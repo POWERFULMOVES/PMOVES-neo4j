@@ -25,7 +25,6 @@ import java.lang.reflect.Array;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.OpenOption;
-import java.nio.file.Path;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -40,6 +39,7 @@ import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.memory.HeapScopedBuffer;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.impl.store.format.RecordFormats;
 import org.neo4j.kernel.impl.store.record.DynamicRecord;
@@ -52,6 +52,7 @@ import org.neo4j.values.storable.CRSTable;
 import org.neo4j.values.storable.CoordinateReferenceSystem;
 import org.neo4j.values.storable.DurationValue;
 import org.neo4j.values.storable.PointValue;
+import org.neo4j.values.storable.StringValue;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.Values;
 
@@ -105,8 +106,8 @@ public class DynamicArrayStore extends AbstractDynamicStore {
 
     public DynamicArrayStore(
             FileSystemAbstraction fileSystem,
-            Path path,
-            Path idFile,
+            StoreFile storeFile,
+            StoreFile idStoreFile,
             Config configuration,
             RecordIdType idType,
             IdGeneratorFactory idGeneratorFactory,
@@ -120,8 +121,8 @@ public class DynamicArrayStore extends AbstractDynamicStore {
             ImmutableSet<OpenOption> openOptions) {
         super(
                 fileSystem,
-                path,
-                idFile,
+                storeFile,
+                idStoreFile,
                 configuration,
                 idType,
                 idGeneratorFactory,
@@ -327,14 +328,14 @@ public class DynamicArrayStore extends AbstractDynamicStore {
         if (typeId == PropertyType.STRING.intValue()) {
             ByteBuffer headerBuffer = ByteBuffer.wrap(header, 1 /*skip the type*/, header.length - 1);
             int arrayLength = headerBuffer.getInt();
-            String[] result = new String[arrayLength];
+            StringValue[] result = new StringValue[arrayLength];
 
             ByteBuffer dataBuffer = ByteBuffer.wrap(bArray);
             for (int i = 0; i < arrayLength; i++) {
                 int byteLength = dataBuffer.getInt();
                 byte[] stringByteArray = new byte[byteLength];
                 dataBuffer.get(stringByteArray);
-                result[i] = PropertyStore.decodeString(stringByteArray);
+                result[i] = Values.utf8Value(stringByteArray);
             }
             return Values.stringArray(result);
         } else if (typeId == PropertyType.GEOMETRY.intValue()) {

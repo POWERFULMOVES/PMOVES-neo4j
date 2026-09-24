@@ -35,12 +35,12 @@ import java.util.BitSet;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.index.internal.gbptree.GBPTree;
 import org.neo4j.index.internal.gbptree.GBPTreeBuilder;
 import org.neo4j.internal.kernel.api.TokenPredicate;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
+import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
 import org.neo4j.io.pagecache.tracing.cursor.PageCursorTracer;
@@ -50,11 +50,11 @@ import org.neo4j.storageengine.api.TokenIndexEntryUpdate;
 import org.neo4j.storageengine.api.schema.SimpleEntityTokenClient;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.extension.pagecache.PageCacheExtension;
 import org.neo4j.test.utils.TestDirectory;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 @PageCacheExtension
 class TokenIndexReaderTest {
     @Inject
@@ -86,24 +86,27 @@ class TokenIndexReaderTest {
         // GIVEN an index with entries
         int expectedNodes = 5;
         int labelId = 1;
-        var idLayout = new DefaultTokenIndexIdLayout();
+        DefaultTokenIndexIdLayout idLayout = new DefaultTokenIndexIdLayout();
         try (TokenIndexUpdater writer = new TokenIndexUpdater(expectedNodes, idLayout)) {
-            writer.initialize(tree.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT), false);
+            writer.initialize(
+                    context -> tree.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT), false, CursorContext.NULL_CONTEXT);
             for (int i = 0; i < expectedNodes; i++) {
-                writer.process(TokenIndexEntryUpdate.change(i, null, EMPTY_INT_ARRAY, new int[] {labelId}));
+                writer.process(TokenIndexEntryUpdate.tokenChange(i, null, EMPTY_INT_ARRAY, new int[] {labelId}));
             }
         }
 
         // WHEN the index is queried
-        var cacheTracer = new DefaultPageCacheTracer();
-        var contextFactory = new CursorContextFactory(cacheTracer, EMPTY_CONTEXT_SUPPLIER);
-        var cursorContext = contextFactory.create("tracePageCache");
-        var reader = new DefaultTokenIndexReader(tree, NO_USAGE_TRACKING, idLayout);
-        var tokenClient = new SimpleEntityTokenClient();
-        reader.query(tokenClient, unconstrained(), new TokenPredicate(labelId), cursorContext);
-        int actualNodes = 0;
-        while (tokenClient.next()) {
-            actualNodes++;
+        DefaultPageCacheTracer cacheTracer = new DefaultPageCacheTracer();
+        CursorContextFactory contextFactory = new CursorContextFactory(cacheTracer, EMPTY_CONTEXT_SUPPLIER);
+        CursorContext cursorContext = contextFactory.create("tracePageCache");
+        DefaultTokenIndexReader reader = new DefaultTokenIndexReader(tree, NO_USAGE_TRACKING, idLayout);
+        int actualNodes;
+        try (SimpleEntityTokenClient tokenClient = new SimpleEntityTokenClient()) {
+            reader.query(tokenClient, unconstrained(), new TokenPredicate(labelId), cursorContext);
+            actualNodes = 0;
+            while (tokenClient.next()) {
+                actualNodes++;
+            }
         }
 
         // THEN the page cache access is traced
@@ -135,13 +138,14 @@ class TokenIndexReaderTest {
         int labelId = 1;
         int highNodeId = 100_000;
         BitSet expected = new BitSet(highNodeId);
-        var idLayout = new DefaultTokenIndexIdLayout();
+        DefaultTokenIndexIdLayout idLayout = new DefaultTokenIndexIdLayout();
         try (TokenIndexUpdater writer = new TokenIndexUpdater(highNodeId, idLayout)) {
-            writer.initialize(tree.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT), false);
+            writer.initialize(
+                    context -> tree.writer(W_BATCHED_SINGLE_THREADED, NULL_CONTEXT), false, CursorContext.NULL_CONTEXT);
             int updates = highNodeId / sparsity;
             for (int i = 0; i < updates; i++) {
                 int nodeId = random.nextInt(highNodeId);
-                writer.process(TokenIndexEntryUpdate.change(nodeId, null, EMPTY_INT_ARRAY, new int[] {labelId}));
+                writer.process(TokenIndexEntryUpdate.tokenChange(nodeId, null, EMPTY_INT_ARRAY, new int[] {labelId}));
                 expected.set(nodeId);
             }
         }
@@ -150,14 +154,16 @@ class TokenIndexReaderTest {
         long fromId = random.nextInt(highNodeId);
         int nextExpectedId = expected.nextSetBit(toIntExact(fromId));
 
-        var reader = new DefaultTokenIndexReader(tree, NO_USAGE_TRACKING, idLayout);
-        var tokenClient = new SimpleEntityTokenClient();
-        reader.query(tokenClient, unconstrained(), new TokenPredicate(labelId), EntityRange.from(fromId), NULL_CONTEXT);
-        while (nextExpectedId != -1) {
-            assertTrue(tokenClient.next());
-            assertThat(toIntExact(tokenClient.reference)).isEqualTo(nextExpectedId);
-            nextExpectedId = expected.nextSetBit(nextExpectedId + 1);
+        DefaultTokenIndexReader reader = new DefaultTokenIndexReader(tree, NO_USAGE_TRACKING, idLayout);
+        try (SimpleEntityTokenClient tokenClient = new SimpleEntityTokenClient()) {
+            reader.query(
+                    tokenClient, unconstrained(), new TokenPredicate(labelId), EntityRange.from(fromId), NULL_CONTEXT);
+            while (nextExpectedId != -1) {
+                assertTrue(tokenClient.next());
+                assertThat(toIntExact(tokenClient.reference)).isEqualTo(nextExpectedId);
+                nextExpectedId = expected.nextSetBit(nextExpectedId + 1);
+            }
+            assertFalse(tokenClient.next());
         }
-        assertFalse(tokenClient.next());
     }
 }

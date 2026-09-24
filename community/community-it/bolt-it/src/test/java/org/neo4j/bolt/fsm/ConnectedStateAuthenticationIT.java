@@ -21,31 +21,24 @@ package org.neo4j.bolt.fsm;
 
 import static org.neo4j.bolt.testing.assertions.MapValueAssertions.assertThat;
 import static org.neo4j.bolt.testing.assertions.ResponseRecorderAssertions.assertThat;
-import static org.neo4j.bolt.testing.assertions.StateMachineAssertions.assertThat;
+import static org.neo4j.bolt.testing.assertions.StateMachineHandleAssertions.assertThat;
 
-import java.util.Map;
 import org.neo4j.bolt.test.annotation.CommunityStateMachineTestExtension;
-import org.neo4j.bolt.test.annotation.setup.SettingsFunction;
+import org.neo4j.bolt.test.annotation.setup.preset.EnableAuthentication;
 import org.neo4j.bolt.testing.annotation.fsm.StateMachineTest;
 import org.neo4j.bolt.testing.messages.BoltMessages;
 import org.neo4j.bolt.testing.response.ResponseRecorder;
-import org.neo4j.configuration.GraphDatabaseSettings;
-import org.neo4j.graphdb.config.Setting;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.internal.Version;
 import org.neo4j.values.storable.Values;
 
+@EnableAuthentication
 @CommunityStateMachineTestExtension
 class ConnectedStateAuthenticationIT {
 
-    @SettingsFunction
-    static void customizeSettings(Map<Setting<?>, Object> settings) {
-        settings.put(GraphDatabaseSettings.auth_enabled, true);
-    }
-
-    @StateMachineTest(until = @org.neo4j.bolt.testing.annotation.Version(major = 5, minor = 1))
+    @StateMachineTest(until = @org.neo4j.bolt.testing.annotation.Version(major = 5, minor = 0))
     void shouldGiveCredentialsExpiredStatusOnExpiredCredentials(
-            StateMachine fsm, BoltMessages messages, ResponseRecorder recorder) throws Throwable {
+            StateMachineHandle fsm, BoltMessages messages, ResponseRecorder recorder) throws Throwable {
         fsm.process(messages.hello("neo4j", "neo4j"), recorder);
         fsm.process(messages.run("CREATE ()"), recorder);
 
@@ -55,8 +48,8 @@ class ConnectedStateAuthenticationIT {
                 .hasFailureResponse(Status.Security.CredentialsExpired);
     }
 
-    @StateMachineTest(until = @org.neo4j.bolt.testing.annotation.Version(major = 5, minor = 1))
-    void shouldGiveKernelVersionOnInit(StateMachine fsm, BoltMessages messages, ResponseRecorder recorder)
+    @StateMachineTest(until = @org.neo4j.bolt.testing.annotation.Version(major = 5, minor = 0))
+    void shouldGiveKernelVersionOnInit(StateMachineHandle fsm, BoltMessages messages, ResponseRecorder recorder)
             throws Throwable {
         var version = "Neo4j/" + Version.getNeo4jVersion();
 
@@ -67,9 +60,9 @@ class ConnectedStateAuthenticationIT {
                         meta -> assertThat(meta).extractingEntry("server").isEqualTo(version));
     }
 
-    @StateMachineTest(until = @org.neo4j.bolt.testing.annotation.Version(major = 5, minor = 1))
+    @StateMachineTest(until = @org.neo4j.bolt.testing.annotation.Version(major = 5, minor = 0))
     void shouldCloseConnectionAfterAuthenticationFailure(
-            StateMachine fsm, BoltMessages messages, ResponseRecorder recorder) throws Throwable {
+            StateMachineHandle fsm, BoltMessages messages, ResponseRecorder recorder) throws Throwable {
         assertThat(fsm).shouldKillConnection(it -> it.process(messages.hello("neo4j", "j4oen"), recorder));
 
         assertThat(recorder).hasFailureResponse(Status.Security.Unauthorized);

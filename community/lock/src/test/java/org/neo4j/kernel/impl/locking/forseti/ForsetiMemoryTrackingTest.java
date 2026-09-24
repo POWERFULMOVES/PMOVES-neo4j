@@ -22,7 +22,7 @@ package org.neo4j.kernel.impl.locking.forseti;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.fail;
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.neo4j.kernel.impl.locking.LockMonitor.EMPTY_LOCK_MONITOR;
 import static org.neo4j.lock.ResourceType.NODE;
 
 import java.util.ArrayDeque;
@@ -36,7 +36,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.configuration.Config;
 import org.neo4j.internal.helpers.Exceptions;
 import org.neo4j.kernel.DeadlockDetectedException;
@@ -55,17 +54,19 @@ import org.neo4j.test.OtherThreadExecutor;
 import org.neo4j.test.Race;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.time.Clocks;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class ForsetiMemoryTrackingTest {
 
     @Inject
     private RandomSupport random;
 
     private static final AtomicLong TRANSACTION_ID = new AtomicLong();
-    private static final int ONE_LOCK_SIZE_ESTIMATE = 56;
+    private static final int ONE_LOCK_SIZE_ESTIMATE = Runtime.version().feature() >= 25 ? 40 : 56;
+    // A shared lock additionally reports the SharedLock instance and the holder set it eagerly allocates.
+    private static final long ONE_SHARED_LOCK_SIZE_ESTIMATE = ONE_LOCK_SIZE_ESTIMATE + SharedLock.SHALLOW_SIZE;
     private GlobalMemoryGroupTracker memoryPool;
     private MemoryTracker memoryTracker;
     private ForsetiLockManager forsetiLockManager;
@@ -74,7 +75,8 @@ class ForsetiMemoryTrackingTest {
     void setUp() {
         memoryPool = new MemoryPools().pool(MemoryGroup.TRANSACTION, 0L, null);
         memoryTracker = new LocalMemoryTracker(memoryPool);
-        forsetiLockManager = new ForsetiLockManager(Config.defaults(), Clocks.nanoClock(), ResourceType.values());
+        forsetiLockManager = new ForsetiLockManager(
+                Config.defaults(), Clocks.nanoClock(), EMPTY_LOCK_MONITOR, ResourceType.values());
     }
 
     @AfterEach
@@ -96,7 +98,37 @@ class ForsetiMemoryTrackingTest {
             var twoLocksAllocatedMemory = memoryTracker.estimatedHeapMemory();
             assertThat(twoLocksAllocatedMemory)
                     .isGreaterThan(0)
-                    .isEqualTo(oneLockAllocatedMemory + ONE_LOCK_SIZE_ESTIMATE);
+                    .isEqualTo(oneLockAllocatedMemory + ONE_SHARED_LOCK_SIZE_ESTIMATE);
+        }
+    }
+
+    @Test
+    void sharedLockReportsItsHolderSetFootprint() {
+        // A shared lock must report its SharedLock holder set, unlike an exclusive lock that re-uses one instance.
+        try (LockManager.Client exclusiveClient = getClient();
+                var sharedTracker = new LocalMemoryTracker(memoryPool);
+                LockManager.Client sharedClient = forsetiLockManager.newClient()) {
+            sharedClient.initialize(
+                    LeaseService.NoLeaseClient.INSTANCE,
+                    TRANSACTION_ID.getAndIncrement(),
+                    sharedTracker,
+                    Config.defaults());
+
+            // prime both maps; disjoint ids so the clients never contend
+            exclusiveClient.acquireExclusive(LockTracer.NONE, NODE, 1);
+            sharedClient.acquireShared(LockTracer.NONE, NODE, 2);
+            var exclusiveBefore = memoryTracker.estimatedHeapMemory();
+            var sharedBefore = sharedTracker.estimatedHeapMemory();
+
+            exclusiveClient.acquireExclusive(LockTracer.NONE, NODE, 3);
+            sharedClient.acquireShared(LockTracer.NONE, NODE, 4);
+
+            long exclusiveCost = memoryTracker.estimatedHeapMemory() - exclusiveBefore;
+            long sharedCost = sharedTracker.estimatedHeapMemory() - sharedBefore;
+
+            assertThat(exclusiveCost).isEqualTo(ONE_LOCK_SIZE_ESTIMATE);
+            assertThat(sharedCost).isEqualTo(ONE_SHARED_LOCK_SIZE_ESTIMATE);
+            assertThat(sharedCost).isEqualTo(exclusiveCost + SharedLock.SHALLOW_SIZE);
         }
     }
 
@@ -126,7 +158,7 @@ class ForsetiMemoryTrackingTest {
 
             client.acquireShared(LockTracer.NONE, NODE, 1);
             var twoLocksAllocatedMemory = memoryTracker.estimatedHeapMemory();
-            assertEquals(oneLockAllocatedMemory, twoLocksAllocatedMemory);
+            assertThat(twoLocksAllocatedMemory).isEqualTo(oneLockAllocatedMemory);
         }
     }
 
@@ -140,7 +172,7 @@ class ForsetiMemoryTrackingTest {
 
             client.acquireExclusive(LockTracer.NONE, NODE, 1);
             var twoLocksAllocatedMemory = memoryTracker.estimatedHeapMemory();
-            assertEquals(oneLockAllocatedMemory, twoLocksAllocatedMemory);
+            assertThat(twoLocksAllocatedMemory).isEqualTo(oneLockAllocatedMemory);
         }
     }
 
@@ -154,7 +186,7 @@ class ForsetiMemoryTrackingTest {
 
             client.acquireExclusive(LockTracer.NONE, NODE, 1);
             var twoLocksAllocatedMemory = memoryTracker.estimatedHeapMemory();
-            assertEquals(sharedAllocatedMemory, twoLocksAllocatedMemory);
+            assertThat(twoLocksAllocatedMemory).isEqualTo(sharedAllocatedMemory);
         }
     }
 
@@ -187,7 +219,9 @@ class ForsetiMemoryTrackingTest {
 
             client.releaseShared(NODE, 1);
             var noLocksClientMemory = memoryTracker.estimatedHeapMemory();
-            assertThat(noLocksClientMemory).isGreaterThan(0).isEqualTo(sharedAllocatedMemory - ONE_LOCK_SIZE_ESTIMATE);
+            assertThat(noLocksClientMemory)
+                    .isGreaterThan(0)
+                    .isEqualTo(sharedAllocatedMemory - ONE_SHARED_LOCK_SIZE_ESTIMATE);
         }
     }
 
@@ -213,7 +247,7 @@ class ForsetiMemoryTrackingTest {
     }
 
     @Test
-    void releaseExclusiveLockWhyHoldingSharedDoNotReleaseAnyMemory() {
+    void releaseExclusiveLockWhileHoldingSharedAllocatesDowngradeLock() {
         try (LockManager.Client client = getClient()) {
             assertThat(memoryTracker.estimatedHeapMemory()).isEqualTo(0);
             client.acquireExclusive(LockTracer.NONE, NODE, 1);
@@ -222,9 +256,10 @@ class ForsetiMemoryTrackingTest {
             var locksMemory = memoryTracker.estimatedHeapMemory();
             assertThat(locksMemory).isGreaterThan(0);
 
+            // Downgrade swaps in a freshly allocated SharedLock, so its instance is reported here.
             client.releaseExclusive(NODE, 1);
             var noExclusiveLockMemory = memoryTracker.estimatedHeapMemory();
-            assertThat(noExclusiveLockMemory).isGreaterThan(0).isEqualTo(locksMemory);
+            assertThat(noExclusiveLockMemory).isEqualTo(locksMemory + SharedLock.SHALLOW_SIZE);
         }
     }
 

@@ -25,7 +25,7 @@ import org.junit.jupiter.api.extension.Extension;
 import org.junit.jupiter.api.extension.ParameterResolutionException;
 import org.junit.jupiter.api.extension.TestTemplateInvocationContext;
 import org.neo4j.bolt.dbapi.BoltGraphDatabaseManagementServiceSPI;
-import org.neo4j.bolt.negotiation.ProtocolVersion;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 import org.neo4j.bolt.testing.extension.dependency.StateMachineDependencyProvider;
 import org.neo4j.bolt.testing.extension.lifecycle.StateMachineDependencyProviderLifecycleListener;
 import org.neo4j.bolt.testing.extension.parameter.ConnectionParameterResolver;
@@ -73,9 +73,11 @@ public class StateMachineInvocationContext implements TestTemplateInvocationCont
                         () -> new ResponseRecorder(this.fsmProvider.protocol().metadataHandler())),
                 new SupplierParameterResolver<>(
                         TransactionIdProvider.class, ctx -> new TransactionIdProvider(ctx, this.dependencyProvider)),
-                new SupplierParameterResolver(TransactionManager.class, ctx -> this.dependencyProvider
-                        .transactionManager()
-                        .orElseThrow(() -> new ParameterResolutionException(
-                                "TransactionManager is not exposed by this dependency provider"))));
+                new SupplierParameterResolver(
+                        TransactionManager.class,
+                        ctx -> this.dependencyProvider
+                                .transactionManager()
+                                .orElseThrow(() -> new ParameterResolutionException(
+                                        "TransactionManager is not exposed by this dependency provider"))));
     }
 }

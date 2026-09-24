@@ -19,7 +19,6 @@
  */
 package org.neo4j.cypher.internal.compiler.planner.logical
 
-import org.neo4j.cypher.internal.compiler.helpers.IterableHelper.RichIterableOnce
 import org.neo4j.cypher.internal.expressions.AndedPropertyInequalities
 import org.neo4j.cypher.internal.expressions.Ands
 import org.neo4j.cypher.internal.expressions.CachedHasProperty
@@ -35,11 +34,13 @@ import org.neo4j.cypher.internal.expressions.UnPositionedVariable.varFor
 import org.neo4j.cypher.internal.expressions.functions.EndNode
 import org.neo4j.cypher.internal.expressions.functions.StartNode
 import org.neo4j.cypher.internal.logical.plans.Expand.VariablePredicate
+import org.neo4j.cypher.internal.logical.plans.NestedPlanExpression
 import org.neo4j.cypher.internal.runtime.ast.TraversalEndpoint
 import org.neo4j.cypher.internal.runtime.ast.TraversalEndpoint.Endpoint.From
 import org.neo4j.cypher.internal.runtime.ast.TraversalEndpoint.Endpoint.To
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.cypher.internal.util.IterableHelper.RichIterableOnce
 import org.neo4j.cypher.internal.util.Repetition
 import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.RewriterStopper
@@ -53,7 +54,7 @@ object convertToInlinedPredicates {
 
   object Mode {
 
-    case object Trail extends Mode {
+    case object Repeat extends Mode {
       override def predicatesOutsideRepetition: Seq[Expression] = Seq.empty
     }
 
@@ -184,7 +185,10 @@ object convertToInlinedPredicates {
 
     val inlinedPredicates =
       predicatesToInline.traverse(predicate => {
-        if (isJuxtaposedOnOuterNodes(predicate)) {
+        if (predicate.contains { case _: NestedPlanExpression => true }) {
+          // Nested logical plans don't generally support arbitrary expressions like TraversalEndpoint in place of variables
+          None
+        } else if (isJuxtaposedOnOuterNodes(predicate)) {
           Some(VariablePredicate(
             anonymousNodeVariable,
             predicate

@@ -19,27 +19,28 @@
  */
 package org.neo4j.fabric.executor;
 
+import java.time.Clock;
 import org.neo4j.fabric.bookmark.TransactionBookmarkManager;
 import org.neo4j.fabric.stream.StatementResult;
 import org.neo4j.fabric.transaction.FabricTransactionInfo;
 import org.neo4j.fabric.transaction.TransactionMode;
 import org.neo4j.fabric.transaction.parent.CompoundTransaction;
 import org.neo4j.values.virtual.MapValue;
-import reactor.core.publisher.Mono;
 
 public class ThrowingFabricRemoteExecutor implements FabricRemoteExecutor {
     @Override
     public RemoteTransactionContext startTransactionContext(
             CompoundTransaction compositeTransaction,
             FabricTransactionInfo transactionInfo,
-            TransactionBookmarkManager bookmarkManager) {
+            TransactionBookmarkManager bookmarkManager,
+            Clock clock) {
         return new RemoteTransactionContextImpl();
     }
 
     private static class RemoteTransactionContextImpl implements RemoteTransactionContext {
 
         @Override
-        public Mono<StatementResult> run(
+        public StatementResult run(
                 Location.Remote location,
                 ExecutionOptions executionOptions,
                 String query,

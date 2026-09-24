@@ -60,7 +60,7 @@ class LenientStoreInputChunkTest {
     private final PropertyStore propertyStore = mock(PropertyStore.class);
     private final ReadBehaviour readBehaviour = mock(ReadBehaviour.class);
     private final TokenHolders tokenHolders = mock(TokenHolders.class);
-    private final Group group = new Group(0, "group", null);
+    private final Group group = new Group(0, "group");
 
     @BeforeEach
     void setUp() {
@@ -203,7 +203,7 @@ class LenientStoreInputChunkTest {
     private IntValue addBlockToProperty(PropertyRecord propertyRecord, NamedToken token, int value) {
         PropertyBlock block = new PropertyBlock();
         IntValue intValue = Values.intValue(value);
-        PropertyStore.encodeValue(block, token.id(), intValue, null, null, NULL_CONTEXT, INSTANCE);
+        PropertyStore.encodeValue(block, token.id(), intValue, null, null, NULL_CONTEXT, INSTANCE, "db-format-2000");
         propertyRecord.addPropertyBlock(block);
         return intValue;
     }

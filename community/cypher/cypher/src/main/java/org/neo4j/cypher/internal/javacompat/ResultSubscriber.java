@@ -31,6 +31,7 @@ import org.neo4j.cypher.internal.NonFatalCypherError;
 import org.neo4j.cypher.internal.result.string.ResultStringBuilder;
 import org.neo4j.exceptions.CypherExecutionException;
 import org.neo4j.exceptions.Neo4jException;
+import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.graphdb.ExecutionPlanDescription;
 import org.neo4j.graphdb.GqlStatusObject;
 import org.neo4j.graphdb.Notification;
@@ -230,7 +231,9 @@ public class ResultSubscriber extends PrefetchingResourceIterator<Map<String, Ob
 
     @Override
     public void writeAsStringTo(PrintWriter writer) {
-        ResultStringBuilder stringBuilder = ResultStringBuilder.apply(execution.fieldNames(), context);
+        ResultStringBuilder stringBuilder = context.executingQuery().isParallelRuntime()
+                ? ResultStringBuilder.apply(execution.fieldNames())
+                : ResultStringBuilder.apply(execution.fieldNames(), context);
         try {
             // don't materialize since that will close down the underlying transaction
             // and we need it to be open in order to serialize nodes, relationships, and
@@ -341,7 +344,7 @@ public class ResultSubscriber extends PrefetchingResourceIterator<Map<String, Ob
 
     private Map<String, Object> createPublicRecord() {
         String[] fieldNames = execution.fieldNames();
-        Map<String, Object> result = new HashMap<>((int) (Math.ceil(fieldNames.length * 1.33)));
+        Map<String, Object> result = HashMap.newHashMap(fieldNames.length);
 
         try {
             for (int i = 0; i < fieldNames.length; i++) {
@@ -372,6 +375,8 @@ public class ResultSubscriber extends PrefetchingResourceIterator<Map<String, Ob
             neo4jException = (Neo4jException) e;
         } else if (e instanceof RuntimeException) {
             throw (RuntimeException) e;
+        } else if (e instanceof ErrorGqlStatusObject) {
+            neo4jException = CypherExecutionException.wrapError((Throwable & ErrorGqlStatusObject) e);
         } else {
             neo4jException = CypherExecutionException.unexpectedError(e);
         }

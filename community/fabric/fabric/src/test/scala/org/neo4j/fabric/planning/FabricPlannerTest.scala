@@ -21,8 +21,9 @@ package org.neo4j.fabric.planning
 
 import org.neo4j.configuration.GraphDatabaseInternalSettings
 import org.neo4j.configuration.GraphDatabaseInternalSettings.CypherParallelRuntimeSupport
-import org.neo4j.cypher.internal.FullyParsedQuery
-import org.neo4j.cypher.internal.QueryOptions
+import org.neo4j.configuration.GraphDatabaseSettings
+import org.neo4j.configuration.helpers.QueryLanguageConverter
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.AstConstructionTestSupport
 import org.neo4j.cypher.internal.ast.CreateIndex
 import org.neo4j.cypher.internal.ast.CreateRole
@@ -34,27 +35,41 @@ import org.neo4j.cypher.internal.ast.SingleQuery
 import org.neo4j.cypher.internal.expressions.NodePattern
 import org.neo4j.cypher.internal.expressions.SensitiveParameter
 import org.neo4j.cypher.internal.expressions.SensitiveStringLiteral
+import org.neo4j.cypher.internal.frontend.phases.ScopedProcedureSignatureResolver
+import org.neo4j.cypher.internal.options.CypherCacheOption
 import org.neo4j.cypher.internal.options.CypherConnectComponentsPlannerOption
 import org.neo4j.cypher.internal.options.CypherDebugOption
 import org.neo4j.cypher.internal.options.CypherDebugOptions
 import org.neo4j.cypher.internal.options.CypherEagerAnalyzerOption
 import org.neo4j.cypher.internal.options.CypherExecutionMode
 import org.neo4j.cypher.internal.options.CypherExpressionEngineOption
+import org.neo4j.cypher.internal.options.CypherHeapEstimatorCacheOption
 import org.neo4j.cypher.internal.options.CypherInferSchemaPartsOption
 import org.neo4j.cypher.internal.options.CypherInterpretedPipesFallbackOption
 import org.neo4j.cypher.internal.options.CypherOperatorEngineOption
+import org.neo4j.cypher.internal.options.CypherParallelRepeatHeuristicOption
+import org.neo4j.cypher.internal.options.CypherParallelRuntimeConfigOption
 import org.neo4j.cypher.internal.options.CypherParallelRuntimeSupportOption
+import org.neo4j.cypher.internal.options.CypherPipelinedBatchReuseOption
+import org.neo4j.cypher.internal.options.CypherPipelinedBatchSizePresetOption
+import org.neo4j.cypher.internal.options.CypherPlanMode
 import org.neo4j.cypher.internal.options.CypherPlanVarExpandInto
 import org.neo4j.cypher.internal.options.CypherPlannerOption
+import org.neo4j.cypher.internal.options.CypherPlannerVersionOption
 import org.neo4j.cypher.internal.options.CypherQueryOptions
 import org.neo4j.cypher.internal.options.CypherReplanOption
 import org.neo4j.cypher.internal.options.CypherRuntimeOption
 import org.neo4j.cypher.internal.options.CypherStatefulShortestPlanningModeOption
+import org.neo4j.cypher.internal.options.CypherTransactionBatchStrategyOption
 import org.neo4j.cypher.internal.options.CypherUpdateStrategy
-import org.neo4j.cypher.internal.options.CypherVersion
+import org.neo4j.cypher.internal.options.CypherVersionOption
+import org.neo4j.cypher.internal.preparser.FullyParsedQuery
+import org.neo4j.cypher.internal.preparser.QueryOptions
 import org.neo4j.cypher.internal.tracing.TimingCompilationTracer
 import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.symbols.CTAny
+import org.neo4j.cypher.internal.util.test_helpers.GqlExceptionMatchers.gqlException
+import org.neo4j.cypher.internal.util.test_helpers.GqlExceptionMatchers.gqlStatus
 import org.neo4j.exceptions.InvalidSemanticsException
 import org.neo4j.fabric.FabricTest
 import org.neo4j.fabric.FragmentTestUtils
@@ -64,6 +79,7 @@ import org.neo4j.fabric.config.FabricConfig
 import org.neo4j.fabric.eval.Catalog
 import org.neo4j.fabric.util.Folded.Descend
 import org.neo4j.fabric.util.Folded.FoldableOps
+import org.neo4j.gqlstatus.GqlStatusInfoCodes
 import org.neo4j.kernel.database.DatabaseIdFactory
 import org.neo4j.kernel.database.DatabaseReference
 import org.neo4j.kernel.database.DatabaseReferenceImpl
@@ -92,12 +108,21 @@ class FabricPlannerTest
     with AstConstructionTestSupport {
 
   private def makeConfig() =
-    new FabricConfig(() => Duration.ZERO, new FabricConfig.DataStream(0, 0, 0, 0), false)
+    new FabricConfig(
+      () => Duration.ZERO,
+      new FabricConfig.DataStream(0, 0, 0, 0),
+      false,
+      () => new FabricConfig.Profiling(false, null)
+    )
 
   private val config = makeConfig()
   private val planner = FabricPlanner(config, cypherConfig, monitors, cacheFactory)
   private val fabricName = "fabric"
   private val sessionGraphName = "session"
+  private val hugeQuery = s"RETURN '${"0123456789".repeat(100)}' AS v"
+
+  private val systemDefaultCypherVersion =
+    QueryLanguageConverter.toInternal(GraphDatabaseSettings.default_language.defaultValue)
 
   val fabricRef = new DatabaseReferenceImpl.Composite(
     new NormalizedDatabaseName(fabricName),
@@ -111,9 +136,17 @@ class FabricPlannerTest
   private def instance(
     query: String,
     params: MapValue = params,
-    sessionDatabaseName: String = defaultGraphName
+    sessionDatabaseName: String = defaultGraphName,
+    defaultLanguage: CypherVersion = cypherConfig.systemDefaultLanguage
   ): planner.PlannerInstance = {
-    planner.instance(signatures, query, params, databaseReference(sessionDatabaseName), fabricCatalog)
+    planner.testInstance(
+      signatures,
+      query,
+      params,
+      databaseReference(sessionDatabaseName),
+      fabricCatalog,
+      defaultLanguage
+    )
   }
 
   private def plan(query: String, params: MapValue = params, sessionDatabaseName: String = defaultGraphName) =
@@ -155,6 +188,18 @@ class FabricPlannerTest
         ))
     }
 
+    "MERGE with a pattern comprehension is not rewritten to COLLECT in the remote fragment" in {
+      val remote = asRemote(
+        """MERGE (n {p: [ ()-->() | 1 ]})
+          |RETURN n.p AS p
+          |""".stripMargin
+      )
+
+      remote.query.should(include("MERGE"))
+      remote.query.should(not(include("COLLECT")))
+      parse(remote.query).as[SingleQuery]
+    }
+
     "single schema command with USE" in {
       val remote = asRemote(
         """USE foo
@@ -168,7 +213,7 @@ class FabricPlannerTest
             varFor("n"),
             labelName("Label"),
             List(prop("n", "prop")),
-            Some(Left("myIndex")),
+            Some(literalString("myIndex")),
             IfExistsThrowError,
             NoOptions,
             fromDefault = true
@@ -196,7 +241,7 @@ class FabricPlannerTest
         .should(not(include("*")))
 
       parse(remote.query).as[CreateUser] match {
-        case CreateUser(_, _, _, _, Some(nativeAuth)) =>
+        case CreateUser(_, _, _, _, Some(nativeAuth), _) =>
           nativeAuth.password should matchPattern { case Some(Password(_: SensitiveParameter, _)) => }
         case _ => fail("missing native auth")
       }
@@ -404,7 +449,7 @@ class FabricPlannerTest
 
       val exec = inst.plan.query.as[Fragment.Exec]
 
-      val local = inst.asLocal(exec).query
+      val local = inst.asLocal(exec, false).query
 
       local.state.statement().shouldEqual(
         singleQuery(
@@ -426,7 +471,7 @@ class FabricPlannerTest
 
       val exec = inst.plan.query.as[Fragment.Exec]
 
-      val local = inst.asLocal(exec).query
+      val local = inst.asLocal(exec, false).query
 
       local.state.statement().shouldEqual(
         singleQuery(
@@ -436,6 +481,67 @@ class FabricPlannerTest
         )
       )
       local.state.queryText should endWith("RETURN true")
+    }
+  }
+
+  "asLocal - composite: " - {
+
+    "Variable with literal name" in {
+      val inst = instance(
+        """MATCH (n)
+          |WITH n AS `true`
+          |RETURN `true`"""
+          .stripMargin
+      )
+
+      val exec = inst.plan.query.as[Fragment.Exec]
+
+      val local = inst.asLocal(exec, compositeContext = true).query
+
+      local.state.statement().shouldEqual(
+        singleQuery(
+          match_(NodePattern(Some(varFor("n")), None, None, None)(pos)),
+          with_(varFor("n").as("true")),
+          returnVars("true")
+        )
+      )
+      local.state.queryText should endWith("RETURN `true` AS `true`")
+    }
+
+    "Literal with variable with same name in scope" in {
+      val inst = instance(
+        """MATCH (n)
+          |WITH n AS `true`
+          |RETURN true"""
+          .stripMargin
+      )
+
+      val exec = inst.plan.query.as[Fragment.Exec]
+
+      val local = inst.asLocal(exec, compositeContext = true).query
+
+      local.state.statement().shouldEqual(
+        singleQuery(
+          match_(NodePattern(Some(varFor("n")), None, None, None)(pos)),
+          with_(varFor("n").as("true")),
+          returnLit(true -> "true")
+        )
+      )
+      local.state.queryText should endWith("RETURN true AS `true`")
+    }
+  }
+
+  "Result columns: " - {
+
+    "a returning query exposes its return columns as result columns" in {
+      val query = plan(
+        """MATCH (n)
+          |RETURN n
+          |""".stripMargin
+      ).query
+
+      query.producesResults shouldEqual true
+      query.resultColumns shouldEqual Seq("n")
     }
   }
 
@@ -566,15 +672,30 @@ class FabricPlannerTest
           |RETURN w, y
           |""".stripMargin
 
-      newPlanner.instance(signatures, q, params, defaultRef, Catalog(Map())).plan
-      newPlanner.instance(signatures, q, params, defaultRef, Catalog(Map())).plan
+      newPlanner.testInstance(
+        signatures,
+        q,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
+      newPlanner.testInstance(
+        signatures,
+        q,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
 
       newPlanner.queryCache.getMisses.shouldEqual(1)
       newPlanner.queryCache.getHits.shouldEqual(1)
     }
 
     "cache hit on equal input with query-obfuscation" in {
-      val newPlanner = FabricPlanner(config, cypherConfigWithQueryObfuscation, monitors, cacheFactory)
+      val newPlanner =
+        FabricPlanner(config, cypherConfigWithQueryObfuscation, monitors, cacheFactory)
 
       val q =
         """WITH [1, "2", "three"] AS a, "A literal" AS b
@@ -589,8 +710,22 @@ class FabricPlannerTest
           |RETURN f, b
           |""".stripMargin
 
-      newPlanner.instance(signatures, q, params, defaultRef, Catalog(Map())).plan
-      newPlanner.instance(signatures, q, params, defaultRef, Catalog(Map())).plan
+      newPlanner.testInstance(
+        signatures,
+        q,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
+      newPlanner.testInstance(
+        signatures,
+        q,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
 
       newPlanner.queryCache.getMisses.shouldEqual(1)
       newPlanner.queryCache.getHits.shouldEqual(1)
@@ -609,8 +744,22 @@ class FabricPlannerTest
           |RETURN x, 2 AS y
           |""".stripMargin
 
-      newPlanner.instance(signatures, q1, params, defaultRef, Catalog(Map())).plan
-      newPlanner.instance(signatures, q2, params, defaultRef, Catalog(Map())).plan
+      newPlanner.testInstance(
+        signatures,
+        q1,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
+      newPlanner.testInstance(
+        signatures,
+        q2,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
 
       newPlanner.queryCache.getMisses.shouldEqual(2)
       newPlanner.queryCache.getHits.shouldEqual(0)
@@ -624,8 +773,22 @@ class FabricPlannerTest
           |RETURN x
           |""".stripMargin
 
-      newPlanner.instance(signatures, q, params, databaseReference("foo"), Catalog(Map())).plan
-      newPlanner.instance(signatures, q, params, databaseReference("bar"), Catalog(Map())).plan
+      newPlanner.testInstance(
+        signatures,
+        q,
+        params,
+        databaseReference("foo"),
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
+      newPlanner.testInstance(
+        signatures,
+        q,
+        params,
+        databaseReference("bar"),
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
 
       newPlanner.queryCache.getMisses.shouldEqual(2)
       newPlanner.queryCache.getHits.shouldEqual(0)
@@ -645,8 +808,22 @@ class FabricPlannerTest
           |RETURN x
           |""".stripMargin
 
-      newPlanner.instance(signatures, q1, params, defaultRef, Catalog(Map())).plan
-      newPlanner.instance(signatures, q2, params, defaultRef, Catalog(Map())).plan
+      newPlanner.testInstance(
+        signatures,
+        q1,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
+      newPlanner.testInstance(
+        signatures,
+        q2,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
 
       newPlanner.queryCache.getMisses.shouldEqual(2)
       newPlanner.queryCache.getHits.shouldEqual(0)
@@ -660,19 +837,21 @@ class FabricPlannerTest
           |RETURN x
           |""".stripMargin
 
-      newPlanner.instance(
+      newPlanner.testInstance(
         signatures,
         q,
         VirtualValues.map(Array("a"), Array(Values.of("a"))),
         defaultRef,
-        Catalog(Map())
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
       ).plan
-      newPlanner.instance(
+      newPlanner.testInstance(
         signatures,
         q,
         VirtualValues.map(Array("a"), Array(Values.of(1))),
         defaultRef,
-        Catalog(Map())
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
       ).plan
 
       newPlanner.queryCache.getMisses.shouldEqual(2)
@@ -687,19 +866,21 @@ class FabricPlannerTest
           |RETURN x
           |""".stripMargin
 
-      newPlanner.instance(
+      newPlanner.testInstance(
         signatures,
         q,
         VirtualValues.map(Array("a"), Array(Values.of("a"))),
         defaultRef,
-        Catalog(Map())
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
       ).plan
-      newPlanner.instance(
+      newPlanner.testInstance(
         signatures,
         q,
         VirtualValues.map(Array("a", "b"), Array(Values.of("a"), Values.of(1))),
         defaultRef,
-        Catalog(Map())
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
       ).plan
 
       newPlanner.queryCache.getMisses.shouldEqual(2)
@@ -714,19 +895,21 @@ class FabricPlannerTest
           |RETURN x
           |""".stripMargin
 
-      newPlanner.instance(
+      newPlanner.testInstance(
         signatures,
         q,
         VirtualValues.map(Array("a"), Array(Values.of("a"))),
         defaultRef,
-        Catalog(Map())
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
       ).plan
-      newPlanner.instance(
+      newPlanner.testInstance(
         signatures,
         q,
         VirtualValues.map(Array("a"), Array(Values.of("b"))),
         defaultRef,
-        Catalog(Map())
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
       ).plan
 
       newPlanner.queryCache.getMisses.shouldEqual(1)
@@ -740,8 +923,22 @@ class FabricPlannerTest
         """CREATE USER foo SET PASSWORD 'secret'
           |""".stripMargin
 
-      newPlanner.instance(signatures, q, params, defaultRef, Catalog(Map())).plan
-      newPlanner.instance(signatures, q, params, defaultRef, Catalog(Map())).plan
+      newPlanner.testInstance(
+        signatures,
+        q,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
+      newPlanner.testInstance(
+        signatures,
+        q,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
 
       newPlanner.queryCache.getMisses.shouldEqual(2)
       newPlanner.queryCache.getHits.shouldEqual(0)
@@ -755,8 +952,22 @@ class FabricPlannerTest
           |""".stripMargin
 
       val secretParams = VirtualValues.map(Array("p"), Array(Values.stringValue("secret")))
-      newPlanner.instance(signatures, q, secretParams, defaultRef, Catalog(Map())).plan
-      newPlanner.instance(signatures, q, secretParams, defaultRef, Catalog(Map())).plan
+      newPlanner.testInstance(
+        signatures,
+        q,
+        secretParams,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
+      newPlanner.testInstance(
+        signatures,
+        q,
+        secretParams,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
 
       newPlanner.queryCache.getMisses.shouldEqual(2)
       newPlanner.queryCache.getHits.shouldEqual(0)
@@ -775,8 +986,22 @@ class FabricPlannerTest
           |RETURN true
           |""".stripMargin
 
-      newPlanner.instance(signatures, q1, params, defaultRef, Catalog(Map())).plan
-      newPlanner.instance(signatures, q2, params, defaultRef, Catalog(Map())).plan
+      newPlanner.testInstance(
+        signatures,
+        q1,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
+      newPlanner.testInstance(
+        signatures,
+        q2,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
 
       newPlanner.queryCache.getMisses.shouldEqual(2)
       newPlanner.queryCache.getHits.shouldEqual(0)
@@ -790,7 +1015,14 @@ class FabricPlannerTest
           |RETURN x
           |""".stripMargin
 
-      newPlanner.instance(signatures, q, params, defaultRef, Catalog(Map())).plan
+      newPlanner.testInstance(
+        signatures,
+        q,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
       newPlanner.queryCache.contextSize(defaultRef.alias().name()).shouldEqual(1)
       newPlanner.queryCache.clearByContext(defaultRef.alias().name()).shouldEqual(1)
       newPlanner.queryCache.contextSize(defaultRef.alias().name()).shouldEqual(0)
@@ -810,8 +1042,22 @@ class FabricPlannerTest
           |RETURN x
           |""".stripMargin
 
-      newPlanner.instance(signatures, q1, params, databaseReference("foo"), Catalog(Map())).plan
-      newPlanner.instance(signatures, q2, params, databaseReference("bar"), Catalog(Map())).plan
+      newPlanner.testInstance(
+        signatures,
+        q1,
+        params,
+        databaseReference("foo"),
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
+      newPlanner.testInstance(
+        signatures,
+        q2,
+        params,
+        databaseReference("bar"),
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
       newPlanner.queryCache.contextSize("foo").shouldEqual(1)
       newPlanner.queryCache.contextSize("bar").shouldEqual(1)
       newPlanner.queryCache.clearByContext("foo").shouldEqual(1)
@@ -828,18 +1074,39 @@ class FabricPlannerTest
           |""".stripMargin
 
       // plan query (cold miss)
-      newPlanner.instance(signatures, q, params, defaultRef, Catalog(Map())).plan
+      newPlanner.testInstance(
+        signatures,
+        q,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
       newPlanner.queryCache.getHits.shouldEqual(0)
       newPlanner.queryCache.getMisses.shouldEqual(1)
 
       // replan query (hits)
-      newPlanner.instance(signatures, q, params, defaultRef, Catalog(Map())).plan
+      newPlanner.testInstance(
+        signatures,
+        q,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
       newPlanner.queryCache.getHits.shouldEqual(1)
       newPlanner.queryCache.getMisses.shouldEqual(1)
 
       // clear cache and rereplan query (cold miss again)
       newPlanner.queryCache.clearByContext(defaultRef.alias().name())
-      newPlanner.instance(signatures, q, params, defaultRef, Catalog(Map())).plan
+      newPlanner.testInstance(
+        signatures,
+        q,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
       newPlanner.queryCache.getHits.shouldEqual(1)
       newPlanner.queryCache.getMisses.shouldEqual(2)
     }
@@ -857,7 +1124,14 @@ class FabricPlannerTest
           |RETURN x
           |""".stripMargin
 
-      newPlanner.instance(signatures, q, params, defaultRef, Catalog(Map())).plan
+      newPlanner.testInstance(
+        signatures,
+        q,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
       newPlanner.queryCache.clearByContext(defaultRef.alias().name()).shouldEqual(1)
       newPlanner.queryCache.clearByContext(defaultRef.alias().name()).shouldEqual(0)
     }
@@ -908,13 +1182,100 @@ class FabricPlannerTest
         ("CYPHER planner=dp runtime=slotted debug=toString RETURN 1", model.hit())
       ).foreach { case (query, expectation) =>
         withClue(query) {
-          val result = Try(newPlanner.instance(signatures, query, params, defaultRef, Catalog(Map())).plan)
+          val result = Try(newPlanner.testInstance(
+            signatures,
+            query,
+            params,
+            defaultRef,
+            Catalog(Map()),
+            cypherConfig.systemDefaultLanguage
+          ).plan)
           result.isFailure.shouldEqual(expectation.failure)
           newPlanner.queryCache.getMisses.shouldEqual(expectation.misses)
           newPlanner.queryCache.getHits.shouldEqual(expectation.hits)
         }
       }
 
+    }
+
+    "cache ignored on huge query" in {
+      val newPlanner = FabricPlanner(config, cypherConfigWithQuerySizeLimit, monitors, cacheFactory)
+
+      newPlanner.testInstance(
+        signatures,
+        hugeQuery,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
+      newPlanner.testInstance(
+        signatures,
+        hugeQuery,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
+
+      newPlanner.queryCache.getMisses.shouldEqual(0)
+      newPlanner.queryCache.getHits.shouldEqual(0)
+    }
+
+    "cache hit on huge query with cache=force" in {
+      val newPlanner = FabricPlanner(config, cypherConfigWithQuerySizeLimit, monitors, cacheFactory)
+
+      val query = "CYPHER cache=force " + hugeQuery
+
+      newPlanner.testInstance(
+        signatures,
+        query,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
+      newPlanner.testInstance(
+        signatures,
+        query,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
+
+      newPlanner.queryCache.getMisses.shouldEqual(1)
+      newPlanner.queryCache.getHits.shouldEqual(1)
+    }
+
+    "cache ignored on cache=skip" in {
+      val newPlanner = FabricPlanner(config, cypherConfig, monitors, cacheFactory)
+
+      val query =
+        """CYPHER cache=skip
+          |WITH 1 AS x
+          |RETURN x
+          |""".stripMargin
+
+      newPlanner.testInstance(
+        signatures,
+        query,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
+      newPlanner.testInstance(
+        signatures,
+        query,
+        params,
+        defaultRef,
+        Catalog(Map()),
+        cypherConfig.systemDefaultLanguage
+      ).plan
+
+      newPlanner.queryCache.getMisses.shouldEqual(0)
+      newPlanner.queryCache.getHits.shouldEqual(0)
     }
   }
 
@@ -957,8 +1318,19 @@ class FabricPlannerTest
           |RETURN 1 AS x
           |""".stripMargin
 
-      the[InvalidSemanticsException].thrownBy(plan(q, params, sessionDatabaseName = fabricName))
-        .check(_.getMessage.should(include("'PROFILE' is not supported on composite databases.")))
+      the[InvalidSemanticsException].thrownBy(plan(q, params, sessionDatabaseName = fabricName)) should be(
+        gqlException(
+          "'PROFILE' is not supported on composite databases.",
+          gqlStatus(
+            GqlStatusInfoCodes.STATUS_42001,
+            "error: syntax error or access rule violation - invalid syntax"
+          )
+            .withCause(
+              GqlStatusInfoCodes.STATUS_42N06,
+              "error: syntax error or access rule violation - unsupported action on composite database. PROFILE is not supported on composite databases."
+            )
+        )
+      )
     }
 
     "passes options on in remote and local parts" in {
@@ -977,6 +1349,7 @@ class FabricPlannerTest
           |  operatorEngine=interpreted
           |  interpretedPipesFallback=disabled
           |  replan=force
+          |  cache=force
           |  connectComponentsPlanner=greedy
           |  debug=tostring
           |WITH 1 AS a
@@ -993,32 +1366,51 @@ class FabricPlannerTest
       val inner = inst.plan.query.as[Fragment.Exec].input.as[Fragment.Apply].inner.as[Fragment.Exec]
       val last = inst.plan.query.as[Fragment.Exec]
 
+      val queryOptions = CypherQueryOptions(
+        cypherVersion = cypherConfig.systemDefaultLanguage match {
+          case CypherVersion.Cypher5  => CypherVersionOption.cypher5
+          case CypherVersion.Cypher25 => CypherVersionOption.cypher25
+        },
+        executionMode = CypherExecutionMode.default,
+        planMode = CypherPlanMode.default,
+        planner = CypherPlannerOption.cost,
+        runtime = CypherRuntimeOption.parallel,
+        updateStrategy = CypherUpdateStrategy.eager,
+        expressionEngine = CypherExpressionEngineOption.compiled,
+        operatorEngine = CypherOperatorEngineOption.interpreted,
+        interpretedPipesFallback = CypherInterpretedPipesFallbackOption.disabled,
+        replan = CypherReplanOption.force,
+        cache = CypherCacheOption.force,
+        connectComponentsPlanner = CypherConnectComponentsPlannerOption.greedy,
+        debugOptions = CypherDebugOptions(Set(CypherDebugOption.tostring)),
+        parallelRuntimeSupportOption = CypherParallelRuntimeSupportOption.all,
+        parallelRuntimeConfigOption = CypherParallelRuntimeConfigOption.none,
+        eagerAnalyzer = CypherEagerAnalyzerOption.lp,
+        inferSchemaParts = CypherInferSchemaPartsOption.default,
+        statefulShortestPlanningModeOption = CypherStatefulShortestPlanningModeOption.default,
+        planVarExpandInto = CypherPlanVarExpandInto.default,
+        plannerVersionOption = CypherPlannerVersionOption.latest,
+        pipelinedBatchSizePresetOption = CypherPipelinedBatchSizePresetOption.default,
+        pipelinedBatchReuseOption = CypherPipelinedBatchReuseOption.default,
+        heapEstimatorCacheOption = CypherHeapEstimatorCacheOption.default,
+        transactionBatchStrategy = CypherTransactionBatchStrategyOption.default,
+        parallelRepeatHeuristic = CypherParallelRepeatHeuristicOption.disabled
+      )
       val expectedInner = QueryOptions(
         offset = InputPosition.NONE,
-        queryOptions = CypherQueryOptions(
-          cypherVersion = CypherVersion.default,
-          executionMode = CypherExecutionMode.default,
-          planner = CypherPlannerOption.cost,
-          runtime = CypherRuntimeOption.parallel,
-          updateStrategy = CypherUpdateStrategy.eager,
-          expressionEngine = CypherExpressionEngineOption.compiled,
-          operatorEngine = CypherOperatorEngineOption.interpreted,
-          interpretedPipesFallback = CypherInterpretedPipesFallbackOption.disabled,
-          replan = CypherReplanOption.force,
-          connectComponentsPlanner = CypherConnectComponentsPlannerOption.greedy,
-          debugOptions = CypherDebugOptions(Set(CypherDebugOption.tostring)),
-          parallelRuntimeSupportOption = CypherParallelRuntimeSupportOption.all,
-          eagerAnalyzer = CypherEagerAnalyzerOption.default,
-          inferSchemaParts = CypherInferSchemaPartsOption.default,
-          statefulShortestPlanningModeOption = CypherStatefulShortestPlanningModeOption.default,
-          planVarExpandInto = CypherPlanVarExpandInto.default
-        )
+        queryOptions = queryOptions,
+        derivedOptions = CypherQueryOptions.derivedOptions(queryOptions, cypherConfig),
+        defaultLanguage = cypherConfig.systemDefaultLanguage
       )
 
-      val expectedLast = QueryOptions.default.copy(
-        queryOptions = QueryOptions.default.queryOptions.copy(
+      val expectedLast = QueryOptions.default(cypherConfig.systemDefaultLanguage).copy(
+        queryOptions = QueryOptions.default(cypherConfig.systemDefaultLanguage).queryOptions.copy(
           runtime = CypherRuntimeOption.slotted,
-          expressionEngine = CypherExpressionEngineOption.interpreted
+          expressionEngine = CypherExpressionEngineOption.interpreted,
+          cypherVersion = cypherConfig.systemDefaultLanguage match {
+            case CypherVersion.Cypher5  => CypherVersionOption.cypher5
+            case CypherVersion.Cypher25 => CypherVersionOption.cypher25
+          }
         ),
         materializedEntitiesMode = true
       )
@@ -1026,10 +1418,102 @@ class FabricPlannerTest
       preParse(inst.asRemote(inner).query).options.copy(offset = InputPosition.NONE)
         .shouldEqual(expectedInner)
 
-      inst.asLocal(inner).query.options.copy(offset = InputPosition.NONE)
+      inst.asLocal(inner, false).query.options.copy(offset = InputPosition.NONE)
         .shouldEqual(expectedInner)
 
-      inst.asLocal(last).query.options.copy(offset = InputPosition.NONE)
+      inst.asLocal(last, false).query.options.copy(offset = InputPosition.NONE)
+        .shouldEqual(expectedLast)
+    }
+
+    "passes options on in remote and local parts - composite" in {
+
+      cypherConfig.config.set(
+        GraphDatabaseInternalSettings.cypher_parallel_runtime_support,
+        CypherParallelRuntimeSupport.ALL
+      )
+
+      val inst = instance(
+        """CYPHER
+          |  planner=cost
+          |  runtime=parallel
+          |  updateStrategy=eager
+          |  expressionEngine=compiled
+          |  operatorEngine=interpreted
+          |  interpretedPipesFallback=disabled
+          |  replan=force
+          |  cache=force
+          |  connectComponentsPlanner=greedy
+          |  debug=tostring
+          |WITH 1 AS a
+          |CALL {
+          |  USE foo
+          |  WITH a AS a
+          |  RETURN 1 AS y
+          |}
+          |RETURN 1 AS x
+          |""".stripMargin,
+        sessionDatabaseName = fabricName
+      )
+
+      val inner = inst.plan.query.as[Fragment.Exec].input.as[Fragment.Apply].inner.as[Fragment.Exec]
+      val last = inst.plan.query.as[Fragment.Exec]
+
+      val queryOptions = CypherQueryOptions(
+        cypherVersion = cypherConfig.systemDefaultLanguage match {
+          case CypherVersion.Cypher5  => CypherVersionOption.cypher5
+          case CypherVersion.Cypher25 => CypherVersionOption.cypher25
+        },
+        executionMode = CypherExecutionMode.default,
+        planMode = CypherPlanMode.default,
+        planner = CypherPlannerOption.cost,
+        runtime = CypherRuntimeOption.parallel,
+        updateStrategy = CypherUpdateStrategy.eager,
+        expressionEngine = CypherExpressionEngineOption.compiled,
+        operatorEngine = CypherOperatorEngineOption.interpreted,
+        interpretedPipesFallback = CypherInterpretedPipesFallbackOption.disabled,
+        replan = CypherReplanOption.force,
+        cache = CypherCacheOption.force,
+        connectComponentsPlanner = CypherConnectComponentsPlannerOption.greedy,
+        debugOptions = CypherDebugOptions(Set(CypherDebugOption.tostring)),
+        parallelRuntimeSupportOption = CypherParallelRuntimeSupportOption.all,
+        parallelRuntimeConfigOption = CypherParallelRuntimeConfigOption.none,
+        eagerAnalyzer = CypherEagerAnalyzerOption.lp,
+        inferSchemaParts = CypherInferSchemaPartsOption.default,
+        statefulShortestPlanningModeOption = CypherStatefulShortestPlanningModeOption.default,
+        planVarExpandInto = CypherPlanVarExpandInto.default,
+        plannerVersionOption = CypherPlannerVersionOption.latest,
+        pipelinedBatchSizePresetOption = CypherPipelinedBatchSizePresetOption.default,
+        pipelinedBatchReuseOption = CypherPipelinedBatchReuseOption.default,
+        heapEstimatorCacheOption = CypherHeapEstimatorCacheOption.default,
+        transactionBatchStrategy = CypherTransactionBatchStrategyOption.default,
+        parallelRepeatHeuristic = CypherParallelRepeatHeuristicOption.disabled
+      )
+      val expectedInner = QueryOptions(
+        offset = InputPosition.NONE,
+        queryOptions = queryOptions,
+        derivedOptions = CypherQueryOptions.derivedOptions(queryOptions, cypherConfig),
+        defaultLanguage = cypherConfig.systemDefaultLanguage
+      )
+
+      val expectedLast = QueryOptions.default(cypherConfig.systemDefaultLanguage).copy(
+        queryOptions = QueryOptions.default(cypherConfig.systemDefaultLanguage).queryOptions.copy(
+          runtime = CypherRuntimeOption.slotted,
+          expressionEngine = CypherExpressionEngineOption.interpreted,
+          cypherVersion = cypherConfig.systemDefaultLanguage match {
+            case CypherVersion.Cypher5  => CypherVersionOption.cypher5
+            case CypherVersion.Cypher25 => CypherVersionOption.cypher25
+          }
+        ),
+        materializedEntitiesMode = true
+      )
+
+      preParse(inst.asRemote(inner).query).options.copy(offset = InputPosition.NONE)
+        .shouldEqual(expectedInner)
+
+      inst.asLocal(inner, compositeContext = true).query.options.copy(offset = InputPosition.NONE)
+        .shouldEqual(expectedInner)
+
+      inst.asLocal(last, compositeContext = true).query.options.copy(offset = InputPosition.NONE)
         .shouldEqual(expectedLast)
     }
 
@@ -1056,29 +1540,102 @@ class FabricPlannerTest
       val inner = inst.plan.query.as[Fragment.Exec].input.as[Fragment.Apply].inner.as[Fragment.Exec]
       val last = inst.plan.query.as[Fragment.Exec]
 
+      val queryOptions = CypherQueryOptions.defaultOptions.copy(
+        cypherVersion = cypherConfig.systemDefaultLanguage match {
+          case CypherVersion.Cypher5  => CypherVersionOption.cypher5
+          case CypherVersion.Cypher25 => CypherVersionOption.cypher25
+        }
+      )
       val expectedInner = QueryOptions(
         offset = InputPosition.NONE,
-        queryOptions = CypherQueryOptions.defaultOptions
+        queryOptions = queryOptions,
+        derivedOptions = CypherQueryOptions.derivedOptions(queryOptions, cypherConfig),
+        defaultLanguage = cypherConfig.systemDefaultLanguage
       )
 
-      val expectedLast = QueryOptions.default.copy(
-        queryOptions = QueryOptions.default.queryOptions.copy(
+      val expectedLast = QueryOptions.default(cypherConfig.systemDefaultLanguage).copy(
+        queryOptions = QueryOptions.default(cypherConfig.systemDefaultLanguage).queryOptions.copy(
           runtime = CypherRuntimeOption.slotted,
-          expressionEngine = CypherExpressionEngineOption.interpreted
+          expressionEngine = CypherExpressionEngineOption.interpreted,
+          cypherVersion = cypherConfig.systemDefaultLanguage match {
+            case CypherVersion.Cypher5  => CypherVersionOption.cypher5
+            case CypherVersion.Cypher25 => CypherVersionOption.cypher25
+          }
         ),
         materializedEntitiesMode = true
       )
 
       val remote = inst.asRemote(inner).query
-      remote.should(not(include("CYPHER")))
+      remote.should(not(include("interpretedPipesFallback")))
 
       preParse(remote).options.copy(offset = InputPosition.NONE)
         .shouldEqual(expectedInner)
 
-      inst.asLocal(inner).query.options.copy(offset = InputPosition.NONE)
+      inst.asLocal(inner, false).query.options.copy(offset = InputPosition.NONE)
         .shouldEqual(expectedInner)
 
-      inst.asLocal(last).query.options.copy(offset = InputPosition.NONE)
+      inst.asLocal(last, false).query.options.copy(offset = InputPosition.NONE)
+        .shouldEqual(expectedLast)
+    }
+
+    "default query options are not rendered - composite" in {
+
+      cypherConfig.config.set(
+        GraphDatabaseInternalSettings.cypher_parallel_runtime_support,
+        CypherParallelRuntimeSupport.ALL
+      )
+      val inst = instance(
+        """CYPHER
+          |  interpretedPipesFallback=default
+          |WITH 1 AS a
+          |CALL {
+          |  USE foo
+          |  WITH a AS a
+          |  RETURN 1 AS y
+          |}
+          |RETURN 1 AS x
+          |""".stripMargin,
+        sessionDatabaseName = fabricName
+      )
+
+      val inner = inst.plan.query.as[Fragment.Exec].input.as[Fragment.Apply].inner.as[Fragment.Exec]
+      val last = inst.plan.query.as[Fragment.Exec]
+
+      val queryOptions = CypherQueryOptions.defaultOptions.copy(
+        cypherVersion = cypherConfig.systemDefaultLanguage match {
+          case CypherVersion.Cypher5  => CypherVersionOption.cypher5
+          case CypherVersion.Cypher25 => CypherVersionOption.cypher25
+        }
+      )
+      val expectedInner = QueryOptions(
+        offset = InputPosition.NONE,
+        queryOptions = queryOptions,
+        derivedOptions = CypherQueryOptions.derivedOptions(queryOptions, cypherConfig),
+        defaultLanguage = cypherConfig.systemDefaultLanguage
+      )
+
+      val expectedLast = QueryOptions.default(cypherConfig.systemDefaultLanguage).copy(
+        queryOptions = QueryOptions.default(cypherConfig.systemDefaultLanguage).queryOptions.copy(
+          runtime = CypherRuntimeOption.slotted,
+          expressionEngine = CypherExpressionEngineOption.interpreted,
+          cypherVersion = cypherConfig.systemDefaultLanguage match {
+            case CypherVersion.Cypher5  => CypherVersionOption.cypher5
+            case CypherVersion.Cypher25 => CypherVersionOption.cypher25
+          }
+        ),
+        materializedEntitiesMode = true
+      )
+
+      val remote = inst.asRemote(inner).query
+      remote.should(not(include("interpretedPipesFallback")))
+
+      preParse(remote).options.copy(offset = InputPosition.NONE)
+        .shouldEqual(expectedInner)
+
+      inst.asLocal(inner, true).query.options.copy(offset = InputPosition.NONE)
+        .shouldEqual(expectedInner)
+
+      inst.asLocal(last, true).query.options.copy(offset = InputPosition.NONE)
         .shouldEqual(expectedLast)
     }
   }
@@ -1345,14 +1902,21 @@ class FabricPlannerTest
     def planAndStitch(sessionGraphName: String, query: String, params: MapValue = params) = {
       val planner =
         FabricPlanner(makeConfig(), cypherConfig, monitors, cacheFactory)
-          .instance(signatures, query, params, databaseReference(sessionGraphName), fabricCatalog)
+          .testInstance(
+            signatures,
+            query,
+            params,
+            databaseReference(sessionGraphName),
+            fabricCatalog,
+            cypherConfig.systemDefaultLanguage
+          )
       Try(planner.plan)
     }
 
     def planAndStitchDatabaseRef(sessionDatabase: DatabaseReference, query: String, params: MapValue = params) = {
       val planner =
         FabricPlanner(makeConfig(), cypherConfig, monitors, cacheFactory)
-          .instance(signatures, query, params, sessionDatabase, fabricCatalog)
+          .testInstance(signatures, query, params, sessionDatabase, fabricCatalog, cypherConfig.systemDefaultLanguage)
       Try(planner.plan)
     }
 
@@ -1375,16 +1939,6 @@ class FabricPlannerTest
     }
 
     "stitches multi-graph queries when graph is the same" in {
-
-      forAll(singlePlusDefaultGraphQueries(graphName = sessionGraphName)) { query =>
-        planAndStitch(sessionGraphName, query)
-          .should(beFullyStitched)
-      }
-
-      forAll(defaultPlusSingleGraphQueries(graphName = sessionGraphName)) { query =>
-        planAndStitch(sessionGraphName, query)
-          .should(beFullyStitched)
-      }
 
       forAll(doubleGraphQueries(graphName1 = "foo", graphName2 = "foo")) { query =>
         planAndStitch(sessionGraphName, query)
@@ -1706,7 +2260,23 @@ class FabricPlannerTest
         VirtualValues.map(Array("p"), Array(Values.of(1)))
       )
 
-      val local = inst.asLocal(inst.plan.query.as[Fragment.Exec])
+      val local = inst.asLocal(inst.plan.query.as[Fragment.Exec], false)
+
+      local.query.state.statement()
+        .shouldEqual(
+          singleQuery(return_(parameter("p", ct.int).as("p")))
+        )
+
+    }
+
+    "parameter types - composite" in {
+
+      val inst = instance(
+        "RETURN $p AS p",
+        VirtualValues.map(Array("p"), Array(Values.of(1)))
+      )
+
+      val local = inst.asLocal(inst.plan.query.as[Fragment.Exec], true)
 
       local.query.state.statement()
         .shouldEqual(
@@ -1739,7 +2309,7 @@ class FabricPlannerTest
   val beFullyStitched: Matcher[Try[FabricPlan]] = Matcher[Try[FabricPlan]] {
     case Success(value) =>
       value.query match {
-        case frag @ Fragment.Exec(_: Fragment.Init, _, _, _, _, _) =>
+        case frag @ Fragment.Exec(_: Fragment.Init, _, _, _, _) =>
           MatchResult(matches = true, s"Expectation failed, got: $frag", s"Expectation failed, got: $frag")
 
         case frag => MatchResult(
@@ -1754,4 +2324,6 @@ class FabricPlannerTest
         s"Expectation failed, got exception: ${exception.getMessage}"
       )
   }
+
+  override def scopedSignatures: ScopedProcedureSignatureResolver = scopedSignatures(systemDefaultCypherVersion)
 }

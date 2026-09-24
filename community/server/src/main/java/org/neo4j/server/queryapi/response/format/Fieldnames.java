@@ -49,10 +49,26 @@ public final class Fieldnames {
     public static final String BOOKMARKS_KEY = "bookmarks";
 
     public static final String NOTIFICATIONS_KEY = "notifications";
-    public static final String QUERY_PLAN_KEY = "queryPlan";
     public static final String COUNTERS_KEY = "counters";
+    public static final String QUERY_TYPE_KEY = "queryType";
+    public static final String RESULT_AVAILABLE_AFTER_KEY = "resultAvailableAfter";
+    public static final String RESULT_CONSUMED_AFTER_KEY = "resultConsumedAfter";
+
+    public static final String QUERY_PLAN_KEY = "queryPlan";
+    public static final String QUERY_PLAN_OPERATOR_TYPE_KEY = "operatorType";
+    public static final String QUERY_PLAN_ARGUMENTS_KEY = "arguments";
+    public static final String QUERY_PLAN_IDENTIFIERS_KEY = "identifiers";
+    public static final String QUERY_PLAN_CHILDREN_KEY = "children";
 
     public static final String PROFILE_KEY = "profiledQueryPlan";
+    public static final String PROFILE_DB_HITS_KEY = "dbHits";
+    public static final String PROFILE_ROWS_KEY = "records";
+    public static final String PROFILE_HAS_PAGE_CACHE_STATS_KEY = "hasPageCacheStats";
+    public static final String PROFILE_PAGE_CACHE_HITS_KEY = "pageCacheHits";
+    public static final String PROFILE_PAGE_CACHE_MISSES_KEY = "pageCacheMisses";
+    public static final String PROFILE_PAGE_CACHE_RATION_KEY = "pageCacheHitRatio";
+    public static final String PROFILE_TIME_KEY = "time";
+    public static final String PROFILE_CHILDREN_KEY = "children";
 
     public static final String ERRORS_KEY = "errors";
     public static final String TRANSACTION_KEY = "transaction";
@@ -62,6 +78,14 @@ public final class Fieldnames {
     public static final String ERROR_KEY = "error";
     public static final String ERROR_MESSAGE = "message";
     public static final String ERROR_CODE = "code";
+
+    public static final String CYPHER_EVENT = "$event";
+    public static final String CYPHER_BODY = "_body";
+
+    public static final String CYPHER_EVENT_HEADER = "Header";
+    public static final String CYPHER_EVENT_RECORD = "Record";
+    public static final String CYPHER_EVENT_SUMMARY = "Summary";
+    public static final String CYPHER_EVENT_ERROR = "Error";
 
     private Fieldnames() {}
 }

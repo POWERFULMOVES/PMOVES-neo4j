@@ -22,6 +22,7 @@ package org.neo4j.values.storable;
 import static java.lang.String.format;
 import static org.neo4j.values.storable.Values.NO_VALUE;
 
+import java.io.Serializable;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -29,6 +30,7 @@ import java.time.OffsetTime;
 import java.time.ZonedDateTime;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.neo4j.exceptions.InvalidArgumentException;
@@ -39,14 +41,12 @@ import org.neo4j.values.AnyValueWriter;
 import org.neo4j.values.Comparison;
 import org.neo4j.values.Equality;
 import org.neo4j.values.SequenceValue;
+import org.neo4j.values.TernaryComparator;
 
-public abstract class Value extends AnyValue {
+public abstract class Value extends AnyValue implements Serializable {
     private static final Pattern MAP_PATTERN = Pattern.compile("\\{(.*)}");
 
-    private static final Pattern KEY_VALUE_PATTERN =
-            Pattern.compile("(?:\\A|,)\\s*+(?<k>[a-z_A-Z]\\w*+)\\s*:\\s*(?<v>[^\\s,]+)");
-
-    static final Pattern QUOTES_PATTERN = Pattern.compile("^[\"']|[\"']$");
+    public static final Pattern QUOTES_PATTERN = Pattern.compile("^[\"']|[\"']$");
 
     @Override
     public boolean equalTo(Object other) {
@@ -107,7 +107,7 @@ public abstract class Value extends AnyValue {
         return false;
     }
 
-    public boolean equals(String[] x) {
+    public boolean equals(StringValue[] x) {
         return false;
     }
 
@@ -139,6 +139,10 @@ public abstract class Value extends AnyValue {
         return false;
     }
 
+    public boolean equals(UUID[] x) {
+        return false;
+    }
+
     @Override
     public Equality ternaryEquals(AnyValue other) {
         assert other != null : "null values are not supported, use NoValue.NO_VALUE instead";
@@ -160,11 +164,20 @@ public abstract class Value extends AnyValue {
         return Equality.FALSE;
     }
 
+    /**
+     * See {@link java.util.Comparator#compare(Object, Object)}
+     *
+     * @param other the implementations can assume that {@code other} is in the same {@link ValueGroup} as this value.
+     * @return a negative integer, zero, or a positive integer as the first argument is less than, equal to, or greater
+     * than the second.
+     */
     protected abstract int unsafeCompareTo(Value other);
 
     /**
-     * Should return {@code Comparison.UNDEFINED} for values that cannot be compared
-     * under Comparability semantics.
+     * See {@link TernaryComparator#ternaryCompare(Object, Object)}
+     *
+     * @param other the implementations can assume that {@code other} is in the same {@link ValueGroup} as this value.
+     * @return {@code Comparison.UNDEFINED} for values that cannot be compared under Comparability semantics.
      */
     Comparison unsafeTernaryCompareTo(Value other) {
         if (ternaryUndefined() || other.ternaryUndefined()) {
@@ -202,9 +215,7 @@ public abstract class Value extends AnyValue {
         return asObjectCopy();
     }
 
-    /**
-     * Returns a json-like string representation of the current value.
-     */
+    @Override
     public abstract String prettyPrint();
 
     @Override
@@ -213,8 +224,6 @@ public abstract class Value extends AnyValue {
     public final ValueGroup valueGroup() {
         return valueRepresentation().valueGroup();
     }
-
-    public abstract NumberType numberType();
 
     /**
      * Returns whether or not the type of this value is the same as the type of the given value. Value type is more specific than
@@ -226,12 +235,6 @@ public abstract class Value extends AnyValue {
      */
     public boolean isSameValueTypeAs(Value value) {
         return getClass() == value.getClass();
-    }
-
-    public final long hashCode64() {
-        HashFunction xxh64 = HashFunction.incrementalXXH64();
-        long seed = 1; // Arbitrary seed, but it must always be the same or hash values will change.
-        return xxh64.finalise(updateHash(xxh64, xxh64.initialise(seed)));
     }
 
     public abstract long updateHash(HashFunction hashFunction, long hash);
@@ -299,8 +302,11 @@ public abstract class Value extends AnyValue {
 
     private static void checkParseState(CharSequence text, int i, boolean condition) {
         if (!condition) {
-            throw new InvalidArgumentException(format(
-                    "Was expecting key:value, key:'value' or key:\"value\" pairs in %s. Error near index %d", text, i));
+            throw InvalidArgumentException.internalError(
+                    Value.class.getSimpleName(),
+                    format(
+                            "Was expecting key:value, key:'value' or key:\"value\" pairs in %s. Error near index %d",
+                            text, i));
         }
     }
 }

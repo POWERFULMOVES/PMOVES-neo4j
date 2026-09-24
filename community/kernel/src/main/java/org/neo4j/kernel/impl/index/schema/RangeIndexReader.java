@@ -26,13 +26,20 @@ import static org.neo4j.kernel.impl.index.schema.NativeIndexKey.Inclusion.NEUTRA
 import static org.neo4j.kernel.impl.index.schema.RangeIndexProvider.CAPABILITY;
 
 import java.util.Arrays;
+import java.util.function.Function;
 import org.neo4j.index.internal.gbptree.GBPTree;
 import org.neo4j.internal.kernel.api.IndexQueryConstraints;
 import org.neo4j.internal.kernel.api.PropertyIndexQuery;
+import org.neo4j.internal.kernel.api.PropertyIndexQuery.ExactPredicate;
+import org.neo4j.internal.kernel.api.PropertyIndexQuery.RangePredicate;
+import org.neo4j.internal.kernel.api.PropertyIndexQuery.StringPrefixPredicate;
+import org.neo4j.internal.kernel.api.exceptions.schema.IndexNotApplicableKernelException;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexOrder;
 import org.neo4j.internal.schema.IndexQuery.IndexQueryType;
 import org.neo4j.internal.schema.IndexType;
+import org.neo4j.logging.LogProvider;
+import org.neo4j.token.api.TokenConstants;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.ValueGroup;
 import org.neo4j.values.storable.Values;
@@ -42,12 +49,14 @@ public class RangeIndexReader extends NativeIndexReader<RangeKey> {
             GBPTree<RangeKey, NullValue> tree,
             IndexLayout<RangeKey> layout,
             IndexDescriptor descriptor,
-            IndexUsageTracking usageTracker) {
-        super(tree, layout, descriptor, usageTracker);
+            IndexUsageTracking usageTracker,
+            LogProvider logProvider) {
+        super(tree, layout, descriptor, usageTracker, logProvider);
     }
 
     @Override
-    void validateQuery(IndexQueryConstraints constraints, PropertyIndexQuery... predicates) {
+    public void validateQuery(IndexQueryConstraints constraints, PropertyIndexQuery... predicates)
+            throws IndexNotApplicableKernelException {
         validateNoUnsupportedPredicates(predicates);
         validateOrder(constraints.order(), predicates);
         validateCompositeQuery(predicates);
@@ -61,7 +70,7 @@ public class RangeIndexReader extends NativeIndexReader<RangeKey> {
         }
 
         for (int i = 0; i < predicates.length; i++) {
-            final var predicate = predicates[i];
+            PropertyIndexQuery predicate = predicates[i];
             switch (predicate.type()) {
                 case EXISTS -> {
                     treeKeyFrom.initValueAsLowest(i, ValueGroup.UNKNOWN);
@@ -69,25 +78,24 @@ public class RangeIndexReader extends NativeIndexReader<RangeKey> {
                 }
 
                 case EXACT -> {
-                    final var exactPredicate = (PropertyIndexQuery.ExactPredicate) predicate;
+                    ExactPredicate exactPredicate = (PropertyIndexQuery.ExactPredicate) predicate;
                     treeKeyFrom.initFromValue(i, exactPredicate.value(), NEUTRAL);
                     treeKeyTo.initFromValue(i, exactPredicate.value(), NEUTRAL);
                 }
 
                 case RANGE -> {
-                    final var rangePredicate = (PropertyIndexQuery.RangePredicate<?>) predicate;
+                    RangePredicate<?> rangePredicate = (PropertyIndexQuery.RangePredicate<?>) predicate;
                     initFromForRange(i, rangePredicate, treeKeyFrom);
                     initToForRange(i, rangePredicate, treeKeyTo);
                 }
 
                 case STRING_PREFIX -> {
-                    final var prefixPredicate = (PropertyIndexQuery.StringPrefixPredicate) predicate;
+                    StringPrefixPredicate prefixPredicate = (PropertyIndexQuery.StringPrefixPredicate) predicate;
                     treeKeyFrom.stateSlot(i).initAsPrefixLow(prefixPredicate.prefix());
                     treeKeyTo.stateSlot(i).initAsPrefixHigh(prefixPredicate.prefix());
                 }
 
-                default -> throw new IllegalArgumentException(
-                        "IndexQuery of type " + predicate.type() + " is not supported.");
+                default -> throw invalidPredicate(IllegalArgumentException::new, predicate);
             }
         }
         return false;
@@ -136,23 +144,22 @@ public class RangeIndexReader extends NativeIndexReader<RangeKey> {
         return rangePredicate.toInclusive() ? HIGH : LOW;
     }
 
-    private static void validateNoUnsupportedPredicates(PropertyIndexQuery[] predicates) {
-        for (final var predicate : predicates) {
-            final var type = predicate.type();
+    private void validateNoUnsupportedPredicates(PropertyIndexQuery[] predicates)
+            throws IndexNotApplicableKernelException {
+        for (PropertyIndexQuery predicate : predicates) {
+            IndexQueryType type = predicate.type();
             switch (type) {
-                case TOKEN_LOOKUP,
-                        BOUNDING_BOX,
-                        STRING_CONTAINS,
-                        STRING_SUFFIX,
-                        FULLTEXT_SEARCH -> throw new IllegalArgumentException(format(
-                        "Tried to query index with illegal query. A %s predicate is not allowed for a %s index. Query was :%s",
-                        type, IndexType.RANGE, Arrays.toString(predicates)));
-                default -> {}
+                case ALL_ENTRIES, EXISTS, EXACT, RANGE, STRING_PREFIX -> {}
+                default ->
+                    throw invalidPredicate(
+                            msg -> IndexNotApplicableKernelException.indexNotApplicable(log, descriptor.getName(), msg),
+                            predicate);
             }
         }
     }
 
-    static void validateOrder(IndexOrder indexOrder, PropertyIndexQuery... predicates) {
+    void validateOrder(IndexOrder indexOrder, PropertyIndexQuery... predicates)
+            throws IndexNotApplicableKernelException {
         if (indexOrder == IndexOrder.NONE) {
             return;
         }
@@ -188,10 +195,10 @@ public class RangeIndexReader extends NativeIndexReader<RangeKey> {
      *
      * @param predicates The query for which we want to check the composite validity.
      */
-    static void validateCompositeQuery(PropertyIndexQuery... predicates) {
+    void validateCompositeQuery(PropertyIndexQuery... predicates) throws IndexNotApplicableKernelException {
         for (int i = 1; i < predicates.length; i++) {
-            final var type = predicates[i].type();
-            final var prevType = predicates[i - 1].type();
+            IndexQueryType type = predicates[i].type();
+            IndexQueryType prevType = predicates[i - 1].type();
             if (prevType == IndexQueryType.ALL_ENTRIES) {
                 invalidQueryInComposite(prevType, predicates);
             }
@@ -213,23 +220,73 @@ public class RangeIndexReader extends NativeIndexReader<RangeKey> {
                 default -> invalidQueryInComposite(type, predicates);
             }
         }
+        assertPredicateKeyOrder(descriptor, predicates);
     }
 
-    private static void invalidOrder(IndexOrder indexOrder, PropertyIndexQuery... predicates) {
-        throw new UnsupportedOperationException(format(
-                "Tried to query index with unsupported order %s. For query %s supports ascending: false, supports descending: false.",
-                indexOrder, Arrays.toString(predicates)));
+    /**
+     * Assert that the predicates are passed in the same order as the property keys are defined
+     * in the index descriptor. When the order does not match, an index seek walks the tree using
+     * values bound to the wrong slots and silently returns invalid results.
+     */
+    static void assertPredicateKeyOrder(IndexDescriptor descriptor, PropertyIndexQuery[] predicates)
+            throws IndexNotApplicableKernelException {
+        if (predicates.length == 1 && predicates[0].type() == IndexQueryType.ALL_ENTRIES) {
+            return;
+        }
+        int[] schemaPropertyIds = descriptor.schema().getPropertyIds();
+        if (predicates.length != schemaPropertyIds.length) {
+            throw IndexNotApplicableKernelException.internalError(
+                    RangeIndexReader.class.getSimpleName(),
+                    format(
+                            "The index specifies %d properties, but %d lookup predicates were given. Query was: %s",
+                            schemaPropertyIds.length, predicates.length, Arrays.toString(predicates)));
+        }
+        for (int i = 0; i < predicates.length; i++) {
+            int queriedKey = predicates[i].propertyKeyId();
+            if (queriedKey != schemaPropertyIds[i] && queriedKey != TokenConstants.ANY_PROPERTY_KEY) {
+                throw IndexNotApplicableKernelException.internalError(
+                        RangeIndexReader.class.getSimpleName(),
+                        format(
+                                "The index has property id %d in position %d, but the lookup property id was %d. Query was: %s",
+                                schemaPropertyIds[i], i, queriedKey, Arrays.toString(predicates)));
+            }
+        }
     }
 
-    private static void invalidQueryInComposite(IndexQueryType type, PropertyIndexQuery... predicates) {
-        throw new IllegalArgumentException(format(
-                "Tried to query index with illegal composite query. %s queries are not allowed in composite query. Query was: %s ",
-                type, Arrays.toString(predicates)));
+    private void invalidOrder(IndexOrder indexOrder, PropertyIndexQuery... predicates)
+            throws IndexNotApplicableKernelException {
+        throw IndexNotApplicableKernelException.indexNotApplicable(
+                log,
+                descriptor.getName(),
+                format(
+                        "Tried to query index with unsupported order %s. For query %s supports ascending: false, supports descending: false.",
+                        indexOrder, Arrays.toString(predicates)));
     }
 
-    private static void invalidQueryPrecisionInComposite(PropertyIndexQuery... predicates) {
-        throw new IllegalArgumentException(format(
-                "Tried to query index with illegal composite query. Composite query must have decreasing precision. Query was: %s ",
-                Arrays.toString(predicates)));
+    private void invalidQueryInComposite(IndexQueryType type, PropertyIndexQuery... predicates)
+            throws IndexNotApplicableKernelException {
+        throw IndexNotApplicableKernelException.indexNotApplicable(
+                log,
+                descriptor.getName(),
+                format(
+                        "Tried to query index with illegal composite query. %s queries are not allowed in composite query. Query was: %s",
+                        type, Arrays.toString(predicates)));
+    }
+
+    private void invalidQueryPrecisionInComposite(PropertyIndexQuery... predicates)
+            throws IndexNotApplicableKernelException {
+        throw IndexNotApplicableKernelException.indexNotApplicable(
+                log,
+                descriptor.getName(),
+                format(
+                        "Tried to query index with illegal composite query. Composite query must have decreasing precision. Query was: %s",
+                        Arrays.toString(predicates)));
+    }
+
+    private static <E extends Exception> E invalidPredicate(
+            Function<String, E> constructor, PropertyIndexQuery predicate) {
+        return constructor.apply(format(
+                "Tried to query index with illegal query. A %s predicate is not allowed for a %s index. Query was :%s",
+                predicate.type(), IndexType.RANGE, predicate));
     }
 }

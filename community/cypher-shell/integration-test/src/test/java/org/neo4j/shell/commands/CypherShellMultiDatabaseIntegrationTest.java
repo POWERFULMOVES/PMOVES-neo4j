@@ -20,9 +20,8 @@
 package org.neo4j.shell.commands;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.neo4j.shell.DatabaseManager.ABSENT_DB_NAME;
 import static org.neo4j.shell.DatabaseManager.DEFAULT_DEFAULT_DB_NAME;
@@ -31,6 +30,7 @@ import static org.neo4j.shell.test.Util.testConnectionConfig;
 import static org.neo4j.shell.util.Versions.majorVersion;
 
 import java.util.List;
+import java.util.Optional;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -58,7 +58,7 @@ class CypherShellMultiDatabaseIntegrationTest {
     void setUp() throws Exception {
         linePrinter.clear();
         var printer = new PrettyPrinter(new PrettyConfig(Format.PLAIN, true, 1000, false));
-        var boltHandler = new BoltStateHandler(false, AccessMode.WRITE);
+        var boltHandler = new BoltStateHandler(false, AccessMode.WRITE, Optional.empty());
         var parameters = ParameterService.create(boltHandler);
         var dbInfo = new DbInfoImpl(parameters, boltHandler, true);
         shell = new CypherShell(linePrinter, boltHandler, dbInfo, printer, parameters);
@@ -133,19 +133,18 @@ class CypherShellMultiDatabaseIntegrationTest {
     void switchingToNonExistingDatabaseShouldGiveErrorResponseFromServer() throws CommandException {
         useCommand.execute(List.of(SYSTEM_DB_NAME));
 
-        try {
-            useCommand.execute(List.of("this_database_name_does_not_exist_in_test_container"));
-            fail("No ClientException thrown");
-        } catch (ClientException e) {
-            // In non-interactive we want to switch even if the database does not exist (in case we don't have
-            // fail-fast)
-            assertOnNoValidDB();
-        }
+        assertThatThrownBy(() -> useCommand.execute(List.of("this_database_name_does_not_exist_in_test_container")))
+                .isInstanceOf(ClientException.class)
+                .satisfies(e ->
+                        // In non-interactive we want to switch even if the database does not exist (in case we don't
+                        // have
+                        // fail-fast)
+                        assertOnNoValidDB());
     }
 
     @Test
     void switchingToNonExistingDatabaseShouldGiveErrorResponseFromServerInteractive() throws CommandException {
-        var boltHandler = new BoltStateHandler(true, AccessMode.WRITE);
+        var boltHandler = new BoltStateHandler(true, AccessMode.WRITE, Optional.empty());
         var parameters = ParameterService.create(boltHandler);
         var printer = new PrettyPrinter(new PrettyConfig(Format.PLAIN, true, 1000, false));
         var dbInfo = new DbInfoImpl(parameters, boltHandler, true);
@@ -155,13 +154,11 @@ class CypherShellMultiDatabaseIntegrationTest {
 
         useCommand.execute(List.of(SYSTEM_DB_NAME));
 
-        try {
-            useCommand.execute(List.of("this_database_name_does_not_exist_in_test_container"));
-            fail("No ClientException thrown");
-        } catch (ClientException e) {
-            // In interactive we do not want to switch if the database does not exist
-            assertOnSystemDB();
-        }
+        assertThatThrownBy(() -> useCommand.execute(List.of("this_database_name_does_not_exist_in_test_container")))
+                .isInstanceOf(ClientException.class)
+                .satisfies(e ->
+                        // In interactive we do not want to switch if the database does not exist
+                        assertOnSystemDB());
     }
 
     // HELPERS
@@ -177,6 +174,7 @@ class CypherShellMultiDatabaseIntegrationTest {
     }
 
     private void assertOnNoValidDB() {
-        assertThrows(ClientException.class, () -> shell.execute(CypherStatement.complete("RETURN 1")));
+        assertThatExceptionOfType(ClientException.class)
+                .isThrownBy(() -> shell.execute(CypherStatement.complete("RETURN 1")));
     }
 }

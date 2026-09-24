@@ -94,8 +94,6 @@ public final class OffHeapPageLock {
     private static final long EXL_MASK = 0b01000000_00000000_00000000_00000000_00000000_00000000_00000000_00000000L;
     private static final long MOD_MASK = 0b00100000_00000000_00000000_00000000_00000000_00000000_00000000_00000000L;
     private static final long CNT_MASK = 0b00011111_11111111_11110000_00000000_00000000_00000000_00000000_00000000L;
-    private static final long MULTI_VERSIONED_CNT_MASK =
-            0b00000000_00000000_00010000_00000000_00000000_00000000_00000000_00000000L;
     private static final long SEQ_MASK = 0b00000000_00000000_00001111_11111111_11111111_11111111_11111111_11111111L;
     private static final long CNT_UNIT = 0b00000000_00000000_00010000_00000000_00000000_00000000_00000000_00000000L;
     private static final long SEQ_IMSK = 0b11111111_11111111_11110000_00000000_00000000_00000000_00000000_00000000L;
@@ -172,36 +170,27 @@ public final class OffHeapPageLock {
      *
      * @return {@code true} if the write lock was taken, {@code false} otherwise.
      */
-    public static boolean tryWriteLock(long address, boolean multiVersioned) {
-        long s;
-        long n;
-        final long cntMask = multiVersioned ? MULTI_VERSIONED_CNT_MASK : CNT_MASK;
+    public static boolean tryWriteLock(long address, boolean singleWriter) {
         for (; ; ) {
-            s = getState(address);
-            boolean unwritablyLocked = (s & EXL_MASK) != 0;
-            boolean writeCountOverflow = (s & cntMask) == cntMask;
-
-            if (unwritablyLocked || writeCountOverflow) {
-                return failWriteLock(s, !multiVersioned && writeCountOverflow);
+            long state = getState(address);
+            long currentWriteCount = state & CNT_MASK;
+            if (singleWriter && currentWriteCount != 0) {
+                return false;
+            }
+            boolean writeCountOverflow = currentWriteCount == CNT_MASK;
+            if (writeCountOverflow) {
+                throw new IllegalMonitorStateException("Write lock counter overflow: " + describeState(state));
+            }
+            boolean unwritablyLocked = (state & EXL_MASK) != 0;
+            if (unwritablyLocked) {
+                return false;
             }
 
-            n = s + CNT_UNIT | MOD_MASK;
-            if (compareAndSetState(address, s, n)) {
+            long newState = state + CNT_UNIT | MOD_MASK;
+            if (compareAndSetState(address, state, newState)) {
                 return true;
             }
         }
-    }
-
-    private static boolean failWriteLock(long s, boolean throwOverflowException) {
-        if (throwOverflowException) {
-            throwWriteLockOverflow(s);
-        }
-        // Otherwise it was exclusively locked
-        return false;
-    }
-
-    private static void throwWriteLockOverflow(long s) {
-        throw new IllegalMonitorStateException("Write lock counter overflow: " + describeState(s));
     }
 
     /**
@@ -370,9 +359,5 @@ public final class OffHeapPageLock {
         long seq = s & SEQ_MASK;
         return "OffHeapPageLock[" + "Flush: " + flush + ", Excl: " + excl + ", Mod: " + mod + ", Ws: " + cnt + ", S: "
                 + seq + "]";
-    }
-
-    static String toString(long address) {
-        return describeState(getState(address));
     }
 }

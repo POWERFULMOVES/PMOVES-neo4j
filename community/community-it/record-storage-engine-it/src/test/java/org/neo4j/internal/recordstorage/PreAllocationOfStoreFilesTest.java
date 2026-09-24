@@ -28,6 +28,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.neo4j.common.Subject.ANONYMOUS;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
+import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_CHECKSUM;
 import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_CONSENSUS_INDEX;
 
 import java.io.IOException;
@@ -52,20 +53,18 @@ import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.impl.muninn.VersionStorage;
 import org.neo4j.io.pagecache.prefetch.PagePrefetcher;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
-import org.neo4j.kernel.KernelVersionRepository;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.api.CompleteTransaction;
 import org.neo4j.kernel.impl.store.record.NodeRecord;
 import org.neo4j.kernel.impl.store.record.RelationshipRecord;
 import org.neo4j.kernel.impl.transaction.CompleteBatchRepresentation;
-import org.neo4j.kernel.impl.transaction.log.CompleteCommandBatch;
-import org.neo4j.kernel.impl.transaction.log.EmptyLogTailMetadata;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntryCommit;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntryStart;
 import org.neo4j.lock.LockService;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.monitoring.DatabaseHealth;
 import org.neo4j.storageengine.api.ConstraintRuleAccessor;
+import org.neo4j.storageengine.api.Leases;
+import org.neo4j.storageengine.api.LogMetadataProviderImpl;
 import org.neo4j.storageengine.api.TransactionApplicationMode;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.test.LatestVersions;
@@ -73,6 +72,10 @@ import org.neo4j.test.extension.EphemeralNeo4jLayoutExtension;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.pagecache.EphemeralPageCacheExtension;
 import org.neo4j.token.TokenHolders;
+import org.neo4j.wal.CompleteCommandBatch;
+import org.neo4j.wal.LogTailLogVersionsMetadata;
+import org.neo4j.wal.entry.LogEntryCommit;
+import org.neo4j.wal.entry.LogEntryStart;
 
 @EphemeralPageCacheExtension
 @EphemeralNeo4jLayoutExtension
@@ -120,13 +123,15 @@ class PreAllocationOfStoreFilesTest {
                 EmptyIdGeneratorFactory.EMPTY_ID_GENERATOR_FACTORY,
                 RecoveryCleanupWorkCollector.ignore(),
                 EmptyMemoryTracker.INSTANCE,
-                new EmptyLogTailMetadata(Config.defaults()),
-                mock(KernelVersionRepository.class),
-                LockVerificationFactory.NONE,
+                new LogMetadataProviderImpl(
+                        LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
+                        LatestVersions.LATEST_LOG_FORMAT,
+                        LatestVersions.LATEST_KERNEL_VERSION),
                 CursorContextFactory.NULL_CONTEXT_FACTORY,
                 PageCacheTracer.NULL,
                 VersionStorage.EMPTY_STORAGE,
-                PagePrefetcher.DISABLED);
+                PagePrefetcher.DISABLED,
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
     }
 
     @AfterEach
@@ -154,16 +159,17 @@ class PreAllocationOfStoreFilesTest {
                                 LATEST_LOG_SERIALIZATION,
                                 new RelationshipRecord(2000),
                                 new RelationshipRecord(2000)
-                                        .initialize(true, -1, -1, -1, 1, -1, -1, -1, -1, true, true))),
+                                        .initialize(true, -1, -1, -1, 1, -1, -1, -1, -1, true, true, false, false))),
                 UNKNOWN_CONSENSUS_INDEX,
                 1611333951,
                 2,
                 1611777951,
                 5,
+                Leases.NO_LEASES,
                 LatestVersions.LATEST_KERNEL_VERSION,
                 ANONYMOUS);
-        CompleteBatchRepresentation transaction =
-                new CompleteBatchRepresentation(mock(LogEntryStart.class), storageCommands, mock(LogEntryCommit.class));
+        CompleteBatchRepresentation transaction = new CompleteBatchRepresentation(
+                mock(LogEntryStart.class), storageCommands, mock(LogEntryCommit.class), BASE_TX_CHECKSUM);
         CompleteTransaction completeTransaction = new CompleteTransaction(transaction, NULL_CONTEXT, StoreCursors.NULL);
 
         recordStorageEngine.preAllocateStoreFilesForCommands(completeTransaction, TransactionApplicationMode.INTERNAL);

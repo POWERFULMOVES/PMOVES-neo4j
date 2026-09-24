@@ -54,15 +54,17 @@ import org.neo4j.kernel.impl.store.record.RelationshipTypeTokenRecord;
 import org.neo4j.kernel.impl.store.record.SchemaRecord;
 import org.neo4j.string.UTF8;
 import org.neo4j.values.storable.CoordinateReferenceSystem;
+import org.neo4j.values.storable.Float16Format;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.ValueWriter;
 
-class LogCommandSerializationV5_0 extends LogCommandSerializationV4_4 {
-    static final LogCommandSerializationV5_0 INSTANCE = new LogCommandSerializationV5_0();
+class LogCommandSerializationV5_0 extends LogCommandSerializationV4_3_D3 {
+    public static final int MAX_PREALLOCATION_SIZE = 2048;
+    static final LogCommandSerializationV5_0 INSTANCE = new LogCommandSerializationV5_0(KernelVersion.V5_0);
+    static final LogCommandSerializationV5_0 V5_7_INSTANCE = new LogCommandSerializationV5_0(KernelVersion.V5_7);
 
-    @Override
-    public KernelVersion kernelVersion() {
-        return KernelVersion.V5_0;
+    LogCommandSerializationV5_0(KernelVersion kernelVersion) {
+        super(kernelVersion);
     }
 
     @Override
@@ -434,6 +436,46 @@ class LogCommandSerializationV5_0 extends LogCommandSerializationV4_4 {
             public void writeDateTime(ZonedDateTime zonedDateTime) throws IOException {
                 throw new IOException("DateTime is not a supported schema map value type.");
             }
+
+            @Override
+            public void writeInt8Vector(byte[] values) throws IOException {
+                throw new IOException("Vector is not a supported schema map value type.");
+            }
+
+            @Override
+            public void writeInt16Vector(short[] values) throws IOException {
+                throw new IOException("Vector is not a supported schema map value type.");
+            }
+
+            @Override
+            public void writeInt32Vector(int[] values) throws IOException {
+                throw new IOException("Vector is not a supported schema map value type.");
+            }
+
+            @Override
+            public void writeInt64Vector(long[] values) throws IOException {
+                throw new IOException("Vector is not a supported schema map value type.");
+            }
+
+            @Override
+            public void writeFloat16Vector(Float16Format format, short[] values) throws IOException {
+                throw new IOException("Vector is not a supported schema map value type.");
+            }
+
+            @Override
+            public void writeFloat32Vector(float[] values) throws IOException {
+                throw new IOException("Vector is not a supported schema map value type.");
+            }
+
+            @Override
+            public void writeFloat64Vector(double[] values) throws IOException {
+                throw new IOException("Vector is not a supported schema map value type.");
+            }
+
+            @Override
+            public void writeUUID(long msb, long lsb) throws IOException {
+                throw new IOException("UID is not a supported schema map value type.");
+            }
         });
     }
 
@@ -677,9 +719,11 @@ class LogCommandSerializationV5_0 extends LogCommandSerializationV4_4 {
                     .putLong(record.getSecondPrevRel())
                     .putLong(record.getSecondNextRel())
                     .putLong(record.getNextProp());
-            var extraByte = bitFlags(
+            byte extraByte = bitFlags(
                     bitFlag(record.isFirstInFirstChain(), Record.RELATIONSHIP_FIRST_IN_FIRST_CHAIN),
-                    bitFlag(record.isFirstInSecondChain(), Record.RELATIONSHIP_FIRST_IN_SECOND_CHAIN));
+                    bitFlag(record.isFirstInSecondChain(), Record.RELATIONSHIP_FIRST_IN_SECOND_CHAIN),
+                    bitFlag(record.firstNodeIsGuaranteedDense(), Record.RELATIONSHIP_FIRST_NODE_IS_GUARANTEED_DENSE),
+                    bitFlag(record.secondNodeIsGuaranteedDense(), Record.RELATIONSHIP_SECOND_NODE_IS_GUARANTEED_DENSE));
             channel.put(extraByte);
         } else {
             channel.putInt(record.getType());
@@ -718,6 +762,10 @@ class LogCommandSerializationV5_0 extends LogCommandSerializationV4_4 {
             byte extraByte = channel.get();
             record.setFirstInFirstChain(bitFlag(extraByte, Record.RELATIONSHIP_FIRST_IN_FIRST_CHAIN));
             record.setFirstInSecondChain(bitFlag(extraByte, Record.RELATIONSHIP_FIRST_IN_SECOND_CHAIN));
+            record.setFirstNodeIsGuaranteedDense(
+                    bitFlag(extraByte, Record.RELATIONSHIP_FIRST_NODE_IS_GUARANTEED_DENSE));
+            record.setSecondNodeIsGuaranteedDense(
+                    bitFlag(extraByte, Record.RELATIONSHIP_SECOND_NODE_IS_GUARANTEED_DENSE));
         } else {
             record.setLinks(-1, -1, channel.getInt());
             record.setInUse(false);
@@ -932,7 +980,8 @@ class LogCommandSerializationV5_0 extends LogCommandSerializationV4_4 {
         int numberOfRecords = channel.getInt();
         assert numberOfRecords >= 0;
         if (numberOfRecords > 0) {
-            var records = new ArrayList<DynamicRecord>(numberOfRecords);
+            int preallocationSize = Math.min(numberOfRecords, MAX_PREALLOCATION_SIZE);
+            var records = new ArrayList<DynamicRecord>(preallocationSize);
             while (numberOfRecords > 0) {
                 records.add(readDynamicRecord(channel));
                 numberOfRecords--;

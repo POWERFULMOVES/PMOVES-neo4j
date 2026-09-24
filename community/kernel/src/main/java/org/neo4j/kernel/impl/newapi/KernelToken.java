@@ -30,6 +30,8 @@ import org.neo4j.internal.kernel.api.security.AccessMode;
 import org.neo4j.internal.kernel.api.security.PrivilegeAction;
 import org.neo4j.kernel.api.txstate.TransactionState;
 import org.neo4j.kernel.impl.api.KernelTransactionImplementation;
+import org.neo4j.logging.Log;
+import org.neo4j.logging.LogProvider;
 import org.neo4j.storageengine.api.CommandCreationContext;
 import org.neo4j.storageengine.api.StorageReader;
 import org.neo4j.token.TokenHolders;
@@ -38,41 +40,46 @@ import org.neo4j.token.api.NonUniqueTokenException;
 import org.neo4j.token.api.TokenConstants;
 import org.neo4j.token.api.TokenHolder;
 import org.neo4j.token.api.TokenNotFoundException;
+import org.neo4j.token.api.TokenType;
 
 public class KernelToken extends KernelTokenRead implements Token {
     private final StorageReader store;
     private final CommandCreationContext commandCreationContext;
     private final KernelTransactionImplementation ktx;
     private final TokenHolders tokenHolders;
+    private final Log log;
 
     public KernelToken(
             StorageReader store,
             CommandCreationContext commandCreationContext,
             KernelTransactionImplementation ktx,
-            TokenHolders tokenHolders) {
+            TokenHolders tokenHolders,
+            LogProvider logProvider) {
         super(store, tokenHolders);
         this.store = store;
         this.commandCreationContext = commandCreationContext;
         this.ktx = ktx;
         this.tokenHolders = tokenHolders;
+        this.log = logProvider.getLog(getClass());
     }
 
     @Override
     public int labelGetOrCreateForName(String labelName) throws KernelException {
-        return getOrCreateForName(tokenHolders.labelTokens(), PrivilegeAction.CREATE_LABEL, labelName);
+        return getOrCreateForName(tokenHolders.labelTokens(), PrivilegeAction.CREATE_LABEL, labelName, TokenType.LABEL);
     }
 
     @Override
     public void labelGetOrCreateForNames(String[] labelNames, int[] labelIds) throws KernelException {
-        getOrCreateForNames(tokenHolders.labelTokens(), PrivilegeAction.CREATE_LABEL, labelNames, labelIds);
+        getOrCreateForNames(
+                tokenHolders.labelTokens(), PrivilegeAction.CREATE_LABEL, labelNames, labelIds, TokenType.LABEL);
     }
 
     @Override
     public int labelCreateForName(String labelName, boolean internal) throws KernelException {
         ktx.assertOpen();
         TransactionState txState = ktx.txState();
-        int id =
-                reserveTokenId(() -> commandCreationContext.reserveLabelTokenId(labelName), tokenHolders.labelTokens());
+        int id = reserveTokenId(
+                () -> commandCreationContext.reserveLabelTokenId(labelName), tokenHolders.labelTokens(), log);
         txState.labelDoCreateForName(labelName, internal, id);
         return id;
     }
@@ -83,7 +90,8 @@ public class KernelToken extends KernelTokenRead implements Token {
         TransactionState txState = ktx.txState();
         int id = reserveTokenId(
                 () -> commandCreationContext.reserveRelationshipTypeTokenId(relationshipTypeName),
-                tokenHolders.relationshipTypeTokens());
+                tokenHolders.relationshipTypeTokens(),
+                log);
         txState.relationshipTypeDoCreateForName(relationshipTypeName, internal, id);
         return id;
     }
@@ -123,7 +131,8 @@ public class KernelToken extends KernelTokenRead implements Token {
         TransactionState txState = ktx.txState();
         int id = reserveTokenId(
                 () -> commandCreationContext.reservePropertyKeyTokenId(propertyKeyName),
-                tokenHolders.propertyKeyTokens());
+                tokenHolders.propertyKeyTokens(),
+                log);
         txState.propertyKeyDoCreateForName(propertyKeyName, internal, id);
         return id;
     }
@@ -131,24 +140,39 @@ public class KernelToken extends KernelTokenRead implements Token {
     @Override
     public int propertyKeyGetOrCreateForName(String propertyKeyName) throws KernelException {
         return getOrCreateForName(
-                tokenHolders.propertyKeyTokens(), PrivilegeAction.CREATE_PROPERTYKEY, propertyKeyName);
+                tokenHolders.propertyKeyTokens(),
+                PrivilegeAction.CREATE_PROPERTYKEY,
+                propertyKeyName,
+                TokenType.PROPERTY_KEY);
     }
 
     @Override
     public void propertyKeyGetOrCreateForNames(String[] propertyKeys, int[] ids) throws KernelException {
-        getOrCreateForNames(tokenHolders.propertyKeyTokens(), PrivilegeAction.CREATE_PROPERTYKEY, propertyKeys, ids);
+        getOrCreateForNames(
+                tokenHolders.propertyKeyTokens(),
+                PrivilegeAction.CREATE_PROPERTYKEY,
+                propertyKeys,
+                ids,
+                TokenType.PROPERTY_KEY);
     }
 
     @Override
     public int relationshipTypeGetOrCreateForName(String relationshipTypeName) throws KernelException {
         return getOrCreateForName(
-                tokenHolders.relationshipTypeTokens(), PrivilegeAction.CREATE_RELTYPE, relationshipTypeName);
+                tokenHolders.relationshipTypeTokens(),
+                PrivilegeAction.CREATE_RELTYPE,
+                relationshipTypeName,
+                TokenType.RELATIONSHIP_TYPE);
     }
 
     @Override
     public void relationshipTypeGetOrCreateForNames(String[] relationshipTypes, int[] ids) throws KernelException {
         getOrCreateForNames(
-                tokenHolders.relationshipTypeTokens(), PrivilegeAction.CREATE_RELTYPE, relationshipTypes, ids);
+                tokenHolders.relationshipTypeTokens(),
+                PrivilegeAction.CREATE_RELTYPE,
+                relationshipTypes,
+                ids,
+                TokenType.RELATIONSHIP_TYPE);
     }
 
     @Override
@@ -173,9 +197,10 @@ public class KernelToken extends KernelTokenRead implements Token {
         return ktx.securityContext().mode();
     }
 
-    private int getOrCreateForName(TokenHolder tokens, PrivilegeAction action, String name) throws KernelException {
+    private int getOrCreateForName(TokenHolder tokens, PrivilegeAction action, String name, TokenType type)
+            throws KernelException {
         ktx.assertOpen();
-        int id = tokens.getIdByName(checkValidTokenName(name));
+        int id = tokens.getIdByName(checkValidTokenName(name, type));
         if (id != TokenConstants.NO_TOKEN) {
             return id;
         }
@@ -185,12 +210,16 @@ public class KernelToken extends KernelTokenRead implements Token {
         return tokens.getOrCreateId(name);
     }
 
-    private void getOrCreateForNames(TokenHolder tokenHolder, PrivilegeAction action, String[] names, int[] ids)
+    private void getOrCreateForNames(
+            TokenHolder tokenHolder, PrivilegeAction action, String[] names, int[] ids, TokenType type)
             throws KernelException {
         ktx.assertOpen();
         assertSameLength(names, ids);
+        for (String name : names) {
+            checkValidTokenName(name, type);
+        }
         for (int i = 0; i < names.length; i++) {
-            ids[i] = tokenHolder.getIdByName(checkValidTokenName(names[i]));
+            ids[i] = tokenHolder.getIdByName(names[i]);
             if (ids[i] == TokenConstants.NO_TOKEN) {
                 ktx.securityAuthorizationHandler().assertAllowsTokenCreates(ktx.securityContext(), action);
                 // ensures the registry has all applied transactions before attempting to create any new ones
@@ -207,7 +236,7 @@ public class KernelToken extends KernelTokenRead implements Token {
         }
     }
 
-    private static int reserveTokenId(IntSupplier generator, TokenHolder holder) throws KernelException {
+    private static int reserveTokenId(IntSupplier generator, TokenHolder holder, Log log) throws KernelException {
         try {
             int id;
             do {
@@ -215,7 +244,7 @@ public class KernelToken extends KernelTokenRead implements Token {
             } while (holder.hasToken(id)); // Retry if id is already taken.
             return id;
         } catch (IdCapacityExceededException e) {
-            throw new TokenCapacityExceededKernelException(e, holder.getTokenType());
+            throw TokenCapacityExceededKernelException.tokenCapacityExceeded(e, holder.getTokenType(), log);
         }
     }
 }

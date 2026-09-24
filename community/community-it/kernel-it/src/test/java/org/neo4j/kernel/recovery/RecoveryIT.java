@@ -25,7 +25,7 @@ import static java.nio.file.StandardOpenOption.TRUNCATE_EXISTING;
 import static java.nio.file.StandardOpenOption.WRITE;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.SECONDS;
-import static org.apache.commons.lang3.RandomStringUtils.randomAlphanumeric;
+import static org.apache.commons.lang3.RandomStringUtils.secure;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assumptions.assumeThat;
@@ -50,16 +50,20 @@ import static org.neo4j.internal.kernel.api.PropertyIndexQuery.fulltextSearch;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.CursorContextFactory.NULL_CONTEXT_FACTORY;
 import static org.neo4j.kernel.database.DatabaseTracers.EMPTY;
-import static org.neo4j.kernel.impl.transaction.log.entry.LogFormat.BIGGEST_HEADER;
+import static org.neo4j.kernel.recovery.IncompleteTransactionAction.STOP;
 import static org.neo4j.kernel.recovery.Recovery.context;
 import static org.neo4j.kernel.recovery.Recovery.performRecovery;
 import static org.neo4j.kernel.recovery.RecoveryHelpers.removeLastCheckpointRecordFromLogFile;
 import static org.neo4j.kernel.recovery.facade.RecoveryCriteria.ALL;
 import static org.neo4j.logging.LogAssertions.assertThat;
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
+import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_CONSENSUS_INDEX;
+import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_TX_SEQUENCE_NUMBER;
 import static org.neo4j.test.LatestVersions.LATEST_KERNEL_VERSION;
 import static org.neo4j.test.LatestVersions.LATEST_KERNEL_VERSION_PROVIDER;
 import static org.neo4j.test.LatestVersions.LATEST_LOG_FORMAT;
+import static org.neo4j.test.LatestVersions.LATEST_LOG_FORMAT_PROVIDER;
+import static org.neo4j.wal.entry.LogFormat.BIGGEST_HEADER;
 
 import java.io.IOException;
 import java.lang.reflect.InvocationHandler;
@@ -69,6 +73,7 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
@@ -86,7 +91,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mockito;
 import org.neo4j.annotations.documented.ReporterFactory;
 import org.neo4j.common.DependencyResolver;
@@ -119,7 +123,9 @@ import org.neo4j.internal.nativeimpl.NativeAccessProvider;
 import org.neo4j.internal.recordstorage.RecordStorageEngine;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.io.ByteUnit;
+import org.neo4j.io.fs.ChecksumMismatchException;
 import org.neo4j.io.fs.DefaultFileSystemAbstraction;
+import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.fs.FileUtils;
 import org.neo4j.io.fs.StoreChannel;
 import org.neo4j.io.layout.CommonDatabaseStores;
@@ -128,6 +134,7 @@ import org.neo4j.io.layout.Neo4jLayout;
 import org.neo4j.io.pagecache.IOController;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.io.pagecache.tracing.version.VersionStorageTracer;
@@ -140,19 +147,7 @@ import org.neo4j.kernel.extension.context.ExtensionContext;
 import org.neo4j.kernel.impl.api.tracer.DefaultDatabaseTracer;
 import org.neo4j.kernel.impl.coreapi.InternalTransaction;
 import org.neo4j.kernel.impl.coreapi.schema.IndexDefinitionImpl;
-import org.neo4j.kernel.impl.transaction.log.CheckpointInfo;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
-import org.neo4j.kernel.impl.transaction.log.LoggingLogFileMonitor;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointerImpl;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.DetachedCheckpointAppender;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
-import org.neo4j.kernel.impl.transaction.log.files.LogFilesBuilder;
-import org.neo4j.kernel.impl.transaction.log.files.checkpoint.CheckpointFile;
 import org.neo4j.kernel.impl.transaction.tracing.DatabaseTracer;
-import org.neo4j.kernel.impl.transaction.tracing.LogCheckPointEvent;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.kernel.lifecycle.Lifecycle;
 import org.neo4j.kernel.lifecycle.LifecycleAdapter;
@@ -162,9 +157,10 @@ import org.neo4j.logging.AssertableLogProvider;
 import org.neo4j.monitoring.DatabaseHealth;
 import org.neo4j.monitoring.Monitors;
 import org.neo4j.service.Services;
-import org.neo4j.storageengine.api.MetadataProvider;
+import org.neo4j.storageengine.api.LogMetadataProvider;
 import org.neo4j.storageengine.api.StorageEngine;
 import org.neo4j.storageengine.api.StorageEngineFactory;
+import org.neo4j.storageengine.api.StorageFileSelection;
 import org.neo4j.storageengine.api.TransactionId;
 import org.neo4j.storageengine.api.TransactionIdStore;
 import org.neo4j.test.LatestVersions;
@@ -172,16 +168,40 @@ import org.neo4j.test.RandomSupport;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.Neo4jLayoutExtension;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.test.extension.pagecache.PageCacheExtension;
+import org.neo4j.test.utils.TestDirectory;
 import org.neo4j.time.Clocks;
 import org.neo4j.time.FakeClock;
 import org.neo4j.values.storable.CoordinateReferenceSystem;
 import org.neo4j.values.storable.Values;
+import org.neo4j.wal.CheckpointInfo;
+import org.neo4j.wal.FlushableLogPositionAwareChannel;
+import org.neo4j.wal.LogFile;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.LogPosition;
+import org.neo4j.wal.LogTailMetadata;
+import org.neo4j.wal.LoggingLogFileMonitor;
+import org.neo4j.wal.TransactionLogWriter;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.CheckPointerImpl;
+import org.neo4j.wal.checkpoint.CheckpointFile;
+import org.neo4j.wal.checkpoint.DetachedCheckpointAppender;
+import org.neo4j.wal.checkpoint.LatestCheckpointInfo;
+import org.neo4j.wal.checkpoint.LogCheckPointEvent;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
+import org.neo4j.wal.entry.LogEntryFactory;
+import org.neo4j.wal.entry.LogEnvelopeHeader;
+import org.neo4j.wal.entry.LogFormat;
+import org.neo4j.wal.enveloped.InconsistentLogFilesException;
+import org.neo4j.wal.files.LogFilesBuilder;
+import org.neo4j.wal.files.LogRangeInfo;
 
 @PageCacheExtension
 @Neo4jLayoutExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
+@SkipOnSpd
 class RecoveryIT {
     private static final int TEN_KB = (int) ByteUnit.kibiBytes(10);
     private static final CursorContextFactory CONTEXT_FACTORY = NULL_CONTEXT_FACTORY;
@@ -193,13 +213,23 @@ class RecoveryIT {
         }
 
         @Override
+        public boolean isSchemaType() {
+            return false;
+        }
+
+        @Override
+        public boolean respectsReservedId() {
+            return true;
+        }
+
+        @Override
         public boolean highActivity() {
             return false;
         }
     };
 
     @Inject
-    private DefaultFileSystemAbstraction fileSystem;
+    DefaultFileSystemAbstraction fileSystem;
 
     @Inject
     private PageCache pageCache;
@@ -210,10 +240,13 @@ class RecoveryIT {
     @Inject
     private RandomSupport random;
 
-    private DatabaseLayout databaseLayout;
+    @Inject
+    TestDirectory dir;
+
+    DatabaseLayout databaseLayout;
 
     private TestDatabaseManagementServiceBuilder builder;
-    private DatabaseManagementService managementService;
+    DatabaseManagementService managementService;
     private FakeClock fakeClock;
     private AssertableLogProvider logProvider;
 
@@ -243,9 +276,9 @@ class RecoveryIT {
                 new DatabaseTracers(checkpointTracer, LockTracer.NONE, PageCacheTracer.NULL, VersionStorageTracer.NULL);
         recoverDatabase(tracers);
 
-        // we should have only one pass over log tails during recovery. 2 checks is tail scan to see if recovery is
+        // we should have only one pass over log tails during recovery. 1 check is tail scan to see if recovery is
         // required
-        assertEquals(1 + 2, checkpointTracer.getCheckpointOpenCounter());
+        assertEquals(1 + 1, checkpointTracer.getCheckpointOpenCounter());
     }
 
     @Test
@@ -265,7 +298,7 @@ class RecoveryIT {
 
         generateSomeData(database);
         // now we have 2 checkpoint log files with checkpoints and one empty
-        var victimFilePath = logFiles.getCheckpointFile().rotate();
+        var victimFilePath = logFiles.getCheckpointFile().rotate().file();
         var config = database.getDependencyResolver().resolveDependency(Config.class);
 
         managementService.shutdown();
@@ -295,7 +328,7 @@ class RecoveryIT {
 
         generateSomeData(database);
         // now we have 2 checkpoint log files with checkpoints and one empty
-        var victimFilePath = logFiles.getCheckpointFile().rotate();
+        var victimFilePath = logFiles.getCheckpointFile().rotate().file();
 
         managementService.shutdown();
 
@@ -326,7 +359,7 @@ class RecoveryIT {
 
         generateSomeData(database);
         // now we have 2 checkpoint log files with checkpoints and one empty
-        var victimFilePath = logFiles.getCheckpointFile().rotate();
+        var victimFilePath = logFiles.getCheckpointFile().rotate().file();
 
         managementService.shutdown();
 
@@ -346,7 +379,7 @@ class RecoveryIT {
 
         var logFiles = database.getDependencyResolver().resolveDependency(LogFiles.class);
         var checkpointer = database.getDependencyResolver().resolveDependency(CheckPointer.class);
-        var logFileToManipulate = logFiles.getLogFile().getHighestLogFile();
+        var logFileToManipulate = logFiles.getLogFile().getLogRangeInfo().highestFile();
 
         var marker = withName("Type");
         var propertyName = "a";
@@ -363,14 +396,14 @@ class RecoveryIT {
 
         checkpointer.forceCheckPoint(new SimpleTriggerInfo("test"));
 
-        LogPosition position = logFiles.getLogFile().getTransactionLogWriter().getCurrentPosition();
+        LogPosition position = getTransactionLogWriter(logFiles.getLogFile()).getCurrentPosition();
 
         // our test big transaction
         try (Transaction tx = database.beginTx()) {
             Node node1 = tx.createNode();
             Node node2 = tx.createNode();
             node1.createRelationshipTo(node2, marker);
-            node2.setProperty(propertyName, randomAlphanumeric(TEN_KB));
+            node2.setProperty(propertyName, random.nextAlphaNumericString(TEN_KB));
             tx.commit();
         }
         managementService.shutdown();
@@ -384,14 +417,78 @@ class RecoveryIT {
     }
 
     @Test
+    void recoverTxLogsWithPartiallyWrittenLastRecordInFirstTransactionAfterCheckpointFailOnLastPartial()
+            throws Exception {
+        var database = createDatabase();
+        assumeRecordStorageEngine(database);
+
+        var logFiles = database.getDependencyResolver().resolveDependency(LogFiles.class);
+        var checkpointer = database.getDependencyResolver().resolveDependency(CheckPointer.class);
+        var logFileToManipulate = logFiles.getLogFile().getLogRangeInfo().highestFile();
+
+        var marker = withName("Type");
+        var propertyName = "a";
+
+        // we do transaction before checkpoint to force token creation that we will use after checkpoint to make sure
+        // that its a first transaction after the checkpoint
+        try (Transaction tx = database.beginTx()) {
+            Node node1 = tx.createNode();
+            Node node2 = tx.createNode();
+            node1.createRelationshipTo(node2, marker);
+            node2.setProperty(propertyName, "b");
+            tx.commit();
+        }
+
+        checkpointer.forceCheckPoint(new SimpleTriggerInfo("test"));
+
+        LogPosition position = getTransactionLogWriter(logFiles.getLogFile()).getCurrentPosition();
+
+        // our test big transaction
+        try (Transaction tx = database.beginTx()) {
+            Node node1 = tx.createNode();
+            Node node2 = tx.createNode();
+            node1.createRelationshipTo(node2, marker);
+            node2.setProperty(propertyName, random.nextAlphaNumericString(TEN_KB));
+            tx.commit();
+        }
+        managementService.shutdown();
+
+        removeLastCheckpointRecordFromLogFile(databaseLayout, fileSystem);
+        // we write big transaction with huge property command above and here we truncate a bit of that to simulate
+        // partially written command
+        removeLastKbFromLogFile(logFileToManipulate, position);
+
+        Config config = defaults();
+        assertTrue(isRecoveryRequired(databaseLayout, config, EMPTY));
+
+        // Ask recover to not accept last broken records (piggybacks on force fail on corrupted).
+        Recovery.Context context = Recovery.contextWithNoLogTail(
+                        fileSystem,
+                        pageCache,
+                        EMPTY,
+                        config,
+                        databaseLayout,
+                        INSTANCE,
+                        IOController.DISABLED,
+                        logProvider,
+                        LATEST_KERNEL_VERSION_PROVIDER)
+                .forceFailOnCorruptedLogs();
+        assertThatThrownBy(() -> performRecovery(context.recoveryPredicate(RecoveryPredicate.ALL)
+                        .startupChecker(RecoveryStartupChecker.EMPTY_CHECKER)
+                        .clock(fakeClock)))
+                .rootCause()
+                .isInstanceOfAny(ChecksumMismatchException.class, InconsistentLogFilesException.class);
+    }
+
+    @Test
     void recoverTxLogsWithBrokenFirstEntryInFirstTransactionAfterCheckpoint() throws Exception {
         var database = createDatabase();
 
         var logFiles = database.getDependencyResolver().resolveDependency(LogFiles.class);
         var checkpointer = database.getDependencyResolver().resolveDependency(CheckPointer.class);
-        var logFileToManipulate = logFiles.getLogFile().getHighestLogFile();
+        var logFileToManipulate = logFiles.getLogFile().getLogRangeInfo().highestFile();
         var positionForCorruption =
-                logFiles.getLogFile().getTransactionLogWriter().getCurrentPosition();
+                getTransactionLogWriter(logFiles.getLogFile()).getCurrentPosition();
 
         checkpointer.forceCheckPoint(new SimpleTriggerInfo("test"));
         managementService.shutdown();
@@ -406,9 +503,10 @@ class RecoveryIT {
 
         var recoveredDatabase = createDatabase();
         // we truncate broken bits and bytes as part of recovery
+        LogFiles recoveredDbLogFiles = recoveredDatabase.getDependencyResolver().resolveDependency(LogFiles.class);
         assertEquals(
                 positionForCorruption,
-                logFiles.getLogFile().getTransactionLogWriter().getCurrentPosition());
+                getTransactionLogWriter(recoveredDbLogFiles.getLogFile()).getCurrentPosition());
         //
         try (var tx = recoveredDatabase.beginTx()) {
             tx.createNode();
@@ -436,7 +534,7 @@ class RecoveryIT {
 
         generateSomeData(database);
         // now we have 2 checkpoint log files with checkpoints and one empty
-        var victimFilePath = logFiles.getCheckpointFile().rotate();
+        var victimFilePath = logFiles.getCheckpointFile().rotate().file();
 
         managementService.shutdown();
 
@@ -461,7 +559,7 @@ class RecoveryIT {
         int logFilesWithoutVictim = countTransactionLogFiles();
 
         // now we have 2 log files with some data and one empty
-        var victimFilePath = logFiles.getLogFile().rotate();
+        var victimFilePath = logFiles.getLogFile().rotate().file();
 
         managementService.shutdown();
 
@@ -489,8 +587,8 @@ class RecoveryIT {
         int logFilesWithoutVictims = countTransactionLogFiles();
 
         // now we have 2 log files with some data and one empty
-        var victimFilePath1 = logFiles.getLogFile().rotate();
-        var victimFilePath2 = logFiles.getLogFile().rotate();
+        var victimFilePath1 = logFiles.getLogFile().rotate().file();
+        var victimFilePath2 = logFiles.getLogFile().rotate().file();
 
         managementService.shutdown();
 
@@ -518,7 +616,7 @@ class RecoveryIT {
         int logFilesWithoutVictim = countTransactionLogFiles();
 
         // now we have 2 log files with some data and one empty
-        var victimFilePath = logFiles.getLogFile().rotate();
+        var victimFilePath = logFiles.getLogFile().rotate().file();
 
         managementService.shutdown();
 
@@ -569,7 +667,7 @@ class RecoveryIT {
         int logFilesWithoutVictim = countTransactionLogFiles();
 
         // now we have 2 log files with some data and one empty
-        var victimFilePath = logFiles.getLogFile().rotate();
+        var victimFilePath = logFiles.getLogFile().rotate().file();
 
         managementService.shutdown();
 
@@ -596,7 +694,7 @@ class RecoveryIT {
 
         var logFiles = database.getDependencyResolver().resolveDependency(LogFiles.class);
         var logFile = logFiles.getLogFile();
-        var currentPosition = logFile.getTransactionLogWriter().getCurrentPosition();
+        var currentPosition = getTransactionLogWriter(logFile).getCurrentPosition();
         var logFileToMutate = logFile.getLogFileForVersion(currentPosition.getLogVersion());
 
         managementService.shutdown();
@@ -616,7 +714,7 @@ class RecoveryIT {
 
         var logFiles = database.getDependencyResolver().resolveDependency(LogFiles.class);
         var logFile = logFiles.getLogFile();
-        var currentPosition = logFile.getTransactionLogWriter().getCurrentPosition();
+        var currentPosition = getTransactionLogWriter(logFile).getCurrentPosition();
         var logFileToMutate = logFile.getLogFileForVersion(currentPosition.getLogVersion());
 
         managementService.shutdown();
@@ -624,7 +722,15 @@ class RecoveryIT {
         // remove shutdown checkpoint
         removeLastCheckpointRecordFromLogFile(databaseLayout, fileSystem);
         // append data that will cause broken next entry
-        appendBytesToLastLogFile(logFileToMutate, currentPosition, new byte[] {1, 0, 0, 1});
+        int minimumBytesToConsiderBrokenRecord =
+                LogFormat.fromConfigAndKernelVersion(Config.defaults(), LATEST_KERNEL_VERSION)
+                                .usesSegments()
+                        ? LogEnvelopeHeader.HEADER_SIZE + 1
+                        : 4;
+        byte[] brokenRecord = new byte[minimumBytesToConsiderBrokenRecord];
+        brokenRecord[0] = 1;
+        brokenRecord[brokenRecord.length - 1] = 1;
+        appendBytesToLastLogFile(logFileToMutate, currentPosition, brokenRecord);
 
         assertThatThrownBy(this::recoverDatabase)
                 .hasStackTraceContaining(
@@ -638,7 +744,7 @@ class RecoveryIT {
 
         var logFiles = database.getDependencyResolver().resolveDependency(LogFiles.class);
         var logFile = logFiles.getLogFile();
-        var currentPosition = logFile.getTransactionLogWriter().getCurrentPosition();
+        var currentPosition = getTransactionLogWriter(logFile).getCurrentPosition();
         long fileSizeBeforeMutation = currentPosition.getByteOffset();
         var logFileToMutate = logFile.getLogFileForVersion(currentPosition.getLogVersion());
 
@@ -663,7 +769,7 @@ class RecoveryIT {
 
         var logFiles = database.getDependencyResolver().resolveDependency(LogFiles.class);
         var logFile = logFiles.getLogFile();
-        var currentPosition = logFile.getTransactionLogWriter().getCurrentPosition();
+        var currentPosition = getTransactionLogWriter(logFile).getCurrentPosition();
         long fileSizeBeforeMutation = currentPosition.getByteOffset();
         var logFileToMutate = logFile.getLogFileForVersion(currentPosition.getLogVersion());
 
@@ -692,7 +798,7 @@ class RecoveryIT {
 
         var logFiles = database.getDependencyResolver().resolveDependency(LogFiles.class);
         var logFile = logFiles.getLogFile();
-        var currentPosition = logFile.getTransactionLogWriter().getCurrentPosition();
+        var currentPosition = getTransactionLogWriter(logFile).getCurrentPosition();
         var logFileToMutate = logFile.getLogFileForVersion(currentPosition.getLogVersion());
 
         managementService.shutdown();
@@ -745,7 +851,7 @@ class RecoveryIT {
                 db.getDependencyResolver()
                         .resolveDependency(LogFiles.class)
                         .getCheckpointFile()
-                        .getCurrentDetachedLogVersion());
+                        .getCurrentLogVersion());
     }
 
     @Test
@@ -787,7 +893,7 @@ class RecoveryIT {
                 db.getDependencyResolver()
                         .resolveDependency(LogFiles.class)
                         .getCheckpointFile()
-                        .getCurrentDetachedLogVersion());
+                        .getCurrentLogVersion());
     }
 
     @Test
@@ -806,8 +912,9 @@ class RecoveryIT {
         managementService.shutdown();
 
         // we did a lot of rotations and now in a range of 10-12 files
-        assertEquals(10, checkpointFile.getLowestLogVersion());
-        assertEquals(12, checkpointFile.getHighestLogVersion());
+        LogRangeInfo logRangeInfo = checkpointFile.getLogRangeInfo();
+        assertEquals(10, logRangeInfo.lowestVersion());
+        assertEquals(12, logRangeInfo.highestVersion());
 
         removeLastCheckpointRecordFromLogFile(databaseLayout, fileSystem);
 
@@ -840,8 +947,8 @@ class RecoveryIT {
         // we have only one checkpoint file now with the highest version
         var restoredCheckpoint =
                 db.getDependencyResolver().resolveDependency(LogFiles.class).getCheckpointFile();
-        assertEquals(12, restoredCheckpoint.getCurrentDetachedLogVersion());
-        assertEquals(1, restoredCheckpoint.getDetachedCheckpointFiles().length);
+        assertEquals(12, restoredCheckpoint.getCurrentLogVersion());
+        assertEquals(1, restoredCheckpoint.getMatchedFiles().length);
     }
 
     @Test
@@ -865,10 +972,7 @@ class RecoveryIT {
         // The database is only completely empty if we skip the creation of the default indexes initially.
         // Without skipping there will be entries in the transaction logs for the default token indexes, so recovery is
         // required if we remove the checkpoint.
-        Config config = Config.newBuilder()
-                .set(GraphDatabaseInternalSettings.skip_default_indexes_on_creation, true)
-                .set(preallocate_logical_logs, false)
-                .build();
+        Config config = Config.newBuilder().set(preallocate_logical_logs, false).build();
 
         managementService = new TestDatabaseManagementServiceBuilder(neo4jLayout)
                 .setConfig(config)
@@ -1442,7 +1546,7 @@ class RecoveryIT {
     }
 
     @RecoveryExtension
-    private class TestPanicRecoveryExtension extends ExtensionFactory<TestPanicRecoveryExtension.Dependencies> {
+    private static class TestPanicRecoveryExtension extends ExtensionFactory<TestPanicRecoveryExtension.Dependencies> {
         private static final String PANIC_MSG = "AAAAAAAAAAAAH!";
         boolean panicked = false;
 
@@ -1541,7 +1645,7 @@ class RecoveryIT {
 
         GraphDatabaseAPI restartedDb = createDatabase();
         try {
-            DatabaseStateService dbStateService =
+            DatabaseStateService<?> dbStateService =
                     restartedDb.getDependencyResolver().resolveDependency(DatabaseStateService.class);
 
             var failure = dbStateService.causeOfFailure(restartedDb.databaseId());
@@ -1686,13 +1790,13 @@ class RecoveryIT {
         GraphDatabaseAPI db = createDatabase();
         generateSomeData(db);
         DatabaseLayout layout = db.databaseLayout();
+        Path idFile = getIdFile(db);
         managementService.shutdown();
 
-        Path idFile = getIdFile(layout);
         fileSystem.deleteFileOrThrow(idFile);
         assertTrue(isRecoveryRequired(layout));
 
-        performRecovery(context(
+        performRecovery(Recovery.contextWithNoLogTail(
                 fileSystem,
                 pageCache,
                 EMPTY,
@@ -1714,6 +1818,7 @@ class RecoveryIT {
         for (int i = 0; i < 10; i++) {
             generateSomeData(db);
         }
+        Path idFile = getIdFile(db);
         managementService.shutdown();
 
         assertThat(Arrays.stream(fileSystem.listFiles(layout.getTransactionLogsDirectory()))
@@ -1721,11 +1826,11 @@ class RecoveryIT {
                         .count())
                 .isGreaterThan(2);
 
-        fileSystem.deleteFileOrThrow(getIdFile(layout));
+        fileSystem.deleteFileOrThrow(idFile);
         assertTrue(isRecoveryRequired(layout));
 
         Config config = defaults(Map.of(GraphDatabaseSettings.keep_logical_logs, "keep_none"));
-        performRecovery(context(
+        performRecovery(Recovery.contextWithNoLogTail(
                 fileSystem,
                 pageCache,
                 EMPTY,
@@ -1745,10 +1850,11 @@ class RecoveryIT {
     void recoverDatabaseWithoutIdFiles() throws Throwable {
         GraphDatabaseAPI db = createDatabase();
         generateSomeData(db);
+        var idFiles = getIdFiles(db);
         DatabaseLayout layout = db.databaseLayout();
         managementService.shutdown();
 
-        for (Path idFile : layout.idFiles()) {
+        for (Path idFile : idFiles) {
             fileSystem.deleteFileOrThrow(idFile);
         }
         assertTrue(isRecoveryRequired(layout));
@@ -1756,7 +1862,7 @@ class RecoveryIT {
         recoverDatabase();
         assertFalse(isRecoveryRequired(layout));
 
-        for (Path idFile : layout.idFiles()) {
+        for (Path idFile : idFiles) {
             assertTrue(fileSystem.fileExists(idFile));
         }
     }
@@ -1765,21 +1871,20 @@ class RecoveryIT {
     void failRecoveryWithMissingStoreFile() throws Exception {
         GraphDatabaseAPI database = createDatabase();
         generateSomeData(database);
-        DatabaseLayout layout = database.databaseLayout();
+        Path storeFile = getStoreFile(database, fileSystem);
         managementService.shutdown();
-        Path storeFile = getStoreFile(layout);
         fileSystem.deleteFileOrThrow(storeFile);
 
         GraphDatabaseAPI restartedDb = createDatabase();
         try {
-            DatabaseStateService dbStateService =
+            DatabaseStateService<?> dbStateService =
                     restartedDb.getDependencyResolver().resolveDependency(DatabaseStateService.class);
 
             var failure = dbStateService.causeOfFailure(restartedDb.databaseId());
             assertTrue(failure.isPresent());
             assertThat(failure.get().getCause())
                     .hasMessageContainingAll(
-                            storeFile.getFileName().toString(), "is(are) missing and recovery is not possible");
+                            storeFile.getFileName().toString(), "is missing and recovery is not possible");
         } finally {
             managementService.shutdown();
         }
@@ -1789,26 +1894,26 @@ class RecoveryIT {
     void failRecoveryWithMissingStoreFileAndIdFile() throws Exception {
         GraphDatabaseAPI database = createDatabase();
         generateSomeData(database);
-        DatabaseLayout layout = database.databaseLayout();
+        Path storeFile = getStoreFile(database, fileSystem);
+        Path idFile = getIdFile(database);
         managementService.shutdown();
 
         // Recovery should not be attempted on any store with missing store files, even if other recoverable files are
         // missing as well.
-        Path storeFile = getStoreFile(layout);
         fileSystem.deleteFileOrThrow(storeFile);
-        fileSystem.deleteFileOrThrow(getIdFile(layout));
+        fileSystem.deleteFileOrThrow(idFile);
 
         GraphDatabaseAPI restartedDb = createDatabase();
 
         try {
-            DatabaseStateService dbStateService =
+            DatabaseStateService<?> dbStateService =
                     restartedDb.getDependencyResolver().resolveDependency(DatabaseStateService.class);
 
             var failure = dbStateService.causeOfFailure(restartedDb.databaseId());
             assertTrue(failure.isPresent());
             assertThat(failure.get().getCause())
                     .hasMessageContainingAll(
-                            storeFile.getFileName().toString(), "is(are) missing and recovery is not possible");
+                            storeFile.getFileName().toString(), "is missing and recovery is not possible");
         } finally {
             managementService.shutdown();
         }
@@ -1854,11 +1959,10 @@ class RecoveryIT {
             }
         };
         monitors.addMonitorListener(recoveryMonitor);
-        var service = new TestDatabaseManagementServiceBuilder(layout.getNeo4jLayout())
+        try (var service = new TestDatabaseManagementServiceBuilder(layout.getNeo4jLayout())
                 .addExtension(guardExtensionFactory)
                 .setMonitors(monitors)
-                .build();
-        try {
+                .build()) {
             var database = service.database(layout.getDatabaseName());
             assertTrue(recoveryMonitor.isReverseCompleted());
             assertFalse(recoveryMonitor.isRecoveryCompleted());
@@ -1866,8 +1970,6 @@ class RecoveryIT {
                     guardExtensionFactory.getProvidedGuardConsumer().globalGuard.isAvailable());
             assertFalse(database.isAvailable());
             assertThatThrownBy(database::beginTx).rootCause().isInstanceOf(DatabaseStartAbortedException.class);
-        } finally {
-            service.shutdown();
         }
     }
 
@@ -1877,6 +1979,7 @@ class RecoveryIT {
         GraphDatabaseAPI db = createDatabase();
         generateSomeData(db);
         DatabaseLayout layout = db.databaseLayout();
+        Path idFile = getIdFile(db);
         managementService.shutdown();
         assertFalse(isRecoveryRequired(layout));
         var openOptions = db.getDependencyResolver()
@@ -1885,10 +1988,9 @@ class RecoveryIT {
         // Make an ID generator, say for the node store, dirty
         DefaultIdGeneratorFactory idGeneratorFactory =
                 new DefaultIdGeneratorFactory(fileSystem, immediate(), PageCacheTracer.NULL, "my db");
-        Path idFile = getIdFile(layout);
         try (IdGenerator idGenerator = idGeneratorFactory.open(
                 pageCache,
-                idFile,
+                new StoreFile(idFile),
                 TEST_NODE_TYPE,
                 () -> 0L /*will not be used*/,
                 10_000,
@@ -1915,7 +2017,7 @@ class RecoveryIT {
         monitors.addMonitorListener(monitor);
         Config config = Config.defaults();
 
-        Recovery.performRecovery(context(
+        Recovery.performRecovery(Recovery.contextWithNoLogTail(
                         fileSystem,
                         pageCache,
                         EMPTY,
@@ -1928,7 +2030,6 @@ class RecoveryIT {
                 .recoveryPredicate(RecoveryPredicate.ALL)
                 .monitors(monitors)
                 .extensionFactories(Iterables.cast(Services.loadAll(ExtensionFactory.class)))
-                .startupChecker(null)
                 .clock(Clock.systemUTC())
                 .force());
 
@@ -1949,7 +2050,7 @@ class RecoveryIT {
         for (int i = 0; i < 10; i++) {
             checkpointFile.rotate();
         }
-        assertEquals(10, resolver.resolveDependency(MetadataProvider.class).getCheckpointLogVersion());
+        assertEquals(10, resolver.resolveDependency(LogMetadataProvider.class).getCheckpointLogVersion());
         managementService.shutdown();
 
         removeTransactionLogs();
@@ -1963,7 +2064,7 @@ class RecoveryIT {
                 0,
                 createDatabase()
                         .getDependencyResolver()
-                        .resolveDependency(MetadataProvider.class)
+                        .resolveDependency(LogMetadataProvider.class)
                         .getCheckpointLogVersion());
     }
 
@@ -1982,6 +2083,7 @@ class RecoveryIT {
                 LogCheckPointEvent.NULL,
                 transactionId,
                 transactionId.id() + 1,
+                UNKNOWN_CONSENSUS_INDEX,
                 LatestVersions.LATEST_KERNEL_VERSION,
                 new LogPosition(0, LATEST_LOG_FORMAT.getHeaderSize()),
                 new LogPosition(0, LATEST_LOG_FORMAT.getHeaderSize()),
@@ -1992,6 +2094,7 @@ class RecoveryIT {
                 LogCheckPointEvent.NULL,
                 transactionId,
                 transactionId.id() + 1,
+                UNKNOWN_CONSENSUS_INDEX,
                 LatestVersions.LATEST_KERNEL_VERSION,
                 new LogPosition(0, LATEST_LOG_FORMAT.getHeaderSize()),
                 new LogPosition(0, LATEST_LOG_FORMAT.getHeaderSize()),
@@ -2002,6 +2105,7 @@ class RecoveryIT {
                 LogCheckPointEvent.NULL,
                 transactionId,
                 transactionId.id() + 1,
+                UNKNOWN_CONSENSUS_INDEX,
                 LatestVersions.LATEST_KERNEL_VERSION,
                 new LogPosition(0, LATEST_LOG_FORMAT.getHeaderSize()),
                 new LogPosition(0, LATEST_LOG_FORMAT.getHeaderSize()),
@@ -2022,7 +2126,7 @@ class RecoveryIT {
                 2,
                 createDatabase()
                         .getDependencyResolver()
-                        .resolveDependency(MetadataProvider.class)
+                        .resolveDependency(LogMetadataProvider.class)
                         .getCheckpointLogVersion());
     }
 
@@ -2239,7 +2343,7 @@ class RecoveryIT {
 
         assertThatThrownBy(() -> recoverDatabase(RecoveryCriteria.until(1)))
                 .hasCauseInstanceOf(RecoveryPredicateException.class)
-                .getCause()
+                .cause()
                 .hasMessageContaining("Partial recovery criteria can't be satisfied. Transaction after and before "
                         + "checkpoint does not satisfy provided recovery criteria. Observed transaction id: " + lastTxId
                         + ", recovery criteria: transaction id should be < 1.");
@@ -2279,6 +2383,327 @@ class RecoveryIT {
         assertFalse(isRecoveryRequired(layout));
     }
 
+    @Test
+    void recoverDatabaseWithLogPosition() throws Exception {
+        GraphDatabaseAPI db = createDatabase();
+        generateSomeData(db);
+        DatabaseLayout layout = db.databaseLayout();
+        StorageEngineFactory storageEngineFactory =
+                db.getDependencyResolver().resolveDependency(StorageEngineFactory.class);
+        LogMetadataProvider metadataProvider = getMetadataProvider(db);
+        long originalLastCommitted = metadataProvider.getLastCommittedTransactionId();
+        LogPosition lastLogPosition = metadataProvider.getLastCommittedBatch().logPositionAfter();
+        generateSomeData(db);
+        managementService.shutdown();
+        RecoveryHelpers.removeLastCheckpointRecordFromLogFile(layout, fileSystem);
+
+        RecoveryCriteria recoveryCriteria = RecoveryCriteria.untilPosition(lastLogPosition);
+        RecoveryPredicate predicate = recoveryCriteria.toPredicate();
+
+        Monitors monitors = new Monitors();
+        monitors.addMonitorListener(new LoggingLogFileMonitor(logProvider.getLog(getClass())));
+        Config config = Config.newBuilder().build();
+        additionalConfiguration(config);
+        assertTrue(isRecoveryRequired(databaseLayout, config, predicate));
+
+        Recovery.performRecovery(Recovery.contextWithNoLogTail(
+                        fileSystem,
+                        pageCache,
+                        EMPTY,
+                        config,
+                        databaseLayout,
+                        INSTANCE,
+                        IOController.DISABLED,
+                        logProvider,
+                        LATEST_KERNEL_VERSION_PROVIDER)
+                .recoveryPredicate(predicate)
+                .monitors(monitors)
+                .startupChecker(RecoveryStartupChecker.EMPTY_CHECKER)
+                .clock(fakeClock)
+                .incompleteTransactionAction(STOP));
+
+        // Verify where we recovered to by checking the checkpoint created by recovery
+        LogTailMetadata tailMetadata = new LogTailExtractor(fileSystem, config, storageEngineFactory, EMPTY)
+                .getTailMetadata(databaseLayout, INSTANCE);
+        assertThat(tailMetadata.getLastCheckPoint().get().transactionLogPosition())
+                .isEqualTo(lastLogPosition);
+        assertThat(tailMetadata.getLastCheckPoint().get().transactionId().id()).isEqualTo(originalLastCommitted);
+
+        assertFalse(isRecoveryRequired(databaseLayout, config, predicate));
+    }
+
+    @Test
+    void noRecoveryNeededWithLogPositionAtCheckpoint() throws Exception {
+        GraphDatabaseAPI db = createDatabase();
+        DatabaseLayout layout = db.databaseLayout();
+
+        generateSomeData(db);
+        CheckPointer checkPointer = db.getDependencyResolver().resolveDependency(CheckPointer.class);
+        checkPointer.forceCheckPoint(new SimpleTriggerInfo("My checkpoint"));
+        LatestCheckpointInfo latestCheckpointInfo = checkPointer.latestCheckPointInfo();
+        generateSomeData(db);
+        managementService.shutdown();
+
+        RecoveryHelpers.removeLastCheckpointRecordFromLogFile(layout, fileSystem);
+        assertTrue(isRecoveryRequired(layout));
+
+        RecoveryCriteria recoveryCriteria =
+                RecoveryCriteria.untilPosition(latestCheckpointInfo.checkpointedLogPosition());
+        RecoveryPredicate predicate = recoveryCriteria.toPredicate();
+
+        Monitors monitors = new Monitors();
+        monitors.addMonitorListener(new LoggingLogFileMonitor(logProvider.getLog(getClass())));
+        Config config = Config.newBuilder().build();
+        additionalConfiguration(config);
+        assertFalse(isRecoveryRequired(databaseLayout, config, predicate));
+
+        assertFalse(performRecovery(Recovery.contextWithNoLogTail(
+                                fileSystem,
+                                pageCache,
+                                EMPTY,
+                                config,
+                                databaseLayout,
+                                INSTANCE,
+                                IOController.DISABLED,
+                                logProvider,
+                                LATEST_KERNEL_VERSION_PROVIDER)
+                        .recoveryPredicate(predicate)
+                        .monitors(monitors)
+                        .startupChecker(RecoveryStartupChecker.EMPTY_CHECKER)
+                        .clock(fakeClock)
+                        .incompleteTransactionAction(STOP))
+                .recoveryPerformed());
+    }
+
+    @Test
+    void shouldHandleRecoveryWithLogPositionIfUnstableTail() throws Exception {
+        // Nothing after the maxposition should ever be read, even in logtail reading because after that
+        // position the log is not stable and could be truncated during recovery is running.
+        // Let's destroy the tail a bit after maxposition and see that everything still works.
+
+        GraphDatabaseAPI db = createDatabase();
+        DatabaseLayout layout = db.databaseLayout();
+
+        generateSomeData(db);
+        CheckPointer checkPointer = db.getDependencyResolver().resolveDependency(CheckPointer.class);
+        checkPointer.forceCheckPoint(new SimpleTriggerInfo("My checkpoint"));
+        LatestCheckpointInfo latestCheckpointInfo = checkPointer.latestCheckPointInfo();
+
+        FlushableLogPositionAwareChannel channel = getTransactionLogWriter(db).getChannel();
+        channel.beginChecksumForWriting();
+        channel.putVersion(LATEST_KERNEL_VERSION.version());
+        channel.putContentType(LogEnvelopeHeader.KERNEL_CONTENT_TYPE);
+        // something that can not be read without error
+        channel.put((byte) 99);
+        channel.put((byte) 99);
+        channel.put((byte) 99);
+        channel.put((byte) 99);
+        channel.put((byte) 99);
+        channel.put((byte) 99);
+        channel.put((byte) 99);
+        channel.put((byte) 99);
+        channel.putChecksum();
+        channel.prepareForFlush().flush();
+
+        managementService.shutdown();
+
+        RecoveryHelpers.removeLastCheckpointRecordFromLogFile(layout, fileSystem);
+
+        RecoveryCriteria recoveryCriteria =
+                RecoveryCriteria.untilPosition(latestCheckpointInfo.checkpointedLogPosition());
+        RecoveryPredicate predicate = recoveryCriteria.toPredicate();
+
+        Monitors monitors = new Monitors();
+        monitors.addMonitorListener(new LoggingLogFileMonitor(logProvider.getLog(getClass())));
+        Config config = Config.newBuilder().build();
+        additionalConfiguration(config);
+        assertFalse(isRecoveryRequired(databaseLayout, config, predicate));
+
+        assertFalse(performRecovery(Recovery.contextWithNoLogTail(
+                                fileSystem,
+                                pageCache,
+                                EMPTY,
+                                config,
+                                databaseLayout,
+                                INSTANCE,
+                                IOController.DISABLED,
+                                logProvider,
+                                LATEST_KERNEL_VERSION_PROVIDER)
+                        .recoveryPredicate(predicate)
+                        .monitors(monitors)
+                        .startupChecker(RecoveryStartupChecker.EMPTY_CHECKER)
+                        .clock(fakeClock)
+                        .incompleteTransactionAction(STOP))
+                .recoveryPerformed());
+    }
+
+    @Test
+    void shouldRecoverWithTailScanningAndLogPositionIgnoringUnstableTail() throws Exception {
+        // Nothing after the maxposition should ever be read, even in logtail reading because after that
+        // position the log is not stable and could be truncated during recovery is running.
+        // We write a dummy tx with a higher appendIndex/txId to catch this,
+        // since DetachedLogTailAppendIndexProvider masks exceptions
+
+        GraphDatabaseAPI db = createDatabase();
+        DatabaseLayout layout = db.databaseLayout();
+
+        generateSomeData(db);
+        CheckPointer checkPointer = db.getDependencyResolver().resolveDependency(CheckPointer.class);
+        checkPointer.forceCheckPoint(new SimpleTriggerInfo("My checkpoint"));
+        LatestCheckpointInfo latestCheckpointInfo = checkPointer.latestCheckPointInfo();
+
+        // Append an extra dummy tx after maxPosition which we shouldn't read
+        TransactionLogWriter txWriter = getTransactionLogWriter(db);
+        txWriter.getWriter()
+                .writeStartEntry(LogEntryFactory.newStartEntry(
+                        LATEST_KERNEL_VERSION,
+                        Instant.now().toEpochMilli(),
+                        latestCheckpointInfo
+                                .highestObservedClosedTransactionId()
+                                .id(),
+                        latestCheckpointInfo.appendIndex() + 1L,
+                        UNKNOWN_TX_SEQUENCE_NUMBER,
+                        0,
+                        new byte[0]));
+        txWriter.getWriter()
+                .writeCommitEntry(
+                        LATEST_KERNEL_VERSION,
+                        latestCheckpointInfo
+                                        .highestObservedClosedTransactionId()
+                                        .id()
+                                + 1,
+                        Instant.now().toEpochMilli());
+
+        managementService.shutdown();
+
+        // Delete shutdown checkpoint
+        RecoveryHelpers.removeLastCheckpointRecordFromLogFile(layout, fileSystem);
+        // Delete custom checkpoint
+        RecoveryHelpers.removeLastCheckpointRecordFromLogFile(layout, fileSystem);
+
+        RecoveryCriteria recoveryCriteria =
+                RecoveryCriteria.untilPosition(latestCheckpointInfo.checkpointedLogPosition());
+        RecoveryPredicate predicate = recoveryCriteria.toPredicate();
+
+        Monitors monitors = new Monitors();
+        monitors.addMonitorListener(new LoggingLogFileMonitor(logProvider.getLog(getClass())));
+        Config config = Config.newBuilder().build();
+        additionalConfiguration(config);
+
+        LogFiles logFiles = LogFilesBuilder.readableBuilder(
+                        layout, fileSystem, LATEST_KERNEL_VERSION_PROVIDER, LATEST_LOG_FORMAT_PROVIDER)
+                .withTailReadingMaxPosition(latestCheckpointInfo.checkpointedLogPosition())
+                .build();
+        LogTailMetadata tailMetadata = logFiles.getTailMetadata();
+        assertThat(tailMetadata.lastBatch().appendIndex()).isEqualTo(latestCheckpointInfo.appendIndex());
+        assertThat(tailMetadata.lastBatch().logPositionAfter())
+                .isEqualTo(latestCheckpointInfo.checkpointedLogPosition());
+        assertTrue(isRecoveryRequired(databaseLayout, config, predicate));
+
+        assertTrue(performRecovery(context(
+                                fileSystem,
+                                pageCache,
+                                EMPTY,
+                                config,
+                                databaseLayout,
+                                INSTANCE,
+                                IOController.DISABLED,
+                                logProvider,
+                                tailMetadata)
+                        .recoveryPredicate(predicate)
+                        .monitors(monitors)
+                        .startupChecker(RecoveryStartupChecker.EMPTY_CHECKER)
+                        .clock(fakeClock)
+                        .incompleteTransactionAction(STOP))
+                .recoveryPerformed());
+    }
+
+    @Test
+    void shouldHandleRecoveryWithLogPositionIfUnstableTailWithoutCheckpoints() throws Exception {
+        // Nothing after the maxposition should ever be read, even in logtail reading because after that
+        // position the log is not stable and could be truncated during recovery is running.
+        // Let's destroy the tail a bit after maxposition and see that everything still works.
+
+        GraphDatabaseAPI db = createDatabase();
+        DatabaseLayout layout = db.databaseLayout();
+
+        generateSomeData(db);
+
+        FlushableLogPositionAwareChannel channel = getTransactionLogWriter(db).getChannel();
+        LogPosition position = channel.getCurrentLogPosition();
+        channel.beginChecksumForWriting();
+        channel.putVersion(LATEST_KERNEL_VERSION.version());
+        channel.putContentType(LogEnvelopeHeader.KERNEL_CONTENT_TYPE);
+        // something that can not be read without error
+        channel.put((byte) 99);
+        channel.put((byte) 99);
+        channel.put((byte) 99);
+        channel.put((byte) 99);
+        channel.put((byte) 99);
+        channel.put((byte) 99);
+        channel.put((byte) 99);
+        channel.put((byte) 99);
+        channel.putChecksum();
+        channel.prepareForFlush().flush();
+
+        managementService.shutdown();
+
+        RecoveryHelpers.removeLastCheckpointRecordFromLogFile(layout, fileSystem);
+        RecoveryHelpers.removeLastCheckpointRecordFromLogFile(layout, fileSystem);
+
+        RecoveryCriteria recoveryCriteria = RecoveryCriteria.untilPosition(position);
+        RecoveryPredicate predicate = recoveryCriteria.toPredicate();
+
+        Monitors monitors = new Monitors();
+        monitors.addMonitorListener(new LoggingLogFileMonitor(logProvider.getLog(getClass())));
+        Config config = Config.newBuilder().build();
+        additionalConfiguration(config);
+        assertTrue(isRecoveryRequired(databaseLayout, config, predicate));
+
+        assertTrue(performRecovery(Recovery.contextWithNoLogTail(
+                                fileSystem,
+                                pageCache,
+                                EMPTY,
+                                config,
+                                databaseLayout,
+                                INSTANCE,
+                                IOController.DISABLED,
+                                logProvider,
+                                LATEST_KERNEL_VERSION_PROVIDER)
+                        .recoveryPredicate(predicate)
+                        .monitors(monitors)
+                        .startupChecker(RecoveryStartupChecker.EMPTY_CHECKER)
+                        .clock(fakeClock)
+                        .incompleteTransactionAction(STOP))
+                .recoveryPerformed());
+    }
+
+    @Test
+    void recoveryUntilPositionNotAllowedToPointBeforeLatestCheckpoint() {
+        GraphDatabaseAPI db = createDatabase();
+
+        CheckPointer checkPointer = db.getDependencyResolver().resolveDependency(CheckPointer.class);
+        LatestCheckpointInfo latestCheckpointInfo = checkPointer.latestCheckPointInfo();
+        LogPosition positionBeforeCheckpoint = latestCheckpointInfo.checkpointedLogPosition();
+
+        generateSomeData(db);
+        managementService.shutdown();
+
+        RecoveryCriteria recoveryCriteria = RecoveryCriteria.untilPosition(positionBeforeCheckpoint);
+        RecoveryPredicate predicate = recoveryCriteria.toPredicate();
+
+        assertThrows(RuntimeException.class, () -> isRecoveryRequired(databaseLayout, defaults(), predicate));
+    }
+
+    private static TransactionLogWriter getTransactionLogWriter(GraphDatabaseAPI db) {
+        return getTransactionLogWriter(
+                db.getDependencyResolver().resolveDependency(LogFiles.class).getLogFile());
+    }
+
+    private static TransactionLogWriter getTransactionLogWriter(LogFile logFile) {
+        return (TransactionLogWriter) logFile.getTransactionLogWriter();
+    }
+
     private void prepareEmptyZeroedLogFile(Path victimFilePath) throws IOException {
         fileSystem.deleteFileOrThrow(victimFilePath);
         var nativeAccess = NativeAccessProvider.getNativeAccess();
@@ -2316,7 +2741,7 @@ class RecoveryIT {
                 new DefaultIdGeneratorFactory(fileSystem, immediate(), PageCacheTracer.NULL, "my db");
         try (IdGenerator idGenerator = idGeneratorFactory.open(
                 pageCache,
-                path,
+                new StoreFile(path),
                 TEST_NODE_TYPE,
                 () -> 0L /*will not be used*/,
                 10_000,
@@ -2339,7 +2764,7 @@ class RecoveryIT {
         }
     }
 
-    private static void awaitIndexesOnline(GraphDatabaseService database) {
+    static void awaitIndexesOnline(GraphDatabaseService database) {
         try (Transaction transaction = database.beginTx()) {
             transaction.schema().awaitIndexesOnline(10, MINUTES);
             transaction.commit();
@@ -2359,7 +2784,7 @@ class RecoveryIT {
         managementService.shutdown();
     }
 
-    private void recoverDatabase() throws Exception {
+    void recoverDatabase() throws Exception {
         recoverDatabase(EMPTY, ALL);
     }
 
@@ -2398,7 +2823,7 @@ class RecoveryIT {
         additionalConfiguration(config);
         assertTrue(isRecoveryRequired(databaseLayout, config, databaseTracers));
 
-        Recovery.performRecovery(context(
+        Recovery.performRecovery(Recovery.contextWithNoLogTail(
                         fileSystem,
                         pageCache,
                         databaseTracers,
@@ -2430,6 +2855,20 @@ class RecoveryIT {
         return Recovery.isRecoveryRequired(fileSystem, pageCache, layout, config, Optional.empty(), INSTANCE, tracers);
     }
 
+    private boolean isRecoveryRequired(DatabaseLayout layout, Config config, RecoveryPredicate recoveryPredicate)
+            throws Exception {
+        return Recovery.isRecoveryRequired(
+                fileSystem,
+                pageCache,
+                layout,
+                StorageEngineFactory.selectStorageEngine(fileSystem, databaseLayout, config),
+                config,
+                Optional.empty(),
+                INSTANCE,
+                DatabaseTracers.EMPTY,
+                recoveryPredicate);
+    }
+
     private int countCheckPointsInTransactionLogs() throws IOException {
         LogFiles logFiles = buildLogFiles();
         var checkpoints = logFiles.getCheckpointFile().reachableCheckpoints();
@@ -2437,15 +2876,14 @@ class RecoveryIT {
     }
 
     private LogFiles buildLogFiles() throws IOException {
-        return buildLogFiles(EMPTY);
-    }
-
-    private LogFiles buildLogFiles(DatabaseTracers databaseTracers) throws IOException {
-        return LogFilesBuilder.activeFilesBuilder(
-                        databaseLayout, fileSystem, LatestVersions.LATEST_KERNEL_VERSION_PROVIDER)
+        return LogFilesBuilder.readableBuilder(
+                        databaseLayout,
+                        fileSystem,
+                        LATEST_KERNEL_VERSION_PROVIDER,
+                        LatestVersions.LATEST_LOG_FORMAT_PROVIDER)
                 .withCommandReaderFactory(StorageEngineFactory.selectStorageEngine(fileSystem, databaseLayout, null)
                         .commandReaderFactory())
-                .withDatabaseTracers(databaseTracers)
+                .withDatabaseTracers(EMPTY)
                 .build();
     }
 
@@ -2467,8 +2905,12 @@ class RecoveryIT {
     }
 
     private int countCheckpointFiles() throws IOException {
-        LogFiles logFiles = buildLogFiles();
-        return logFiles.getCheckpointFile().getDetachedCheckpointFiles().length;
+        // Don't build active files here since that will trigger logTail reading and
+        // potentially clean up empty checkpoint files
+        LogFiles logFiles = LogFilesBuilder.logFilesBasedOnlyBuilder(
+                        databaseLayout.getTransactionLogsDirectory(), fileSystem)
+                .build();
+        return logFiles.getCheckpointFile().getMatchedFiles().length;
     }
 
     private static void generateSomeData(GraphDatabaseService database) {
@@ -2477,13 +2919,13 @@ class RecoveryIT {
                 Node node1 = transaction.createNode();
                 Node node2 = transaction.createNode();
                 node1.createRelationshipTo(node2, withName("Type" + i));
-                node2.setProperty("a", randomAlphanumeric(TEN_KB));
+                node2.setProperty("a", secure().nextAlphanumeric(TEN_KB));
                 transaction.commit();
             }
         }
     }
 
-    private GraphDatabaseAPI createDatabase() {
+    GraphDatabaseAPI createDatabase() {
         return createDatabase(logical_log_rotation_threshold.defaultValue());
     }
 
@@ -2525,17 +2967,16 @@ class RecoveryIT {
         return additionalConfiguration(serviceBuilder).build();
     }
 
-    private static MetadataProvider getMetadataProvider(GraphDatabaseAPI db) {
-        return db.getDependencyResolver().resolveDependency(MetadataProvider.class);
+    private static LogMetadataProvider getMetadataProvider(GraphDatabaseAPI db) {
+        return db.getDependencyResolver().resolveDependency(LogMetadataProvider.class);
     }
 
     private void verifyRecoveryMissingLogs() throws IOException {
         GraphDatabaseAPI restartedDatabase = createDatabase();
         try {
             LogFiles logFiles = restartedDatabase.getDependencyResolver().resolveDependency(LogFiles.class);
-            CheckpointInfo checkpointInfo = logFiles.getCheckpointFile()
-                    .getReachableDetachedCheckpoints()
-                    .get(0);
+            CheckpointInfo checkpointInfo =
+                    logFiles.getCheckpointFile().reachableCheckpoints().get(0);
             assertThat(checkpointInfo.reason()).contains("missing logs");
         } finally {
             managementService.shutdown();
@@ -2557,18 +2998,29 @@ class RecoveryIT {
         }
     }
 
-    private static Path getIdFile(DatabaseLayout layout) {
-        return getFirstSortedOnName(layout.idFiles());
+    private static Path getIdFile(GraphDatabaseAPI db) {
+        var idFiles = getIdFiles(db);
+        return getFirstSortedOnName(idFiles);
     }
 
-    private static Path getStoreFile(DatabaseLayout layout) {
-        Set<Path> files = new HashSet<>(layout.storeFiles());
-        files.remove(layout.pathForStore(CommonDatabaseStores.METADATA));
-        files.remove(layout.pathForStore(CommonDatabaseStores.INDEX_STATISTICS));
+    private static Collection<Path> getIdFiles(GraphDatabaseAPI db) {
+        return db.getDependencyResolver()
+                .resolveDependency(StorageEngine.class)
+                .listStorageFiles(new StorageFileSelection(false, false, true));
+    }
+
+    private static Path getStoreFile(GraphDatabaseAPI db, FileSystemAbstraction fs) {
+        Set<Path> files = new HashSet<>(db.getDependencyResolver()
+                .resolveDependency(StorageEngine.class)
+                .listStorageFiles(new StorageFileSelection(true, true, false)));
+        var layout = db.databaseLayout();
+        files.removeAll(layout.pathForStore(CommonDatabaseStores.METADATA).allSegments(fs));
+        files.removeAll(
+                layout.pathForStore(CommonDatabaseStores.INDEX_STATISTICS).allSegments(fs));
         return getFirstSortedOnName(files);
     }
 
-    private static Path getFirstSortedOnName(Set<Path> path) {
+    private static Path getFirstSortedOnName(Collection<Path> path) {
         return path.stream()
                 .max(Comparator.comparing(p -> p.getFileName().toString())) // To be deterministic
                 .orElseThrow();

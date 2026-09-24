@@ -22,11 +22,8 @@ package org.neo4j.gqlstatus;
 import static java.util.Arrays.asList;
 import static java.util.Collections.emptyMap;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
-import static org.neo4j.gqlstatus.GqlStatusInfoCodes.STATUS_42I13;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.fail;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -40,17 +37,12 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Predicate;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
-import org.apache.commons.codec.digest.DigestUtils;
-import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.reflections.Reflections;
 import org.reflections.scanners.SubTypesScanner;
-import org.scalatest.Ignore;
 
-public class GqlStatusInfoCodesTest {
+class GqlStatusInfoCodesTest {
 
     @Test
     void verifyParametersCorrectlyWritten() {
@@ -68,7 +60,7 @@ public class GqlStatusInfoCodesTest {
                                 p,
                                 p.process("⚠️this-should-be-ok-since-boolean-processor-is-StringValueOf-%s⚠️"
                                         .formatted(p.name())));
-                    } else if (GqlParams.ListParam.class == e && p instanceof GqlParams.ListParam par) {
+                    } else if (GqlParams.ListParam.class == e && p instanceof GqlParams.ListParam) {
                         allUniqueParams.put(p, List.of("⚠️very-unique-param-value-%s⚠️".formatted(p.name())));
                     } else if (GqlParams.NumberParam.class == e) {
                         allUniqueParams.put(p, veryUniqueNumber++);
@@ -81,32 +73,33 @@ public class GqlStatusInfoCodesTest {
 
         for (GqlStatusInfoCodes gqlCode : GqlStatusInfoCodes.values()) {
             final var keys = gqlCode.getStatusParameterKeys();
-            final var keySet = new HashSet<GqlParams.GqlParam>();
-            keySet.addAll(keys);
+            final var keySet = new HashSet<>(keys);
             assertThat(gqlCode.parameterCount())
-                    .describedAs("Number of parameters needs to match the message template")
+                    .describedAs("%s: Number of parameters needs to match the message template", gqlCode.name())
                     .isEqualTo(gqlCode.messageFormatParameterCount());
 
             assertThat(keys)
                     .allSatisfy(key -> assertThat(key.name())
-                            .describedAs("Parameters must be a camelCase word (possibly containing numbers)")
+                            .describedAs(
+                                    "%s: Parameters must be a camelCase word (possibly containing numbers)",
+                                    gqlCode.name())
                             .matches("^[a-z][a-zA-Z0-9]*$"))
                     .hasSize(gqlCode.parameterCount());
 
             if (!keys.isEmpty()) {
                 assertThat(gqlCode.getMessage(allUniqueParams))
-                        .describedAs("Message should contain all expected parameters")
+                        .describedAs("%s: Message should contain all expected parameters", gqlCode.name())
                         .contains(filterValues(gqlCode, allUniqueParams, keySet::contains));
                 assertThat(gqlCode.getMessage(orderKeys(allUniqueParams, keys)))
-                        .describedAs("Message should contain all expected parameters")
+                        .describedAs("%s: Message should contain all expected parameters", gqlCode.name())
                         .contains(filterValues(gqlCode, allUniqueParams, keySet::contains));
             }
 
             assertThat(gqlCode.getMessage(allUniqueParams))
-                    .describedAs("Message should not contain unexpected parameters")
+                    .describedAs("%s: Message should not contain unexpected parameters", gqlCode.name())
                     .doesNotContain(filterValues(allUniqueParams, k -> !keySet.contains(k)));
             assertThat(gqlCode.getMessage(orderKeys(allUniqueParams, keys)))
-                    .describedAs("Message should not contain unexpected parameters")
+                    .describedAs("%s: Message should not contain unexpected parameters", gqlCode.name())
                     .doesNotContain(filterValues(allUniqueParams, k -> !keySet.contains(k)));
         }
     }
@@ -119,6 +112,7 @@ public class GqlStatusInfoCodesTest {
         whitelist.add(GqlStatusInfoCodes.STATUS_51N09);
         whitelist.add(GqlStatusInfoCodes.STATUS_51N68);
         whitelist.add(GqlStatusInfoCodes.STATUS_42N84);
+        whitelist.add(GqlStatusInfoCodes.STATUS_01N74);
         for (GqlStatusInfoCodes gqlCode : GqlStatusInfoCodes.values()) {
             var subcond = gqlCode.getSubCondition();
             if (!subcond.isEmpty()) {
@@ -158,7 +152,8 @@ public class GqlStatusInfoCodesTest {
             var trueSubs = gqlCode.getOffsets(template, GqlParams.substitution).length;
             if (numAlmostSubs != trueSubs)
                 fail(
-                        "Some substitution-patterns are faulty in some GqlStatusInfoCodes template(s), probably with a blankspace too few/many"); // I used this pattern: [^\{].%s.[^\}] to find faulty
+                        gqlCode.name()
+                                + ": Some substitution-patterns are faulty in some GqlStatusInfoCodes template(s), probably with a blankspace too few/many"); // I used this pattern: [^\{].%s.[^\}] to find faulty
         }
     }
 
@@ -237,7 +232,6 @@ public class GqlStatusInfoCodesTest {
     @Test
     void verifySingleWhitespaces() {
         Set<GqlStatusInfoCodes> whitelist = EnumSet.noneOf(GqlStatusInfoCodes.class);
-        whitelist.add(STATUS_42I13);
         var regex = "\\s\\s";
         Pattern pattern = Pattern.compile(regex);
         ArrayList<String> dontNeedWhiteList = new ArrayList<>();
@@ -305,6 +299,7 @@ public class GqlStatusInfoCodesTest {
     void verifyConditionSubconditionIsUnique() {
         var whiteList = EnumSet.noneOf(GqlStatusInfoCodes.class);
         whiteList.add(GqlStatusInfoCodes.STATUS_22N12);
+        whiteList.add(GqlStatusInfoCodes.STATUS_42NG1);
         var errorMessages = new ArrayList<String>();
         var knownCombinations = new HashMap<TotalCondition, GqlStatusInfoCodes>();
         for (var gqlCode : GqlStatusInfoCodes.values()) {
@@ -314,7 +309,7 @@ public class GqlStatusInfoCodesTest {
             var cond = gqlCode.getCondition();
             var subCond = gqlCode.getSubCondition();
             var tc = new TotalCondition(cond, subCond);
-            if (!knownCombinations.keySet().contains(tc)) {
+            if (!knownCombinations.containsKey(tc)) {
                 knownCombinations.put(tc, gqlCode);
             } else {
                 errorMessages.add("\n" + gqlCode + " and " + knownCombinations.get(tc));
@@ -344,9 +339,9 @@ public class GqlStatusInfoCodesTest {
     void verifyGetMessageHandlesFaultyParameters() {
         String[] badParam = {"AA", "BBB", "CCC", "DDD", "EEE"};
         for (var gqlCode : GqlStatusInfoCodes.values()) {
-            assertDoesNotThrow(
-                    () -> gqlCode.getMessage((Object[]) badParam),
-                    "The code " + gqlCode + " throws an exception when passed String parameters.");
+            assertThatCode(() -> gqlCode.getMessage((Object[]) badParam))
+                    .as("The code %s throws an exception when passed String parameters.", gqlCode)
+                    .doesNotThrowAnyException();
         }
     }
 
@@ -358,16 +353,15 @@ public class GqlStatusInfoCodesTest {
         String[] params = {"Deleting nodes", "Person", "A*B"};
         String[] expectedMessages = {
             "Deleting nodes is deprecated and will be removed without a replacement.",
-            "The label `Person` does not exist. Verify that the spelling is correct.",
+            // Second parameter $db not sent in so will fallback to print out the parameter name
+            "The label `Person` does not exist in database `$db`. Verify that the spelling is correct.",
             "The disconnected pattern 'A*B' builds a cartesian product. A cartesian product may produce a large amount of data and slow down query processing."
         };
         for (int i = 0; i < gqlCodes.length; i++) {
             Object[] param = {params[i]};
-            assertEquals(
-                    gqlCodes[i].getMessage(param),
-                    expectedMessages[i],
-                    "GqlStatusInfoCode " + gqlCodes[i] + " is incorrectly formatted by getMessage(). \nExpected: '"
-                            + expectedMessages[i] + "' got: '" + gqlCodes[i].getMessage(param) + "'");
+            assertThat(gqlCodes[i].getMessage(param))
+                    .as("GqlStatusInfoCode %s is incorrectly formatted by getMessage()", gqlCodes[i])
+                    .isEqualTo(expectedMessages[i]);
         }
     }
 
@@ -376,10 +370,9 @@ public class GqlStatusInfoCodesTest {
         for (var gqlCode : GqlStatusInfoCodes.values()) {
             if (gqlCode.getJoinStyles() != null) {
                 for (var joinStyle : gqlCode.getJoinStyles().keySet()) {
-                    assertTrue(
-                            gqlCode.getStatusParameterKeys().contains(joinStyle),
-                            "The code " + gqlCode + " has JoinStyle key " + joinStyle
-                                    + " but no matching parameter key");
+                    assertThat(gqlCode.getStatusParameterKeys())
+                            .as("The code %s has JoinStyle key %s but no matching parameter key", gqlCode, joinStyle)
+                            .contains(joinStyle);
                 }
             }
         }
@@ -389,7 +382,7 @@ public class GqlStatusInfoCodesTest {
     void verifyJoinStyle() {
         var joinStyledCodes = Arrays.stream(GqlStatusInfoCodes.values())
                 .filter(e -> !emptyMap().equals(e.getJoinStyles()))
-                .collect(Collectors.toList());
+                .toList();
         String joinWord = ",";
         for (var gqlCode : joinStyledCodes) {
             var statusParameterKeys = gqlCode.getStatusParameterKeys();
@@ -412,55 +405,10 @@ public class GqlStatusInfoCodesTest {
                     "(?:(['`]?)|(\\$)(`))A(\\1|\\3), (\\1|\\2\\3)B(\\1|\\3)%s (\\1|\\2\\3)C(\\1|\\3)",
                     Pattern.quote(joinWord)); // Might need to update the %s here if GqlParams.substitution changes
             Pattern pattern = Pattern.compile(expected);
-            Matcher matcher = pattern.matcher(gqlCode.getMessage(msgParams));
             var msg = gqlCode.getMessage(msgParams);
-            assertTrue(
-                    matcher.find(),
-                    "The expected list-joinstyle was not inserted into the message string for code " + gqlCode
-                            + ". Got: " + msg);
-        }
-    }
-
-    @Ignore
-    void verifyGqlStatusHaveNotChanged() {
-        final var params = new HashMap<GqlParams.GqlParam, Object>();
-        Reflections reflections = new Reflections("org.neo4j.gqlstatus", new SubTypesScanner(false));
-        Set<Class<? extends GqlParams.GqlParam>> enums = reflections.getSubTypesOf(GqlParams.GqlParam.class);
-
-        for (Class<? extends GqlParams.GqlParam> e : enums) {
-            if (e.isEnum()) {
-                for (final var p : e.getEnumConstants()) params.put(p, p.toParamFormat());
-            }
-        }
-
-        StringBuilder gqlBuilder = new StringBuilder();
-        Arrays.stream(GqlStatusInfoCodes.values()).forEach(gqlCode -> {
-            gqlBuilder.append(gqlCode.getStatusString());
-            gqlBuilder.append(gqlCode.getCondition());
-            gqlBuilder.append(gqlCode.getSubCondition());
-            gqlBuilder.append(gqlCode.getMessage(params));
-            gqlBuilder.append(Arrays.toString(gqlCode.getStatusParameterKeys().stream()
-                    .map(GqlParams.GqlParam::name)
-                    .toArray()));
-        });
-
-        byte[] gqlHash = DigestUtils.sha256(gqlBuilder.toString());
-
-        byte[] expectedHash = new byte[] {
-            -25, 81, -58, 73, 72, -100, 93, -44, -108, 98, 54, 30, -11, -109, 110, 102, 24, 40, -3, 64, 67, 117, 65,
-            -99, -114, 122, -7, -56, 122, 5, 91, -111
-        };
-
-        if (!Arrays.equals(gqlHash, expectedHash)) {
-            Assertions.fail(
-                    """
-            Expected: %s
-            Actual: %s
-            Updating the GQL status code is a breaking change!!!
-            If parameters are updated, you must change them everywhere they are used (i.e. each time they are used in the call `.withParam(..., ...)`)
-            If you update an error message, it is not breaking, but please update documentation.
-            """
-                            .formatted(Arrays.toString(expectedHash), Arrays.toString(gqlHash)));
+            assertThat(msg)
+                    .as("The expected list-joinstyle was not inserted into the message string for code %s", gqlCode)
+                    .containsPattern(pattern);
         }
     }
 

@@ -19,15 +19,16 @@
  */
 package org.neo4j.internal.schema;
 
+import java.io.Serializable;
+import java.util.Collections;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.NoSuchElementException;
 import java.util.Objects;
+import java.util.Set;
 import java.util.SortedMap;
+import java.util.TreeMap;
 import java.util.function.Supplier;
-import org.eclipse.collections.api.RichIterable;
-import org.eclipse.collections.api.factory.SortedMaps;
-import org.eclipse.collections.api.map.sorted.ImmutableSortedMap;
-import org.eclipse.collections.api.tuple.Pair;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.ValueCategory;
 
@@ -37,13 +38,19 @@ import org.neo4j.values.storable.ValueCategory;
  * Not all value types are supported, however. Only "storable" values are supported, with the additional restriction that temporal and spatial values are
  * <em>not</em> supported.
  */
-public final class IndexConfig {
-    private static final IndexConfig EMPTY = new IndexConfig(SortedMaps.immutable.empty());
+public final class IndexConfig implements Serializable {
+    private static final IndexConfig EMPTY = new IndexConfig();
+    private static final Supplier<SortedMap<String, Value>> NEW_MAP =
+            () -> new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
 
-    private final ImmutableSortedMap<String, Value> map;
+    private final SortedMap<String, Value> map;
 
-    private IndexConfig(ImmutableSortedMap<String, Value> map) {
-        this.map = map;
+    private IndexConfig() {
+        this.map = Collections.emptySortedMap();
+    }
+
+    private IndexConfig(SortedMap<String, Value> map) {
+        this.map = Collections.unmodifiableSortedMap(map);
     }
 
     public static IndexConfig empty() {
@@ -51,40 +58,40 @@ public final class IndexConfig {
     }
 
     public static IndexConfig with(String key, Value value) {
-        return new IndexConfig(SortedMaps.immutable.with(String.CASE_INSENSITIVE_ORDER, key, value));
+        SortedMap<String, Value> map = NEW_MAP.get();
+        map.put(key, value);
+        return new IndexConfig(map);
     }
 
     public static IndexConfig with(Map<String, Value> map) {
-        for (Value value : map.values()) {
-            validate(value);
+        SortedMap<String, Value> settings = NEW_MAP.get();
+        for (Entry<String, Value> entry : map.entrySet()) {
+            String settingName = entry.getKey();
+            Value value = validate(entry.getValue());
+            settings.put(settingName, value);
         }
-        return new IndexConfig(SortedMaps.mutable
-                .<String, Value>with(String.CASE_INSENSITIVE_ORDER)
-                .withMap(map)
-                .toImmutable());
+        return new IndexConfig(settings);
     }
 
-    private static void validate(Value value) {
+    private static Value validate(Value value) {
         ValueCategory category = value.valueGroup().category();
-        switch (category) {
-            case GEOMETRY,
-                    GEOMETRY_ARRAY,
-                    TEMPORAL,
-                    TEMPORAL_ARRAY,
-                    UNKNOWN,
-                    NO_CATEGORY -> throw new IllegalArgumentException(
-                    "Value type not support in index configuration: " + value + ".");
-                // Otherwise everything is fine.
-            default -> {}
-        }
+        return switch (category) {
+            case GEOMETRY, GEOMETRY_ARRAY, TEMPORAL, TEMPORAL_ARRAY, UNKNOWN, NO_CATEGORY ->
+                throw new IllegalArgumentException("Value type not support in index configuration: " + value + ".");
+            // Otherwise everything is fine.
+            default -> value;
+        };
     }
 
     public IndexConfig withIfAbsent(String key, Value value) {
-        validate(value);
         if (map.containsKey(key)) {
             return this;
         }
-        return new IndexConfig(map.newWithKeyValue(key, value));
+
+        SortedMap<String, Value> copy = NEW_MAP.get();
+        copy.putAll(map);
+        copy.put(key, validate(value));
+        return new IndexConfig(copy);
     }
 
     @SuppressWarnings("unchecked")
@@ -110,12 +117,16 @@ public final class IndexConfig {
         return value;
     }
 
-    public RichIterable<Pair<String, Value>> entries() {
-        return map.keyValuesView();
+    public Set<String> settingNames() {
+        return Collections.unmodifiableSet(map.keySet());
+    }
+
+    public Set<Entry<String, Value>> entries() {
+        return Collections.unmodifiableSet(map.entrySet());
     }
 
     public SortedMap<String, Value> asMap() {
-        return map.castToMap();
+        return Collections.unmodifiableSortedMap(map);
     }
 
     @Override
@@ -137,8 +148,8 @@ public final class IndexConfig {
     @Override
     public String toString() {
         StringBuilder sb = new StringBuilder("IndexConfig[");
-        for (Pair<String, Value> entry : entries()) {
-            sb.append(entry.getOne()).append(" -> ").append(entry.getTwo()).append(", ");
+        for (Entry<String, Value> entry : entries()) {
+            sb.append(entry.getKey()).append(" -> ").append(entry.getValue()).append(", ");
         }
         if (!map.isEmpty()) {
             sb.setLength(sb.length() - 2);

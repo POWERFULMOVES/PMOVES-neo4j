@@ -27,7 +27,9 @@ import static org.neo4j.util.Preconditions.requireNonNegative;
 
 import java.util.Arrays;
 import java.util.Objects;
+import org.eclipse.collections.api.iterator.IntIterator;
 import org.neo4j.collection.PrimitiveArrays;
+import org.neo4j.collection.PrimitiveIntCollections;
 import org.neo4j.graphdb.Resource;
 import org.neo4j.memory.MemoryTracker;
 
@@ -158,6 +160,10 @@ public class HeapTrackingIntArrayList implements Resource {
         }
     }
 
+    public boolean addAll(HeapTrackingIntArrayList other) {
+        return addAll(other.elementData);
+    }
+
     public boolean addAll(int... values) {
         int numNew = values.length;
         if (numNew == 0) {
@@ -175,6 +181,18 @@ public class HeapTrackingIntArrayList implements Resource {
 
     public int[] toArray() {
         return Arrays.copyOf(elementData, size);
+    }
+
+    public IntIterator iterator() {
+        return new PrimitiveIntCollections.AbstractPrimitiveIntBaseIterator() {
+            private int index = -1;
+
+            @Override
+            protected boolean fetchNext() {
+                index++;
+                return index < size && next(elementData[index]);
+            }
+        };
     }
 
     @Override
@@ -209,5 +227,20 @@ public class HeapTrackingIntArrayList implements Resource {
         if (index > size || index < 0) {
             throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + size);
         }
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (!(o instanceof HeapTrackingIntArrayList that)) return false;
+        return size == that.size && Arrays.equals(elementData, 0, size, that.elementData, 0, that.size);
+    }
+
+    @Override
+    public int hashCode() {
+        int result = 1;
+        for (int i = 0; i < size; i++) {
+            result = 31 * result + elementData[i];
+        }
+        return result;
     }
 }

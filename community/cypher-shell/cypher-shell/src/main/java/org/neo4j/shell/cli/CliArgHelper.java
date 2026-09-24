@@ -205,6 +205,10 @@ public class CliArgHelper {
         ofNullable(ns.<Duration>get("idle-timeout")).ifPresent(cliArgs::setIdleTimeout);
         ofNullable(ns.<Duration>get("hidden-idle-timeout-delay")).ifPresent(cliArgs::setIdleTimeoutDelay);
 
+        cliArgs.setErrorFormat(ns.get("error-format"));
+
+        ofNullable(ns.<Duration>get("transaction-timeout")).ifPresent(cliArgs::setTransactionTimeout);
+
         return cliArgs;
     }
 
@@ -248,11 +252,9 @@ public class CliArgHelper {
             return uri;
         } catch (URISyntaxException e) {
             log.error(e);
-            var message =
-                    """
+            var message = """
                     cypher-shell: error: Failed to parse address: '%s'
-                    Address should be of the form: [scheme://][username:password@][host][:port]"""
-                            .formatted(address);
+                    Address should be of the form: [scheme://][username:password@][host][:port]""".formatted(address);
             throw new ArgumentParserException(message, e, parser);
         }
     }
@@ -260,6 +262,7 @@ public class CliArgHelper {
     private static ArgumentParser setupParser() {
         ArgumentParser parser = ArgumentParsers.newFor("cypher-shell")
                 .defaultFormatWidth(100)
+                .addHelp(false)
                 .build()
                 .defaultHelp(true)
                 .description(format(
@@ -271,6 +274,11 @@ public class CliArgHelper {
                                 + "%n%n"
                                 + "Example of piping a file:%n"
                                 + "  cat some-cypher.txt | cypher-shell"));
+
+        parser.addArgument("-h", "--help")
+                .action(Arguments.help())
+                .help("Show this help message and exit.")
+                .setDefault(Arguments.SUPPRESS);
 
         ArgumentGroup connGroup = parser.addArgumentGroup("connection arguments");
         connGroup
@@ -334,8 +342,7 @@ public class CliArgHelper {
                 .action(Arguments.storeTrue());
 
         parser.addArgument("--format")
-                .help(
-                        """
+                .help("""
                                 Desired output format. Displays the results in tabular format if you use the shell interactively \
                                 and with minimal formatting if you use it for scripting.
                                 `verbose` displays results in tabular format and prints statistics.
@@ -348,7 +355,7 @@ public class CliArgHelper {
 
         parser.addArgument("-P", "--param")
                 .help("Add a parameter to this session."
-                        + " Example: `-P {a: 1}` or `-P {a: 1, b: duration({seconds: 1})}`."
+                        + " Example: `-P '{a: 1}'` or `-P '{a: 1, b: duration({seconds: 1})}'`."
                         + " This argument can be specified multiple times.")
                 .action(new AddParamArgumentAction(ParameterService.createParser()))
                 .setDefault(new ArrayList<ParameterService.RawParameters>());
@@ -388,7 +395,7 @@ public class CliArgHelper {
                 .dest("change-password")
                 .help("Change the neo4j user password and exit.");
 
-        parser.addArgument("--log")
+        parser.addArgument("--log", "--debug")
                 .nargs("?")
                 .type(new LogHandlerType())
                 .dest("log-file")
@@ -398,8 +405,8 @@ public class CliArgHelper {
 
         parser.addArgument("--history")
                 .help(
-                        "File path of a query and a command history file or `in-memory` for in-memory history. Defaults to <user home>/.neo4j/.cypher_shell_history. Can also be set using the environment variable "
-                                + HISTORY_ENV_VAR + ".")
+                        "File path of a query and a command history file, `in-memory` for in-memory history or `disable` to disable history. If the option is omitted, history is saved to <user home>/.neo4j/.cypher_shell_history. Can also be set using the environment variable %s."
+                                .formatted(HISTORY_ENV_VAR))
                 .dest("history-behaviour")
                 .type(new HistoryBehaviourHandler())
                 .setDefault((CypherShellTerminal.HistoryBehaviour) null);
@@ -419,6 +426,18 @@ public class CliArgHelper {
                 .dest("hidden-idle-timeout-delay")
                 .type(new TimeoutHandler())
                 .help(FeatureControl.SUPPRESS);
+
+        parser.addArgument("--error-format")
+                .dest("error-format")
+                .type(Arguments.caseInsensitiveEnumStringType(ErrorFormat.class))
+                .setDefault(ErrorFormat.DEFAULT)
+                .help("Controls how errors are displayed.");
+
+        parser.addArgument("--transaction-timeout")
+                .dest("transaction-timeout")
+                .type(new TimeoutHandler())
+                .help(
+                        "Transaction timeout. You can specify the duration using the format `<hours>h<minutes>m<seconds>s`, for example `1h` (1 hour), `1h30m` (1 hour 30 minutes), or `30m` (30 minutes).");
 
         return parser;
     }
@@ -459,6 +478,8 @@ public class CliArgHelper {
                 ArgumentParser argumentParser, Argument argument, String value) {
             if ("in-memory".equals(value.toLowerCase(Locale.ROOT))) {
                 return new CypherShellTerminal.InMemoryHistory();
+            } else if ("disable".equals(value.toLowerCase(Locale.ROOT))) {
+                return new CypherShellTerminal.DisableHistory();
             } else {
                 return historyFromFilePath(value);
             }

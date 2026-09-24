@@ -21,11 +21,10 @@ package org.neo4j.cypher.internal
 
 import org.neo4j.configuration.Config
 import org.neo4j.configuration.GraphDatabaseSettings
-import org.neo4j.cypher.internal.PrivilegeGQLCodeEntity.entityAlreadyExistsGqlStatus
-import org.neo4j.cypher.internal.PrivilegeGQLCodeEntity.entityNotFoundGqlStatus
 import org.neo4j.cypher.internal.ast.DatabaseName
 import org.neo4j.cypher.internal.ast.ExternalAuth
 import org.neo4j.cypher.internal.ast.HomeDatabaseAction
+import org.neo4j.cypher.internal.ast.MapBasedParameterProvider
 import org.neo4j.cypher.internal.ast.NamespacedName
 import org.neo4j.cypher.internal.ast.NativeAuth
 import org.neo4j.cypher.internal.ast.ParameterName
@@ -33,12 +32,15 @@ import org.neo4j.cypher.internal.ast.Password
 import org.neo4j.cypher.internal.ast.RemoveAuth
 import org.neo4j.cypher.internal.ast.RemoveHomeDatabaseAction
 import org.neo4j.cypher.internal.ast.SetHomeDatabaseAction
+import org.neo4j.cypher.internal.ast.prettifier.ExpressionStringifier
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.ListLiteral
 import org.neo4j.cypher.internal.expressions.Parameter
 import org.neo4j.cypher.internal.expressions.StringLiteral
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 import org.neo4j.cypher.internal.logical.plans.NameValidator
+import org.neo4j.cypher.internal.notification.HomeDatabaseNotPresent
+import org.neo4j.cypher.internal.notification.InternalNotification
 import org.neo4j.cypher.internal.options.CypherRuntimeOption
 import org.neo4j.cypher.internal.procs.Continue
 import org.neo4j.cypher.internal.procs.InitAndFinallyFunctions
@@ -46,32 +48,43 @@ import org.neo4j.cypher.internal.procs.ParameterTransformer
 import org.neo4j.cypher.internal.procs.ParameterTransformer.ParameterGenerationFunction
 import org.neo4j.cypher.internal.procs.QueryHandler
 import org.neo4j.cypher.internal.procs.QueryHandlerResult
+import org.neo4j.cypher.internal.procs.SystemGraphWriteExecutionPlan
 import org.neo4j.cypher.internal.procs.ThrowException
 import org.neo4j.cypher.internal.procs.UpdatingSystemCommandExecutionPlan
-import org.neo4j.cypher.internal.util.DeprecatedDatabaseNameNotification
-import org.neo4j.cypher.internal.util.HomeDatabaseNotPresent
-import org.neo4j.cypher.internal.util.InternalNotification
-import org.neo4j.cypher.internal.util.symbols.CTInteger
+import org.neo4j.cypher.internal.procs.WriteEffect
 import org.neo4j.cypher.internal.util.symbols.CTString
 import org.neo4j.cypher.internal.util.symbols.StringType
-import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.COMPOSITE_DATABASE_LABEL
-import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DATABASE_NAME_LABEL
-import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DATABASE_NAME_PROPERTY
-import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DEFAULT_NAMESPACE
-import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DISPLAY_NAME_PROPERTY
-import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.NAMESPACE_PROPERTY
-import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.NAME_PROPERTY
-import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.TARGETS_RELATIONSHIP
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.AUTH
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.AUTH_CONSTRAINT
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.AUTH_ID_PROPERTY
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.AUTH_PROVIDER_PROPERTY
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.AUTH_RULE
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.HAS_AUTH
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.ROLE
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_CREDENTIALS_EXPIRED_PROPERTY
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_CREDENTIALS_PROPERTY
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_HOME_DB_PROPERTY
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_ID_PROPERTY
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_NAME_PROPERTY
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_SUSPENDED_PROPERTY
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.COMPOSITE_DATABASE_LABEL
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.DATABASE_DEFAULT_LANGUAGE_PROPERTY
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.DATABASE_NAME
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.DATABASE_NAME_LABEL
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.DATABASE_NAME_PROPERTY
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.DEFAULT_NAMESPACE
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.DISPLAY_NAME_PROPERTY
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.NAMESPACE_PROPERTY
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.NAME_PROPERTY
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.TARGETS_RELATIONSHIP
 import org.neo4j.exceptions.CypherExecutionException
 import org.neo4j.exceptions.DatabaseAdministrationOnFollowerException
+import org.neo4j.exceptions.InternalException
 import org.neo4j.exceptions.InvalidArgumentException
 import org.neo4j.exceptions.ParameterNotFoundException
 import org.neo4j.exceptions.ParameterWrongTypeException
-import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation
-import org.neo4j.gqlstatus.GqlHelper.getGql22G03_22N27
-import org.neo4j.gqlstatus.GqlHelper.getGql42N51
-import org.neo4j.gqlstatus.GqlParams
-import org.neo4j.gqlstatus.GqlStatusInfoCodes
+import org.neo4j.gqlstatus.PrivilegeGqlCodeEntity
 import org.neo4j.graphdb.Direction
 import org.neo4j.graphdb.Transaction
 import org.neo4j.internal.helpers.collection.Iterators
@@ -84,23 +97,10 @@ import org.neo4j.server.security.SecureHasher
 import org.neo4j.server.security.SystemGraphCredential
 import org.neo4j.server.security.systemgraph.SecurityGraphHelper.NATIVE_AUTH
 import org.neo4j.server.security.systemgraph.UserSecurityGraphComponent
-import org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.AUTH_CONSTRAINT
-import org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.AUTH_ID
-import org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.AUTH_LABEL
-import org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.AUTH_PROVIDER
-import org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.HAS_AUTH
-import org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.USER_CREDENTIALS
-import org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.USER_EXPIRED
-import org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.USER_HOME_DB
-import org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.USER_ID
-import org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.USER_LABEL
-import org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.USER_NAME
-import org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.USER_SUSPENDED
 import org.neo4j.string.UTF8
 import org.neo4j.values.AnyValue
 import org.neo4j.values.storable.BooleanValue
 import org.neo4j.values.storable.ByteArray
-import org.neo4j.values.storable.IntValue
 import org.neo4j.values.storable.StringValue
 import org.neo4j.values.storable.TextValue
 import org.neo4j.values.storable.Value
@@ -125,26 +125,15 @@ trait AdministrationCommandRuntime extends CypherRuntime[RuntimeContext] {
 }
 
 object AdministrationCommandRuntime {
-  private[internal] val userLabel: String = USER_LABEL.name()
-  private[internal] val userIdPropKey: String = USER_ID
-  private[internal] val userNamePropKey: String = USER_NAME
-  private[internal] val userCredPropKey: String = USER_CREDENTIALS
-  private[internal] val userPwChangeReqPropKey: String = USER_EXPIRED
-  private[internal] val userSuspendedPropKey: String = USER_SUSPENDED
-  private[internal] val userHomeDbPropKey: String = USER_HOME_DB
-  private[internal] val authRelType: String = HAS_AUTH.name()
-  private[internal] val authLabel: String = AUTH_LABEL.name()
-  private[internal] val authProviderPropKey: String = AUTH_PROVIDER
-  private[internal] val authIdPropKey: String = AUTH_ID
-
-  private[internal] val followerError = "Administration commands must be executed on the LEADER server."
   private val secureHasher = new SecureHasher
   private val internalPrefix: String = "__internal_"
+  val resolved_databaseName: String = "resolved_databaseName"
+  val resolved_databaseUuid: String = "resolved_databaseUuid"
 
-  private[internal] def internalKey(name: String): String = internalPrefix + name
+  def internalKey(name: String): String = internalPrefix + name
 
   private[internal] def validatePassword(password: Array[Byte])(config: Config): Array[Byte] = {
-    if (password == null || password.length == 0) throw new InvalidArgumentException("A password cannot be empty.")
+    if (password == null || password.length == 0) throw InvalidArgumentException.providedPasswordEmpty()
 
     val minimumPasswordLength = config.get(GraphDatabaseSettings.auth_minimum_password_length)
     val cb = StandardCharsets.UTF_8.decode(ByteBuffer.wrap(password))
@@ -207,7 +196,10 @@ object AdministrationCommandRuntime {
           (_, params) => convertPasswordParameters(params)
         )
 
-      case _ => throw new IllegalStateException(s"Internal error when processing password.")
+      case _ => throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"Internal error when processing password."
+        )
     }
 
   private[internal] def getValidPasswordParameter(params: MapValue, passwordParameter: String): Array[Byte] = {
@@ -217,23 +209,9 @@ object AdministrationCommandRuntime {
       case s: StringValue =>
         UTF8.encode(s.stringValue()) // User parameters have String type
       case Values.NO_VALUE =>
-        throw new ParameterNotFoundException(s"Expected parameter(s): $passwordParameter")
+        throw ParameterNotFoundException.expectedParam(passwordParameter, params.keySet())
       case other =>
-        val pp = new PrettyPrinter
-        other.writeTo(pp)
-        val gql =
-          getGql42N51(
-            passwordParameter,
-            getGql22G03_22N27(
-              "******", // Obfuscate the wrongly formatted password to not leak sensitive information
-              GqlParams.StringParam.param.process(passwordParameter),
-              java.util.List.of("STRING")
-            )
-          )
-        throw new ParameterWrongTypeException(
-          gql,
-          s"Expected password parameter $$$passwordParameter to have type String but was ${other.getTypeName}"
-        )
+        throw ParameterWrongTypeException.expectedPasswordToBeString(passwordParameter, other.getTypeName)
     }
   }
 
@@ -251,29 +229,26 @@ object AdministrationCommandRuntime {
     param.parameterType match {
       case _: StringType =>
       case _ =>
-        val gql =
-          getGql42N51(
-            param.name,
-            getGql22G03_22N27(
-              "type " + String.valueOf(param.parameterType),
-              "password",
-              java.util.List.of("STRING")
-            )
-          )
-        throw new ParameterWrongTypeException(
-          gql,
-          s"Only $CTString values are accepted as password, got: " + param.parameterType
+        throw ParameterWrongTypeException.onlyStringValuesAsPassword(
+          param.name,
+          String.valueOf(CTString),
+          String.valueOf(param.parameterType)
         )
     }
   }
 
-  private[internal] def makeCreateUserExecutionPlan(
+  def getParameterName(parameter: Either[String, Parameter]): Option[String] =
+    // Either.toOption returns a Some containing the Right value if it exists or a None if this is a Left
+    parameter.toOption.map(_.name)
+
+  def makeCreateUserExecutionPlan(
     userName: Either[String, Parameter],
     suspended: Boolean,
     defaultDatabase: Option[HomeDatabaseAction],
     nativeAuth: Option[NativeAuth],
     externalAuths: Seq[ExternalAuth],
-    validateAuth: (Seq[ExternalAuth], Option[NativeAuth]) => QueryHandlerResult = (_, _) => Continue
+    validateAuth: (Seq[ExternalAuth], Option[NativeAuth]) => QueryHandlerResult = (_, _) => Continue,
+    tagWriter: Option[(Transaction, String, MapValue) => Boolean] = None
   )(
     sourcePlan: Option[ExecutionPlan],
     normalExecutionEngine: ExecutionEngine,
@@ -284,12 +259,22 @@ object AdministrationCommandRuntime {
     val passwordChangeRequiredKey = internalKey("passwordChangeRequired")
     val suspendedKey = internalKey("suspended")
     val uuidKey = internalKey("uuid")
-    val userId = Values.utf8Value(UUID.randomUUID().toString)
     val authKey = internalKey("auth")
     val homeDatabaseFields = defaultDatabase.map {
-      case RemoveHomeDatabaseAction => NameFields(s"${internalPrefix}homeDatabase", Values.NO_VALUE, IdentityConverter)
+      case RemoveHomeDatabaseAction => DatabaseNameFields(
+          s"${internalPrefix}homeDatabase",
+          Values.NO_VALUE,
+          s"${internalPrefix}homeDatabase_namespace",
+          Values.NO_VALUE,
+          s"${internalPrefix}homeDatabase_displayName",
+          Values.NO_VALUE,
+          s"${internalPrefix}homeDatabase_quotedDisplayName",
+          Values.NO_VALUE,
+          wasParameter = false,
+          IdentityConverter
+        )
       case SetHomeDatabaseAction(name) =>
-        getNameFields("homeDatabase", name.asLegacyName, s => new NormalizedDatabaseName(s).name())
+        getDatabaseNameFields("homeDatabase", name, emulateGetNameFields = true)
     }
     val userNameFields = getNameFields("username", userName)
     val nonPasswordParameterNames = Array(
@@ -297,19 +282,22 @@ object AdministrationCommandRuntime {
       uuidKey,
       suspendedKey,
       authKey
-    ) ++ homeDatabaseFields.map(_.nameKey) ++ changeRequiredOption.map(_ =>
+    ) ++ homeDatabaseFields.map(_.displayNameKey) ++ changeRequiredOption.map(_ =>
       passwordChangeRequiredKey
     )
     val credentialsOption = nativeAuth.map(_.password).collectFirst {
       case Some(Password(password, isEncrypted)) =>
         getPasswordExpression(password, isEncrypted, nonPasswordParameterNames)(config)
     }
-    val homeDatabaseCypher = homeDatabaseFields.map(ddf => s", $userHomeDbPropKey: $$`${ddf.nameKey}`").getOrElse("")
+    val homeDatabaseCypher = homeDatabaseFields.map(ddf =>
+      s", $USER_HOME_DB_PROPERTY: $$`${ddf.displayNameKey}`"
+    ).getOrElse("")
     val nativeAuthCypher = credentialsOption.map(credentials =>
-      s", $userCredPropKey: $$`${credentials.key}`, $userPwChangeReqPropKey: $$`$passwordChangeRequiredKey`"
+      s", $USER_CREDENTIALS_PROPERTY: $$`${credentials.key}`, $USER_CREDENTIALS_EXPIRED_PROPERTY: $$`$passwordChangeRequiredKey`"
     ).getOrElse("")
 
     def authMapGenerator: ParameterGenerationFunction = (_, _, params) => {
+      val userId = Values.utf8Value(UUID.randomUUID().toString)
       val authList = externalAuths.map(auth => {
         val id = runtimeStringValue(auth.id, params, prettyPrint = true)
         validateAuthId(id)
@@ -317,7 +305,7 @@ object AdministrationCommandRuntime {
       }) ++ nativeAuth.map(_ =>
         VirtualValues.map(Array("provider", "id"), Array(Values.utf8Value(NATIVE_AUTH), userId))
       )
-      VirtualValues.map(Array(authKey), Array(VirtualValues.list(authList: _*)))
+      VirtualValues.map(Array(authKey, uuidKey), Array(VirtualValues.list(authList: _*), userId))
     }
 
     val parameterTransformer = ParameterTransformer(authMapGenerator)
@@ -325,53 +313,44 @@ object AdministrationCommandRuntime {
       .optionallyConvert(homeDatabaseFields.map(_.nameConverter))
       .optionallyConvert(credentialsOption.map(_.mapValueConverter))
       .validate(isHomeDatabasePresent(homeDatabaseFields))
-    UpdatingSystemCommandExecutionPlan(
+    val createUserPlan: ExecutionPlan = UpdatingSystemCommandExecutionPlan(
       "CreateUser",
       normalExecutionEngine,
       securityAuthorizationHandler,
       // NOTE: If username already exists we will violate a constraint
-      s"""CREATE (u:$userLabel {$userNamePropKey: $$`${userNameFields.nameKey}`, $userIdPropKey: $$`$uuidKey`, $userSuspendedPropKey: $$`$suspendedKey`
+      s"""CREATE (u:$USER {$USER_NAME_PROPERTY: $$`${userNameFields.nameKey}`, $USER_ID_PROPERTY: $$`$uuidKey`, $USER_SUSPENDED_PROPERTY: $$`$suspendedKey`
          |$nativeAuthCypher
          |$homeDatabaseCypher })
          |WITH u
-         |CALL {
-         |  WITH u
+         |CALL (u) {
          |  UNWIND $$`$authKey` AS auth
-         |  CREATE (u)-[:$authRelType]->(:$authLabel {$authProviderPropKey: auth.provider, $authIdPropKey: auth.id})
+         |  CREATE (u)-[:$HAS_AUTH]->(:$AUTH {$AUTH_PROVIDER_PROPERTY: auth.provider, $AUTH_ID_PROPERTY: auth.id})
          |}
-         |RETURN u.$userNamePropKey""".stripMargin,
+         |RETURN u.$USER_NAME_PROPERTY""".stripMargin,
       VirtualValues.map(
         credentialsOption.map(credentials => Array(credentials.key, credentials.bytesKey)).getOrElse(
-          Array.empty
+          Array.empty[String]
         ) ++ nonPasswordParameterNames,
         credentialsOption.map(credentials => Array[AnyValue](credentials.value, credentials.bytesValue)).getOrElse(
-          Array.empty
+          Array.empty[AnyValue]
         )
           ++ Array[AnyValue](
             userNameFields.nameValue,
-            userId,
+            Values.NO_VALUE,
             Values.booleanValue(suspended),
             Values.NO_VALUE // generated
-          ) ++ homeDatabaseFields.map(_.nameValue) ++ changeRequiredOption.map(Values.booleanValue)
+          ) ++ homeDatabaseFields.map(_.displayNameValue) ++ changeRequiredOption.map(Values.booleanValue)
       ),
       QueryHandler
-        .handleNoResult(params =>
-          Some(ThrowException(
-            CypherExecutionException.createEntity("user", runtimeStringValue(userName, params))
-          ))
-        )
         .handleError((error, params) =>
           (error, error.getCause) match {
             case (_, e: UniquePropertyValueValidationException) =>
               if (e.constraint().getName.equals(AUTH_CONSTRAINT)) {
-                new InvalidArgumentException(
-                  s"Failed to create the specified user '${runtimeStringValue(userName, params)}': The combination of provider and id is already in use.",
-                  error
-                )
+                InvalidArgumentException.providerIdCombinationAlreadyInUseCreate(runtimeStringValue(userName, params));
               } else {
-                new InvalidArgumentException(
-                  s"Failed to create the specified user '${runtimeStringValue(userName, params)}': User already exists.",
-                  error
+                InvalidArgumentException.createEntityAlreadyExists(
+                  PrivilegeGqlCodeEntity.USER,
+                  runtimeStringValue(userName, params)
                 )
               }
             case (e: HasStatus, _) if e.status() == Status.Cluster.NotALeader =>
@@ -392,16 +371,25 @@ object AdministrationCommandRuntime {
       ),
       parameterTransformer = parameterTransformer
     )
+    tagWriter.fold(createUserPlan)(fn =>
+      SystemGraphWriteExecutionPlan(
+        "CreateUserSetTags",
+        securityAuthorizationHandler,
+        Some(createUserPlan),
+        WriteEffect.Subsumed((tx, _, params) => fn(tx, runtimeStringValue(userName, params), params))
+      )
+    )
   }
 
-  private[internal] def makeAlterUserExecutionPlan(
+  def makeAlterUserExecutionPlan(
     userName: Either[String, Parameter],
     suspended: Option[Boolean],
     homeDatabase: Option[HomeDatabaseAction],
     nativeAuth: Option[NativeAuth],
     externalAuths: Seq[ExternalAuth],
     removeAuths: RemoveAuth,
-    validateAuth: (Seq[ExternalAuth], Option[NativeAuth]) => QueryHandlerResult = (_, _) => Continue
+    validateAuth: (Seq[ExternalAuth], Option[NativeAuth]) => QueryHandlerResult = (_, _) => Continue,
+    tagWriter: Option[(Transaction, String, MapValue) => Boolean] = None
   )(
     sourcePlan: Option[ExecutionPlan],
     normalExecutionEngine: ExecutionEngine,
@@ -415,21 +403,32 @@ object AdministrationCommandRuntime {
     val removeNativeKey = internalKey("removeNative")
     val enforceAuthKey = internalKey("enforceAuth")
     val homeDatabaseFields = homeDatabase.map {
-      case RemoveHomeDatabaseAction => NameFields(s"${internalPrefix}homeDatabase", Values.NO_VALUE, IdentityConverter)
+      case RemoveHomeDatabaseAction => DatabaseNameFields(
+          s"${internalPrefix}homeDatabase",
+          Values.NO_VALUE,
+          s"${internalPrefix}homeDatabase_namespace",
+          Values.NO_VALUE,
+          s"${internalPrefix}homeDatabase_displayName",
+          Values.NO_VALUE,
+          s"${internalPrefix}homeDatabase_quotedDisplayName",
+          Values.NO_VALUE,
+          wasParameter = false,
+          IdentityConverter
+        )
       case SetHomeDatabaseAction(name) =>
-        getNameFields("homeDatabase", name.asLegacyName, s => new NormalizedDatabaseName(s).name())
+        getDatabaseNameFields("homeDatabase", name, emulateGetNameFields = true)
     }
-    val nonPasswordParameterNames = Array(userNameFields.nameKey) ++ homeDatabaseFields.map(_.nameKey) ++
+    val nonPasswordParameterNames = Array(userNameFields.nameKey) ++ homeDatabaseFields.map(_.displayNameKey) ++
       Array(setAuthKey, removeAuthKey, removeNativeKey, enforceAuthKey)
     val maybePw = nativeAuth.map(_.password).collectFirst {
       case Some(Password(password, isEncrypted)) =>
         getPasswordExpression(password, isEncrypted, nonPasswordParameterNames)(config)
     }
     val params = Seq(
-      maybePw -> userCredPropKey,
-      nativeAuth.flatMap(_.changeRequired) -> userPwChangeReqPropKey,
-      suspended -> userSuspendedPropKey,
-      homeDatabaseFields -> userHomeDbPropKey
+      maybePw -> USER_CREDENTIALS_PROPERTY,
+      nativeAuth.flatMap(_.changeRequired) -> USER_CREDENTIALS_EXPIRED_PROPERTY,
+      suspended -> USER_SUSPENDED_PROPERTY,
+      homeDatabaseFields -> USER_HOME_DB_PROPERTY
     ).flatMap { param =>
       param._1 match {
         case None                    => Seq.empty
@@ -437,21 +436,14 @@ object AdministrationCommandRuntime {
         case Some(passwordExpression: PasswordExpression) =>
           Seq((param._2, passwordExpression.key, passwordExpression.value))
         case Some(nameFields: NameFields) => Seq((param._2, nameFields.nameKey, nameFields.nameValue))
-        case Some(p)                      =>
+        case Some(nameFields: DatabaseNameFields) => Seq(
+            (param._2, nameFields.displayNameKey, nameFields.displayNameValue)
+          )
+        case Some(p) =>
           // The $input (...getSimpleName) is a bit strange, but it's fine as this error should not happen as we only give the expected values in the loop
-          val gql = {
-            getGql42N51(
-              String.valueOf(p),
-              getGql22G03_22N27(
-                String.valueOf(p.getClass.getSimpleName),
-                GqlParams.StringParam.cmd.process("ALTER USER"),
-                java.util.List.of("BOOLEAN", "STRING")
-              )
-            )
-          }
-          throw new InvalidArgumentException(
-            gql,
-            s"Invalid option type for ALTER USER, expected PasswordExpression, Boolean, String or Parameter but got: ${p.getClass.getSimpleName}"
+          throw InvalidArgumentException.invalidOptionTypeForAlterUser(
+            String.valueOf(p),
+            String.valueOf(p.getClass.getSimpleName)
           )
       }
     }
@@ -509,24 +501,22 @@ object AdministrationCommandRuntime {
     val removeAuthString = {
       val authMatch =
         if (removeAuths.all)
-          s"OPTIONAL MATCH (user)-[:$authRelType]->(a:$authLabel)"
+          s"OPTIONAL MATCH (user)-[:$HAS_AUTH]->(a:$AUTH)"
         else
           s"""UNWIND $$`$removeAuthKey` AS auth
-             |  OPTIONAL MATCH (user)-[:$authRelType]->(a:$authLabel {$authProviderPropKey: auth})""".stripMargin
+             |  OPTIONAL MATCH (user)-[:$HAS_AUTH]->(a:$AUTH {$AUTH_PROVIDER_PROPERTY: auth})""".stripMargin
 
       s"""WITH user, oldCredentials
-         |CALL {
-         |  WITH user
+         |CALL (user) {
          |  WITH user,
          |  CASE
          |    WHEN $$`$removeNativeKey` THEN {credentials: null, change: null}
-         |    ELSE {credentials: user.$userCredPropKey, change: user.$userPwChangeReqPropKey}
+         |    ELSE {credentials: user.$USER_CREDENTIALS_PROPERTY, change: user.$USER_CREDENTIALS_EXPIRED_PROPERTY}
          |  END AS cMap
-         |  SET user.$userCredPropKey = cMap.credentials, user.$userPwChangeReqPropKey = cMap.change
+         |  SET user.$USER_CREDENTIALS_PROPERTY = cMap.credentials, user.$USER_CREDENTIALS_EXPIRED_PROPERTY = cMap.change
          |}
          |WITH user, oldCredentials
-         |CALL {
-         |  WITH user
+         |CALL (user) {
          |  $authMatch
          |  DETACH DELETE (a)
          |}""".stripMargin
@@ -534,32 +524,31 @@ object AdministrationCommandRuntime {
 
     val addNativeAuthString =
       if (nativeAuth.nonEmpty)
-        s"""MERGE (user)-[:$authRelType]->(:$authLabel {$authProviderPropKey: '$NATIVE_AUTH', $authIdPropKey: user.$userIdPropKey})
-           |SET user.$userPwChangeReqPropKey = coalesce(user.$userPwChangeReqPropKey, true)""".stripMargin
+        s"""MERGE (user)-[:$HAS_AUTH]->(:$AUTH {$AUTH_PROVIDER_PROPERTY: '$NATIVE_AUTH', $AUTH_ID_PROPERTY: user.$USER_ID_PROPERTY})
+           |SET user.$USER_CREDENTIALS_EXPIRED_PROPERTY = coalesce(user.$USER_CREDENTIALS_EXPIRED_PROPERTY, true)""".stripMargin
       else ""
 
     val nativeAuthValid =
       s"""
          |WITH user, oldCredentials
-         |OPTIONAL MATCH (user)-[:$authRelType]->(nativeAuth:$authLabel {$authProviderPropKey: '$NATIVE_AUTH'})
+         |OPTIONAL MATCH (user)-[:$HAS_AUTH]->(nativeAuth:$AUTH {$AUTH_PROVIDER_PROPERTY: '$NATIVE_AUTH'})
          |WITH user, oldCredentials,
          | CASE EXISTS { (nativeAuth) }
-         |  WHEN true THEN EXISTS { (user) WHERE user.$userCredPropKey IS NOT NULL AND user.$userPwChangeReqPropKey IS NOT NULL }
+         |  WHEN true THEN EXISTS { (user) WHERE user.$USER_CREDENTIALS_PROPERTY IS NOT NULL AND user.$USER_CREDENTIALS_EXPIRED_PROPERTY IS NOT NULL }
          |  ELSE true
          | END AS validNativeAuth
          |""".stripMargin
 
     val addAuthString =
       s"""WITH user, oldCredentials
-         |CALL {
-         |  WITH user
+         |CALL (user) {
          |  UNWIND $$`$setAuthKey` AS auth
-         |  MERGE (user)-[:$authRelType]->(a:$authLabel {$authProviderPropKey: auth.provider}) SET a.$authIdPropKey = auth.id
+         |  MERGE (user)-[:$HAS_AUTH]->(a:$AUTH {$AUTH_PROVIDER_PROPERTY: auth.provider}) SET a.$AUTH_ID_PROPERTY = auth.id
          |}""".stripMargin
 
     val enforceAuthString =
       s"""CASE $$`$enforceAuthKey`
-         | WHEN true THEN EXISTS { (user)-[:$authRelType]->(:$authLabel) }
+         | WHEN true THEN EXISTS { (user)-[:$HAS_AUTH]->(:$AUTH) }
          | ELSE true
          |END AS authOk
          |""".stripMargin
@@ -571,31 +560,31 @@ object AdministrationCommandRuntime {
       .optionallyConvert(homeDatabaseFields.map(_.nameConverter))
       .optionallyConvert(maybePw.map(_.mapValueConverter))
       .validate(isHomeDatabasePresent(homeDatabaseFields))
-    UpdatingSystemCommandExecutionPlan(
+    val alterUserPlan: ExecutionPlan = UpdatingSystemCommandExecutionPlan(
       "AlterUser",
       normalExecutionEngine,
       securityAuthorizationHandler,
-      s"""MATCH (user:$userLabel {$userNamePropKey: $$`${userNameFields.nameKey}`})
-         |WITH user, user.$userCredPropKey AS oldCredentials
+      s"""MATCH (user:$USER {$USER_NAME_PROPERTY: $$`${userNameFields.nameKey}`})
+         |WITH user, user.$USER_CREDENTIALS_PROPERTY AS oldCredentials
          |$removeAuthString
          |$setParts
          |$addNativeAuthString
          |$addAuthString
          |$nativeAuthValid
-         |RETURN EXISTS { (user:$userLabel {$userNamePropKey: $$`${userNameFields.nameKey}`}) } AS exists,
+         |RETURN EXISTS { (user:$USER {$USER_NAME_PROPERTY: $$`${userNameFields.nameKey}`}) } AS exists,
          |oldCredentials, $enforceAuthString, validNativeAuth """.stripMargin,
       VirtualValues.map(parameterKeys, parameterValues),
       QueryHandler
         .handleNoResult(p =>
-          Some(ThrowException(InvalidArgumentException.alterMissingUser(runtimeStringValue(userName, p))))
+          Some(ThrowException(InvalidArgumentException.alterMissingUser(
+            runtimeStringValue(userName, p),
+            getParameterName(userName).orNull
+          )))
         )
         .handleError((error, p) =>
           (error, error.getCause) match {
             case (_, _: UniquePropertyValueValidationException) =>
-              new InvalidArgumentException(
-                s"Failed to alter the specified user '${runtimeStringValue(userName, p)}': The combination of provider and id is already in use.",
-                error
-              )
+              InvalidArgumentException.providerIdCombinationAlreadyInUseAlter(runtimeStringValue(userName, p))
             case (e: HasStatus, _) if e.status() == Status.Cluster.NotALeader =>
               DatabaseAdministrationOnFollowerException.notALeader(
                 "ALTER USER",
@@ -607,8 +596,9 @@ object AdministrationCommandRuntime {
         )
         .handleResult {
           case (0, value: BooleanValue, p) if !value.booleanValue() =>
-            ThrowException(new InvalidArgumentException(
-              s"Failed to alter the specified user '${runtimeStringValue(userName, p)}': User does not exist."
+            ThrowException(InvalidArgumentException.alterMissingUser(
+              runtimeStringValue(userName, p),
+              getParameterName(userName).orNull
             ))
           case (1, value: TextValue, p) =>
             maybePw.map {
@@ -621,9 +611,7 @@ object AdministrationCommandRuntime {
                 } else validateAuth(externalAuths, nativeAuth)
             }.getOrElse(validateAuth(externalAuths, nativeAuth))
           case (2, value: BooleanValue, _) if !value.booleanValue() =>
-            ThrowException(new InvalidArgumentException(
-              "User has no auth provider. Add at least one auth provider for the user or consider suspending them."
-            ))
+            ThrowException(InvalidArgumentException.atLeastOneAuthProviderRequired())
           case (3, value: BooleanValue, _) if !value.booleanValue() =>
             ThrowException(InvalidArgumentException.missingMandatoryAuthClause(
               "SET PASSWORD",
@@ -639,14 +627,22 @@ object AdministrationCommandRuntime {
       parameterTransformer =
         parameterTransformer
     )
+    tagWriter.fold(alterUserPlan)(fn =>
+      SystemGraphWriteExecutionPlan(
+        "AlterUserSetTags",
+        securityAuthorizationHandler,
+        Some(alterUserPlan),
+        WriteEffect.Subsumed((tx, _, params) => fn(tx, runtimeStringValue(userName, params), params))
+      )
+    )
   }
 
-  private def isHomeDatabasePresent(homeDatabaseFields: Option[NameFields])(
+  private def isHomeDatabasePresent(homeDatabaseFields: Option[DatabaseNameFields])(
     tx: Transaction,
     params: MapValue
   ): (MapValue, Set[InternalNotification]) =
     homeDatabaseFields.map(ddf => {
-      params.get(ddf.nameKey) match {
+      params.get(ddf.displayNameKey) match {
         case tv: TextValue =>
           val notifications: Set[InternalNotification] =
             if (Iterators.asList(tx.findNodes(DATABASE_NAME_LABEL, DISPLAY_NAME_PROPERTY, tv.stringValue())).isEmpty) {
@@ -659,8 +655,8 @@ object AdministrationCommandRuntime {
       }
     }).getOrElse((params, Set.empty))
 
-  private[internal] def makeRenameExecutionPlan(
-    entity: PrivilegeGQLCodeEntity,
+  def makeRenameExecutionPlan(
+    entityType: PrivilegeGqlCodeEntity,
     namePropKey: String,
     fromName: Either[String, Parameter],
     toName: Either[String, Parameter],
@@ -670,6 +666,13 @@ object AdministrationCommandRuntime {
     normalExecutionEngine: ExecutionEngine,
     securityAuthorizationHandler: SecurityAuthorizationHandler
   ): ExecutionPlan = {
+    val entity = entityType match {
+      case PrivilegeGqlCodeEntity.USER           => USER
+      case PrivilegeGqlCodeEntity.ROLE           => ROLE
+      case PrivilegeGqlCodeEntity.AUTHRULE       => AUTH_RULE
+      case PrivilegeGqlCodeEntity.DATABASE       => DATABASE_NAME
+      case PrivilegeGqlCodeEntity.DATABASE_ALIAS => DATABASE_NAME
+    }
     val fromNameFields = getNameFields("fromName", fromName)
     val toNameFields = getNameFields("toName", toName)
 
@@ -691,30 +694,29 @@ object AdministrationCommandRuntime {
       QueryHandler
         .handleNoResult(p => {
           Some(ThrowException(InvalidArgumentException.renameEntityNotFound(
-            entityNotFoundGqlStatus(entity, entity.toString),
-            entity.toString.toLowerCase(Locale.ROOT),
+            entityType,
             runtimeStringValue(fromName, p),
-            runtimeStringValue(toName, p)
+            runtimeStringValue(toName, p),
+            getParameterName(fromName).orNull
           )))
         })
         .handleError((error, p) =>
           (error, error.getCause) match {
             case (_, _: UniquePropertyValueValidationException) =>
               InvalidArgumentException.renameEntityAlreadyExists(
-                entityAlreadyExistsGqlStatus(entity, entity.toString),
-                entity.toString,
+                entityType,
                 runtimeStringValue(fromName, p),
-                runtimeStringValue(toName, p),
-                error
+                runtimeStringValue(toName, p)
+                // Not including the cause as that would be leaking information, we can consider logging it instead
               )
             case (e: HasStatus, _) if e.status() == Status.Cluster.NotALeader =>
               DatabaseAdministrationOnFollowerException.notALeader(
-                s"RENAME ${entity.toString.toUpperCase(Locale.ROOT)}",
-                s"Failed to rename the specified ${entity.toString.toLowerCase(Locale.ROOT)} '${runtimeStringValue(fromName, p)}'",
+                s"RENAME ${entity.toUpperCase(Locale.ROOT)}",
+                s"Failed to rename the specified ${entity.toLowerCase(Locale.ROOT)} '${runtimeStringValue(fromName, p)}'",
                 error
               )
             case _ => CypherExecutionException.renameEntityCause(
-                entity.toString.toLowerCase(Locale.ROOT),
+                entity.toLowerCase(Locale.ROOT),
                 runtimeStringValue(fromName, p),
                 runtimeStringValue(toName, p),
                 error
@@ -735,7 +737,7 @@ object AdministrationCommandRuntime {
    * @param valueMapper function to apply to the value
    * @return
    */
-  private[internal] def getNameFields(
+  def getNameFields(
     key: String,
     name: Either[String, Parameter],
     valueMapper: String => String = identity
@@ -758,13 +760,17 @@ object AdministrationCommandRuntime {
    *
    * @param nameKey parameter key used in the "inner" cypher
    * @param name the namespaced name or parameter
+   * @param emulateGetNameFields make this behave closer to getNameFields to keep existing behaviour for example for create database
    * @return
    */
-  private[internal] def getDatabaseNameFields(
+  def getDatabaseNameFields(
     nameKey: String,
-    name: DatabaseName
+    name: DatabaseName,
+    emulateGetNameFields: Boolean = false
   ): DatabaseNameFields = {
-    val valueMapper: String => String = new NormalizedDatabaseName(_).name()
+    // NOTE: valueMapper and backtick are used in different order, ensure that valueMapper doesn't affect backticks
+    val valueMapper: String => String = NormalizedDatabaseName.normalize
+    def backtick(s: String) = ExpressionStringifier().backtick(s)
     name match {
       case name @ NamespacedName(_, None) =>
         DatabaseNameFields(
@@ -774,6 +780,8 @@ object AdministrationCommandRuntime {
           Values.utf8Value(DEFAULT_NAMESPACE),
           s"$internalPrefix${nameKey}_displayName",
           Values.utf8Value(valueMapper(name.name)),
+          s"$internalPrefix${nameKey}_quotedDisplayName",
+          Values.utf8Value(backtick(valueMapper(name.name))),
           wasParameter = false,
           IdentityConverter
         )
@@ -788,129 +796,65 @@ object AdministrationCommandRuntime {
             if (namespace == DEFAULT_NAMESPACE) valueMapper(name.name)
             else valueMapper(namespace) + "." + valueMapper(name.name)
           ),
+          s"$internalPrefix${nameKey}_quotedDisplayName",
+          Values.utf8Value(
+            if (namespace == DEFAULT_NAMESPACE) backtick(valueMapper(name.name))
+            else backtick(valueMapper(namespace)) + "." + backtick(valueMapper(name.name))
+          ),
           wasParameter = false,
           IdentityConverter
         )
-      case pn @ ParameterName(parameter) =>
-        def rename: String => String = paramName => internalKey(paramName)
-        val displayNameKey = internalKey(parameter.name + "_displayName")
+      case pn: ParameterName =>
+        // use 'real' parameter name to fetch values with `pn.getNameParts`
+        // but then the internal name (nameKey) to not cause namespace collision with other internal parameters
+        // similar as what `RenamingStringParameterConverter` does for `getNameFields`
+        val displayNameKey = internalKey(nameKey + "_displayName")
+        val quotedDisplayNameKey = internalKey(nameKey + "_quotedDisplayName")
         DatabaseNameFields(
-          rename(parameter.name),
+          internalKey(nameKey),
           Values.NO_VALUE,
-          internalKey(parameter.name + "_namespace"),
+          internalKey(nameKey + "_namespace"),
           Values.utf8Value(DEFAULT_NAMESPACE),
           displayNameKey,
           Values.NO_VALUE,
+          quotedDisplayNameKey,
+          Values.NO_VALUE,
           wasParameter = true,
           (_, params) => {
-            val (namespace, name, displayName) = pn.getNameParts(params, DEFAULT_NAMESPACE)
+            val (namespace, name, displayName, quotedDisplayName) =
+              pn.getNameParts(MapBasedParameterProvider(params), DEFAULT_NAMESPACE, emulateGetNameFields)
             params.updatedWith(
-              internalKey(parameter.name + "_namespace"),
+              internalKey(nameKey + "_namespace"),
               Values.utf8Value(valueMapper(namespace.getOrElse(DEFAULT_NAMESPACE)))
             )
-              .updatedWith(internalKey(parameter.name), Values.utf8Value(valueMapper(name)))
+              .updatedWith(internalKey(nameKey), Values.utf8Value(valueMapper(name)))
               .updatedWith(displayNameKey, Values.utf8Value(valueMapper(displayName)))
+              .updatedWith(quotedDisplayNameKey, Values.utf8Value(valueMapper(quotedDisplayName)))
           }
         )
     }
   }
 
-  private[internal] def runtimeIntInRange(
-    params: MapValue,
-    lower: Int,
-    upper: Int,
-    component: String
-  )(literalOrParam: Either[Int, Parameter]): Int = {
-    val value = runtimeIntValue(literalOrParam, params, component)
-    if (value < lower || value > upper) {
-      literalOrParam match {
-        case Right(param) =>
-          throw parameterOutOfNumericRangeException(
-            param,
-            component,
-            Values.intValue(value),
-            lower = lower,
-            upper = upper
-          )
-        case Left(_) =>
-          // This should have been caught in semantic checking
-          throw CypherExecutionException.internalError(
-            "Cypher Execution",
-            s"Numeric value for $component out of range of valid values",
-            null
-          )
-      }
-    }
-    value
-  }
-
-  private[internal] def runtimeStringValue(field: DatabaseName, params: MapValue): String = field match {
+  def runtimeStringValue(field: DatabaseName, params: MapValue): String = field match {
     case n: NamespacedName => n.toString
-    case ParameterName(p)  => runtimeStringValue(p.name, params, prettyPrint = false)
+    case pn: ParameterName => runtimeStringValue(pn.parameter.name, params, prettyPrint = false)
   }
 
-  private[internal] def runtimeIntValue(either: Either[Int, Parameter], params: MapValue, component: String): Int = {
-    either match {
-      case Left(literal) => literal
-      case Right(param) => params.get(param.name) match {
-          case i: IntValue => i.value()
-          case invalidType =>
-            throw parameterWrongTypeException(
-              param,
-              invalidType,
-              java.util.List.of(CTInteger.toCypherTypeString),
-              component
-            )
-        }
-    }
-  }
-
-  private def parameterWrongTypeException(
-    parameter: Parameter,
-    value: AnyValue,
-    expected: java.util.List[String],
-    component: String
-  ): ParameterWrongTypeException = {
-    val gql = getGql42N51(
-      parameter.name,
-      getGql22G03_22N27(value.toString, component, expected)
-    )
-    new ParameterWrongTypeException(gql, gql.getMessage)
-  }
-
-  private def parameterOutOfNumericRangeException(
-    parameter: Parameter,
-    component: String,
-    value: IntValue,
-    lower: Int,
-    upper: Int
-  ): InvalidArgumentException = {
-    val gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N51)
-      .withParam(GqlParams.StringParam.param, parameter.name)
-      .withCause(
-        ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N03)
-          .withParam(GqlParams.StringParam.component, component)
-          .withParam(GqlParams.StringParam.valueType, value.getTypeName)
-          .withParam(GqlParams.NumberParam.lower, lower)
-          .withParam(GqlParams.NumberParam.upper, upper)
-          .withParam(GqlParams.StringParam.value, String.valueOf(value.value()))
-          .build()
-      )
-      .build()
-    new InvalidArgumentException(gql, gql.getMessage)
-  }
-
-  private[internal] def runtimeStringValue(field: Either[String, Parameter], params: MapValue): String = field match {
-    case Left(s)  => s
+  def runtimeStringValue(
+    field: Either[String, Parameter],
+    params: MapValue,
+    literalValueMapper: String => String = identity
+  ): String = field match {
+    case Left(s)  => literalValueMapper(s)
     case Right(p) => runtimeStringValue(p.name, params, prettyPrint = false)
   }
 
-  private[internal] def runtimeStringValue(field: Expression, params: MapValue, prettyPrint: Boolean): String = ({
+  def runtimeStringValue(field: Expression, params: MapValue, prettyPrint: Boolean): String = ({
     case StringLiteral(s) => s
     case p: Parameter     => runtimeStringValue(p.name, params, prettyPrint)
   }: PartialFunction[Expression, String]).apply(field)
 
-  private[internal] def runtimeStringValue(parameter: String, params: MapValue, prettyPrint: Boolean): String = {
+  def runtimeStringValue(parameter: String, params: MapValue, prettyPrint: Boolean): String = {
     val value: AnyValue =
       if (params.containsKey(parameter))
         params.get(parameter)
@@ -919,32 +863,25 @@ object AdministrationCommandRuntime {
     value match {
       case tv: TextValue => tv.stringValue()
       case _ =>
-        val (p, v) = if (prettyPrint) {
-          val pp = new PrettyPrinter()
-          value.writeTo(pp)
-          (s"`$$$parameter`", s"`${pp.value()}`.")
-        } else (s"$$$parameter", value.toString)
-        val prettyParam = new PrettyPrinter()
-        value.writeTo(prettyParam)
-        val gql =
-          getGql42N51(
-            p,
-            getGql22G03_22N27(
-              prettyParam.value,
-              GqlParams.StringParam.param.process(parameter),
-              java.util.List.of("STRING")
-            )
-          )
-        throw new ParameterWrongTypeException(gql, s"Expected parameter $p to have type String but was $v")
+        throw ParameterWrongTypeException.expectedParameterToBeString42N51(
+          prettyPrint,
+          parameter,
+          String.valueOf(value),
+          value.prettify()
+        )
     }
   }
 
-  private[internal] def runtimeStringListValue(field: Expression, params: MapValue): List[String] = field match {
+  def runtimeStringListValue(
+    field: Expression,
+    params: MapValue,
+    allowEmptyList: Boolean = false
+  ): List[String] = field match {
     case StringLiteral(s) if s.nonEmpty => List(s)
     case l: ListLiteral
       if l.expressions.forall(e =>
         e.isInstanceOf[StringLiteral] && e.asInstanceOf[StringLiteral].value.nonEmpty
-      ) && l.expressions.nonEmpty =>
+      ) && (allowEmptyList || l.expressions.nonEmpty) =>
       l.expressions.map(_.asInstanceOf[StringLiteral].value).toList
     case p: Parameter =>
       val value: AnyValue =
@@ -956,30 +893,33 @@ object AdministrationCommandRuntime {
       val pp = new PrettyPrinter()
       value match {
         case tv: TextValue if tv.stringValue().nonEmpty => List(tv.stringValue())
-        case lv: ListValue if lv.nonEmpty =>
+        case lv: ListValue if allowEmptyList || lv.nonEmpty =>
           lv.iterator().asScala.map {
             case tv: TextValue if tv.stringValue().nonEmpty => tv.stringValue()
             case v =>
               v.writeTo(pp)
-              throw new ParameterWrongTypeException(
-                s"Expected parameter `$$${p.name}` to only contain non-empty Strings but contained `${pp.value()}`."
+              throw ParameterWrongTypeException.expectedListParameterToContainStrings(
+                p.name,
+                pp.value()
               )
           }.toList
         case _ =>
           value.writeTo(pp)
-          throw new ParameterWrongTypeException(
-            s"Expected parameter `$$${p.name}` to be a non-empty String or a non-empty List of non-empty Strings but was `${pp.value()}`."
-          )
+          throw ParameterWrongTypeException.expectedStringOrStringList2(p.name, pp.value());
       }
     case _ =>
       // this fails in parsing or semantic checking, but is needed for scala warnings
-      throw new InvalidArgumentException(
-        s"Expected non-empty String or non-empty List of non-empty Strings but was `${field.asCanonicalStringVal}`."
+      val listDescription =
+        if (allowEmptyList) "List of non-empty Strings"
+        else "non-empty List of non-empty Strings"
+      throw CypherExecutionException.internalError(
+        this.getClass.getSimpleName,
+        s"Expected non-empty String or $listDescription but was `${field.asCanonicalStringVal}`."
       )
   }
 
   private def validateAuthId(id: String): Unit =
-    if (id.isEmpty) throw new InvalidArgumentException("Invalid input. Auth id is not allowed to be an empty string.")
+    if (id.isEmpty) throw InvalidArgumentException.notAllowedToBeEmptyString("Auth id")
 
   private case class RenamingStringParameterConverter(
     parameter: String,
@@ -991,13 +931,11 @@ object AdministrationCommandRuntime {
       val paramValue = params.get(parameter)
       // Check the parameter is actually the expected type
       if (!paramValue.isInstanceOf[TextValue]) {
-        val pp = new PrettyPrinter
-        paramValue.writeTo(pp)
-        val gql =
-          getGql22G03_22N27(pp.value, GqlParams.StringParam.param.process(parameter), java.util.List.of("STRING"))
-        throw new ParameterWrongTypeException(
-          gql,
-          s"Expected parameter $$$parameter to have type String but was $paramValue"
+        throw ParameterWrongTypeException.expectedParameterToBeString42N51(
+          false,
+          parameter,
+          String.valueOf(paramValue),
+          paramValue.prettify()
         )
       } else params.updatedWith(name, valueMapper(params.get(parameter).asInstanceOf[TextValue]))
     }
@@ -1024,14 +962,19 @@ object AdministrationCommandRuntime {
     namespaceValue: Value,
     displayNameKey: String,
     displayNameValue: Value,
+    quotedDisplayNameKey: String,
+    quotedDisplayNameValue: Value,
     wasParameter: Boolean,
     override val nameConverter: (Transaction, MapValue) => MapValue
   ) extends NameConverter {
 
-    val keys: Array[String] = Array(nameKey, namespaceKey, displayNameKey)
-    val values: Array[AnyValue] = Array(nameValue, namespaceValue, displayNameValue)
+    val keys: Array[String] = Array(nameKey, namespaceKey, displayNameKey, quotedDisplayNameKey)
+    val values: Array[AnyValue] = Array(nameValue, namespaceValue, displayNameValue, quotedDisplayNameValue)
 
-    def asNodeFilter: String = s"{$NAME_PROPERTY: $$`$nameKey`, $NAMESPACE_PROPERTY: $$`$namespaceKey`}"
+    def asNodeFilter(cypherVersion: CypherVersion): String = cypherVersion match {
+      case CypherVersion.Cypher5 => s"{$NAME_PROPERTY: $$`$nameKey`, $NAMESPACE_PROPERTY: $$`$namespaceKey`}"
+      case _                     => s"{$DISPLAY_NAME_PROPERTY: $$`$displayNameKey`}"
+    }
 
   }
 
@@ -1045,47 +988,130 @@ object AdministrationCommandRuntime {
   /*
    * This is a bit of a kludge to get around database names being ambiguous in 5.0 for backward
    * compatibility. We assume that 'db.name' means 'name' in composite 'db' but in case db does
-   * not exist we need to rewrite the parameters to mean 'db.name' in the default namespace. Also flag
-   * this usage as deprecated.
+   * not exist we need to rewrite the parameters to mean 'db.name' in the default namespace.
    */
-  def checkNamespaceExists(aliasNameFields: DatabaseNameFields)(
-    tx: Transaction,
-    params: MapValue
-  ): (MapValue, Set[InternalNotification]) = {
+  def checkNamespaceExists(
+    aliasNameFields: DatabaseNameFields,
+    context: AdministrationCommandRuntimeContext
+  )(tx: Transaction, params: MapValue): (MapValue, Set[InternalNotification]) = {
 
-    def paramString(key: String) = params.get(key).asInstanceOf[StringValue].stringValue()
-
-    if (paramString(aliasNameFields.namespaceKey) != DEFAULT_NAMESPACE) {
-      // Check to see if there is a composite database node for this alias
-      // MATCH (dbname:DatabaseName{name: name})-[:TARGETS]->(:CompositeDatabase) WHERE dbname.namespace = namespace
-      val compositeDatabaseExists = Using.resource(tx.findNodes(
-        DATABASE_NAME_LABEL,
-        DATABASE_NAME_PROPERTY,
-        paramString(aliasNameFields.namespaceKey)
-      )) { nodes =>
-        nodes.asScala.exists(n =>
-          n.getProperty(NAMESPACE_PROPERTY).equals(DEFAULT_NAMESPACE) && n.getSingleRelationship(
-            TARGETS_RELATIONSHIP,
-            Direction.OUTGOING
-          ).getEndNode.hasLabel(COMPOSITE_DATABASE_LABEL)
-        )
-      }
-      if (!compositeDatabaseExists) {
-        val aliasName = paramString(aliasNameFields.namespaceKey) + "." + paramString(aliasNameFields.nameKey)
-        // This is just a regular local alias with . in the name, so use the default namespace
-        (
-          params.updatedWith(
-            aliasNameFields.nameKey,
-            Values.utf8Value(aliasName)
-          )
-            .updatedWith(aliasNameFields.namespaceKey, Values.utf8Value(DEFAULT_NAMESPACE)),
-          if (aliasNameFields.wasParameter) Set.empty else Set(DeprecatedDatabaseNameNotification(aliasName, None))
-        )
-      } else {
-        (params, Set.empty)
-      }
-    } else {
+    if (context.runtimeContext.cypherVersion != CypherVersion.Cypher5) {
+      // Cypher 25+ ignores namespace/name split for lookup and has special handling for create
+      // See updateNamespaceToMatchingComposite for Cypher25 behaviour
       (params, Set.empty)
+    } else {
+      val namespace = runtimeStringValue(aliasNameFields.namespaceKey, params, prettyPrint = false)
+      // Check to see if there is a composite database node for this alias
+      if (namespace == DEFAULT_NAMESPACE || compositeNamespaces(tx).contains(namespace)) {
+        (params, Set.empty)
+      } else {
+        // Composite namespace doesn't exist
+        interpretNamespaceAsPartOfName(aliasNameFields, params)
+      }
     }
   }
+
+  def updateNamespaceToMatchingComposite(
+    cypherVersion: CypherVersion,
+    aliasNameFields: DatabaseNameFields
+  )(tx: Transaction, params: MapValue): MapValue = {
+    if (cypherVersion == CypherVersion.Cypher5) {
+      // See checkNamespaceExists for Cypher5 behaviour
+      params
+    } else {
+      val fullName = runtimeStringValue(aliasNameFields.displayNameKey, params, prettyPrint = false)
+      findNamespaceNameSplit(compositeNamespaces(tx), fullName) match {
+        case Some((namespace, name)) =>
+          params
+            .updatedWith(aliasNameFields.namespaceKey, Values.utf8Value(namespace))
+            .updatedWith(aliasNameFields.nameKey, Values.utf8Value(name))
+        case None =>
+          params
+            .updatedWith(aliasNameFields.namespaceKey, Values.utf8Value(DEFAULT_NAMESPACE))
+            .updatedWith(aliasNameFields.nameKey, Values.utf8Value(fullName))
+      }
+    }
+  }
+
+  private def compositeNamespaces(tx: Transaction): Seq[String] = {
+    // List all composite database namespaces
+    // MATCH (dbname:DatabaseName)-[:TARGETS]->(:CompositeDatabase) RETURN dbname.namespace
+    Using.resource(tx.findNodes(
+      DATABASE_NAME_LABEL
+    )) { nodes =>
+      nodes.asScala
+        .filter(_
+          .getProperty(NAMESPACE_PROPERTY)
+          .equals(DEFAULT_NAMESPACE))
+        .filter(nameNode =>
+          Option(nameNode.getSingleRelationship(TARGETS_RELATIONSHIP, Direction.OUTGOING))
+            .exists(_
+              .getEndNode
+              .hasLabel(COMPOSITE_DATABASE_LABEL))
+        )
+        .map(_.getProperty(DATABASE_NAME_PROPERTY))
+        .flatMap {
+          case s: String => Some(s)
+          case _         => None // Covers both null and non-string values
+        }.toList
+    }
+  }
+
+  /**
+   * Splits a name (e.g. 'a.b.c') into all possible namespace/name splits:
+   * a | b.c
+   * a.b | c
+   * and returns the first that matches a namespace provided in compositeNamespaces
+   *
+   * @param compositeNamespaces composite namespaces that exist in the system db
+   * @param fullName            the name to be split
+   * @return An Option((namespace, name)) tuple if a matching split is found, None otherwise
+   */
+  private def findNamespaceNameSplit(compositeNamespaces: Seq[String], fullName: String): Option[(String, String)] = {
+    // Find the indexes of all dots in the fullName (left to right)
+    val dotIndexes = fullName.zipWithIndex.filter(_._1.equals('.')).map(_._2)
+    // For each dot, split the fullName on that dot
+    val namespaceNamePairs = dotIndexes
+      .map(index => {
+        val namespace = fullName.take(index)
+        val name = fullName.drop(index + 1)
+        (namespace, name)
+      })
+    // Find the first (namespace, name) pair for which a composite exists
+    namespaceNamePairs
+      .find { case (namespace, _) => compositeNamespaces.contains(namespace) }
+  }
+
+  private def interpretNamespaceAsPartOfName(
+    aliasNameFields: DatabaseNameFields,
+    params: MapValue
+  ): (MapValue, Set[InternalNotification]) = {
+    val namespace = runtimeStringValue(aliasNameFields.namespaceKey, params, prettyPrint = false)
+    val name = runtimeStringValue(aliasNameFields.nameKey, params, prettyPrint = false)
+    val aliasName = s"$namespace.$name"
+    // This is just a regular local alias with . in the name, so use the default namespace
+    (
+      params.updatedWith(
+        aliasNameFields.nameKey,
+        Values.utf8Value(aliasName)
+      )
+        .updatedWith(aliasNameFields.namespaceKey, Values.utf8Value(DEFAULT_NAMESPACE)),
+      Set.empty
+    )
+  }
+
+  /** Translate from the persisted default language to the version description outputted in the show database and show alias commands.
+    *
+    * For aliases the property can be null, and should then return null.
+    * For databases we should always get a value, and the default null will act as a warning about needing to update this when we add new Cypher versions
+    *
+    * @param node the node variable for which to check the property on
+    */
+  def translateDefaultLanguagePropertyToShowOutput(node: String): String =
+    s"""CASE $node.$DATABASE_DEFAULT_LANGUAGE_PROPERTY
+       |WHEN '${CypherVersion.Cypher5.persistedValue}' THEN '${CypherVersion.Cypher5.description}'
+       |WHEN '${CypherVersion.Cypher25.persistedValue}' THEN '${CypherVersion.Cypher25.description}'
+       |ELSE NULL
+       |END""".stripMargin
+
 }

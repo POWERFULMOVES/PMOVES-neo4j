@@ -27,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.neo4j.values.storable.DurationValue.duration;
 import static org.neo4j.values.storable.LocalTimeValue.localTime;
 import static org.neo4j.values.storable.TimeValue.time;
+import static org.neo4j.values.storable.Values.EMPTY_TEXT_ARRAY;
 import static org.neo4j.values.storable.Values.booleanArray;
 import static org.neo4j.values.storable.Values.booleanValue;
 import static org.neo4j.values.storable.Values.byteArray;
@@ -35,8 +36,14 @@ import static org.neo4j.values.storable.Values.charArray;
 import static org.neo4j.values.storable.Values.charValue;
 import static org.neo4j.values.storable.Values.doubleArray;
 import static org.neo4j.values.storable.Values.doubleValue;
+import static org.neo4j.values.storable.Values.float32Vector;
+import static org.neo4j.values.storable.Values.float64Vector;
 import static org.neo4j.values.storable.Values.floatArray;
 import static org.neo4j.values.storable.Values.floatValue;
+import static org.neo4j.values.storable.Values.int16Vector;
+import static org.neo4j.values.storable.Values.int32Vector;
+import static org.neo4j.values.storable.Values.int64Vector;
+import static org.neo4j.values.storable.Values.int8Vector;
 import static org.neo4j.values.storable.Values.intArray;
 import static org.neo4j.values.storable.Values.intValue;
 import static org.neo4j.values.storable.Values.longArray;
@@ -49,6 +56,8 @@ import static org.neo4j.values.storable.Values.utf8Value;
 import static org.neo4j.values.utils.AnyValueTestUtil.assertEqual;
 import static org.neo4j.values.utils.AnyValueTestUtil.assertNotEqual;
 
+import java.time.OffsetDateTime;
+import java.time.ZonedDateTime;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -86,7 +95,7 @@ class ValuesTest {
         assertEqual(floatArray(new float[] {}), floatArray(new float[] {}));
         assertEqual(doubleArray(new double[] {}), doubleArray(new double[] {}));
         assertEqual(charArray(new char[] {}), charArray(new char[] {}));
-        assertEqual(stringArray(), stringArray());
+        assertEqual(EMPTY_TEXT_ARRAY, EMPTY_TEXT_ARRAY);
 
         assertEqual(booleanArray(new boolean[] {true}), booleanArray(new boolean[] {true}));
         assertEqual(byteArray(new byte[] {1}), byteArray(new byte[] {1}));
@@ -97,6 +106,13 @@ class ValuesTest {
         assertEqual(doubleArray(new double[] {1.0}), doubleArray(new double[] {1.0}));
         assertEqual(charArray(new char[] {'x'}), charArray(new char[] {'x'}));
         assertEqual(stringArray("hi"), stringArray("hi"));
+
+        assertEqual(int8Vector((byte) 1, (byte) 2, (byte) 3), int8Vector((byte) 1, (byte) 2, (byte) 3));
+        assertEqual(int16Vector((short) 1, (short) 2, (short) 3), int16Vector((short) 1, (short) 2, (short) 3));
+        assertEqual(int32Vector(1, 2, 3), int32Vector(1, 2, 3));
+        assertEqual(int64Vector(1, 2, 3), int64Vector(1, 2, 3));
+        assertEqual(float32Vector(1, 2, 3), float32Vector(1, 2, 3));
+        assertEqual(float64Vector(1, 2, 3), float64Vector(1, 2, 3));
     }
 
     @Test
@@ -138,7 +154,10 @@ class ValuesTest {
                 localTime(14, 0, 0, 0),
                 duration(0, 0, 0, 1_000_000_000),
                 byteArray(new byte[] {}),
-                charArray(new char[] {'x'}));
+                charArray(new char[] {'x'}),
+                int16Vector((byte) 1),
+                int32Vector(1),
+                float64Vector(2.5, 3.2));
         for (int i = 0; i < items.size(); i++) {
             for (int j = 0; j < items.size(); j++) {
                 if (i != j) {
@@ -158,5 +177,13 @@ class ValuesTest {
                 .isEqualTo(Map.of("singleKey", "value:with:colons"));
         assertThat(Value.parseStringMap("{key1:value:with:colons,key2:'another value'}"))
                 .isEqualTo(Map.of("key1", "value:with:colons", "key2", "another value"));
+    }
+
+    @Test
+    void shouldHandleOffsetDateTimeArray() {
+        var clock = new FrozenClock("Europe/Berlin");
+        assertThat(Values.arrayValue(new OffsetDateTime[] {OffsetDateTime.now(clock)}, false))
+                .isEqualTo(new DateTimeArray(
+                        new ZonedDateTime[] {ZonedDateTime.now(clock).withFixedOffsetZone()}));
     }
 }

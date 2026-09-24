@@ -26,6 +26,7 @@ import org.neo4j.cypher.internal.util.Cardinality
 import org.neo4j.cypher.internal.util.LabelId
 import org.neo4j.cypher.internal.util.RelTypeId
 import org.neo4j.cypher.internal.util.Selectivity
+import org.neo4j.internal.kernel.api.InternalIndexState
 import org.neo4j.internal.kernel.api.Read
 import org.neo4j.internal.kernel.api.SchemaRead
 import org.neo4j.internal.kernel.api.exceptions.schema.IndexNotFoundKernelException
@@ -51,6 +52,56 @@ object TransactionBoundGraphStatistics {
     new MinimumGraphStatistics(new BaseTransactionBoundGraphStatistics(read, schemaRead, log))
   }
 
+  def uniqueValueSelectivity(indexDescriptor: schema.IndexDescriptor, schemaRead: SchemaRead): Option[Selectivity] = {
+    val indexSize = schemaRead.indexSize(indexDescriptor)
+    if (indexSize == 0)
+      Some(Selectivity.ZERO)
+    else {
+      // Probability of any entity in the index, to have a property with a given value
+      val indexEntrySelectivity = schemaRead.indexUniqueValuesSelectivity(indexDescriptor)
+      if (indexEntrySelectivity == 0.0) {
+        Some(Selectivity.ZERO)
+      } else {
+        val frequencyOfEntitiesWithSameValue = 1.0 / indexEntrySelectivity
+
+        // This is = 1 / number of unique values
+        val indexSelectivity = frequencyOfEntitiesWithSameValue / indexSize
+
+        Selectivity.of(min(indexSelectivity, 1.0))
+      }
+    }
+  }
+
+  def indexPropertyIsNotNullSelectivity(
+    indexDescriptor: schema.IndexDescriptor,
+    read: Read,
+    schemaRead: SchemaRead
+  ): Option[Selectivity] = {
+    val entitiesCount = indexDescriptor.schema().entityType() match {
+      case org.neo4j.common.EntityType.NODE =>
+        read.estimateCountsForNode(indexDescriptor.schema().getLabelId).toDouble
+      case org.neo4j.common.EntityType.RELATIONSHIP =>
+        read.estimateCountsForRelationships(
+          TokenConstants.ANY_LABEL,
+          indexDescriptor.schema().getRelTypeId,
+          TokenConstants.ANY_LABEL
+        )
+          .toDouble
+    }
+
+    if (entitiesCount == 0)
+      Some(Selectivity.ZERO)
+    else {
+      // Probability of any entity with the given type, to have a given property
+      val indexSize = schemaRead.indexSize(indexDescriptor)
+      val indexSelectivity = indexSize / entitiesCount
+
+      // Even though semantically impossible the index can get into a state where
+      // the indexSize > entitiesCount
+      Selectivity.of(min(indexSelectivity, 1.0))
+    }
+  }
+
   private class BaseTransactionBoundGraphStatistics(read: Read, schemaRead: SchemaRead, log: InternalLog)
       extends GraphStatistics with IndexDescriptorCompatibility {
 
@@ -58,23 +109,7 @@ object TransactionBoundGraphStatistics {
       try {
         val maybeIndexDescriptor = maybeKernelIndexDescriptor(index)
         maybeIndexDescriptor.flatMap { indexDescriptor =>
-          val indexSize = schemaRead.indexSize(indexDescriptor)
-          if (indexSize == 0)
-            Some(Selectivity.ZERO)
-          else {
-            // Probability of any entity in the index, to have a property with a given value
-            val indexEntrySelectivity = schemaRead.indexUniqueValuesSelectivity(indexDescriptor)
-            if (indexEntrySelectivity == 0.0) {
-              Some(Selectivity.ZERO)
-            } else {
-              val frequencyOfEntitiesWithSameValue = 1.0 / indexEntrySelectivity
-
-              // This is = 1 / number of unique values
-              val indexSelectivity = frequencyOfEntitiesWithSameValue / indexSize
-
-              Selectivity.of(min(indexSelectivity, 1.0))
-            }
-          }
+          TransactionBoundGraphStatistics.uniqueValueSelectivity(indexDescriptor, schemaRead)
         }
       } catch {
         case e: IndexNotFoundKernelException =>
@@ -84,26 +119,9 @@ object TransactionBoundGraphStatistics {
 
     override def indexPropertyIsNotNullSelectivity(index: IndexDescriptor): Option[Selectivity] =
       try {
-        val entitiesCount = index.entityType match {
-          case IndexDescriptor.EntityType.Node(label) =>
-            read.estimateCountsForNode(label).toDouble
-          case IndexDescriptor.EntityType.Relationship(relType) =>
-            read.estimateCountsForRelationships(TokenConstants.ANY_LABEL, relType, TokenConstants.ANY_LABEL).toDouble
-        }
-
-        if (entitiesCount == 0)
-          Some(Selectivity.ZERO)
-        else {
-          // Probability of any entity with the given type, to have a given property
-          val maybeIndexDescriptor = maybeKernelIndexDescriptor(index)
-          maybeIndexDescriptor.flatMap { indexDescriptor =>
-            val indexSize = schemaRead.indexSize(indexDescriptor)
-            val indexSelectivity = indexSize / entitiesCount
-
-            // Even though semantically impossible the index can get into a state where
-            // the indexSize > entitiesCount
-            Selectivity.of(min(indexSelectivity, 1.0))
-          }
+        val maybeIndexDescriptor = maybeKernelIndexDescriptor(index)
+        maybeIndexDescriptor.flatMap { indexDescriptor =>
+          TransactionBoundGraphStatistics.indexPropertyIsNotNullSelectivity(indexDescriptor, read, schemaRead)
         }
       } catch {
         case e: IndexNotFoundKernelException =>
@@ -131,8 +149,12 @@ object TransactionBoundGraphStatistics {
       Cardinality(read.estimateCountsForRelationships(fromLabel, relTypeId, toLabel))
 
     private def maybeKernelIndexDescriptor(indexDescriptor: IndexDescriptor): Option[schema.IndexDescriptor] = {
-      Option(schemaRead.index(cypherToKernelSchema(indexDescriptor), cypherToKernel(indexDescriptor.indexType)))
+      Option(schemaRead.indexForSchemaAndIndexTypeNonTransactional(
+        cypherToKernelSchema(indexDescriptor),
+        cypherToKernel(indexDescriptor.indexType)
+      ))
         .filter(_ != schema.IndexDescriptor.NO_INDEX)
+        .filter(kernelDescriptor => schemaRead.indexGetStateNonLocking(kernelDescriptor) == InternalIndexState.ONLINE)
     }
   }
 }

@@ -20,19 +20,27 @@
 package org.neo4j.exceptions;
 
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
+import org.neo4j.gqlstatus.GqlParams;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.kernel.api.exceptions.Status;
 
 public class InvalidTargetDatabaseException extends DatabaseAdministrationException {
-    public InvalidTargetDatabaseException(String message) {
-        super(message);
-    }
 
-    public InvalidTargetDatabaseException(ErrorGqlStatusObject gqlStatusObject, String message) {
+    protected InvalidTargetDatabaseException(ErrorGqlStatusObject gqlStatusObject, String message) {
         super(gqlStatusObject, message);
     }
 
     @Override
     public Status status() {
         return Status.Statement.InvalidTargetDatabaseError;
+    }
+
+    public static InvalidTargetDatabaseException systemDbIsImmutable(String oldMessage, String action) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N69)
+                .withParam(GqlParams.StringParam.operation, action)
+                .build();
+
+        return new InvalidTargetDatabaseException(gql, oldMessage);
     }
 }

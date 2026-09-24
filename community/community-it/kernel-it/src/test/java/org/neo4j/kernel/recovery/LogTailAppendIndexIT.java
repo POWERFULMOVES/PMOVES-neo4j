@@ -21,17 +21,18 @@ package org.neo4j.kernel.recovery;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.neo4j.cloud.storage.StorageUtils.WRITE_OPTIONS;
+import static org.neo4j.configuration.GraphDatabaseInternalSettings.fail_on_corrupted_log_files;
 import static org.neo4j.configuration.GraphDatabaseSettings.fail_on_missing_files;
 import static org.neo4j.kernel.recovery.RecoveryHelpers.removeLastCheckpointRecordFromLogFile;
 import static org.neo4j.storageengine.AppendIndexProvider.BASE_APPEND_INDEX;
 import static org.neo4j.test.LatestVersions.LATEST_KERNEL_VERSION_PROVIDER;
+import static org.neo4j.test.LatestVersions.LATEST_LOG_FORMAT_PROVIDER;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.dbms.api.DatabaseManagementService;
 import org.neo4j.graphdb.GraphDatabaseService;
@@ -41,15 +42,6 @@ import org.neo4j.io.fs.DefaultFileSystemAbstraction;
 import org.neo4j.io.fs.StoreFileChannel;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.layout.Neo4jLayout;
-import org.neo4j.kernel.impl.transaction.SimpleAppendIndexProvider;
-import org.neo4j.kernel.impl.transaction.SimpleLogVersionRepository;
-import org.neo4j.kernel.impl.transaction.SimpleTransactionIdStore;
-import org.neo4j.kernel.impl.transaction.log.AppendBatchInfo;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
-import org.neo4j.kernel.impl.transaction.log.files.LogFilesBuilder;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.storageengine.api.StorageEngineFactory;
 import org.neo4j.storageengine.api.TransactionIdStore;
@@ -57,6 +49,12 @@ import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.Neo4jLayoutExtension;
 import org.neo4j.test.extension.pagecache.PageCacheExtension;
+import org.neo4j.wal.AppendBatchInfo;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.LogPosition;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
+import org.neo4j.wal.files.LogFilesBuilder;
 
 @PageCacheExtension
 @Neo4jLayoutExtension
@@ -107,7 +105,7 @@ public class LogTailAppendIndexIT {
 
         var layout = dependencyResolver.resolveDependency(DatabaseLayout.class);
         var originalLogFiles = dependencyResolver.resolveDependency(LogFiles.class);
-        Path[] checkpointFiles = originalLogFiles.getCheckpointFile().getDetachedCheckpointFiles();
+        Path[] checkpointFiles = originalLogFiles.getCheckpointFile().getMatchedFiles();
         dbms.shutdown();
 
         for (Path checkpointFile : checkpointFiles) {
@@ -135,7 +133,7 @@ public class LogTailAppendIndexIT {
         var lastBatchBeforeRestart =
                 dependencyResolver.resolveDependency(TransactionIdStore.class).getLastCommittedBatch();
         var layout = dependencyResolver.resolveDependency(DatabaseLayout.class);
-        Path[] checkpointFiles = originalLogFiles.getCheckpointFile().getDetachedCheckpointFiles();
+        Path[] checkpointFiles = originalLogFiles.getCheckpointFile().getMatchedFiles();
         dbms.shutdown();
 
         for (Path checkpointFile : checkpointFiles) {
@@ -244,7 +242,7 @@ public class LogTailAppendIndexIT {
         }
 
         var layout = dependencyResolver.resolveDependency(DatabaseLayout.class);
-        Path[] checkpointFiles = originalLogFiles.getCheckpointFile().getDetachedCheckpointFiles();
+        Path[] checkpointFiles = originalLogFiles.getCheckpointFile().getMatchedFiles();
         dbms.shutdown();
 
         for (Path checkpointFile : checkpointFiles) {
@@ -255,7 +253,14 @@ public class LogTailAppendIndexIT {
                     .writeAll(ByteBuffer.wrap(new byte[1024]));
         }
 
-        LogFiles logFiles = buildDefaultLogFiles(layout);
+        // start db and truncate any broken tail if any
+        dbms = new TestDatabaseManagementServiceBuilder(neo4jLayout)
+                .setConfig(fail_on_missing_files, false)
+                .setConfig(fail_on_corrupted_log_files, false)
+                .build();
+
+        var restartedDb = (GraphDatabaseAPI) dbms.database(GraphDatabaseSettings.DEFAULT_DATABASE_NAME);
+        LogFiles logFiles = restartedDb.getDependencyResolver().resolveDependency(LogFiles.class);
         assertEquals(lastBatchBeforeRestart, logFiles.getTailMetadata().lastBatch());
     }
 
@@ -275,11 +280,11 @@ public class LogTailAppendIndexIT {
     }
 
     private LogFiles buildDefaultLogFiles(DatabaseLayout databaseLayout) throws IOException {
-        return LogFilesBuilder.builder(databaseLayout, fileSystem, LATEST_KERNEL_VERSION_PROVIDER)
-                .withLogVersionRepository(new SimpleLogVersionRepository())
-                .withTransactionIdStore(new SimpleTransactionIdStore())
-                .withAppendIndexProvider(new SimpleAppendIndexProvider())
-                .withStorageEngineFactory(StorageEngineFactory.selectStorageEngine(Config.defaults()))
+        var storageEngine = StorageEngineFactory.selectStorageEngine(new DefaultFileSystemAbstraction(), databaseLayout)
+                .get();
+        return LogFilesBuilder.readableBuilder(
+                        databaseLayout, fileSystem, LATEST_KERNEL_VERSION_PROVIDER, LATEST_LOG_FORMAT_PROVIDER)
+                .withStorageEngineFactory(storageEngine)
                 .build();
     }
 }

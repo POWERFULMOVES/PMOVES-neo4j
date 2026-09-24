@@ -25,18 +25,23 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Path;
 import java.util.Collection;
+import java.util.Iterator;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
-import org.apache.lucene.document.Document;
 import org.neo4j.graphdb.ResourceIterator;
+import org.neo4j.internal.helpers.collection.Iterators;
 import org.neo4j.internal.kernel.api.exceptions.schema.IndexNotFoundKernelException;
 import org.neo4j.io.IOUtils;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.kernel.api.impl.index.DatabaseIndex;
-import org.neo4j.kernel.api.impl.schema.writer.LuceneIndexWriter;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDocument;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDocumentsFactory;
+import org.neo4j.kernel.api.impl.schema.writer.LucenePartitionIndexWriter;
 import org.neo4j.kernel.api.index.IndexPopulator;
 import org.neo4j.kernel.api.index.IndexSample;
+import org.neo4j.kernel.api.index.IndexSampler;
+import org.neo4j.kernel.api.index.ValueIndexReader;
 import org.neo4j.kernel.impl.index.schema.IndexUpdateIgnoreStrategy;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
 import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
@@ -46,8 +51,9 @@ import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
  */
 public abstract class LuceneIndexPopulator<INDEX extends DatabaseIndex<?>> implements IndexPopulator {
     protected final IndexUpdateIgnoreStrategy ignoreStrategy;
-    protected INDEX luceneIndex;
-    protected LuceneIndexWriter writer;
+    protected final INDEX luceneIndex;
+    protected LucenePartitionIndexWriter writer;
+    protected LuceneDocumentsFactory documentsFactory;
 
     protected LuceneIndexPopulator(INDEX luceneIndex, IndexUpdateIgnoreStrategy ignoreStrategy) {
         this.luceneIndex = luceneIndex;
@@ -60,6 +66,7 @@ public abstract class LuceneIndexPopulator<INDEX extends DatabaseIndex<?>> imple
             luceneIndex.create();
             luceneIndex.open();
             writer = luceneIndex.getIndexWriter();
+            documentsFactory = writer.documentsFactory();
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
@@ -76,25 +83,39 @@ public abstract class LuceneIndexPopulator<INDEX extends DatabaseIndex<?>> imple
     }
 
     @Override
-    public void add(Collection<? extends IndexEntryUpdate<?>> updates, CursorContext cursorContext) {
+    public void add(Collection<? extends IndexEntryUpdate> updates, CursorContext cursorContext) {
         assert updatesForCorrectIndex(updates);
 
         try {
-            // Lucene documents stored in a ThreadLocal and reused so we can't create an eager collection of documents
-            // here
-            // That is why we create a lazy Iterator and then Iterable
-            writer.addDocuments(updates.size(), () -> updates.stream()
-                    .map(u -> (ValueIndexEntryUpdate<?>) u)
+            if (usesSeparateDocuments()) {
+                var luceneDocuments = updates.stream()
+                        .map(ValueIndexEntryUpdate.class::cast)
+                        .filter(Predicate.not(ignoreStrategy::ignore))
+                        .map(this::updateAsDocument)
+                        .filter(Objects::nonNull)
+                        .iterator();
+                writer.addDocuments(updates.size(), () -> luceneDocuments);
+                return;
+            }
+
+            // we reuse the same document stored in thread local, and because since lucene 10.5 there is additional
+            // has next call while iterating documents we can't produce next document on the hasNext call
+            // and need to do that only on next (as a side effects we can't produce null documents there anymore atp)
+            Iterator<ValueIndexEntryUpdate> relevantUpdates = updates.stream()
+                    .map(ValueIndexEntryUpdate.class::cast)
                     .filter(Predicate.not(ignoreStrategy::ignore))
-                    .map(this::updateAsDocument)
-                    .filter(Objects::nonNull)
-                    .iterator());
+                    .iterator();
+            writer.addDocuments(updates.size(), () -> Iterators.map(this::updateAsDocument, relevantUpdates));
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
     }
 
-    protected abstract Document updateAsDocument(ValueIndexEntryUpdate<?> update);
+    protected boolean usesSeparateDocuments() {
+        return false;
+    }
+
+    protected abstract LuceneDocument updateAsDocument(ValueIndexEntryUpdate update);
 
     @Override
     public void close(boolean populationCompletedSuccessfully, CursorContext cursorContext) {
@@ -119,7 +140,7 @@ public abstract class LuceneIndexPopulator<INDEX extends DatabaseIndex<?>> imple
     }
 
     @Override
-    public void includeSample(IndexEntryUpdate<?> update) {
+    public void includeSample(IndexEntryUpdate update) {
         // no-op
     }
 
@@ -127,8 +148,8 @@ public abstract class LuceneIndexPopulator<INDEX extends DatabaseIndex<?>> imple
     public IndexSample sample(CursorContext cursorContext) {
         try {
             luceneIndex.maybeRefreshBlocking();
-            try (var reader = luceneIndex.getIndexReader(NO_USAGE_TRACKING);
-                    var sampler = reader.createSampler()) {
+            try (ValueIndexReader reader = luceneIndex.getIndexReader(NO_USAGE_TRACKING);
+                    IndexSampler sampler = reader.createSampler()) {
                 return sampler.sampleIndex(cursorContext, new AtomicBoolean());
             }
         } catch (IOException | IndexNotFoundKernelException e) {
@@ -136,8 +157,8 @@ public abstract class LuceneIndexPopulator<INDEX extends DatabaseIndex<?>> imple
         }
     }
 
-    private boolean updatesForCorrectIndex(Collection<? extends IndexEntryUpdate<?>> updates) {
-        for (IndexEntryUpdate<?> update : updates) {
+    private boolean updatesForCorrectIndex(Iterable<? extends IndexEntryUpdate> updates) {
+        for (IndexEntryUpdate update : updates) {
             if (!update.indexKey().schema().equals(luceneIndex.getDescriptor().schema())) {
                 return false;
             }

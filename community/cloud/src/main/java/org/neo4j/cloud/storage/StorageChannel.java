@@ -24,6 +24,8 @@ import static org.neo4j.io.fs.FileSystemAbstraction.INVALID_FILE_DESCRIPTOR;
 import java.io.Flushable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.MappedByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.channels.SeekableByteChannel;
 import org.neo4j.io.fs.StoreChannel;
@@ -43,7 +45,7 @@ public class StorageChannel implements StoreChannel {
 
     @Override
     public StorageChannel position(long newPosition) throws IOException {
-        channel.position(newPosition);
+        internalPosition(newPosition);
         return this;
     }
 
@@ -72,8 +74,7 @@ public class StorageChannel implements StoreChannel {
 
     @Override
     public void writeAll(ByteBuffer src, long position) throws IOException {
-        //noinspection resource
-        position(position).writeAll(src);
+        throw new UnsupportedOperationException("Not supported in storage channels");
     }
 
     @Override
@@ -104,7 +105,7 @@ public class StorageChannel implements StoreChannel {
 
     @Override
     public void readAll(ByteBuffer dst, long position) throws IOException {
-        position(position).readAll(dst);
+        throw new UnsupportedOperationException("Not supported in storage channels");
     }
 
     @Override
@@ -172,6 +173,11 @@ public class StorageChannel implements StoreChannel {
     }
 
     @Override
+    public MappedByteBuffer map(FileChannel.MapMode mode, long position, long size) throws IOException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
     public void flush() throws IOException {
         force(false);
     }
@@ -198,5 +204,9 @@ public class StorageChannel implements StoreChannel {
             }
         }
         return total;
+    }
+
+    private void internalPosition(long newPosition) throws IOException {
+        channel.position(newPosition);
     }
 }

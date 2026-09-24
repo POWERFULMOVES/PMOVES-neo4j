@@ -19,45 +19,170 @@
  */
 package org.neo4j.kernel.impl.newapi;
 
+import org.eclipse.collections.api.iterator.LongIterator;
 import org.neo4j.internal.kernel.api.NodeCursor;
 import org.neo4j.internal.kernel.api.PropertyCursor;
 import org.neo4j.internal.kernel.api.Read;
-import org.neo4j.internal.kernel.api.RelationshipDataAccessor;
+import org.neo4j.internal.kernel.api.RelationshipCursor;
+import org.neo4j.internal.kernel.api.security.AccessMode;
 import org.neo4j.kernel.api.AccessModeProvider;
 import org.neo4j.kernel.api.txstate.TxStateHolder;
 import org.neo4j.storageengine.api.LongReference;
 import org.neo4j.storageengine.api.PropertySelection;
 import org.neo4j.storageengine.api.Reference;
-import org.neo4j.storageengine.api.RelationshipVisitor;
+import org.neo4j.storageengine.api.StorageProperty;
 import org.neo4j.storageengine.api.StorageRelationshipCursor;
 
-abstract class DefaultRelationshipCursor<SELF extends DefaultRelationshipCursor> extends TraceableCursorImpl<SELF>
-        implements RelationshipDataAccessor {
-    protected boolean hasChanges;
-    boolean checkHasChanges;
-    Read read;
-    TxStateHolder txStateHolder;
-    AccessModeProvider accessModeProvider;
+abstract class DefaultRelationshipCursor<SELF extends DefaultRelationshipCursor<?>> extends TraceableCursorImpl<SELF>
+        implements RelationshipCursor {
 
-    final StorageRelationshipCursor storeCursor;
-    RelationshipVisitor<RuntimeException> relationshipTxStateDataVisitor = new TxStateDataVisitor();
-    // The visitor above will update the fields below
+    private final StorageRelationshipCursor storeCursor;
+    protected final boolean applyAccessModeToTxState;
+    private final InternalCursorFactory internalCursors;
+
+    protected Read read;
+    private TxStateHolder txStateHolder;
+
+    private boolean hasChanges;
+    private boolean checkHasChanges;
+    private LongIterator addedRelationships;
+
     long currentAddedInTx = LongReference.NULL;
     private int txStateTypeId;
-    long txStateSourceNodeReference;
-    long txStateTargetNodeReference;
+    protected long txStateSourceNodeReference;
+    protected long txStateTargetNodeReference;
 
-    DefaultRelationshipCursor(StorageRelationshipCursor storeCursor, CursorPool<SELF> pool) {
+    private AccessModeProvider accessModeProvider;
+    private AccessMode accessMode;
+    private boolean allowAllRelationships;
+    protected boolean allowAllNodes;
+    private AccessControlDataProvider accessControlDataProvider;
+    private DefaultNodeCursor securityNodeCursor;
+
+    DefaultRelationshipCursor(
+            StorageRelationshipCursor storeCursor,
+            CursorPool<SELF> pool,
+            boolean applyAccessModeToTxState,
+            InternalCursorFactory internalCursors) {
         super(pool);
         this.storeCursor = storeCursor;
+        this.applyAccessModeToTxState = applyAccessModeToTxState;
+        this.internalCursors = internalCursors;
     }
 
     protected void init(Read read, TxStateHolder txStateHolder, AccessModeProvider accessModeProvider) {
         this.currentAddedInTx = LongReference.NULL;
         this.read = read;
         this.txStateHolder = txStateHolder;
-        this.accessModeProvider = accessModeProvider;
         this.checkHasChanges = true;
+        initAccessMode(accessModeProvider);
+    }
+
+    /**
+     * It is expected that accessMode is stable while cursor is in use, so we cache accessMode and couple shortcuts
+     */
+    private void initAccessMode(AccessModeProvider accessModeProvider) {
+        this.accessModeProvider = accessModeProvider;
+        this.accessMode = accessModeProvider.getAccessMode();
+        this.allowAllRelationships = accessMode.allowsTraverseAllRelTypes();
+        this.allowAllNodes = accessMode.allowsTraverseAllLabels();
+    }
+
+    @Override
+    public boolean next() {
+        boolean hasChanges = hasChanges();
+
+        if (hasChanges) {
+            while (addedRelationships.hasNext()) {
+                long next = addedRelationships.next();
+                collectTxStateData(next);
+
+                if (!applyAccessModeToTxState || allowed()) {
+                    if (filterOutTxStateRelationship()) {
+                        continue;
+                    }
+
+                    trace();
+                    return true;
+                }
+            }
+            currentAddedInTx = LongReference.NULL;
+        }
+
+        while (storeCursor.next()) {
+            if (!deletedInThisBatch(hasChanges) && allowed()) {
+                maybeTraceStoreHit();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    protected void maybeTraceStoreHit() {
+        trace();
+    }
+
+    private void collectTxStateData(long next) {
+        txStateHolder
+                .txState()
+                .relationshipVisit(next, (relationshipId, typeId, sourceNodeReference, targetNodeReference) -> {
+                    currentAddedInTx = relationshipId;
+                    txStateTypeId = typeId;
+                    txStateSourceNodeReference = sourceNodeReference;
+                    txStateTargetNodeReference = targetNodeReference;
+                });
+    }
+
+    protected abstract boolean filterOutTxStateRelationship();
+
+    private boolean deletedInThisBatch(boolean hasChanges) {
+        return hasChanges && txStateHolder.txState().relationshipIsDeletedInThisBatch(storeCursor.entityReference());
+    }
+
+    private void trace() {
+        if (tracer != null) {
+            tracer.onRelationship(relationshipReference());
+        }
+    }
+
+    protected boolean allowed() {
+        assert accessMode == accessModeProvider.getAccessMode() : "access mode changed while cursor is in use";
+        return allowedTraverseRelationship() && allowedToTraverseEndNodes();
+    }
+
+    private boolean allowedTraverseRelationship() {
+        if (allowAllRelationships) {
+            return true;
+        }
+        return accessMode.allowsTraverseRelationship(type(), getSelectedPropertiesProvider());
+    }
+
+    protected abstract boolean allowedToTraverseEndNodes();
+
+    private AccessControlDataProvider getSelectedPropertiesProvider() {
+        if (accessControlDataProvider == null) {
+            accessControlDataProvider = new AccessControlDataProvider(
+                    () -> storeCursor::properties,
+                    internalCursors,
+                    applyAccessModeToTxState,
+                    this::txStateProperties,
+                    () -> read);
+        }
+        return accessControlDataProvider;
+    }
+
+    private Iterable<StorageProperty> txStateProperties() {
+        return txStateHolder
+                .txState()
+                .getRelationshipState(this.relationshipReference())
+                .addedProperties();
+    }
+
+    protected DefaultNodeCursor getSecurityNodeCursor() {
+        if (securityNodeCursor == null) {
+            securityNodeCursor = internalCursors.allocateNodeCursor();
+        }
+        return securityNodeCursor;
     }
 
     @Override
@@ -82,7 +207,16 @@ abstract class DefaultRelationshipCursor<SELF extends DefaultRelationshipCursor>
 
     @Override
     public void properties(PropertyCursor cursor, PropertySelection selection) {
-        ((DefaultPropertyCursor) cursor).initRelationship(this, selection, read, txStateHolder, accessModeProvider);
+        ((DefaultPropertyCursor) cursor)
+                .initRelationship(
+                        this.type(),
+                        selection,
+                        read,
+                        txStateHolder,
+                        accessModeProvider,
+                        storeCursor,
+                        this.currentRelationshipIsAddedInTx(),
+                        this.relationshipReference());
     }
 
     @Override
@@ -102,8 +236,6 @@ abstract class DefaultRelationshipCursor<SELF extends DefaultRelationshipCursor>
                 : storeCursor.propertiesReference();
     }
 
-    protected abstract void collectAddedTxStateSnapshot();
-
     protected boolean currentRelationshipIsAddedInTx() {
         return currentAddedInTx != LongReference.NULL;
     }
@@ -116,7 +248,7 @@ abstract class DefaultRelationshipCursor<SELF extends DefaultRelationshipCursor>
         if (checkHasChanges) {
             hasChanges = txStateHolder.hasTxStateWithChanges();
             if (hasChanges) {
-                collectAddedTxStateSnapshot();
+                addedRelationships = collectAddedTxStateSnapshot(txStateHolder);
             }
             checkHasChanges = false;
         }
@@ -124,13 +256,47 @@ abstract class DefaultRelationshipCursor<SELF extends DefaultRelationshipCursor>
         return hasChanges;
     }
 
-    private class TxStateDataVisitor implements RelationshipVisitor<RuntimeException> {
-        @Override
-        public void visit(long relationshipId, int typeId, long sourceNodeReference, long targetNodeReference) {
-            currentAddedInTx = relationshipId;
-            txStateTypeId = typeId;
-            txStateSourceNodeReference = sourceNodeReference;
-            txStateTargetNodeReference = targetNodeReference;
+    protected abstract LongIterator collectAddedTxStateSnapshot(TxStateHolder stateHolder);
+
+    protected void prepareChanges(LongIterator addedRelationships, boolean hasChanges) {
+        this.addedRelationships = addedRelationships;
+        this.hasChanges = hasChanges;
+        this.checkHasChanges = false;
+    }
+
+    @Override
+    public void release() {
+        storeCursor.close();
+        if (securityNodeCursor != null) {
+            securityNodeCursor.close();
+            securityNodeCursor.release();
+            securityNodeCursor = null;
         }
+        if (accessControlDataProvider != null) {
+            accessControlDataProvider.close();
+            accessControlDataProvider = null;
+        }
+    }
+
+    @Override
+    public boolean isClosed() {
+        return read == null;
+    }
+
+    @Override
+    public void closeInternal() {
+        if (!isClosed()) {
+            read = null;
+            txStateHolder = null;
+            accessModeProvider = null;
+            storeCursor.reset();
+            if (securityNodeCursor != null) {
+                securityNodeCursor.close();
+            }
+            if (accessControlDataProvider != null) {
+                accessControlDataProvider.close();
+            }
+        }
+        super.closeInternal();
     }
 }

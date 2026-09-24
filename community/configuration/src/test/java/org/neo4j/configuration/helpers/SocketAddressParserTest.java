@@ -19,10 +19,8 @@
  */
 package org.neo4j.configuration.helpers;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import org.junit.jupiter.api.Test;
 
@@ -36,8 +34,8 @@ class SocketAddressParserTest {
         SocketAddress address = SocketAddressParser.socketAddress(addressString, SocketAddress::new);
 
         // then
-        assertEquals("localhost", address.getHostname());
-        assertEquals(9999, address.getPort());
+        assertThat(address.getHostname()).isEqualTo("localhost");
+        assertThat(address.getPort()).isEqualTo(9999);
     }
 
     @Test
@@ -49,56 +47,51 @@ class SocketAddressParserTest {
         SocketAddress address = SocketAddressParser.socketAddress(addressString, SocketAddress::new);
 
         // then
-        assertEquals("localhost", address.getHostname());
-        assertEquals(9999, address.getPort());
+        assertThat(address.getHostname()).isEqualTo("localhost");
+        assertThat(address.getPort()).isEqualTo(9999);
     }
 
     @Test
     void shouldFailToCreateSocketAddressWithMixedInWhitespace() {
         String addressString = "localhost" + whitespace(1) + ":9999";
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> SocketAddressParser.socketAddress(addressString, SocketAddress::new));
+        assertThatThrownBy(() -> SocketAddressParser.socketAddress(addressString, SocketAddress::new))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void shouldFailToCreateSocketAddressWithNegativePort() {
         String addressString = "localhost:-10";
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> SocketAddressParser.socketAddress(addressString, SocketAddress::new));
+        assertThatThrownBy(() -> SocketAddressParser.socketAddress(addressString, SocketAddress::new))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void shouldFailToCreateSocketAddressWithNonNumericPort() {
         String addressString = "localhost:bolt";
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> SocketAddressParser.socketAddress(addressString, SocketAddress::new));
+        assertThatThrownBy(() -> SocketAddressParser.socketAddress(addressString, SocketAddress::new))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void shouldGetInvalidPortWhenMissingPort() {
         String addressString = "localhost";
-        assertEquals(
-                -1,
-                SocketAddressParser.socketAddress(addressString, SocketAddress::new)
-                        .getPort());
+        assertThat(SocketAddressParser.socketAddress(addressString, SocketAddress::new)
+                        .getPort())
+                .isEqualTo(-1);
     }
 
     @Test
     void shouldGetInvalidPortWhenMissingPortWithTrailingColon() {
         String addressString = "localhost:";
-        assertEquals(
-                -1,
-                SocketAddressParser.socketAddress(addressString, SocketAddress::new)
-                        .getPort());
+        assertThat(SocketAddressParser.socketAddress(addressString, SocketAddress::new)
+                        .getPort())
+                .isEqualTo(-1);
     }
 
     @Test
     void shouldGetInvalidPortWhenMissingPortIPv6Address() {
         SocketAddress socketAddress = SocketAddressParser.socketAddress("fe80:1:2:3:4::5", SocketAddress::new);
-        assertEquals(-1, socketAddress.getPort());
+        assertThat(socketAddress.getPort()).isEqualTo(-1);
     }
 
     @Test
@@ -107,195 +100,124 @@ class SocketAddressParserTest {
 
         // behaviour should be the same regardless of whether or not a default port is included in the call to
         // socketAddress
-        assertEquals(
-                1,
-                SocketAddressParser.socketAddress(addressString, SocketAddress::new)
-                        .getPort());
-        assertEquals(
-                1,
-                SocketAddressParser.socketAddress(addressString, 123, SocketAddress::new)
-                        .getPort());
+        assertThat(SocketAddressParser.socketAddress(addressString, SocketAddress::new)
+                        .getPort())
+                .isEqualTo(1);
+        assertThat(SocketAddressParser.socketAddress(addressString, 123, SocketAddress::new)
+                        .getPort())
+                .isEqualTo(1);
     }
 
     @Test
     void shouldGetDefaultPortWhenMissingPort() {
         String addressString = "localhost";
-        assertEquals(
-                123,
-                SocketAddressParser.socketAddress(addressString, 123, SocketAddress::new)
-                        .getPort());
+        assertThat(SocketAddressParser.socketAddress(addressString, 123, SocketAddress::new)
+                        .getPort())
+                .isEqualTo(123);
     }
 
     @Test
     void shouldGetDefaultPortWhenMissingPortIPv6Address() {
         String addressString = "fe80:1:2:3:4::5";
-        assertEquals(
-                123,
-                SocketAddressParser.socketAddress(addressString, 123, SocketAddress::new)
-                        .getPort());
+        assertThat(SocketAddressParser.socketAddress(addressString, 123, SocketAddress::new)
+                        .getPort())
+                .isEqualTo(123);
     }
 
     @Test
     void shouldGetDefaultPortWhenMissingPortWithTrailingColon() {
         String addressString = "localhost:";
-        assertEquals(
-                123,
-                SocketAddressParser.socketAddress(addressString, 123, SocketAddress::new)
-                        .getPort());
+        assertThat(SocketAddressParser.socketAddress(addressString, 123, SocketAddress::new)
+                        .getPort())
+                .isEqualTo(123);
     }
 
     @Test
     void shouldCreateSocketAddressWithPortZero() {
         SocketAddress socketAddress = SocketAddressParser.socketAddress("my.domain:0", SocketAddress::new);
 
-        assertEquals("my.domain", socketAddress.getHostname());
-        assertEquals(0, socketAddress.getPort());
-        assertEquals("my.domain:0", socketAddress.toString());
+        assertThat(socketAddress.getHostname()).isEqualTo("my.domain");
+        assertThat(socketAddress.getPort()).isZero();
+        assertThat(socketAddress).hasToString("my.domain:0");
     }
 
     @Test
     void shouldSupportDomainNameWithPort() {
         SocketAddress socketAddress = SocketAddressParser.socketAddress("my.domain:123", SocketAddress::new);
 
-        assertEquals("my.domain", socketAddress.getHostname());
-        assertEquals(123, socketAddress.getPort());
-        assertEquals("my.domain:123", socketAddress.toString());
+        assertThat(socketAddress.getHostname()).isEqualTo("my.domain");
+        assertThat(socketAddress.getPort()).isEqualTo(123);
+        assertThat(socketAddress).hasToString("my.domain:123");
     }
 
     @Test
     void shouldSupportWildcardWithPort() {
         SocketAddress socketAddress = SocketAddressParser.socketAddress("0.0.0.0:123", SocketAddress::new);
 
-        assertEquals("0.0.0.0", socketAddress.getHostname());
-        assertEquals(123, socketAddress.getPort());
-        assertEquals("0.0.0.0:123", socketAddress.toString());
-        assertTrue(socketAddress.isWildcard());
-    }
-
-    @Test
-    void shouldSupportPortOnly() {
-        SocketAddress socketAddress =
-                SocketAddressParser.deriveSocketAddress("setting.name", ":123", "my.domain", 456, SocketAddress::new);
-
-        assertEquals("my.domain", socketAddress.getHostname());
-        assertEquals(123, socketAddress.getPort());
-        assertEquals("my.domain:123", socketAddress.toString());
-        assertFalse(socketAddress.isWildcard());
-    }
-
-    @Test
-    void shouldSupportDefaultValue() {
-        SocketAddress socketAddress =
-                SocketAddressParser.deriveSocketAddress("setting.name", null, "my.domain", 456, SocketAddress::new);
-
-        assertEquals("my.domain", socketAddress.getHostname());
-        assertEquals(456, socketAddress.getPort());
-        assertEquals("my.domain:456", socketAddress.toString());
-        assertFalse(socketAddress.isWildcard());
-    }
-
-    @Test
-    void shouldSupportDefaultWildcard() {
-        SocketAddress socketAddress =
-                SocketAddressParser.deriveSocketAddress("setting.name", null, "0.0.0.0", 456, SocketAddress::new);
-
-        assertEquals("0.0.0.0", socketAddress.getHostname());
-        assertEquals(456, socketAddress.getPort());
-        assertEquals("0.0.0.0:456", socketAddress.toString());
-        assertTrue(socketAddress.isWildcard());
-    }
-
-    @Test
-    void shouldSupportDefaultIPv6Wildcard() {
-        SocketAddress socketAddress =
-                SocketAddressParser.deriveSocketAddress("setting.name", null, "::", 456, SocketAddress::new);
-
-        assertEquals("::", socketAddress.getHostname());
-        assertEquals(456, socketAddress.getPort());
-        assertEquals("[::]:456", socketAddress.toString());
-        assertTrue(socketAddress.isWildcard());
-    }
-
-    @Test
-    void shouldSupportDefaultIPv6Value() {
-        SocketAddress socketAddress =
-                SocketAddressParser.deriveSocketAddress("setting.name", null, "fe80:1:2::4", 456, SocketAddress::new);
-
-        assertEquals("fe80:1:2::4", socketAddress.getHostname());
-        assertEquals(456, socketAddress.getPort());
-        assertEquals("[fe80:1:2::4]:456", socketAddress.toString());
-        assertFalse(socketAddress.isWildcard());
-    }
-
-    @Test
-    void shouldNotUseDefaultsWhenSettingValueSupplied() {
-        SocketAddress socketAddress = SocketAddressParser.deriveSocketAddress(
-                "setting.name", "[fe80:3:4::6]:456", "fe80:1:2::4", 123, SocketAddress::new);
-
-        assertEquals("fe80:3:4::6", socketAddress.getHostname());
-        assertEquals(456, socketAddress.getPort());
-        assertEquals("[fe80:3:4::6]:456", socketAddress.toString());
-        assertFalse(socketAddress.isWildcard());
+        assertThat(socketAddress.getHostname()).isEqualTo("0.0.0.0");
+        assertThat(socketAddress.getPort()).isEqualTo(123);
+        assertThat(socketAddress).hasToString("0.0.0.0:123");
+        assertThat(socketAddress.isWildcard()).isTrue();
     }
 
     @Test
     void shouldSupportIPv6Wildcard() {
         SocketAddress socketAddress = SocketAddressParser.socketAddress("[::]:123", SocketAddress::new);
 
-        assertEquals("::", socketAddress.getHostname());
-        assertEquals(123, socketAddress.getPort());
-        assertEquals("[::]:123", socketAddress.toString());
-        assertTrue(socketAddress.isWildcard());
+        assertThat(socketAddress.getHostname()).isEqualTo("::");
+        assertThat(socketAddress.getPort()).isEqualTo(123);
+        assertThat(socketAddress).hasToString("[::]:123");
+        assertThat(socketAddress.isWildcard()).isTrue();
     }
 
     @Test
     void shouldSupportIPv6Localhost() {
         SocketAddress socketAddress = SocketAddressParser.socketAddress("[::1]:123", SocketAddress::new);
 
-        assertEquals("::1", socketAddress.getHostname());
-        assertEquals(123, socketAddress.getPort());
-        assertEquals("[::1]:123", socketAddress.toString());
-        assertFalse(socketAddress.isWildcard());
+        assertThat(socketAddress.getHostname()).isEqualTo("::1");
+        assertThat(socketAddress.getPort()).isEqualTo(123);
+        assertThat(socketAddress).hasToString("[::1]:123");
+        assertThat(socketAddress.isWildcard()).isFalse();
     }
 
     @Test
     void shouldSupportIPv6WithZoneId() {
         SocketAddress socketAddress = SocketAddressParser.socketAddress("[fe80::b279:2f%en0]:123", SocketAddress::new);
 
-        assertEquals("fe80::b279:2f%en0", socketAddress.getHostname());
-        assertEquals(123, socketAddress.getPort());
-        assertEquals("[fe80::b279:2f%en0]:123", socketAddress.toString());
-        assertFalse(socketAddress.isWildcard());
+        assertThat(socketAddress.getHostname()).isEqualTo("fe80::b279:2f%en0");
+        assertThat(socketAddress.getPort()).isEqualTo(123);
+        assertThat(socketAddress).hasToString("[fe80::b279:2f%en0]:123");
+        assertThat(socketAddress.isWildcard()).isFalse();
     }
 
     @Test
     void shouldSupportIPv6AddressWithBrackets() {
         SocketAddress socketAddress = SocketAddressParser.socketAddress("[fe80:1:2:3:4::5]:123", SocketAddress::new);
 
-        assertEquals("fe80:1:2:3:4::5", socketAddress.getHostname());
-        assertEquals(123, socketAddress.getPort());
-        assertEquals("[fe80:1:2:3:4::5]:123", socketAddress.toString());
-        assertFalse(socketAddress.isWildcard());
+        assertThat(socketAddress.getHostname()).isEqualTo("fe80:1:2:3:4::5");
+        assertThat(socketAddress.getPort()).isEqualTo(123);
+        assertThat(socketAddress).hasToString("[fe80:1:2:3:4::5]:123");
+        assertThat(socketAddress.isWildcard()).isFalse();
     }
 
     @Test
     void shouldSupportIPv6AddressWithoutBrackets() {
         SocketAddress socketAddress = SocketAddressParser.socketAddress("fe80:1:2:3:4::5:123", SocketAddress::new);
 
-        assertEquals("fe80:1:2:3:4::5", socketAddress.getHostname());
-        assertEquals(123, socketAddress.getPort());
-        assertEquals("[fe80:1:2:3:4::5]:123", socketAddress.toString());
-        assertFalse(socketAddress.isWildcard());
+        assertThat(socketAddress.getHostname()).isEqualTo("fe80:1:2:3:4::5");
+        assertThat(socketAddress.getPort()).isEqualTo(123);
+        assertThat(socketAddress).hasToString("[fe80:1:2:3:4::5]:123");
+        assertThat(socketAddress.isWildcard()).isFalse();
     }
 
     @Test
     void shouldSupportIPv6WildcardWithoutBrackets() {
         SocketAddress socketAddress = SocketAddressParser.socketAddress(":::123", SocketAddress::new);
 
-        assertEquals("::", socketAddress.getHostname());
-        assertEquals(123, socketAddress.getPort());
-        assertEquals("[::]:123", socketAddress.toString());
-        assertTrue(socketAddress.isWildcard());
+        assertThat(socketAddress.getHostname()).isEqualTo("::");
+        assertThat(socketAddress.getPort()).isEqualTo(123);
+        assertThat(socketAddress.toString()).isEqualTo("[::]:123");
+        assertThat(socketAddress.isWildcard()).isTrue();
     }
 
     @Test
@@ -303,17 +225,113 @@ class SocketAddressParserTest {
         SocketAddress localhost = SocketAddressParser.socketAddress("::1", SocketAddress::new);
         SocketAddress unspecified = SocketAddressParser.socketAddress("::", SocketAddress::new);
 
-        assertEquals("::1", localhost.getHostname());
-        assertTrue(localhost.getPort() < 0);
-        assertEquals("::", unspecified.getHostname());
-        assertTrue(unspecified.getPort() < 0);
+        assertThat(localhost.getHostname()).isEqualTo("::1");
+        assertThat(localhost.getPort()).isLessThan(0);
+        assertThat(unspecified.getHostname()).isEqualTo("::");
+        assertThat(unspecified.getPort()).isLessThan(0);
     }
 
     @Test
     void shouldNotAllowURIs() {
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> SocketAddressParser.socketAddress("neo4j://18.117.195.94:7687", SocketAddress::new));
+        assertThatThrownBy(() -> SocketAddressParser.socketAddress("neo4j://18.117.195.94:7687", SocketAddress::new))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void shouldAllowHostnameIPv6WithBracketsAndNoPort() {
+        SocketAddress sa = SocketAddressParser.socketAddress("[fd01::9419:4c0e:be04:f0e3:4332]", SocketAddress::new);
+
+        assertThat(sa.getHostname()).isEqualTo("fd01::9419:4c0e:be04:f0e3:4332");
+        assertThat(sa.getPort()).isLessThan(0);
+    }
+
+    @Test
+    void shouldAllowHostnameIPv4WithBracketsAndNoPort() {
+        SocketAddress sa = SocketAddressParser.socketAddress("[127.0.0.1]", SocketAddress::new);
+
+        assertThat(sa.getHostname()).isEqualTo("127.0.0.1");
+        assertThat(sa.getPort()).isLessThan(0);
+    }
+
+    @Test
+    void shouldAllowHostnameWithBracketsAndNoPort() {
+        SocketAddress sa = SocketAddressParser.socketAddress("[localhost]", SocketAddress::new);
+
+        assertThat(sa.getHostname()).isEqualTo("localhost");
+        assertThat(sa.getPort()).isLessThan(0);
+    }
+
+    @Test
+    void shouldNotParseHostnameIPv4WithPortInsideBrackets() {
+        assertThatThrownBy(() -> SocketAddressParser.socketAddress("[127.0.0.1:80]", SocketAddress::new))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void shouldNotParseHostnameWithPortInsideBrackets() {
+        assertThatThrownBy(() -> SocketAddressParser.socketAddress("[localhost:80]", SocketAddress::new))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void shouldParseHostnameOnlyIPv4() {
+        SocketAddress sa = SocketAddressParser.socketAddressHostnameOnly("127.0.0.1", SocketAddress::new);
+
+        assertThat(sa.getHostname()).isEqualTo("127.0.0.1");
+        assertThat(sa.getPort()).isLessThan(0);
+    }
+
+    @Test
+    void shouldParseHostnameOnlyIPv4WithBrackets() {
+        SocketAddress sa = SocketAddressParser.socketAddressHostnameOnly("[127.0.0.1]", SocketAddress::new);
+
+        assertThat(sa.getHostname()).isEqualTo("127.0.0.1");
+        assertThat(sa.getPort()).isLessThan(0);
+    }
+
+    @Test
+    void shouldNotParseHostnameOnlyIPv4WithPort() {
+        assertThatThrownBy(() -> SocketAddressParser.socketAddressHostnameOnly("127.0.0.1:80", SocketAddress::new))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void shouldParseHostnameOnly() {
+        SocketAddress sa = SocketAddressParser.socketAddressHostnameOnly("localhost", SocketAddress::new);
+
+        assertThat(sa.getHostname()).isEqualTo("localhost");
+        assertThat(sa.getPort()).isLessThan(0);
+    }
+
+    @Test
+    void shouldNotParseHostnameOnlyWithPort() {
+        assertThatThrownBy(() -> SocketAddressParser.socketAddressHostnameOnly("localhost:80", SocketAddress::new))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void shouldParseHostnameOnlyIPv6() {
+        SocketAddress sa =
+                SocketAddressParser.socketAddressHostnameOnly("fd01::9419:4c0e:be04:f0e3:433c", SocketAddress::new);
+
+        assertThat(sa.getHostname()).isEqualTo("fd01::9419:4c0e:be04:f0e3:433c");
+        assertThat(sa.getPort()).isLessThan(0);
+    }
+
+    @Test
+    void shouldParseHostnameOnlyIPv6AmbiguousLast() {
+        SocketAddress sa =
+                SocketAddressParser.socketAddressHostnameOnly("fd01::9419:4c0e:be04:f0e3:4332", SocketAddress::new);
+
+        assertThat(sa.getHostname()).isEqualTo("fd01::9419:4c0e:be04:f0e3:4332");
+        assertThat(sa.getPort()).isLessThan(0);
+    }
+
+    @Test
+    void shouldNotParseHostnameOnlyIPv6WithPort() {
+        assertThatThrownBy(() -> SocketAddressParser.socketAddressHostnameOnly(
+                        "[fd01::9419:4c0e:be04:f0e3]:4332", SocketAddress::new))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     private static String whitespace(int numberOfWhitespaces) {

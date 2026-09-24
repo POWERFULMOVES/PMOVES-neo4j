@@ -20,13 +20,15 @@
 package org.neo4j.cypher.internal.runtime.spec
 
 import org.neo4j.cypher.internal.CypherRuntime
-import org.neo4j.cypher.internal.ExecutionPlan
 import org.neo4j.cypher.internal.LogicalQuery
 import org.neo4j.cypher.internal.RuntimeContext
 import org.neo4j.cypher.internal.options.CypherDebugOptions
+import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSupport.WorkloadMode
 import org.neo4j.cypher.internal.runtime.spec.rewriters.TestPlanCombinationRewriter.TestPlanCombinationRewriterHint
+import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.graphdb.GraphDatabaseService
+import org.neo4j.kernel.api.KernelTransaction.Type
 import org.neo4j.logging.InternalLogProvider
 
 /**
@@ -37,43 +39,52 @@ trait RewritingRuntimeTest[CONTEXT <: RuntimeContext] {
 
   def rewriter(logicalQuery: LogicalQuery): Rewriter
 
-  private def rewriteLogicalQuery(logicalQuery: LogicalQuery): LogicalQuery = {
-    val rewrittenPlan = logicalQuery.logicalPlan.endoRewrite(rewriter(logicalQuery))
-    logicalQuery.copy(logicalPlan = rewrittenPlan)
-  }
-
   override protected def createRuntimeTestSupport(
     graphDb: GraphDatabaseService,
     edition: Edition[CONTEXT],
     runtime: CypherRuntime[CONTEXT],
-    workloadMode: Boolean,
+    workloadMode: WorkloadMode,
     logProvider: InternalLogProvider
   ): RuntimeTestSupport[CONTEXT] = {
-    new RewritingRuntimeTestSupport[CONTEXT](graphDb, edition, runtime, workloadMode, logProvider, debugOptions)
+    new RewritingRuntimeTestSupport(
+      graphDb,
+      edition,
+      runtime,
+      workloadMode,
+      logProvider,
+      debugOptions,
+      defaultTransactionType
+    )
   }
 
-  class RewritingRuntimeTestSupport[CONTEXT <: RuntimeContext](
+  class RewritingRuntimeTestSupport(
     graphDb: GraphDatabaseService,
     edition: Edition[CONTEXT],
     runtime: CypherRuntime[CONTEXT],
-    workloadMode: Boolean,
+    workloadMode: WorkloadMode,
     logProvider: InternalLogProvider,
-    debugOptions: CypherDebugOptions = CypherDebugOptions.default
-  ) extends RuntimeTestSupport[CONTEXT](graphDb, edition, runtime, workloadMode, logProvider, debugOptions) {
+    // No default values: a default getter would synthesize a companion object, which the
+    // Scala 2.13 TASTy reader cannot resolve when nested in a Scala 3 trait
+    debugOptions: CypherDebugOptions,
+    defaultTransactionType: Type
+  ) extends RuntimeTestSupport[CONTEXT](
+        graphDb,
+        edition,
+        runtime,
+        workloadMode,
+        logProvider,
+        debugOptions,
+        defaultTransactionType
+      ) {
 
-    override def buildPlan(
+    override protected[spec] def rewriteLogicalQuery(
       logicalQuery: LogicalQuery,
-      runtime: CypherRuntime[CONTEXT],
-      testPlanCombinationRewriterHint: Set[TestPlanCombinationRewriterHint]
-    ): ExecutionPlan = {
-      super.buildPlan(rewriteLogicalQuery(logicalQuery), runtime, testPlanCombinationRewriterHint)
-    }
-
-    override def buildPlanAndContext(
-      logicalQuery: LogicalQuery,
-      runtime: CypherRuntime[CONTEXT]
-    ): (ExecutionPlan, CONTEXT) = {
-      super.buildPlanAndContext(rewriteLogicalQuery(logicalQuery), runtime)
+      anonymousVariableNameGenerator: AnonymousVariableNameGenerator,
+      testPlanCombinationRewriterHints: Set[TestPlanCombinationRewriterHint]
+    ): LogicalQuery = {
+      val rewrittenPlan = logicalQuery.logicalPlan.endoRewrite(rewriter(logicalQuery))
+      val afterTraitRewrite = logicalQuery.copy(logicalPlan = rewrittenPlan)
+      super.rewriteLogicalQuery(afterTraitRewrite, anonymousVariableNameGenerator, testPlanCombinationRewriterHints)
     }
   }
 }

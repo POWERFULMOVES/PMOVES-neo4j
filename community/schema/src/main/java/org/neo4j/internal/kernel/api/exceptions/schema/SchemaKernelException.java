@@ -34,10 +34,6 @@ public abstract class SchemaKernelException extends KernelException {
         CONSTRAINT_CREATION
     }
 
-    protected SchemaKernelException(Status statusCode, Throwable cause, String message, Object... parameters) {
-        super(statusCode, cause, message, parameters);
-    }
-
     protected SchemaKernelException(
             ErrorGqlStatusObject gqlStatusObject,
             Status statusCode,
@@ -47,20 +43,12 @@ public abstract class SchemaKernelException extends KernelException {
         super(gqlStatusObject, statusCode, cause, message, parameters);
     }
 
-    public SchemaKernelException(Status statusCode, String message, Throwable cause) {
-        super(statusCode, cause, message);
-    }
-
-    public SchemaKernelException(
+    protected SchemaKernelException(
             ErrorGqlStatusObject gqlStatusObject, Status statusCode, String message, Throwable cause) {
         super(gqlStatusObject, statusCode, cause, message);
     }
 
-    public SchemaKernelException(Status statusCode, String message) {
-        super(statusCode, message);
-    }
-
-    public SchemaKernelException(ErrorGqlStatusObject gqlStatusObject, Status statusCode, String message) {
+    protected SchemaKernelException(ErrorGqlStatusObject gqlStatusObject, Status statusCode, String message) {
         super(gqlStatusObject, statusCode, message);
     }
 

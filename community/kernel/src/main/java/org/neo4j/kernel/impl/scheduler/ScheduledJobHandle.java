@@ -203,6 +203,11 @@ final class ScheduledJobHandle<T> implements JobHandle<T> {
     }
 
     @Override
+    public boolean isDone() {
+        throw new UnsupportedOperationException("Not supported for repeating tasks.");
+    }
+
+    @Override
     public void registerCancelListener(CancelListener listener) {
         cancelListeners.add(listener);
     }
@@ -230,10 +235,10 @@ final class ScheduledJobHandle<T> implements JobHandle<T> {
         var state = this.state.get();
         return switch (state) {
             case RUNNABLE, SUBMITTED -> MonitoredJobInfo.State.SCHEDULED;
-                // A job can be in failed state only for a glimpse between being marked
-                // as failed and being removed from monitored jobs immediately after that.
-                // Let's show such job as still executing as there is no point confusing
-                // users with this esoteric state.
+            // A job can be in failed state only for a glimpse between being marked
+            // as failed and being removed from monitored jobs immediately after that.
+            // Let's show such job as still executing as there is no point confusing
+            // users with this esoteric state.
             case EXECUTING, FAILED -> MonitoredJobInfo.State.EXECUTING;
             default -> throw new IllegalStateException("Unexpected job state: " + state);
         };

@@ -39,6 +39,8 @@ class EphemeralFileData {
     private EphemeralDynamicByteBuffer forcedBuffer;
     private long lastModified;
     private int locked; // Guarded by lock on 'channels'
+    private boolean isMapped; // True if memory mapped
+    private boolean freed = false;
 
     EphemeralFileData(Path file, Clock clock) {
         this(file, new EphemeralDynamicByteBuffer(), clock);
@@ -92,11 +94,22 @@ class EphemeralFileData {
     }
 
     synchronized EphemeralFileData copy() {
-        return new EphemeralFileData(file, fileAsBuffer.copy(), clock);
+        EphemeralDynamicByteBuffer copy;
+        try {
+            copy = fileAsBuffer.copy();
+        } catch (IllegalStateException e) {
+            throw new IllegalStateException("Error copying ephemeral buffer for " + file, e);
+        }
+        return new EphemeralFileData(file, copy, clock);
     }
 
     synchronized void free() {
-        fileAsBuffer.free();
+        if (channels.isEmpty()) {
+            fileAsBuffer.free();
+        } else {
+            /* If the file was unlinked, then its data will die with the last open channel. */
+            freed = true;
+        }
     }
 
     void open(EphemeralFileChannel channel) {
@@ -113,7 +126,7 @@ class EphemeralFileData {
         fileAsBuffer = forcedBuffer.copy();
     }
 
-    void close(EphemeralFileChannel channel) {
+    synchronized void close(EphemeralFileChannel channel) {
         synchronized (channels) {
             locked = 0; // Regular file systems seems to release all file locks when closed...
             Iterator<WeakReference<EphemeralFileChannel>> iterator = channels.iterator();
@@ -123,6 +136,9 @@ class EphemeralFileData {
                 if (openChannel == null || openChannel == channel) {
                     iterator.remove();
                 }
+            }
+            if (channels.isEmpty() && freed) {
+                fileAsBuffer.free();
             }
         }
     }
@@ -187,5 +203,13 @@ class EphemeralFileData {
 
     synchronized long getLastModified() {
         return lastModified;
+    }
+
+    synchronized void setIsMapped() {
+        isMapped = true;
+    }
+
+    synchronized boolean isMapped() {
+        return isMapped;
     }
 }

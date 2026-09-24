@@ -19,19 +19,22 @@
  */
 package org.neo4j.io.pagecache.impl.muninn;
 
-import static org.neo4j.io.pagecache.context.TransactionIdSnapshot.isNotVisible;
-
 import java.io.IOException;
-import org.neo4j.io.pagecache.PageSwapper;
 import org.neo4j.io.pagecache.context.CursorContext;
+import org.neo4j.io.pagecache.impl.muninn.swapper.PageSwapper;
 import org.neo4j.io.pagecache.tracing.PinEvent;
 
 final class MuninnReadPageCursor extends MuninnPageCursor {
     long lockStamp;
 
     MuninnReadPageCursor(
-            MuninnPagedFile pagedFile, int pf_flags, long victimPage, CursorContext cursorContext, long pageId) {
-        super(pagedFile, pf_flags, victimPage, cursorContext, pageId);
+            MuninnPagedFile pagedFile,
+            PageMetadata pageMetadata,
+            int pf_flags,
+            long victimPage,
+            CursorContext cursorContext,
+            long pageId) {
+        super(pagedFile, pageMetadata, pf_flags, victimPage, cursorContext, pageId);
     }
 
     @Override
@@ -67,7 +70,7 @@ final class MuninnReadPageCursor extends MuninnPageCursor {
 
     @Override
     protected boolean tryLockPage(long pageRef) {
-        lockStamp = PageList.tryOptimisticReadLock(pageRef);
+        lockStamp = PageMetadata.tryOptimisticReadLock(pageRef);
         return true;
     }
 
@@ -78,10 +81,11 @@ final class MuninnReadPageCursor extends MuninnPageCursor {
     protected void pinCursorToPage(PinEvent pinEvent, long pageRef, long filePageId, PageSwapper swapper) {
         init(pinEvent, pageRef);
         if (multiVersioned) {
+            versionStamp = versionContext.stamp();
             long pagePointer = pointer;
             version = getLongAt(pagePointer, littleEndian);
             versionContext.observedChainHead(version);
-            if (shouldLoadSnapshot(version)) {
+            if (cursorContext.isNotVisibleVersion(version)) {
                 versionContext.markHeadInvisible();
                 if (chainFollow) {
                     versionStorage.loadReadSnapshot(this, versionContext, pinEvent);
@@ -90,15 +94,9 @@ final class MuninnReadPageCursor extends MuninnPageCursor {
         }
     }
 
-    private boolean shouldLoadSnapshot(long pageVersion) {
-        return pageVersion != versionContext.committingTransactionId()
-                && (pageVersion > versionContext.highestClosed()
-                        || isNotVisible(versionContext.notVisibleTransactionIds(), pageVersion));
-    }
-
     @Override
     protected void convertPageFaultLock(long pageRef) {
-        lockStamp = PageList.unlockExclusive(pageRef);
+        lockStamp = PageMetadata.unlockExclusive(pageRef);
     }
 
     @Override
@@ -118,7 +116,7 @@ final class MuninnReadPageCursor extends MuninnPageCursor {
         MuninnReadPageCursor cursor = this;
         do {
             long pageRef = cursor.pinnedPageRef;
-            if (pageRef != 0 && !PageList.validateReadLock(pageRef, cursor.lockStamp)) {
+            if (pageRef != 0 && !PageMetadata.validateReadLock(pageRef, cursor.lockStamp)) {
                 assertCursorOpenFileMappedAndGetIdOfLastPage();
                 startRetryLinkedChain();
                 return true;
@@ -133,7 +131,7 @@ final class MuninnReadPageCursor extends MuninnPageCursor {
         MuninnReadPageCursor cursor = this;
         do {
             long pageRef = cursor.pinnedPageRef;
-            if (pageRef != 0 && !PageList.validateReadLock(pageRef, cursor.lockStamp)) {
+            if (pageRef != 0 && !PageMetadata.validateReadLock(pageRef, cursor.lockStamp)) {
                 return true;
             }
             cursor = (MuninnReadPageCursor) cursor.linkedCursor;
@@ -157,12 +155,12 @@ final class MuninnReadPageCursor extends MuninnPageCursor {
         setOffset(0);
         checkAndClearBoundsFlag();
         clearCursorException();
-        lockStamp = PageList.tryOptimisticReadLock(pageRef);
+        lockStamp = PageMetadata.tryOptimisticReadLock(pageRef);
         // The page might have been evicted while we held the optimistic
         // read lock, so we need to check with page.pin that this is still
         // the page we're actually interested in:
         var filePageId = loadPlainCurrentPageId();
-        if (!PageList.isBoundTo(pageRef, swapperId, filePageId) || multiVersioned) {
+        if (!PageMetadata.isBoundTo(pageRef, swapperId, filePageId) || multiVersioned) {
             // This is no longer the page we're interested in, so we have
             // to redo the pinning.
             // This might in turn lead to a new optimistic lock on a
@@ -227,5 +225,10 @@ final class MuninnReadPageCursor extends MuninnPageCursor {
     @Override
     public void setPageHorizon(long horizon) {
         throw new IllegalStateException("Cannot mark read only page");
+    }
+
+    @Override
+    public boolean includesChangesFromThisTransaction() {
+        return !multiVersioned || cursorContext.includeCurrentTransaction();
     }
 }

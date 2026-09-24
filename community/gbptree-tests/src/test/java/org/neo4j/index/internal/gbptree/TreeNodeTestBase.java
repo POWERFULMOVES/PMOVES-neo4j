@@ -19,6 +19,7 @@
  */
 package org.neo4j.index.internal.gbptree;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -37,13 +38,12 @@ import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.io.pagecache.PageCursor;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 public abstract class TreeNodeTestBase<KEY, VALUE> {
     static final int STABLE_GENERATION = 1;
     static final int UNSTABLE_GENERATION = 3;
@@ -55,8 +55,6 @@ public abstract class TreeNodeTestBase<KEY, VALUE> {
     private TestLayout<KEY, VALUE> layout;
     LeafNodeBehaviour<KEY, VALUE> leaf;
     InternalNodeBehaviour<KEY> internal;
-
-    private final GenerationKeeper generationTarget = new GenerationKeeper();
 
     @Inject
     private RandomSupport random;
@@ -88,11 +86,11 @@ public abstract class TreeNodeTestBase<KEY, VALUE> {
 
     abstract void assertAdditionalHeader(PageCursor cursor, int pageSize);
 
-    private KEY key(long seed) {
+    KEY key(long seed) {
         return layout.key(seed);
     }
 
-    private VALUE value(long seed) {
+    VALUE value(long seed) {
         return layout.value(seed);
     }
 
@@ -220,7 +218,7 @@ public abstract class TreeNodeTestBase<KEY, VALUE> {
         // WHEN
         VALUE overwriteValue = value(666);
         assertTrue(
-                leaf.setValueAt(cursor, overwriteValue, 0, NULL_CONTEXT, STABLE_GENERATION, UNSTABLE_GENERATION),
+                leaf.setValueAt(cursor, overwriteValue, 0, 2, NULL_CONTEXT, STABLE_GENERATION, UNSTABLE_GENERATION),
                 String.format("Could not overwrite value, oldValue=%s, newValue=%s", firstValue, overwriteValue));
 
         // THEN
@@ -326,6 +324,59 @@ public abstract class TreeNodeTestBase<KEY, VALUE> {
     }
 
     @Test
+    void availableSpaceOfInternalShouldPredictOverflow() throws IOException {
+        initializeInternal();
+        long stable = 3;
+        long unstable = 4;
+        int keyCount = 0;
+        long childId = 10;
+        internal.setChildAt(cursor, childId, 0, stable, unstable);
+        childId++;
+        while (true) {
+            KEY key = key(childId);
+            int availableSpace = internal.availableSpace(cursor, keyCount);
+            boolean fits = availableSpace >= internal.totalSpaceOfKeyChild(key);
+            assertThat(internal.overflow(cursor, keyCount, key) != Overflow.YES).isEqualTo(fits);
+            if (!fits) {
+                break;
+            }
+            if (internal.overflow(cursor, keyCount, key) == Overflow.NO_NEED_DEFRAG) {
+                internal.defragment(cursor, keyCount);
+            }
+            internal.insertKeyAndRightChildAt(cursor, key, childId, keyCount, keyCount, stable, unstable, NULL_CONTEXT);
+            keyCount++;
+            TreeNodeUtil.setKeyCount(cursor, keyCount);
+            assertThat(internal.availableSpace(cursor, keyCount)).isLessThan(availableSpace);
+            childId++;
+        }
+    }
+
+    @Test
+    void totalSpaceOfKeyChildAtShouldMatchMaterializedEntrySize() throws IOException {
+        initializeInternal();
+        long stable = 3;
+        long unstable = 4;
+        internal.setChildAt(cursor, 10, 0, stable, unstable);
+        int keyCount = 0;
+        for (long seed = 11; keyCount < 5; seed++) {
+            KEY key = key(seed);
+            if (internal.overflow(cursor, keyCount, key) != Overflow.NO) {
+                break;
+            }
+            internal.insertKeyAndRightChildAt(cursor, key, seed, keyCount, keyCount, stable, unstable, NULL_CONTEXT);
+            keyCount++;
+            TreeNodeUtil.setKeyCount(cursor, keyCount);
+        }
+
+        KEY readKey = getLayout().newKey();
+        for (int pos = 0; pos < keyCount; pos++) {
+            assertEquals(
+                    internal.totalSpaceOfKeyChild(internal.keyAt(cursor, readKey, pos, NULL_CONTEXT)),
+                    internal.totalSpaceOfKeyChildAt(cursor, pos));
+        }
+    }
+
+    @Test
     void shouldSetAndGetKeyCount() {
         // GIVEN
         initializeLeaf();
@@ -367,7 +418,7 @@ public abstract class TreeNodeTestBase<KEY, VALUE> {
 
     protected void defragmentLeaf(LeafNodeBehaviour<KEY, VALUE> leaf, PageAwareByteArrayCursor cursor)
             throws IOException {
-        leaf.defragment(cursor, TreeNodeUtil.keyCount(cursor), NULL_CONTEXT);
+        leaf.defragment(cursor, TreeNodeUtil.keyCount(cursor), STABLE_GENERATION, UNSTABLE_GENERATION, NULL_CONTEXT);
     }
 
     @Test
@@ -539,7 +590,7 @@ public abstract class TreeNodeTestBase<KEY, VALUE> {
 
                 Overflow overflow = leaf.overflow(cursor, expectedKeyCount, newKey, newValue, NULL_CONTEXT);
                 if (overflow == NO_NEED_DEFRAG) {
-                    leaf.defragment(cursor, expectedKeyCount, NULL_CONTEXT);
+                    leaf.defragment(cursor, expectedKeyCount, STABLE_GENERATION, UNSTABLE_GENERATION, NULL_CONTEXT);
                     assertContent(expectedKeys, expectedValues, expectedKeyCount);
                 }
                 if (overflow != YES) { // there's room
@@ -636,13 +687,12 @@ public abstract class TreeNodeTestBase<KEY, VALUE> {
         TreeNodeUtil.setRightSibling(cursor, pointer, STABLE_GENERATION, generation);
 
         // WHEN
-        long readResult = TreeNodeUtil.rightSibling(cursor, STABLE_GENERATION, generation, generationTarget);
-        long readGeneration = generationTarget.generation;
+        PointerWithGeneration readResult = TreeNodeUtil.rightSibling(cursor, STABLE_GENERATION, generation);
 
         // THEN
-        assertEquals(pointer, pointer(readResult));
-        assertEquals(generation, readGeneration);
-        assertTrue(resultIsFromSlotA(readResult));
+        assertEquals(pointer, pointer(readResult.pointer()));
+        assertEquals(generation, readResult.generation());
+        assertTrue(resultIsFromSlotA(readResult.pointer()));
     }
 
     @Test
@@ -655,13 +705,12 @@ public abstract class TreeNodeTestBase<KEY, VALUE> {
         TreeNodeUtil.setRightSibling(cursor, pointer, UNSTABLE_GENERATION, generation);
 
         // WHEN
-        long readResult = TreeNodeUtil.rightSibling(cursor, UNSTABLE_GENERATION, generation, generationTarget);
-        long readGeneration = generationTarget.generation;
+        PointerWithGeneration readResult = TreeNodeUtil.rightSibling(cursor, UNSTABLE_GENERATION, generation);
 
         // THEN
-        assertEquals(pointer, pointer(readResult));
-        assertEquals(generation, readGeneration);
-        assertFalse(resultIsFromSlotA(readResult));
+        assertEquals(pointer, pointer(readResult.pointer()));
+        assertEquals(generation, readResult.generation());
+        assertFalse(resultIsFromSlotA(readResult.pointer()));
     }
 
     @Test
@@ -673,13 +722,12 @@ public abstract class TreeNodeTestBase<KEY, VALUE> {
         internal.setChildAt(cursor, pointer, childPos, STABLE_GENERATION, generation);
 
         // WHEN
-        long readResult = internal.childAt(cursor, childPos, STABLE_GENERATION, generation, generationTarget);
-        long readGeneration = generationTarget.generation;
+        var readResult = internal.childWithGenerationAt(cursor, childPos, STABLE_GENERATION, generation);
 
         // THEN
-        assertEquals(pointer, pointer(readResult));
-        assertEquals(generation, readGeneration);
-        assertTrue(resultIsFromSlotA(readResult));
+        assertEquals(pointer, pointer(readResult.pointer()));
+        assertEquals(generation, readResult.generation());
+        assertTrue(resultIsFromSlotA(readResult.pointer()));
     }
 
     @Test
@@ -691,13 +739,12 @@ public abstract class TreeNodeTestBase<KEY, VALUE> {
         internal.setChildAt(cursor, pointer, childPos, STABLE_GENERATION, generation);
 
         // WHEN
-        long readResult = internal.childAt(cursor, childPos, STABLE_GENERATION, generation, generationTarget);
-        long readGeneration = generationTarget.generation;
+        var readResult = internal.childWithGenerationAt(cursor, childPos, STABLE_GENERATION, generation);
 
         // THEN
-        assertEquals(pointer, pointer(readResult));
-        assertEquals(generation, readGeneration);
-        assertTrue(resultIsFromSlotA(readResult));
+        assertEquals(pointer, pointer(readResult.pointer()));
+        assertEquals(generation, readResult.generation());
+        assertTrue(resultIsFromSlotA(readResult.pointer()));
     }
 
     @Test
@@ -711,13 +758,12 @@ public abstract class TreeNodeTestBase<KEY, VALUE> {
         internal.setChildAt(cursor, pointer, childPos, UNSTABLE_GENERATION, generation);
 
         // WHEN
-        long readResult = internal.childAt(cursor, childPos, UNSTABLE_GENERATION, generation, generationTarget);
-        long readGeneration = generationTarget.generation;
+        var readResult = internal.childWithGenerationAt(cursor, childPos, UNSTABLE_GENERATION, generation);
 
         // THEN
-        assertEquals(pointer, pointer(readResult));
-        assertEquals(generation, readGeneration);
-        assertFalse(resultIsFromSlotA(readResult));
+        assertEquals(pointer, pointer(readResult.pointer()));
+        assertEquals(generation, readResult.generation());
+        assertFalse(resultIsFromSlotA(readResult.pointer()));
     }
 
     @Test
@@ -731,16 +777,15 @@ public abstract class TreeNodeTestBase<KEY, VALUE> {
         internal.setChildAt(cursor, pointer, childPos, UNSTABLE_GENERATION, generation);
 
         // WHEN
-        long readResult = internal.childAt(cursor, childPos, UNSTABLE_GENERATION, generation, generationTarget);
-        long readGeneration = generationTarget.generation;
+        var readResult = internal.childWithGenerationAt(cursor, childPos, UNSTABLE_GENERATION, generation);
 
         // THEN
-        assertEquals(pointer, pointer(readResult));
-        assertEquals(generation, readGeneration);
-        assertFalse(resultIsFromSlotA(readResult));
+        assertEquals(pointer, pointer(readResult.pointer()));
+        assertEquals(generation, readResult.generation());
+        assertFalse(resultIsFromSlotA(readResult.pointer()));
     }
 
-    private void assertKeyEquals(KEY expectedKey, KEY actualKey) {
+    void assertKeyEquals(KEY expectedKey, KEY actualKey) {
         assertEquals(
                 0,
                 layout.compare(expectedKey, actualKey),
@@ -771,23 +816,26 @@ public abstract class TreeNodeTestBase<KEY, VALUE> {
         }
     }
 
-    private void initializeLeaf() {
+    void initializeLeaf() {
         leaf.initialize(cursor, DATA_LAYER_FLAG, STABLE_GENERATION, UNSTABLE_GENERATION);
     }
 
-    private void initializeInternal() {
+    void initializeInternal() {
         internal.initialize(cursor, DATA_LAYER_FLAG, STABLE_GENERATION, UNSTABLE_GENERATION);
     }
 
     private static long rightSibling(PageCursor cursor, long stableGeneration, long unstableGeneration) {
-        return pointer(TreeNodeUtil.rightSibling(cursor, stableGeneration, unstableGeneration));
+        return pointer(TreeNodeUtil.rightSibling(cursor, stableGeneration, unstableGeneration)
+                .pointer());
     }
 
     private static long leftSibling(PageCursor cursor, long stableGeneration, long unstableGeneration) {
-        return pointer(TreeNodeUtil.leftSibling(cursor, stableGeneration, unstableGeneration));
+        return pointer(TreeNodeUtil.leftSibling(cursor, stableGeneration, unstableGeneration)
+                .pointer());
     }
 
     private static long successor(PageCursor cursor, long stableGeneration, long unstableGeneration) {
-        return pointer(TreeNodeUtil.successor(cursor, stableGeneration, unstableGeneration));
+        return pointer(TreeNodeUtil.successor(cursor, stableGeneration, unstableGeneration)
+                .pointer());
     }
 }

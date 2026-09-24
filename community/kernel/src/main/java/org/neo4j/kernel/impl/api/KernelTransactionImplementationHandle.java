@@ -20,16 +20,15 @@
 package org.neo4j.kernel.impl.api;
 
 import static java.util.Optional.ofNullable;
-import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_ID;
 
 import java.util.Collection;
 import java.util.Map;
 import java.util.Optional;
 import org.apache.commons.lang3.StringUtils;
+import org.neo4j.graphdb.NotInTransactionException;
+import org.neo4j.graphdb.TransactionTerminatedException;
 import org.neo4j.internal.kernel.api.connectioninfo.ClientConnectionInfo;
 import org.neo4j.internal.kernel.api.security.AuthSubject;
-import org.neo4j.io.pagecache.context.CursorContext;
-import org.neo4j.io.pagecache.context.VersionContext;
 import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.api.KernelTransactionHandle;
 import org.neo4j.kernel.api.TerminationMark;
@@ -38,6 +37,7 @@ import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.api.query.ExecutingQuery;
 import org.neo4j.kernel.impl.api.transaction.trace.TransactionInitializationTrace;
 import org.neo4j.lock.ActiveLock;
+import org.neo4j.memory.MemoryTracker;
 import org.neo4j.time.SystemNanoClock;
 
 /**
@@ -63,11 +63,8 @@ class KernelTransactionImplementationHandle implements KernelTransactionHandle {
     private final TransactionInitializationTrace initializationTrace;
     private final KernelTransactionStamp transactionStamp;
     private final String databaseName;
-    private final long lastClosedTxId;
-    private final long transactionHorizon;
 
-    KernelTransactionImplementationHandle(
-            KernelTransactionImplementation tx, SystemNanoClock clock, CursorContext cursorContext) {
+    KernelTransactionImplementationHandle(KernelTransactionImplementation tx, SystemNanoClock clock) {
         this.transactionStamp = new KernelTransactionStamp(tx);
         this.startTime = tx.startTime();
         this.startTimeNanos = tx.startTimeNanos();
@@ -80,9 +77,6 @@ class KernelTransactionImplementationHandle implements KernelTransactionHandle {
         this.initializationTrace = tx.getInitializationTrace();
         this.clientInfo = tx.clientInfo();
         this.databaseName = tx.getDatabaseName();
-        var versionContext = cursorContext.getVersionContext();
-        this.lastClosedTxId = versionContext.lastClosedTransactionId();
-        this.transactionHorizon = transactionHorizon(versionContext);
         this.tx = tx;
         this.clock = clock;
     }
@@ -167,8 +161,17 @@ class KernelTransactionImplementationHandle implements KernelTransactionHandle {
     }
 
     @Override
-    public Collection<ActiveLock> activeLocks() {
-        return tx.activeLocks();
+    public Collection<ActiveLock> activeLocks(MemoryTracker memoryTracker) {
+        return tx.activeLocks(memoryTracker);
+    }
+
+    @Override
+    public long activeLockCount() {
+        try {
+            return tx.lockClient().activeLockCount();
+        } catch (NotInTransactionException | TransactionTerminatedException e) {
+            return 0L;
+        }
     }
 
     @Override
@@ -195,16 +198,6 @@ class KernelTransactionImplementationHandle implements KernelTransactionHandle {
     }
 
     @Override
-    public long getLastClosedTxId() {
-        return lastClosedTxId;
-    }
-
-    @Override
-    public long getTransactionHorizon() {
-        return transactionHorizon;
-    }
-
-    @Override
     public boolean equals(Object o) {
         if (this == o) {
             return true;
@@ -223,18 +216,20 @@ class KernelTransactionImplementationHandle implements KernelTransactionHandle {
 
     @Override
     public String toString() {
-        return "KernelTransactionImplementationHandle{transactionSequenceNumber="
-                + transactionStamp.getTransactionSequenceNumber() + ", tx=" + tx + "}";
-    }
-
-    private long transactionHorizon(VersionContext versionContext) {
-        // if transaction has already started committing its horizon is oldestVisibleTransactionNumber which was
-        // recorded at the time commit started
-        var oldestVisibleTransactionNumber = versionContext.oldestVisibleTransactionNumber();
-        if (oldestVisibleTransactionNumber > BASE_TX_ID) {
-            return oldestVisibleTransactionNumber;
-        }
-        // otherwise, its horizon is the latest gap free closed transaction at the time it started
-        return versionContext.lastClosedTransactionId();
+        return "KernelTransactionImplementationHandle{" + "startTime="
+                + startTime + ", startTimeNanos="
+                + startTimeNanos + ", timeout="
+                + timeout + ", tx="
+                + tx + ", clock="
+                + clock + ", clientInfo="
+                + clientInfo + ", subject="
+                + subject + ", terminationMark="
+                + terminationMark + ", executingQuery="
+                + executingQuery + ", metaData="
+                + metaData + ", statusDetails='"
+                + statusDetails + '\'' + ", initializationTrace="
+                + initializationTrace + ", transactionStamp="
+                + transactionStamp + ", databaseName='"
+                + databaseName + '\'' + '}';
     }
 }

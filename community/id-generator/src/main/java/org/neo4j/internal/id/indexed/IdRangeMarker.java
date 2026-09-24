@@ -20,6 +20,7 @@
 package org.neo4j.internal.id.indexed;
 
 import static org.neo4j.internal.id.indexed.IdRange.ADDITION_ALL;
+import static org.neo4j.internal.id.indexed.IdRange.ADDITION_NONE;
 import static org.neo4j.internal.id.indexed.IdRange.ADDITION_REUSE;
 import static org.neo4j.internal.id.indexed.IdRange.BITSET_ALL;
 import static org.neo4j.internal.id.indexed.IdRange.BITSET_COMMIT;
@@ -28,7 +29,6 @@ import static org.neo4j.internal.id.indexed.IdRange.BITSET_REUSE;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
 import org.neo4j.index.internal.gbptree.GBPTree;
@@ -77,7 +77,7 @@ class IdRangeMarker implements IdGenerator.TransactionalMarker, IdGenerator.Cont
      * Which {@link GBPTree} {@link ValueMerger} to use, may be different depending on whether or not the id generator has been fully started,
      * i.e. different whether it's recovery mode or normal operations mode.
      */
-    private final ValueMerger<IdRangeKey, IdRange> merger;
+    private final IdRangeMerger merger;
 
     /**
      * Whether or not the id generator has been started.
@@ -88,7 +88,7 @@ class IdRangeMarker implements IdGenerator.TransactionalMarker, IdGenerator.Cont
      * Incremented as soon as this marker marks any id as "free", so that the {@link FreeIdScanner} will go through the effort of even starting
      * a scan for free ids.
      */
-    private final AtomicInteger freeIdsNotifier;
+    private final FreeIdFindState freeIdFindState;
 
     /**
      * Generation that this marker was instantiated at. It cannot change as long as this marker is unclosed.
@@ -101,6 +101,8 @@ class IdRangeMarker implements IdGenerator.TransactionalMarker, IdGenerator.Cont
      * and the id being written with deleted ids.
      */
     private final AtomicLong highestWrittenId;
+
+    private final AtomicLong highId;
 
     /**
      * Whether or not to bridge gaps between previously highest written id and id being written as updates comes in.
@@ -128,6 +130,7 @@ class IdRangeMarker implements IdGenerator.TransactionalMarker, IdGenerator.Cont
     private final IndexedIdGenerator.Monitor monitor;
 
     private final boolean respectsReservedIds;
+    private final boolean isPowerOfTwo;
 
     /**
      * Current type of operations. As various "mark" operations comes in they modify the {@link #key} and {@link #value}
@@ -142,11 +145,12 @@ class IdRangeMarker implements IdGenerator.TransactionalMarker, IdGenerator.Cont
             Layout<IdRangeKey, IdRange> layout,
             Writer<IdRangeKey, IdRange> writer,
             Lock lock,
-            ValueMerger<IdRangeKey, IdRange> merger,
+            IdRangeMerger merger,
             boolean started,
-            AtomicInteger freeIdsNotifier,
+            FreeIdFindState freeIdFindState,
             long generation,
             AtomicLong highestWrittenId,
+            AtomicLong highId,
             boolean bridgeIdGaps,
             boolean deleteAlsoFrees,
             IndexedIdGenerator.Monitor monitor) {
@@ -158,14 +162,21 @@ class IdRangeMarker implements IdGenerator.TransactionalMarker, IdGenerator.Cont
         this.lock = lock;
         this.merger = merger;
         this.started = started;
-        this.freeIdsNotifier = freeIdsNotifier;
+        this.freeIdFindState = freeIdFindState;
         this.generation = generation;
         this.highestWrittenId = highestWrittenId;
+        this.highId = highId;
         this.bridgeIdGaps = bridgeIdGaps;
         this.deleteAlsoFrees = deleteAlsoFrees;
         this.monitor = monitor;
-        this.idsPerEntryShift = Long.numberOfTrailingZeros(idsPerEntry);
-        this.idOffsetMask = (1 << idsPerEntryShift) - 1;
+        this.isPowerOfTwo = Integer.bitCount(idsPerEntry) == 1;
+        if (isPowerOfTwo) {
+            this.idsPerEntryShift = Long.numberOfTrailingZeros(idsPerEntry);
+            this.idOffsetMask = (1 << idsPerEntryShift) - 1;
+        } else {
+            this.idsPerEntryShift = 0;
+            this.idOffsetMask = 0;
+        }
     }
 
     @Override
@@ -200,30 +211,30 @@ class IdRangeMarker implements IdGenerator.TransactionalMarker, IdGenerator.Cont
     public void markUsed(long id, int numberOfIds) {
         bridgeGapBetweenHighestWrittenIdAndThisId(id, numberOfIds, false);
         if (!hasReservedIdInRange(id, id + numberOfIds)) {
-            prepareRange(TYPE_USED, id, false);
-            value.setBits(BITSET_ALL, idOffset(id), numberOfIds);
+            markWithSupportForLargerThanRange(TYPE_USED, id, numberOfIds, ADDITION_NONE, BITSET_ALL, -1);
             monitor.markedAsUsed(id, numberOfIds);
         }
     }
 
     @Override
-    public void markDeleted(long id, int numberOfIds) {
+    public void markDeleted(long id, int numberOfIds, boolean bridgeOnDelete) {
         if (!deleteAlsoFrees) {
+            if (bridgeOnDelete) {
+                bridgeGapBetweenHighestWrittenIdAndThisId(id, numberOfIds, false);
+            }
             if (!hasReservedIdInRange(id, id + numberOfIds)) {
-                prepareRange(TYPE_DELETED, id, true);
-                value.setBits(BITSET_COMMIT, idOffset(id), numberOfIds);
+                markWithSupportForLargerThanRange(TYPE_DELETED, id, numberOfIds, ADDITION_ALL, BITSET_COMMIT, -1);
                 monitor.markedAsDeleted(id, numberOfIds);
             }
         } else {
-            markDeletedAndFree(id, numberOfIds);
+            markDeletedAndFree(id, numberOfIds, bridgeOnDelete);
         }
     }
 
     @Override
     public void markReserved(long id, int numberOfIds) {
         if (!hasReservedIdInRange(id, id + numberOfIds)) {
-            prepareRange(TYPE_RESERVED, id, true);
-            value.setBits(BITSET_RESERVED, idOffset(id), numberOfIds);
+            markWithSupportForLargerThanRange(TYPE_RESERVED, id, numberOfIds, ADDITION_ALL, BITSET_RESERVED, -1);
             monitor.markedAsReserved(id, numberOfIds);
         }
     }
@@ -231,8 +242,7 @@ class IdRangeMarker implements IdGenerator.TransactionalMarker, IdGenerator.Cont
     @Override
     public void markUnreserved(long id, int numberOfIds) {
         if (!hasReservedIdInRange(id, id + numberOfIds)) {
-            prepareRange(TYPE_UNRESERVED, id, false);
-            value.setBits(BITSET_RESERVED, idOffset(id), numberOfIds);
+            markWithSupportForLargerThanRange(TYPE_UNRESERVED, id, numberOfIds, ADDITION_NONE, BITSET_RESERVED, -1);
             monitor.markedAsUnreserved(id, numberOfIds);
         }
     }
@@ -241,10 +251,8 @@ class IdRangeMarker implements IdGenerator.TransactionalMarker, IdGenerator.Cont
     public void markUncached(long id, int numberOfIds) {
         if (!hasReservedIdInRange(id, id + numberOfIds)) {
             // Mark free:1, reserved:0
-            prepareRange(TYPE_UNCACHED, id, ADDITION_REUSE);
-            var idOffset = idOffset(id);
-            value.setBits(BITSET_REUSE, idOffset, numberOfIds);
-            value.setBits(BITSET_RESERVED, idOffset, numberOfIds);
+            markWithSupportForLargerThanRange(
+                    TYPE_UNCACHED, id, numberOfIds, ADDITION_REUSE, BITSET_REUSE, BITSET_RESERVED);
             monitor.markedAsFree(id, numberOfIds);
             monitor.markedAsUnreserved(id, numberOfIds);
         }
@@ -253,19 +261,19 @@ class IdRangeMarker implements IdGenerator.TransactionalMarker, IdGenerator.Cont
     @Override
     public void markFree(long id, int numberOfIds) {
         if (!hasReservedIdInRange(id, id + numberOfIds)) {
-            prepareRange(TYPE_FREE, id, true);
-            value.setBits(BITSET_REUSE, idOffset(id), numberOfIds);
+            markWithSupportForLargerThanRange(TYPE_FREE, id, numberOfIds, ADDITION_ALL, BITSET_REUSE, -1);
             monitor.markedAsFree(id, numberOfIds);
         }
     }
 
     @Override
-    public void markDeletedAndFree(long id, int numberOfIds) {
+    public void markDeletedAndFree(long id, int numberOfIds, boolean bridgeOnDelete) {
+        if (bridgeOnDelete) {
+            bridgeGapBetweenHighestWrittenIdAndThisId(id, numberOfIds, false);
+        }
         if (!hasReservedIdInRange(id, id + numberOfIds)) {
-            prepareRange(TYPE_DELETED_AND_FREE, id, true);
-            var idOffset = idOffset(id);
-            value.setBits(BITSET_COMMIT, idOffset, numberOfIds);
-            value.setBits(BITSET_REUSE, idOffset, numberOfIds);
+            markWithSupportForLargerThanRange(
+                    TYPE_DELETED_AND_FREE, id, numberOfIds, ADDITION_ALL, BITSET_COMMIT, BITSET_REUSE);
             monitor.markedAsDeleted(id, numberOfIds);
             monitor.markedAsFree(id, numberOfIds);
         }
@@ -298,10 +306,6 @@ class IdRangeMarker implements IdGenerator.TransactionalMarker, IdGenerator.Cont
         }
     }
 
-    private void prepareRange(int newType, long id, boolean addition) {
-        prepareRange(newType, id, addition ? ADDITION_ALL : 0);
-    }
-
     private void prepareRange(int newType, long id, byte addition) {
         long idRangeIdx = idRangeIndex(id);
         if (newType != type || idRangeIdx != key.getIdRangeIdx()) {
@@ -322,25 +326,32 @@ class IdRangeMarker implements IdGenerator.TransactionalMarker, IdGenerator.Cont
         } else if (type != TYPE_NONE) {
             writer.merge(key, value, merger);
             if (type == TYPE_FREE || type == TYPE_DELETED_AND_FREE || type == TYPE_UNALLOCATED) {
-                freeIdsNotifier.incrementAndGet();
+                freeIdFindState.recordFreedIds(merger.largestSeenFreeIdsSlotSize());
             }
         }
         type = TYPE_NONE;
     }
 
     private long idRangeIndex(long id) {
-        return id >> idsPerEntryShift;
+        if (isPowerOfTwo) {
+            return id >> idsPerEntryShift;
+        }
+        return id / idsPerEntry;
     }
 
     private int idOffset(long id) {
-        return (int) (id & idOffsetMask);
+        if (isPowerOfTwo) {
+            return (int) (id & idOffsetMask);
+        }
+        return (int) (id % idsPerEntry);
     }
 
     /**
      * Fills the space between the previously highest ever written id and the id currently being updated. The ids between those two points
      * will be marked as deleted, or in the recovery case (where {@link #started} is {@code false} marked as deleted AND free.
      * This solves a problem of not losing track of ids that have been allocated off of high id, but either not committed or failed to be committed.
-     * @param id the id being updated.
+     *
+     * @param id          the id being updated.
      * @param numberOfIds number of ids this id allocation is.
      */
     private void bridgeGapBetweenHighestWrittenIdAndThisId(long id, int numberOfIds, boolean includeThis) {
@@ -381,7 +392,9 @@ class IdRangeMarker implements IdGenerator.TransactionalMarker, IdGenerator.Cont
             // Well, we bridged the gap up and including id - 1, but we know that right after this the actual id
             // will be written so to try to isolate updates to highestWrittenId to this method we can might as well
             // do that right here.
-            this.highestWrittenId.set(id + numberOfIds - 1);
+            long highestWritten = id + numberOfIds - 1;
+            this.highestWrittenId.set(highestWritten);
+            this.highId.accumulateAndGet(highestWritten + 1, Math::max);
         }
     }
 }

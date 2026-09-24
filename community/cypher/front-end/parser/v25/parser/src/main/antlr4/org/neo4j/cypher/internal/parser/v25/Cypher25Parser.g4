@@ -23,15 +23,74 @@ statements
    ;
 
 statement
-   : command | regularQuery
+   : command | queryWithLocalDefinitions
+   ;
+
+queryWithLocalDefinitions
+   : (DEFINE localDefinition)* nextStatement
+   ;
+
+localDefinition
+   : PROCEDURE localProcedureDefinition
+   | FUNCTION localFunctionDefinition
+   ;
+
+localProcedureDefinition
+   : procedureName localInputFieldsSignature (typed outputType = localOutputFieldsSignature)? LCURLY queryWithLocalDefinitions RCURLY
+   ;
+
+localFunctionDefinition
+   : functionName localInputFieldsSignature (typed outputType = type)? localFunctionBody
+   ;
+
+localInputFieldsSignature
+    : LPAREN (localOptionalFieldSignature ( COMMA localOptionalFieldSignature )*)? RPAREN
+    ;
+
+localOutputFieldsSignature
+    : LPAREN (localMandatoryFieldSignature ( COMMA localMandatoryFieldSignature )*)? RPAREN
+    ;
+
+localMandatoryFieldSignature
+    : symbolicNameString (typed? type)?
+    ;
+
+localOptionalFieldSignature
+    : symbolicNameString (typed? type)? (EQ expression)?
+    ;
+
+localFunctionBody
+   : EQ expression                           # ExpressionBody
+   | LCURLY queryWithLocalDefinitions RCURLY # QueryBody
+   ;
+
+nextStatement
+   : regularQuery (NEXT regularQuery)*
    ;
 
 regularQuery
+   : union | when
+   ;
+
+union
    : singleQuery (UNION (ALL | DISTINCT)? singleQuery)*
+   ;
+
+when
+   : whenBranch+ elseBranch?
+   ;
+
+whenBranch
+   : WHEN expression THEN singleQuery
+   ;
+
+elseBranch
+   : ELSE singleQuery
    ;
 
 singleQuery
    : clause+
+   | useClause? LCURLY queryWithLocalDefinitions RCURLY
    ;
 
 clause
@@ -46,12 +105,16 @@ clause
    | matchClause
    | mergeClause
    | withClause
+   | filterClause
    | unwindClause
+   | forListClause
+   | letClause
    | callClause
    | subqueryClause
    | loadCSVClause
    | foreachClause
    | orderBySkipLimitClause
+   | composableCommandClauses
    ;
 
 useClause
@@ -73,7 +136,7 @@ returnClause
    ;
 
 returnBody
-   : DISTINCT? returnItems orderBy? skip? limit?
+   : (DISTINCT | ALL)? returnItems groupBy? orderBy? skip? limit?
    ;
 
 returnItem
@@ -82,6 +145,10 @@ returnItem
 
 returnItems
    : (TIMES | returnItem) (COMMA returnItem)*
+   ;
+
+groupBy
+   : GROUP BY (LPAREN RPAREN | ALL | expression (COMMA expression)*)
    ;
 
 orderItem
@@ -112,6 +179,26 @@ whereClause
    : WHERE expression
    ;
 
+searchClause
+   : SEARCH variable IN LPAREN (FULLTEXT | VECTOR) indexSpecificationClause forClause analyzerClause? whereClause? skip? limit RPAREN scoreClause?
+   ;
+
+indexSpecificationClause
+   : INDEX commandNameExpression
+   ;
+
+forClause
+   : FOR expression
+   ;
+
+analyzerClause
+   : WITH ANALYZER expression
+   ;
+
+scoreClause
+  : SCORE AS variable
+  ;
+
 withClause
    : WITH returnBody whereClause?
    ;
@@ -129,12 +216,11 @@ setClause
    ;
 
 setItem
-   : propertyExpression EQ expression        # SetProp
-   | dynamicPropertyExpression EQ expression # SetDynamicProp
-   | variable EQ expression                  # SetProps
-   | variable PLUSEQUAL expression           # AddProp
-   | variable nodeLabels                     # SetLabels
-   | variable nodeLabelsIs                   # SetLabelsIs
+   : variable EQ expression         # SetProps
+   | variable PLUSEQUAL expression  # AddProp
+   | variable nodeLabels            # SetLabels
+   | variable nodeLabelsIs          # SetLabelsIs
+   | expression2 EQ expression      # SetProp
    ;
 
 removeClause
@@ -142,10 +228,9 @@ removeClause
    ;
 
 removeItem
-   : propertyExpression         # RemoveProp
-   | dynamicPropertyExpression  # RemoveDynamicProp
-   | variable nodeLabels        # RemoveLabels
-   | variable nodeLabelsIs      # RemoveLabelsIs
+   : variable nodeLabels    # RemoveLabels
+   | variable nodeLabelsIs  # RemoveLabelsIs
+   | expression2            # RemoveProp
    ;
 
 deleteClause
@@ -153,7 +238,7 @@ deleteClause
    ;
 
 matchClause
-   : OPTIONAL? MATCH matchMode? patternList hint* whereClause?
+   : OPTIONAL? MATCH matchMode? patternList hint* (whereClause? searchClause? | searchClause whereClause)
    ;
 
 matchMode
@@ -162,15 +247,22 @@ matchMode
    ;
 
 hint
-   : USING (((
-      INDEX
-      | TEXT INDEX
-      | RANGE INDEX
-      | POINT INDEX
-   ) SEEK? variable labelOrRelType LPAREN nonEmptyNameList RPAREN)
-   | JOIN ON nonEmptyNameList
-   | SCAN variable labelOrRelType
+   : USING (
+     ((
+        INDEX
+        | TEXT INDEX
+        | RANGE INDEX
+        | POINT INDEX
+     ) SEEK? variable labelOrRelType LPAREN nonEmptyNameList RPAREN)
+     | JOIN ON nonEmptyNameList
+     | SCAN variable labelOrRelType
+     | EXPAND expandHintStep (COMMA expandHintStep)*
    )
+   ;
+
+expandHintStep
+   : (ALL | INTO)? FROM from=variable TO to=variable (VIA via=variable)?
+   | (ALL | INTO)? VIA via=variable
    ;
 
 mergeClause
@@ -181,8 +273,24 @@ mergeAction
    : ON (MATCH | CREATE) setClause
    ;
 
+filterClause
+   : FILTER WHERE? expression
+   ;
+
 unwindClause
    : UNWIND expression AS variable
+   ;
+
+forListClause
+   : FOR variable IN expression
+   ;
+
+letClause
+   : LET letItem (COMMA letItem)*
+   ;
+
+letItem
+   : variable EQ expression
    ;
 
 callClause
@@ -198,7 +306,7 @@ procedureArgument
    ;
 
 procedureResultItem
-   : symbolicNameString (AS variable)?
+   : yieldItemName = variable (AS yieldItemAlias = variable)?
    ;
 
 loadCSVClause
@@ -210,7 +318,7 @@ foreachClause
    ;
 
 subqueryClause
-   : OPTIONAL? CALL subqueryScope? LCURLY regularQuery RCURLY subqueryInTransactionsParameters?
+   : OPTIONAL? CALL subqueryScope? LCURLY queryWithLocalDefinitions RCURLY subqueryInTransactionsParameters?
    ;
 
 subqueryScope
@@ -218,15 +326,30 @@ subqueryScope
    ;
 
 subqueryInTransactionsParameters
-   : IN (expression? CONCURRENT)? TRANSACTIONS (subqueryInTransactionsBatchParameters | subqueryInTransactionsErrorParameters | subqueryInTransactionsReportParameters)*
+   : IN (expression? CONCURRENT)? TRANSACTIONS (subqueryInTransactionsBatchParameters | subqueryInTransactionsDisjointByParameters | subqueryInTransactionsErrorParameters | subqueryInTransactionsReportParameters)*
    ;
 
 subqueryInTransactionsBatchParameters
    : OF expression (ROW | ROWS)
    ;
 
+subqueryInTransactionsDisjointByParameters
+   : DISJOINT BY AUTO
+   | DISJOINT BY NONE
+   | DISJOINT BY LPAREN subqueryInTransactionsDisjointByExpressions RPAREN
+   ;
+
+subqueryInTransactionsDisjointByExpressions
+   : expression (COMMA expression)*
+   ;
+
 subqueryInTransactionsErrorParameters
-   : ON ERROR (CONTINUE | BREAK | FAIL)
+   : ON ERROR RETRY (subqueryInTransactionsRetryParameters)? (THEN (CONTINUE | BREAK | FAIL))?
+   | ON ERROR (CONTINUE | BREAK | FAIL)
+   ;
+
+subqueryInTransactionsRetryParameters
+   : FOR? expression secondsToken
    ;
 
 subqueryInTransactionsReportParameters
@@ -248,7 +371,7 @@ insertPatternList
    ;
 
 pattern
-   : (variable EQ)? selector? anonymousPattern
+   : (variable EQ)? pathPatternPrefix? anonymousPattern
    ;
 
 insertPattern
@@ -275,14 +398,23 @@ patternElement
    : (nodePattern (relationshipPattern quantifier? nodePattern)* | parenthesizedPath)+
    ;
 
-selector
-   : ANY SHORTEST pathToken?                                  # AnyShortestPath
-   | ALL SHORTEST pathToken?                                  # AllShortestPath
-   | ANY UNSIGNED_DECIMAL_INTEGER? pathToken?                 # AnyPath
-   | ALL pathToken?                                           # AllPath
-   | SHORTEST UNSIGNED_DECIMAL_INTEGER? pathToken? groupToken # ShortestGroup
-   | SHORTEST UNSIGNED_DECIMAL_INTEGER pathToken?             # AnyShortestPath
+pathPatternPrefix
+   : pathMode pathToken?                                                       # AllPath
+   | ANY SHORTEST pathMode? pathToken?                                         # AnyShortestPath
+   | ALL SHORTEST pathMode? pathToken?                                         # AllShortestPath
+   | ANY nonNegativeIntegerSpecification? pathMode? pathToken?                 # AnyPath
+   | ALL pathMode? pathToken?                                                  # AllPath
+   | SHORTEST nonNegativeIntegerSpecification? pathMode? pathToken? groupToken # ShortestGroup
+   | SHORTEST nonNegativeIntegerSpecification pathMode? pathToken?             # AnyShortestPath
    ;
+
+nonNegativeIntegerSpecification
+   : UNSIGNED_DECIMAL_INTEGER | parameter["INTEGER"]
+   ;
+
+pathMode
+    : WALK | TRAIL | ACYCLIC
+    ;
 
 groupToken
    : GROUP | GROUPS
@@ -297,11 +429,13 @@ pathPatternNonEmpty
    ;
 
 nodePattern
-   : LPAREN variable? labelExpression? properties? (WHERE expression)? RPAREN
+   : LPAREN WHERE expression RPAREN //prioritize the WHERE keyword
+   | LPAREN variable? labelExpression? properties? (WHERE expression)? RPAREN
    ;
 
 insertNodePattern
-   : LPAREN variable? insertNodeLabelExpression? map? RPAREN
+   : LPAREN WHERE expression RPAREN //prioritize the WHERE keyword
+   | LPAREN variable? insertNodeLabelExpression? map? RPAREN
    ;
 
 parenthesizedPath
@@ -319,7 +453,7 @@ nodeLabelsIs
 dynamicExpression
    : DOLLAR LPAREN expression RPAREN
    ;
-   
+
 dynamicAnyAllExpression
    : DOLLAR (ALL | ANY)? LPAREN expression RPAREN
    ;
@@ -346,11 +480,17 @@ properties
    ;
 
 relationshipPattern
-   : leftArrow? arrowLine (LBRACKET variable? labelExpression? pathLength? properties? (WHERE expression)? RBRACKET)? arrowLine rightArrow?
+   : leftArrow? arrowLine
+     ( LBRACKET WHERE expression RBRACKET //prioritize the WHERE keyword
+     | LBRACKET variable? labelExpression? pathLength? properties? (WHERE expression)? RBRACKET
+     )? arrowLine rightArrow?
    ;
 
 insertRelationshipPattern
-   : leftArrow? arrowLine LBRACKET variable? insertRelationshipLabelExpression map? RBRACKET arrowLine rightArrow?
+   : leftArrow? arrowLine
+     ( LBRACKET WHERE expression RBRACKET //prioritize the WHERE keyword
+     | LBRACKET variable? insertRelationshipLabelExpression map? RBRACKET
+     ) arrowLine rightArrow?
    ;
 
 leftArrow
@@ -373,32 +513,19 @@ pathLength
    ;
 
 labelExpression
-   : COLON labelExpression4
-   | IS labelExpression4Is
+   : (COLON | IS) labelExpression4
    ;
 
 labelExpression4
    : labelExpression3 (BAR COLON? labelExpression3)*
    ;
 
-labelExpression4Is
-   : labelExpression3Is (BAR COLON? labelExpression3Is)*
-   ;
-
 labelExpression3
    : labelExpression2 ((AMPERSAND | COLON) labelExpression2)*
    ;
 
-labelExpression3Is
-   : labelExpression2Is ((AMPERSAND | COLON) labelExpression2Is)*
-   ;
-
 labelExpression2
    : EXCLAMATION_MARK* labelExpression1
-   ;
-
-labelExpression2Is
-   : EXCLAMATION_MARK* labelExpression1Is
    ;
 
 labelExpression1
@@ -406,13 +533,6 @@ labelExpression1
    | PERCENT                        #AnyLabel
    | dynamicAnyAllExpression        #DynamicLabel
    | symbolicNameString             #LabelName
-   ;
-
-labelExpression1Is
-   : LPAREN labelExpression4Is RPAREN #ParenthesizedLabelExpressionIs
-   | PERCENT                          #AnyLabelIs
-   | dynamicAnyAllExpression          #DynamicLabelIs
-   | symbolicLabelNameString          #LabelNameIs
    ;
 
 insertNodeLabelExpression
@@ -468,6 +588,7 @@ comparisonExpression6
    | IS NOT? NULL                                     # NullComparison
    | (IS NOT? (TYPED | COLONCOLON) | COLONCOLON) type # TypeComparison
    | IS NOT? normalForm? NORMALIZED                   # NormalFormComparison
+   | (IS NOT? LABELED? | COLON) labelExpression4      # LabelComparison
    ;
 
 normalForm
@@ -500,7 +621,6 @@ expression2
 
 postFix
    : property                                                           # PropertyPostfix
-   | labelExpression                                                    # LabelPostfix
    | LBRACKET expression RBRACKET                                       # IndexPostfix
    | LBRACKET fromExp = expression? DOTDOT toExp = expression? RBRACKET # RangePostfix
    ;
@@ -511,14 +631,6 @@ property
 
 dynamicProperty
    : LBRACKET expression RBRACKET
-   ;
-
-propertyExpression
-   : expression1 property+
-   ;
-
-dynamicPropertyExpression
-   : expression1 dynamicProperty
    ;
 
 expression1
@@ -532,21 +644,29 @@ expression1
    | collectExpression
    | mapProjection
    | listComprehension
+   | mapComprehension
    | listLiteral
    | patternComprehension
    | reduceExpression
+   | allReduceExpression
    | listItemsPredicate
    | normalizeFunction
+   | vectorFunction
+   | vectorDistanceFunction
+   | vectorNormFunction
    | trimFunction
+   | propertyExistsPredicate
    | patternExpression
    | shortestPathExpression
    | parenthesizedExpression
    | functionInvocation
+   | interpolatedStringLiteral
    | variable
+   | obfuscatedLiteral
    ;
 
 literal
-   : numberLiteral # NummericLiteral
+   : numberLiteral # NumericLiteral
    | stringLiteral # StringsLiteral
    | map           # OtherLiteral
    | TRUE          # BooleanLiteral
@@ -575,28 +695,29 @@ extendedCaseAlternative
 
 // Making changes here? Consider looking at comparisonExpression6 and expression8 too.
 extendedWhen
-   : (REGEQ | STARTS WITH | ENDS WITH) expression6 # WhenStringOrList
-   | IS NOT? NULL                                  # WhenNull
-   | (IS NOT? TYPED | COLONCOLON) type             # WhenType
-   | IS NOT? normalForm? NORMALIZED                # WhenForm
-   | (
-      EQ
-      | NEQ
-      | INVALID_NEQ
-      | LE
-      | GE
-      | LT
-      | GT
-   ) expression7                                   # WhenComparator
-   | expression                                    # WhenEquals
+   : (
+     EQ
+     | INVALID_NEQ
+     | NEQ
+     | LE
+     | GE
+     | LT
+     | GT ) expression7    # WhenSimpleComparison
+   | comparisonExpression6 # WhenAdvancedComparison
+   | expression            # WhenEquals
    ;
 
 // Observe that this is not possible to write as:
 // (WHERE whereExp = expression)? (BAR barExp = expression)? RBRACKET
-// Due to an ambigouity with cases such as [node IN nodes WHERE node:A|B]
+// Due to an ambiguity with cases such as [node IN nodes WHERE node:A|B]
 // where |B will be interpreted as part of the whereExp, rather than as the expected barExp.
 listComprehension
    : LBRACKET variable IN expression ((WHERE whereExp = expression)? BAR barExp = expression | (WHERE whereExp = expression)?) RBRACKET
+   ;
+   
+mapComprehension
+   : LCURLY variable IN expression (WHERE whereExp = expression)? BAR keyExp = expression6 COLON valueExp = expression RCURLY                                    # MapComprehensionForList
+   | LCURLY keyVar = variable COLON valueVar = variable IN expression (WHERE whereExp = expression)? BAR keyExp = expression6 COLON valueExp = expression RCURLY # MapComprehensionForMap
    ;
 
 patternComprehension
@@ -605,6 +726,20 @@ patternComprehension
 
 reduceExpression
    : REDUCE LPAREN variable EQ expression COMMA variable IN expression BAR expression RPAREN
+   ;
+
+allReduceExpression
+   :  allReduceExpressionValidArguments | allReduceExpressionInvalidArguments
+   ;
+
+allReduceExpressionValidArguments
+   : ALLREDUCE LPAREN variable EQ expression COMMA variable IN expression BAR expression COMMA expression RPAREN
+   ;
+
+// Captures the case where the arguments are not valid, e.g. missing the variable or the bar expression.
+// This will be mapped to a FunctionInvocation which will throw a useful error during Semantic Analysis.
+allReduceExpressionInvalidArguments
+   : ALLREDUCE LPAREN expression ((COMMA | BAR) expression)* RPAREN
    ;
 
 listItemsPredicate
@@ -618,6 +753,33 @@ listItemsPredicate
 
 normalizeFunction
    : NORMALIZE LPAREN expression (COMMA normalForm)? RPAREN
+   ;
+
+
+vectorFunction
+   : VECTOR LPAREN vectorValue = expression COMMA dimension = expression COMMA vectorCoordinateType RPAREN
+   ;
+
+vectorDistanceFunction
+   : VECTOR_DISTANCE LPAREN vector1 = expression COMMA vector2 = expression COMMA vectorDistanceMetric RPAREN
+   ;
+
+vectorNormFunction
+   : VECTOR_NORM LPAREN vectorValue = expression COMMA vectorNormDistanceMetric RPAREN
+   ;
+
+vectorDistanceMetric
+   : EUCLIDEAN
+   | EUCLIDEAN_SQUARED
+   | MANHATTAN
+   | COSINE
+   | DOT_METRIC
+   | HAMMING
+   ;
+
+vectorNormDistanceMetric
+   : EUCLIDEAN
+   | MANHATTAN
    ;
 
 trimFunction
@@ -652,15 +814,19 @@ countStar
    ;
 
 existsExpression
-   : EXISTS LCURLY (regularQuery | matchMode? patternList whereClause?) RCURLY
+   : EXISTS LCURLY (queryWithLocalDefinitions | matchMode? patternList whereClause?) RCURLY
+   ;
+
+propertyExistsPredicate
+   : PROPERTY_EXISTS LPAREN variable COMMA propertyKeyName RPAREN
    ;
 
 countExpression
-   : COUNT LCURLY (regularQuery | matchMode? patternList whereClause?) RCURLY
+   : COUNT LCURLY (queryWithLocalDefinitions | matchMode? patternList whereClause?) RCURLY
    ;
 
 collectExpression
-   : COLLECT LCURLY regularQuery RCURLY
+   : COLLECT LCURLY queryWithLocalDefinitions RCURLY
    ;
 
 numberLiteral
@@ -709,7 +875,11 @@ namespace
    ;
 
 variable
-   : symbolicNameString
+   : symbolicVariableNameString
+   ;
+
+obfuscatedLiteral
+   : OBFUSCATION
    ;
 
 // Returns non-list of propertyKeyNames
@@ -733,9 +903,13 @@ typeName
    | BOOLEAN
    | VARCHAR
    | STRING
+   | UUID
    | INT
    | SIGNED? INTEGER
+   | INTEGER64
+   | INT64
    | FLOAT
+   | FLOAT64
    | DATE
    | LOCAL (TIME | DATETIME)
    | ZONED (TIME | DATETIME)
@@ -744,6 +918,8 @@ typeName
    | DURATION
    | POINT
    | NODE
+   | VECTOR LPAREN signedIntegerLiteral COMMA vectorCoordinateType RPAREN
+   | VECTOR (LT vectorCoordinateType GT)? (LPAREN signedIntegerLiteral RPAREN)?
    | VERTEX
    | RELATIONSHIP
    | EDGE
@@ -773,6 +949,23 @@ typeListSuffix
    : (LIST | ARRAY) typeNullability?
    ;
 
+vectorCoordinateType
+    : (INT
+    | SIGNED? INTEGER
+    | INTEGER64
+    | INTEGER32
+    | INTEGER16
+    | INTEGER8
+    | INT64
+    | INT32
+    | INT16
+    | INT8
+    | FLOAT
+    | FLOAT64
+    | FLOAT32
+    ) typeNullability?
+    ;
+
 // Show, terminate, schema and admin commands
 
 command
@@ -788,8 +981,7 @@ command
       | stopDatabase
       | enableServerCommand
       | allocationCommand
-      | showCommand
-      | terminateCommand
+      | showAdminCommand
    )
    ;
 
@@ -799,9 +991,24 @@ createCommand
       | createCompositeDatabase
       | createConstraint
       | createDatabase
+      | createReplicaDatabase
       | createIndex
       | createRole
       | createUser
+      | createAuthRule
+   )
+   ;
+
+alterCommand
+   : ALTER (
+      alterAlias
+      | alterCurrentUser
+      | alterCurrentGraphType
+      | alterDatabase
+      | alterUser
+      | alterUsers
+      | alterServer
+      | alterAuthRule
    )
    ;
 
@@ -814,25 +1021,21 @@ dropCommand
       | dropRole
       | dropServer
       | dropUser
+      | dropAuthRule
    )
    ;
 
-showCommand
+showAdminCommand
    : SHOW (
       showAliases
-      | showConstraintCommand
+      | showAuthRulePrivileges
+      | showAuthRules
       | showCurrentUser
-      | showDatabase
-      | showFunctions
-      | showIndexCommand
       | showPrivileges
-      | showProcedures
       | showRolePrivileges
       | showRoles
       | showServers
-      | showSettings
       | showSupportedPrivileges
-      | showTransactions
       | showUserPrivileges
       | showUsers
    )
@@ -840,6 +1043,11 @@ showCommand
 
 showCommandYield
    : yieldClause returnClause?
+   | whereClause
+   ;
+
+showCommandYieldWhere
+   : yieldClause
    | whereClause
    ;
 
@@ -878,10 +1086,12 @@ composableShowCommandClauses
    : SHOW (
       showIndexCommand
       | showConstraintCommand
+      | showCurrentGraphTypeCommand
       | showFunctions
       | showProcedures
       | showSettings
       | showTransactions
+      | showDatabase
    )
    ;
 
@@ -900,7 +1110,7 @@ showIndexType
     ;
 
 showIndexesEnd
-   : indexToken showCommandYield? composableCommandClauses?
+   : indexToken showCommandYieldWhere?
    ;
 
 showConstraintCommand
@@ -924,15 +1134,19 @@ constraintExistType
    ;
 
 showConstraintsEnd
-   : constraintToken showCommandYield? composableCommandClauses?
+   : constraintToken showCommandYieldWhere?
+   ;
+
+showCurrentGraphTypeCommand
+   : CURRENT GRAPH TYPE (AS GRAPH)? showCommandYieldWhere?
    ;
 
 showProcedures
-   : (PROCEDURE | PROCEDURES) executableBy? showCommandYield? composableCommandClauses?
+   : (PROCEDURE | PROCEDURES) executableBy? showCommandYieldWhere?
    ;
 
 showFunctions
-   : showFunctionsType? functionToken executableBy? showCommandYield? composableCommandClauses?
+   : showFunctionsType? functionToken executableBy? showCommandYieldWhere?
    ;
 
 functionToken
@@ -954,7 +1168,7 @@ showTransactions
    ;
 
 terminateTransactions
-   : transactionToken stringsOrExpression showCommandYield? composableCommandClauses?
+   : transactionToken stringsOrExpression showCommandYieldWhere?
    ;
 
 showSettings
@@ -965,8 +1179,12 @@ settingToken
    : SETTING | SETTINGS
    ;
 
+// Keeping both sides here as optional instead of having one mandatory and then optionally call `namesAndClauses`,
+// to not prioritize stringsOrExpression over regular clauses (for example, we don't want `SHOW SETTINGS WITH * MATCH (*)`
+// to be parsed as variable `WITH` multiplied with the function call `MATCH (*)`)
 namesAndClauses
-   : (showCommandYield? | stringsOrExpression showCommandYield?) composableCommandClauses?
+   : showCommandYieldWhere?
+   | stringsOrExpression showCommandYieldWhere?
    ;
 
 stringsOrExpression
@@ -985,7 +1203,7 @@ commandRelPattern
    ;
 
 createConstraint
-   : CONSTRAINT symbolicNameOrStringParameter? (IF NOT EXISTS)? FOR (commandNodePattern | commandRelPattern) constraintType commandOptions?
+   : CONSTRAINT commandNameExpression? (IF NOT EXISTS)? FOR (commandNodePattern | commandRelPattern) constraintType commandOptions?
    ;
 
 constraintType
@@ -996,37 +1214,41 @@ constraintType
    ;
 
 dropConstraint
-   : CONSTRAINT symbolicNameOrStringParameter (IF EXISTS)?
+   : CONSTRAINT commandNameExpression (IF EXISTS)?
    ;
 
 createIndex
    : RANGE INDEX createIndex_
    | TEXT INDEX createIndex_
    | POINT INDEX createIndex_
-   | VECTOR INDEX createIndex_
+   | VECTOR INDEX createVectorIndex
    | LOOKUP INDEX createLookupIndex
    | FULLTEXT INDEX createFulltextIndex
    | INDEX createIndex_
    ;
 
 createIndex_
-   : symbolicNameOrStringParameter? (IF NOT EXISTS)? FOR (commandNodePattern | commandRelPattern) ON propertyList commandOptions?
+   : commandNameExpression? (IF NOT EXISTS)? FOR (commandNodePattern | commandRelPattern) ON propertyList commandOptions?
    ;
 
 createFulltextIndex
-   : symbolicNameOrStringParameter? (IF NOT EXISTS)? FOR (fulltextNodePattern | fulltextRelPattern) ON EACH LBRACKET enclosedPropertyList RBRACKET commandOptions?
+   : commandNameExpression? (IF NOT EXISTS)? FOR (multiLabelNodePattern | multiRelTypeRelPattern) ON EACH LBRACKET enclosedPropertyList RBRACKET commandOptions?
    ;
 
-fulltextNodePattern
+createVectorIndex
+   : commandNameExpression? (IF NOT EXISTS)? FOR (multiLabelNodePattern | multiRelTypeRelPattern) ON propertyList withProperties? commandOptions?
+   ;
+
+multiLabelNodePattern
    : LPAREN variable COLON symbolicNameString (BAR symbolicNameString)* RPAREN
    ;
 
-fulltextRelPattern
+multiRelTypeRelPattern
    : LPAREN RPAREN leftArrow? arrowLine LBRACKET variable COLON symbolicNameString (BAR symbolicNameString)* RBRACKET arrowLine rightArrow? LPAREN RPAREN
    ;
 
 createLookupIndex
-   : symbolicNameOrStringParameter? (IF NOT EXISTS)? FOR (lookupIndexNodePattern | lookupIndexRelPattern) symbolicNameString LPAREN variable RPAREN commandOptions?
+   : commandNameExpression? (IF NOT EXISTS)? FOR (lookupIndexNodePattern | lookupIndexRelPattern) symbolicNameString LPAREN variable RPAREN commandOptions?
    ;
 
 lookupIndexNodePattern
@@ -1038,7 +1260,7 @@ lookupIndexRelPattern
    ;
 
 dropIndex
-   : INDEX symbolicNameOrStringParameter (IF EXISTS)?
+   : INDEX commandNameExpression (IF EXISTS)?
    ;
 
 propertyList
@@ -1049,20 +1271,144 @@ enclosedPropertyList
    : variable property (COMMA variable property)*
    ;
 
-// Admin commands
-
-alterCommand
-   : ALTER (
-      alterAlias
-      | alterCurrentUser
-      | alterDatabase
-      | alterUser
-      | alterServer
-   )
+withProperties
+   : WITH LBRACKET enclosedPropertyList RBRACKET
    ;
 
+// Graph Type Specification
+
+alterCurrentGraphType
+   : CURRENT GRAPH TYPE ( (SET | ADD | ALTER) graphTypeSpecification | DROP graphTypeDropSpecification )
+   ;
+
+graphTypeSpecification
+   : LCURLY graphTypeSpecificationBody? RCURLY
+   ;
+
+graphTypeDropSpecification
+   : LCURLY graphTypeDropSpecificationBody? RCURLY
+   ;
+
+graphTypeSpecificationBody
+   : graphTypeElement (COMMA graphTypeElement)*
+   ;
+
+graphTypeDropSpecificationBody
+   : graphTypeDropElement (COMMA graphTypeDropElement)*
+   ;
+
+graphTypeElement
+  : edgeTypeSpecification
+  | nodeTypeSpecification
+  | constraintSpecification
+  ;
+
+graphTypeDropElement
+  : edgeTypeSpecification
+  | nodeTypeSpecification
+  | CONSTRAINT symbolicNameString
+  ;
+
+nodeTypeInlineConstraintList
+   : (constraintType commandOptions?)+
+   ;
+
+edgeTypeInlineConstraintList
+   : (constraintType commandOptions?)+
+   ;
+
+implies
+  : EQ rightArrow
+  | IMPLIES
+  ;
+
+// Node type specification
+
+nodeTypeSpecification
+  : LPAREN variable? identifyingLabel impliedLabelSet? propertyTypeList? RPAREN nodeTypeInlineConstraintList?
+  ;
+
+impliedLabelSet
+  : labelType ( AMPERSAND symbolicNameString )*
+  ;
+
+identifyingLabel
+  : labelType implies
+  ;
+
+// Node type reference
+
+nodeTypeReference
+  : nodeTypeAliasReference
+  | nodeTypeInSituReference
+  ;
+
+nodeTypeAliasReference
+  : LPAREN variable RPAREN
+  ;
+
+nodeTypeInSituReference
+  : LPAREN ( variable? labelType implies? )? RPAREN
+  ;
+
+// Edge type specifcation
+
+edgeTypeSpecification
+  : nodeTypeReference arcTypePointingRight nodeTypeReference edgeTypeInlineConstraintList?
+  ;
+
+arcTypePointingRight
+  : arrowLine LBRACKET variable? identifyingRelationship propertyTypeList? RBRACKET arrowLine rightArrow
+  ;
+
+identifyingRelationship
+  : relType implies
+  ;
+
+// Edge type reference
+
+edgeTypeReference
+  : edgeTypeAliasReference
+  | edgeTypeInSituReference
+  ;
+
+edgeTypeAliasReference
+  : LPAREN RPAREN arrowLine LBRACKET variable RBRACKET arrowLine rightArrow LPAREN RPAREN
+  ;
+
+edgeTypeInSituReference
+  : LPAREN RPAREN arrowLine LBRACKET variable? relType implies? RBRACKET arrowLine rightArrow LPAREN RPAREN
+  ;
+
+// Property Types
+
+propertyTypeList
+  : LCURLY (propertyType ( COMMA propertyType )* )? RCURLY
+  ;
+
+propertyType
+  : propertyKeyName typed? type propertyTypeInlineConstraint?
+  ;
+
+propertyTypeInlineConstraint
+  : IS  ( NODE | RELATIONSHIP | REL )? (KEY | UNIQUE)
+  ;
+
+typed
+  : COLONCOLON
+  | TYPED
+  ;
+
+// Graph Type constraint specification
+
+constraintSpecification
+  : CONSTRAINT symbolicNameString? FOR (nodeTypeReference | edgeTypeReference) constraintType commandOptions?
+  ;
+
+// Admin commands
+
 renameCommand
-   : RENAME (renameRole | renameServer | renameUser)
+   : RENAME (renameRole | renameServer | renameUser | renameAuthRule)
    ;
 
 grantCommand
@@ -1091,10 +1437,28 @@ roleNames
    : symbolicNameOrStringParameterList
    ;
 
+authRuleNames
+   : symbolicNameOrStringParameterList
+   ;
+
 roleToken
    : ROLES
    | ROLE
    ;
+
+tagToken
+   : TAG
+   | TAGS
+   ;
+
+authRuleKeywords
+    : AUTH (RULE | RULES)
+    ;
+
+commandToken
+    : COMMAND
+    | COMMANDS
+    ;
 
 // Server commands
 
@@ -1145,16 +1509,21 @@ renameRole
    ;
 
 showRoles
-   : (ALL | POPULATED)? roleToken (WITH (USER | USERS))? showCommandYield?
+   : (ALL | POPULATED)? roleToken (WITH (USER | USERS | authRuleKeywords))? (AS commandToken)? showCommandYield?
    ;
 
 grantRole
-   : roleNames TO userNames
+   : roleNames TO usersOrAuthRule
    ;
 
 revokeRole
-   : roleNames FROM userNames
+   : roleNames FROM usersOrAuthRule
    ;
+
+usersOrAuthRule
+    : authRuleKeywords authRuleNames
+    | (USER | USERS)? userNames
+    ;
 
 // User commands
 
@@ -1165,6 +1534,7 @@ createUser
       | userStatus
       | homeDatabase
       | setAuthClause
+      | userSetTagsClause
    ))+;
 
 dropUser
@@ -1184,17 +1554,45 @@ alterUser
       HOME DATABASE
       | ALL AUTH (PROVIDER | PROVIDERS)?
       | removeNamedProvider
+      | userRemoveTagsClause
+   ))* (ADD (
+      userAddTagsClause
    ))* (SET (
       password
       | PASSWORD passwordChangeRequired
       | userStatus
       | homeDatabase
       | setAuthClause
+      | userSetTagsClause
    ))*
+   ;
+
+alterUsers
+   : USERS commandNameExpression (COMMA commandNameExpression)* (IF EXISTS)?
+     (REMOVE userRemoveTagsClause)*
+     (ADD userAddTagsClause)*
+     (SET userSetTagsClause)*
    ;
 
 removeNamedProvider
    : AUTH (PROVIDER | PROVIDERS)? (stringLiteral | stringListLiteral | parameter["ANY"])
+   ;
+
+userSetTagsClause
+   : explicitUserTags
+   ;
+
+userAddTagsClause
+   : explicitUserTags
+   ;
+
+userRemoveTagsClause
+   : ALL tagToken
+   | explicitUserTags
+   ;
+
+explicitUserTags
+   : tagToken (stringLiteral | stringListLiteral | parameter["ANY"])
    ;
 
 password
@@ -1235,7 +1633,7 @@ userAuthAttribute
    ;
 
 showUsers
-   : (USER | USERS) (WITH AUTH)? showCommandYield?
+   : (USER | USERS) (WITH AUTH)? (AS commandToken)? showCommandYield?
    ;
 
 showCurrentUser
@@ -1260,8 +1658,12 @@ showUserPrivileges
    : (USER | USERS) userNames? privilegeToken privilegeAsCommand? showCommandYield?
    ;
 
+showAuthRulePrivileges
+   : authRuleKeywords authRuleNames privilegeToken privilegeAsCommand? showCommandYield?
+   ;
+
 privilegeAsCommand
-   : AS REVOKE? (COMMAND | COMMANDS)
+   : AS REVOKE? commandToken
    ;
 
 privilegeToken
@@ -1277,7 +1679,6 @@ privilege
    | dropPrivilege
    | loadPrivilege
    | qualifiedGraphPrivileges
-   | qualifiedGraphPrivilegesWithProperty
    | removePrivilege
    | setPrivilege
    | showPrivilege
@@ -1329,6 +1730,7 @@ createPropertyPrivilegeToken
 
 actionForDBMS
    : ALIAS
+   | AUTH RULE
    | COMPOSITE? DATABASE
    | ROLE
    | USER
@@ -1351,16 +1753,16 @@ loadPrivilege
 showPrivilege
    : SHOW (
       (indexToken | constraintToken | transactionToken userQualifier?) ON databaseScope
-      | (ALIAS | PRIVILEGE | ROLE | SERVER | SERVERS | settingToken settingQualifier | USER) ON DBMS
+      | (ALIAS | AUTH RULE | PRIVILEGE | ROLE | SERVER | SERVERS | settingToken settingQualifier | USER (CREDENTIALS | METADATA)? | SECRETS) ON DBMS
    )
    ;
 
 setPrivilege
    : SET (
-      (passwordToken | USER (STATUS | HOME DATABASE) | DATABASE ACCESS) ON DBMS
+      (passwordToken | USER (STATUS | HOME DATABASE | METADATA) | DATABASE (ACCESS | DEFAULT LANGUAGE) | AUTH) ON DBMS
+      | DATABASE (ACCESS | DEFAULT LANGUAGE) ON databaseScope
       | LABEL labelsResource ON graphScope
       | PROPERTY propertiesResource ON graphScope graphQualifier
-      | AUTH ON DBMS
    )
    ;
 
@@ -1383,6 +1785,7 @@ writePrivilege
 databasePrivilege
    : (
       ACCESS
+      | ALTER COMPOSITE? DATABASE
       | START
       | STOP
       | (indexToken | constraintToken | NAME) MANAGEMENT?
@@ -1393,11 +1796,13 @@ databasePrivilege
 
 dbmsPrivilege
    : (
-      ALTER (ALIAS | DATABASE | USER)
+      ALTER (ALIAS | AUTH RULE | COMPOSITE? DATABASE | USER)
       | ASSIGN (PRIVILEGE | ROLE)
-      | (ALIAS | COMPOSITE? DATABASE | PRIVILEGE | ROLE | SERVER | USER) MANAGEMENT
+      | (ALIAS | COMPOSITE? DATABASE | PRIVILEGE | ROLE | SERVER | USER METADATA? | AUTH RULE | SECRETS) MANAGEMENT
       | dbmsPrivilegeExecute
-      | RENAME (ROLE | USER)
+      | RENAME (AUTH RULE | ROLE | USER)
+      | WRITE SECRETS
+      | READ secretToken secretQualifier
       | IMPERSONATE userQualifier?
    )
    ON DBMS
@@ -1438,6 +1843,16 @@ transactionToken
    | TRANSACTIONS
    ;
 
+secretToken
+  : SECRET
+  | SECRETS
+  ;
+
+secretQualifier
+  : TIMES
+  | stringOrParameterExpression
+  ;
+
 userQualifier
    : LPAREN (TIMES | userNames) RPAREN
    ;
@@ -1474,12 +1889,8 @@ globPart
    | unescapedSymbolicNameString
    ;
 
-qualifiedGraphPrivilegesWithProperty
-   : (TRAVERSE | (READ | MATCH) propertiesResource) ON graphScope graphQualifier (LPAREN TIMES RPAREN)?
-   ;
-
 qualifiedGraphPrivileges
-   : (DELETE | MERGE propertiesResource) ON graphScope graphQualifier
+   : (TRAVERSE | DELETE | (READ | MATCH | MERGE) propertiesResource) ON graphScope graphQualifier
    ;
 
 labelsResource
@@ -1499,7 +1910,11 @@ nonEmptyStringList
 graphQualifier
    : (
       graphQualifierToken (TIMES | nonEmptyStringList)
-      | FOR LPAREN variable? (COLON symbolicNameString (BAR symbolicNameString)*)? (RPAREN WHERE expression | (WHERE expression | map) RPAREN)
+      | FOR (
+        LPAREN variable? (COLON symbolicNameString (BAR symbolicNameString)*)? (RPAREN WHERE expression | (WHERE expression | map) RPAREN)
+        | LPAREN RPAREN leftArrow? arrowLine LBRACKET variable? (COLON symbolicNameString (BAR symbolicNameString)*)?
+            (RBRACKET arrowLine rightArrow? LPAREN RPAREN WHERE expression | (WHERE expression | map) RBRACKET arrowLine rightArrow? LPAREN RPAREN)
+      )
    )?
    ;
 
@@ -1534,14 +1949,68 @@ graphScope
    | (GRAPH | GRAPHS) (TIMES | symbolicAliasNameList)
    ;
 
+// Attribute based role assignment
+
+createAuthRule
+    : AUTH RULE commandNameExpression (IF NOT EXISTS)? (authRuleSetClause)+
+    ;
+
+authRuleSetClause
+    : SET (authRuleSetCondition | authRuleSetEnabled)
+    ;
+
+authRuleSetCondition
+    : CONDITION expression
+    ;
+
+authRuleSetEnabled
+    : ENABLED (TRUE | FALSE)
+    ;
+
+renameAuthRule
+    : AUTH RULE commandNameExpression (IF EXISTS)? TO commandNameExpression
+    ;
+
+alterAuthRule
+    : AUTH RULE commandNameExpression (IF EXISTS)? (authRuleSetClause)+
+    ;
+
+dropAuthRule
+    : AUTH RULE commandNameExpression (IF EXISTS)?
+    ;
+
+showAuthRules
+    : authRuleKeywords (AS commandToken)? showCommandYield?
+    ;
+
 // Database commands
 
 createCompositeDatabase
-   : COMPOSITE DATABASE symbolicAliasNameOrParameter (IF NOT EXISTS)? commandOptions? waitClause?
+   : COMPOSITE DATABASE symbolicAliasNameOrParameter (IF NOT EXISTS)? (SET? defaultLanguageSpecification)? commandOptions? waitClause?
    ;
 
 createDatabase
-   : DATABASE symbolicAliasNameOrParameter (IF NOT EXISTS)? (TOPOLOGY (primaryTopology | secondaryTopology)+)? commandOptions? waitClause?
+   : DATABASE symbolicAliasNameOrParameter (IF NOT EXISTS)? (SET? defaultLanguageSpecification)? (topology | shards)? commandOptions? waitClause?
+   ;
+
+createReplicaDatabase
+   : REPLICA DATABASE symbolicAliasNameOrParameter (IF NOT EXISTS)? (SET? defaultLanguageSpecification)? topology? commandOptions? waitClause?
+   ;
+
+shards
+   : (SET? graphShard)? SET? propertyShard
+   ;
+
+graphShard
+   : GRAPH SHARD LCURLY (topology)? RCURLY
+   ;
+
+propertyShard
+   : PROPERTY (SHARD | SHARDS) LCURLY COUNT UNSIGNED_DECIMAL_INTEGER (SET? TOPOLOGY uIntOrIntParameter replicaToken)? RCURLY
+   ;
+
+topology
+   : SET? TOPOLOGY (primaryTopology | secondaryTopology)+
    ;
 
 primaryTopology
@@ -1560,6 +2029,14 @@ secondaryToken
    : SECONDARY | SECONDARIES
    ;
 
+replicaToken
+   : REPLICA | REPLICAS
+   ;
+
+defaultLanguageSpecification
+    : DEFAULT LANGUAGE CYPHER UNSIGNED_DECIMAL_INTEGER
+    ;
+
 dropDatabase
    : COMPOSITE? DATABASE symbolicAliasNameOrParameter (IF EXISTS)? aliasAction? ((DUMP | DESTROY) DATA)? waitClause?
    ;
@@ -1571,7 +2048,7 @@ aliasAction
 
 alterDatabase
    : DATABASE symbolicAliasNameOrParameter (IF EXISTS)? (
-      (SET (alterDatabaseAccess | alterDatabaseTopology | alterDatabaseOption))+
+      (SET (alterDatabaseAccess | alterDatabaseTopology | alterReplicaTopology | alterGraphShard | alterPropertyShards | alterDatabaseOption | defaultLanguageSpecification))+
       | (REMOVE OPTION symbolicNameString)+
    ) waitClause?
    ;
@@ -1586,6 +2063,18 @@ alterDatabaseTopology
 
 alterDatabaseOption
    : OPTION symbolicNameString expression
+   ;
+
+alterGraphShard
+   : GRAPH SHARD LCURLY SET alterDatabaseTopology RCURLY
+   ;
+
+alterPropertyShards
+   : PROPERTY (SHARD | SHARDS) LCURLY SET alterReplicaTopology RCURLY
+   ;
+
+alterReplicaTopology
+   : TOPOLOGY uIntOrIntParameter replicaToken
    ;
 
 startDatabase
@@ -1605,23 +2094,28 @@ secondsToken
    : SEC | SECOND | SECONDS;
 
 showDatabase
-   : (DEFAULT | HOME) DATABASE showCommandYield?
-   | (DATABASE | DATABASES) symbolicAliasNameOrParameter? showCommandYield?
+   : (DEFAULT | HOME) DATABASE showCommandYieldWhere?
+   | (DATABASE | DATABASES) symbolicAliasNameOrParameter? showCommandYieldWhere?
    ;
 
 aliasName
    : symbolicAliasNameOrParameter
    ;
 
-databaseName
+aliasTargetName
    : symbolicAliasNameOrParameter
    ;
 
 // Alias commands
 
 createAlias
-   : ALIAS aliasName (IF NOT EXISTS)? FOR DATABASE databaseName (AT stringOrParameter USER commandNameExpression PASSWORD passwordExpression (DRIVER mapOrParameter)?)? (PROPERTIES mapOrParameter)?
+   : ALIAS aliasName (IF NOT EXISTS)? FOR DATABASE aliasTargetName (AT stringOrParameter remoteTargetConnectionCredentials (DRIVER mapOrParameter)? defaultLanguageSpecification?)? (PROPERTIES mapOrParameter)?
    ;
+
+remoteTargetConnectionCredentials
+    : USER commandNameExpression PASSWORD passwordExpression
+    | OIDC CREDENTIAL FORWARDING
+    ;
 
 dropAlias
    : ALIAS aliasName (IF EXISTS)? FOR DATABASE
@@ -1634,11 +2128,12 @@ alterAlias
       | alterAliasPassword
       | alterAliasDriver
       | alterAliasProperties
+      | defaultLanguageSpecification
    )+
    ;
 
 alterAliasTarget
-   : TARGET databaseName (AT stringOrParameter)?
+   : TARGET aliasTargetName (AT stringOrParameter)?
    ;
 
 alterAliasUser
@@ -1663,13 +2158,6 @@ showAliases
 
 // Various strings, symbolic names, lists and maps
 
-// Should return an Either[String, Parameter]
-symbolicNameOrStringParameter
-   : symbolicNameString
-   | parameter["STRING"]
-   ;
-
-// Should return an Expression
 commandNameExpression
    : symbolicNameString
    | parameter["STRING"]
@@ -1704,6 +2192,29 @@ stringLiteral
    : STRING_LITERAL1
    | STRING_LITERAL2
    ;
+   
+interpolatedStringLiteral
+   : interpolatedStringLiteralSingle
+   | interpolatedStringLiteralDouble
+   ;
+
+interpolatedStringLiteralSingle
+   : INTERPOLATED_START_SINGLE interpolatedElementSingle* INTERPOLATED_END_SINGLE
+   ;
+
+interpolatedStringLiteralDouble
+   : INTERPOLATED_START_DOUBLE interpolatedElementDouble* INTERPOLATED_END_DOUBLE
+   ;
+
+interpolatedElementSingle
+   : INTERPOLATED_TEXT_SINGLE
+   | INTERPOLATED_EXPR_START_SINGLE expression RCURLY
+   ;
+
+interpolatedElementDouble
+   : INTERPOLATED_TEXT_DOUBLE
+   | INTERPOLATED_EXPR_START_DOUBLE expression RCURLY
+   ;
 
 // Should return an Expression
 stringOrParameterExpression
@@ -1733,6 +2244,19 @@ map
    : LCURLY (propertyKeyName COLON expression (COMMA propertyKeyName COLON expression)*)? RCURLY
    ;
 
+symbolicVariableNameString
+   : escapedSymbolicVariableNameString
+   | unescapedSymbolicVariableNameString
+   ;
+
+escapedSymbolicVariableNameString
+   : escapedSymbolicNameString
+   ;
+
+unescapedSymbolicVariableNameString
+   : unescapedSymbolicNameString
+   ;
+
 symbolicNameString
    : escapedSymbolicNameString
    | unescapedSymbolicNameString
@@ -1742,40 +2266,27 @@ escapedSymbolicNameString
    : ESCAPED_SYMBOLIC_NAME
    ;
 
-unescapedSymbolicNameString
-   : unescapedLabelSymbolicNameString
-   | NOT
-   | NULL
-   | TYPED
-   | NORMALIZED
-   | NFC
-   | NFD
-   | NFKC
-   | NFKD
-   ;
-
-symbolicLabelNameString
-   : escapedSymbolicNameString
-   | unescapedLabelSymbolicNameString
-   ;
-
 // Do not remove this, it is needed for composing the grammar
 // with other ones (e.g. language support ones)
-unescapedLabelSymbolicNameString
-   : unescapedLabelSymbolicNameString_
+unescapedSymbolicNameString
+   : unescapedSymbolicNameString_
    ;
 
-unescapedLabelSymbolicNameString_
+unescapedSymbolicNameString_
    : IDENTIFIER
    | ACCESS
    | ACTIVE
+   | ACYCLIC
+   | ADD
    | ADMIN
    | ADMINISTRATOR
    | ALIAS
    | ALIASES
    | ALL_SHORTEST_PATHS
    | ALL
+   | ALLREDUCE
    | ALTER
+   | ANALYZER
    | AND
    | ANY
    | ARRAY
@@ -1785,6 +2296,7 @@ unescapedLabelSymbolicNameString_
    | ASSIGN
    | AT
    | AUTH
+   | AUTO
    | BINDINGS
    | BOOL
    | BOOLEAN
@@ -1808,10 +2320,15 @@ unescapedLabelSymbolicNameString_
    | CONTAINS
    | CONTINUE
    | COPY
+   | CONDITION
+   | COSINE
    | COUNT
    | CREATE
+   | CREDENTIAL
+   | CREDENTIALS
    | CSV
    | CURRENT
+   | CYPHER
    | DATA
    | DATABASE
    | DATABASES
@@ -1820,6 +2337,7 @@ unescapedLabelSymbolicNameString_
    | DBMS
    | DEALLOCATE
    | DEFAULT
+   | DEFINE
    | DEFINED
    | DELETE
    | DENY
@@ -1828,8 +2346,10 @@ unescapedLabelSymbolicNameString_
    | DESTROY
    | DETACH
    | DIFFERENT
+   | DISJOINT
    | DISTINCT
    | DRIVER
+   | DOT_METRIC
    | DROP
    | DRYRUN
    | DUMP
@@ -1839,23 +2359,31 @@ unescapedLabelSymbolicNameString_
    | ELEMENT
    | ELEMENTS
    | ELSE
+   | ENABLED
    | ENABLE
    | ENCRYPTED
    | END
    | ENDS
    | ERROR
+   | EUCLIDEAN
+   | EUCLIDEAN_SQUARED
    | EXECUTABLE
    | EXECUTE
    | EXIST
    | EXISTENCE
    | EXISTS
+   | EXPAND
    | FAIL
    | FALSE
    | FIELDTERMINATOR
+   | FILTER
    | FINISH
-   | FLOAT
+   | FLOAT   
+   | FLOAT64
+   | FLOAT32
    | FOREACH
    | FOR
+   | FORWARDING
    | FROM
    | FULLTEXT
    | FUNCTION
@@ -1865,12 +2393,14 @@ unescapedLabelSymbolicNameString_
    | GRAPHS
    | GROUP
    | GROUPS
+   | HAMMING
    | HEADERS
    | HOME
    | ID
    | IF
    | IMMUTABLE
    | IMPERSONATE
+   | IMPLIES
    | IN
    | INDEX
    | INDEXES
@@ -1878,13 +2408,25 @@ unescapedLabelSymbolicNameString_
    | INFINITY
    | INSERT
    | INT
+   | INT64
+   | INT32
+   | INT16
+   | INT8
    | INTEGER
+   | INTEGER64
+   | INTEGER32
+   | INTEGER16
+   | INTEGER8
+   | INTO
    | IS
    | JOIN
    | KEY
    | LABEL
+   | LABELED
    | LABELS
+   | LANGUAGE
    | LEADING
+   | LET
    | LIMITROWS
    | LIST
    | LOAD
@@ -1892,21 +2434,32 @@ unescapedLabelSymbolicNameString_
    | LOOKUP
    | MATCH
    | MANAGEMENT
+   | MANHATTAN
    | MAP
    | MERGE
+   | METADATA
    | NAME
    | NAMES
    | NAN
    | NEW
+   | NEXT
+   | NFC
+   | NFD
+   | NFKC
+   | NFKD
    | NODE
    | NODETACH
    | NODES
    | NONE
    | NORMALIZE
+   | NORMALIZED
+   | NOT
    | NOTHING
    | NOWAIT
+   | NULL
    | OF
    | OFFSET
+   | OIDC
    | ON
    | ONLY
    | OPTIONAL
@@ -1929,6 +2482,7 @@ unescapedLabelSymbolicNameString_
    | PROCEDURES
    | PROPERTIES
    | PROPERTY
+   | PROPERTY_EXISTS
    | PROVIDER
    | PROVIDERS
    | RANGE
@@ -1942,28 +2496,39 @@ unescapedLabelSymbolicNameString_
    | RENAME
    | REPEATABLE
    | REPLACE
+   | REPLICA
+   | REPLICAS
    | REPORT
    | REQUIRE
    | REQUIRED
    | RESTRICT
+   | RETRY
    | RETURN
    | REVOKE
    | ROLE
    | ROLES
    | ROW
    | ROWS
+   | RULE
+   | RULES
    | SCAN
+   | SCORE
+   | SEARCH
    | SECONDARY
    | SECONDARIES
    | SEC
    | SECOND
    | SECONDS
+   | SECRET
+   | SECRETS
    | SEEK
    | SERVER
    | SERVERS
    | SET
    | SETTING
    | SETTINGS
+   | SHARD
+   | SHARDS
    | SHORTEST
    | SHORTEST_PATH
    | SHOW
@@ -1978,6 +2543,8 @@ unescapedLabelSymbolicNameString_
    | STRING
    | SUPPORTED
    | SUSPENDED
+   | TAG
+   | TAGS
    | TARGET
    | TERMINATE
    | TEXT
@@ -1987,6 +2554,7 @@ unescapedLabelSymbolicNameString_
    | TIMEZONE
    | TO
    | TOPOLOGY
+   | TRAIL
    | TRAILING
    | TRANSACTION
    | TRANSACTIONS
@@ -1994,7 +2562,9 @@ unescapedLabelSymbolicNameString_
    | TRIM
    | TRUE
    | TYPE
+   | TYPED
    | TYPES
+   | UUID
    | UNION
    | UNIQUE
    | UNIQUENESS
@@ -2005,9 +2575,13 @@ unescapedLabelSymbolicNameString_
    | USERS
    | USING
    | VALUE
+   | VIA
    | VECTOR
+   | VECTOR_DISTANCE
+   | VECTOR_NORM
    | VERTEX
    | WAIT
+   | WALK
    | WHEN
    | WHERE
    | WITH

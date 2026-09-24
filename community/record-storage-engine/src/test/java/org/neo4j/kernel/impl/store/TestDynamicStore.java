@@ -26,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
 import static org.neo4j.internal.recordstorage.RecordCursorTypes.DYNAMIC_ARRAY_STORE_CURSOR;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
 import static org.neo4j.kernel.impl.store.record.RecordLoad.NORMAL;
@@ -52,9 +53,9 @@ import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.store.cursor.CachedStoreCursors;
 import org.neo4j.kernel.impl.store.record.DynamicRecord;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
@@ -92,7 +93,7 @@ class TestDynamicStore {
                 NullLogProvider.getInstance(),
                 new CursorContextFactory(pageCacheTracer, EMPTY_CONTEXT_SUPPLIER),
                 false,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL);
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
     }
 
     @AfterEach
@@ -219,7 +220,7 @@ class TestDynamicStore {
                 currentCount++;
             }
             if (rIndex > (1.0f - closeIndex) || rIndex < closeIndex) {
-                neoStores.flush(DatabaseFlushEvent.NULL, NULL_CONTEXT);
+                neoStores.flush(DatabaseFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
                 neoStores.close();
                 store = createDynamicArrayStore();
             }

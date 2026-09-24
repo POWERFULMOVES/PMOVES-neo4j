@@ -51,7 +51,6 @@ import java.util.Collection;
 import java.util.List;
 import org.apache.commons.lang3.mutable.MutableLong;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.batchimport.api.Configuration;
 import org.neo4j.batchimport.api.IndexImporterFactory;
 import org.neo4j.batchimport.api.Monitor;
@@ -59,6 +58,7 @@ import org.neo4j.batchimport.api.input.Collector;
 import org.neo4j.batchimport.api.input.IdType;
 import org.neo4j.batchimport.api.input.Input;
 import org.neo4j.batchimport.api.input.InputChunk;
+import org.neo4j.common.EntityType;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.internal.batchimport.DefaultAdditionalIds;
@@ -76,17 +76,15 @@ import org.neo4j.io.layout.recordstorage.RecordDatabaseFile;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.PageCursor;
 import org.neo4j.io.pagecache.context.CursorContext;
-import org.neo4j.io.pagecache.impl.SingleFilePageSwapperFactory;
 import org.neo4j.io.pagecache.impl.muninn.MuninnPageCache;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.store.CommonAbstractStore;
 import org.neo4j.kernel.impl.store.NeoStores;
 import org.neo4j.kernel.impl.store.NoStoreHeader;
 import org.neo4j.kernel.impl.store.PropertyValueRecordSizeCalculator;
 import org.neo4j.kernel.impl.store.StoreFactory;
 import org.neo4j.kernel.impl.store.record.PropertyRecord;
-import org.neo4j.kernel.impl.transaction.log.EmptyLogTailMetadata;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.logging.internal.NullLogService;
 import org.neo4j.memory.EmptyMemoryTracker;
@@ -95,13 +93,14 @@ import org.neo4j.storageengine.api.LogFilesInitializer;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.Neo4jLayoutExtension;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.scheduler.ThreadPoolJobScheduler;
 import org.neo4j.test.utils.TestDirectory;
 import org.neo4j.values.storable.RandomValues;
+import org.neo4j.wal.EmptyLogTailMetadata;
 
 @Neo4jLayoutExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class CsvInputEstimateCalculationIT {
     private static final long NODE_COUNT = 600_000;
     private static final long RELATIONSHIP_COUNT = 600_000;
@@ -146,12 +145,15 @@ class CsvInputEstimateCalculationIT {
     void shouldCalculateCorrectEstimates() throws Exception {
         // given a couple of input files of various layouts
         Input input = generateData();
-        Input.Estimates estimates = input.validateAndEstimate(new PropertyValueRecordSizeCalculator(
-                defaultFormat().property().getRecordSize(NO_STORE_HEADER),
-                GraphDatabaseInternalSettings.string_block_size.defaultValue(),
-                0,
-                GraphDatabaseInternalSettings.array_block_size.defaultValue(),
-                0));
+        Input.Estimates estimates = input.validateAndEstimate(
+                new PropertyValueRecordSizeCalculator(
+                        defaultFormat().property().getRecordSize(NO_STORE_HEADER),
+                        GraphDatabaseInternalSettings.string_block_size.defaultValue(),
+                        0,
+                        GraphDatabaseInternalSettings.array_block_size.defaultValue(),
+                        0,
+                        "db-format-2000"),
+                PBI_CONFIG.maxNumberOfWorkerThreads());
 
         // when
         Config config = Config.defaults();
@@ -174,13 +176,13 @@ class CsvInputEstimateCalculationIT {
                             LogFilesInitializer.NULL,
                             IndexImporterFactory.EMPTY,
                             EmptyMemoryTracker.INSTANCE,
-                            NULL_CONTEXT_FACTORY)
+                            NULL_CONTEXT_FACTORY,
+                            DatabaseCreationOptions.EMPTY_CREATION_OPTIONS)
                     .doImport(input);
 
             // then compare estimates with actual disk sizes
-            SingleFilePageSwapperFactory swapperFactory =
-                    new SingleFilePageSwapperFactory(fs, cacheTracer, EmptyMemoryTracker.INSTANCE);
-            try (PageCache pageCache = new MuninnPageCache(swapperFactory, jobScheduler, MuninnPageCache.config(1000));
+            try (PageCache pageCache = new MuninnPageCache(
+                            fs, jobScheduler, MuninnPageCache.forPages(1000).pageCacheTracer(cacheTracer));
                     NeoStores stores = new StoreFactory(
                                     databaseLayout,
                                     config,
@@ -192,7 +194,7 @@ class CsvInputEstimateCalculationIT {
                                     NullLogProvider.getInstance(),
                                     NULL_CONTEXT_FACTORY,
                                     false,
-                                    LogTailLogVersionsMetadata.EMPTY_LOG_TAIL)
+                                    DatabaseCreationOptions.EMPTY_CREATION_OPTIONS)
                             .openAllNeoStores()) {
                 var nodeStore = stores.getNodeStore();
                 assertRoughlyEqual(
@@ -243,12 +245,15 @@ class CsvInputEstimateCalculationIT {
                 INSTANCE);
 
         // when
-        Input.Estimates estimates = input.validateAndEstimate(new PropertyValueRecordSizeCalculator(
-                defaultFormat().property().getRecordSize(NO_STORE_HEADER),
-                GraphDatabaseInternalSettings.string_block_size.defaultValue(),
-                0,
-                GraphDatabaseInternalSettings.array_block_size.defaultValue(),
-                0));
+        Input.Estimates estimates = input.validateAndEstimate(
+                new PropertyValueRecordSizeCalculator(
+                        defaultFormat().property().getRecordSize(NO_STORE_HEADER),
+                        GraphDatabaseInternalSettings.string_block_size.defaultValue(),
+                        0,
+                        GraphDatabaseInternalSettings.array_block_size.defaultValue(),
+                        0,
+                        "db-format-2000"),
+                PBI_CONFIG.maxNumberOfWorkerThreads());
 
         // then
         assertEquals(0, estimates.numberOfNodes());
@@ -265,7 +270,7 @@ class CsvInputEstimateCalculationIT {
     }
 
     private long sizeOf(RecordDatabaseFile file) throws IOException {
-        return Files.size(databaseLayout.file(file));
+        return databaseLayout.file(file).size(testDirectory.getFileSystem());
     }
 
     private Input generateData() throws IOException {
@@ -355,7 +360,8 @@ class CsvInputEstimateCalculationIT {
             Groups groups)
             throws IOException {
         Path file = testDirectory.file(fileName);
-        Header header = factory.create(charSeeker(wrap(headerString), COMMAS, false), COMMAS, IdType.INTEGER, groups);
+        Header header = factory.create(
+                charSeeker(wrap(headerString), COMMAS, false, EntityType.NODE), COMMAS, IdType.INTEGER, groups);
         Deserialization<String> deserialization = new StringDeserialization(COMMAS);
         DataGeneratorInput.DataDistribution dataDistribution = DataGeneratorInput.data(nodeCount, count)
                 .withStartNodeId(start.longValue())

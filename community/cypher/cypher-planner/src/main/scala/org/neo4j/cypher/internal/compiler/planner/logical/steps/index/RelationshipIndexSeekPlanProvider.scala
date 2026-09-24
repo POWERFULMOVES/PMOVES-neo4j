@@ -19,14 +19,12 @@
  */
 package org.neo4j.cypher.internal.compiler.planner.logical.steps.index
 
-import org.neo4j.cypher.internal.ast.Hint
-import org.neo4j.cypher.internal.compiler.planner.logical.LeafPlanRestrictions
+import org.neo4j.cypher.internal.ast.IrHint
 import org.neo4j.cypher.internal.compiler.planner.logical.LogicalPlanningContext
-import org.neo4j.cypher.internal.compiler.planner.logical.steps.RelationshipLeafPlanner.planHiddenSelectionAndRelationshipLeafPlan
-import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.EntityIndexSeekPlanProvider.isAllowedByRestrictions
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.EntityIndexSeekPlanProvider.mergeQueryExpressionsToSingleOne
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.EntityIndexSeekPlanProvider.predicatesForIndexSeek
-import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.RelationshipIndexLeafPlanner.RelationshipIndexMatch
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.leafplanner.RelationshipLeafPlanner.planHiddenSelectionAndRelationshipLeafPlan
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.leafplanner.index.RelationshipIndexLeafPlanner.RelationshipIndexMatch
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.ir.PatternRelationship
@@ -35,6 +33,7 @@ import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 import org.neo4j.cypher.internal.logical.plans.QueryExpression
 import org.neo4j.cypher.internal.logical.plans.RangeQueryExpression
 import org.neo4j.cypher.internal.logical.plans.SingleQueryExpression
+import org.neo4j.cypher.internal.util.collection.immutable.ListSet
 import org.neo4j.internal.kernel.api.PropertyIndexQuery.allEntries
 
 object RelationshipIndexSeekPlanProvider extends RelationshipIndexPlanProvider {
@@ -42,11 +41,9 @@ object RelationshipIndexSeekPlanProvider extends RelationshipIndexPlanProvider {
   override def createPlans(
     indexMatches: Set[RelationshipIndexMatch],
     queryGraph: QueryGraph,
-    restrictions: LeafPlanRestrictions,
     context: LogicalPlanningContext
   ): Set[LogicalPlan] = for {
     indexMatch <- indexMatches
-    if isAllowedByRestrictions(indexMatch.propertyPredicates, restrictions)
     plan <- doCreatePlans(indexMatch, queryGraph, context)
   } yield plan
 
@@ -62,7 +59,7 @@ object RelationshipIndexSeekPlanProvider extends RelationshipIndexPlanProvider {
         context,
         queryGraph
       )
-    if (predicateSet.propertyPredicates.forall(_.isExists))
+    if (predicateSet.propertyPredicates.forall(_.indexCompatiblePredicate.isExists))
       None
     else
       Some(predicateSet)
@@ -80,12 +77,13 @@ object RelationshipIndexSeekPlanProvider extends RelationshipIndexPlanProvider {
   private def constructPlan(
     predicateSet: PredicateSet,
     indexMatch: RelationshipIndexMatch,
-    hints: Set[Hint],
+    hints: ListSet[IrHint],
     argumentIds: Set[LogicalVariable],
     context: LogicalPlanningContext
   ): LogicalPlan = {
 
-    val queryExpression: QueryExpression[Expression] = mergeQueryExpressionsToSingleOne(predicateSet.propertyPredicates)
+    val queryExpression: QueryExpression[Expression] =
+      mergeQueryExpressionsToSingleOne(predicateSet.propertyPredicates.map(_.indexCompatiblePredicate))
 
     val hint = predicateSet
       .fulfilledHints(hints, indexMatch.indexDescriptor.indexType, planIsScan = false)

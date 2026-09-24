@@ -21,6 +21,8 @@ package org.neo4j.bolt.protocol.common.connector.connection.listener;
 
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelPipeline;
+import io.netty.channel.EventLoop;
+import java.util.function.Consumer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentMatchers;
@@ -41,6 +43,7 @@ class ReadLimitConnectionListenerTest {
     private MemoryTracker memoryTracker;
     private DefaultScopedMemoryTracker scopedMemoryTracker;
     private Channel channel;
+    private EventLoop eventLoop;
     private ChannelPipeline pipeline;
     private AssertableLogProvider logProvider;
     private ChunkFrameDecoder chunkFrameDecoder;
@@ -53,14 +56,31 @@ class ReadLimitConnectionListenerTest {
         this.memoryTracker = Mockito.mock(MemoryTracker.class);
         this.scopedMemoryTracker = Mockito.mock(DefaultScopedMemoryTracker.class);
         this.channel = Mockito.mock(Channel.class);
+        this.eventLoop = Mockito.mock(EventLoop.class);
         this.pipeline = Mockito.mock(ChannelPipeline.class, Mockito.RETURNS_SELF);
         this.logProvider = new AssertableLogProvider();
         this.chunkFrameDecoder = new ChunkFrameDecoder(1000L, this.logProvider);
 
         Mockito.doReturn(CONNECTION_ID).when(this.connection).id();
         Mockito.doReturn(this.memoryTracker).when(this.connection).memoryTracker();
-        Mockito.doReturn(this.channel).when(this.connection).channel();
+        Mockito.doReturn(this.eventLoop).when(this.channel).eventLoop();
         Mockito.doReturn(this.pipeline).when(this.channel).pipeline();
+
+        Mockito.doAnswer(invocationOnMock -> {
+                    var consumer = invocationOnMock.<Consumer<ChannelPipeline>>getArgument(0);
+                    consumer.accept(this.pipeline);
+                    return null;
+                })
+                .when(this.connection)
+                .modifyPipeline(Mockito.<Consumer<ChannelPipeline>>any());
+
+        Mockito.doAnswer(invocationOnMock -> {
+                    var runnable = invocationOnMock.<Runnable>getArgument(0);
+                    runnable.run();
+                    return null;
+                })
+                .when(this.eventLoop)
+                .execute(Mockito.any());
 
         Mockito.doReturn(this.scopedMemoryTracker).when(this.memoryTracker).getScopedMemoryTracker();
 
@@ -80,7 +100,7 @@ class ReadLimitConnectionListenerTest {
         inOrder.verify(this.connection).memoryTracker();
         inOrder.verify(this.memoryTracker).getScopedMemoryTracker();
         inOrder.verify(this.scopedMemoryTracker).allocateHeap(ChunkFrameDecoder.SHALLOW_SIZE);
-        inOrder.verify(this.connection).channel();
+        inOrder.verify(this.connection).modifyPipeline(Mockito.<Consumer<ChannelPipeline>>any());
         inOrder.verify(this.pipeline).get(ChunkFrameDecoder.class);
         inOrder.verify(this.pipeline)
                 .replace(
@@ -103,7 +123,7 @@ class ReadLimitConnectionListenerTest {
         inOrder.verify(this.connection).memoryTracker();
         inOrder.verify(this.memoryTracker).getScopedMemoryTracker();
         inOrder.verify(this.scopedMemoryTracker).allocateHeap(ChunkFrameDecoder.SHALLOW_SIZE);
-        inOrder.verify(this.connection).channel();
+        inOrder.verify(this.connection).modifyPipeline(Mockito.<Consumer<ChannelPipeline>>any());
         inOrder.verify(this.pipeline).get(ChunkFrameDecoder.class);
 
         // No easy why to check that the new Decoder has a limit on it.

@@ -54,7 +54,7 @@ class ProgressMonitorTest {
         when(indicator.reportResolution()).thenReturn(10);
         factory = new ProgressMonitorFactory() {
             @Override
-            protected Indicator newIndicator(String process) {
+            protected Indicator newIndicator(String process, IndicatorListener listener) {
                 return indicator;
             }
         };
@@ -364,7 +364,7 @@ class ProgressMonitorTest {
 
         // then
         out.flush();
-        assertThat(outBuffer.toString()).isEqualTo(format(".....  50%%%n..... 100%%%n"));
+        assertThat(outBuffer).hasToString(format(".....  50%%%n..... 100%%%n"));
     }
 
     private static Indicator indicatorMock() {

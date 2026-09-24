@@ -21,6 +21,7 @@ package org.neo4j.gqlstatus;
 
 import static org.neo4j.gqlstatus.Condition.createStandardDescription;
 
+import java.io.Serializable;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.Objects;
@@ -30,7 +31,7 @@ import java.util.Objects;
  *  Contains common implementations for notifications, standard codes and errors without exposing GqlStatusInfo
  *  and DiagnosticRecord as public API.
  */
-public class CommonGqlStatusObjectImplementation implements CommonGqlStatusObject {
+public class CommonGqlStatusObjectImplementation implements CommonGqlStatusObject, Serializable {
 
     protected final GqlStatusInfo gqlStatusInfo;
     protected final DiagnosticRecord diagnosticRecord;
@@ -65,14 +66,17 @@ public class CommonGqlStatusObjectImplementation implements CommonGqlStatusObjec
 
     @Override
     public String statusDescription() {
+        return createStatusDescriptionForMessage(messageWithParameters);
+    }
+
+    protected String createStatusDescriptionForMessage(String message) {
         var condition = gqlStatusInfo.getCondition();
         var subCondition = gqlStatusInfo.getSubCondition();
-
-        if (messageWithParameters.isEmpty()) {
+        if (message.isEmpty()) {
             return (createStandardDescription(condition, subCondition));
         }
 
-        return (createStandardDescription(condition, subCondition)) + ". " + messageWithParameters;
+        return (createStandardDescription(condition, subCondition)) + ". " + message;
     }
 
     @Override
@@ -113,15 +117,22 @@ public class CommonGqlStatusObjectImplementation implements CommonGqlStatusObjec
     /*
      * If the current specified positions is (oldLine, oldColumn, oldOffset), then change it to (newLine, newColumn, newOffset)
      */
-    public void adjustPosition(int oldLine, int oldColumn, int oldOffset, int newLine, int newColumn, int newOffset) {
+    public void adjustPosition(int oldOffset, int oldLine, int oldColumn, int newOffset, int newLine, int newColumn) {
         if (this.diagnosticRecord.hasPosition()) {
             var positionMap = this.diagnosticRecord.getPositionMap();
-            if (positionMap.get("line") == oldLine
-                    && positionMap.get("column") == oldColumn
-                    && positionMap.get("offset") == oldOffset) {
-                this.diagnosticRecord.updatePosition(newLine, newColumn, newOffset);
+            if (positionMap.get("offset") == oldOffset
+                    && positionMap.get("line") == oldLine
+                    && positionMap.get("column") == oldColumn) {
+                this.diagnosticRecord.updatePosition(newOffset, newLine, newColumn);
             }
         }
+    }
+
+    public Map<String, Integer> getDiagnosticPosition() {
+        if (this.diagnosticRecord.hasPosition()) {
+            return this.diagnosticRecord.getPositionMap();
+        }
+        return Map.of("offset", -1, "line", -1, "column", -1);
     }
 
     @Override

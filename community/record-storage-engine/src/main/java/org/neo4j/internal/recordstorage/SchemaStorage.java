@@ -130,10 +130,10 @@ public class SchemaStorage implements SchemaRuleAccess {
                 .filter(descriptor::equals)
                 .toArray(ConstraintDescriptor[]::new);
         if (rules.length == 0) {
-            throw new SchemaRuleNotFoundException(descriptor, tokenHolders);
+            throw SchemaRuleNotFoundException.schemaRuleNotFound(descriptor, tokenHolders);
         }
         if (rules.length > 1) {
-            throw new DuplicateSchemaRuleException(descriptor, tokenHolders);
+            throw DuplicateSchemaRuleException.internalError(this.getClass().getSimpleName(), descriptor, tokenHolders);
         }
         return rules[0];
     }
@@ -183,7 +183,9 @@ public class SchemaStorage implements SchemaRuleAccess {
                     allocationProvider.allocator(PROPERTY_STRING),
                     allocationProvider.allocator(PROPERTY_ARRAY),
                     cursorContext,
-                    memoryTracker);
+                    memoryTracker,
+                    // Schema rules don't use vector values. The store format passed in here will never be used.
+                    RecordStorageEngineFactory.NAME);
             blocks.add(block);
         });
 
@@ -255,7 +257,8 @@ public class SchemaStorage implements SchemaRuleAccess {
                             nextProp, propRecord, RecordLoad.NORMAL, propertyCursor, memoryTracker);
                     propertyStore.ensureHeavy(propRecord, storeCursors, memoryTracker);
                 } catch (InvalidRecordException e) {
-                    throw new MalformedSchemaRuleException(
+                    throw MalformedSchemaRuleException.internalError(
+                            this.getClass().getSimpleName(),
                             "Cannot read schema rule because it is referencing a property record (id " + nextProp
                                     + ") that is invalid: " + propRecord,
                             e);

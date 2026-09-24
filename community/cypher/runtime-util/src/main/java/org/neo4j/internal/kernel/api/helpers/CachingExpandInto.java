@@ -27,14 +27,13 @@ import static org.neo4j.memory.HeapEstimator.shallowSizeOfInstance;
 import static org.neo4j.storageengine.api.RelationshipSelection.selection;
 
 import java.util.Iterator;
-import org.eclipse.collections.api.block.function.primitive.IntFunction0;
-import org.eclipse.collections.api.map.primitive.MutableLongIntMap;
+import org.eclipse.collections.api.block.function.primitive.LongFunction0;
+import org.eclipse.collections.api.map.primitive.MutableLongLongMap;
 import org.github.jamm.Unmetered;
 import org.neo4j.collection.trackable.HeapTrackingArrayList;
 import org.neo4j.collection.trackable.HeapTrackingCollections;
 import org.neo4j.collection.trackable.HeapTrackingUnifiedMap;
 import org.neo4j.graphdb.Direction;
-import org.neo4j.internal.kernel.api.CloseListener;
 import org.neo4j.internal.kernel.api.CursorFactory;
 import org.neo4j.internal.kernel.api.DefaultCloseListenable;
 import org.neo4j.internal.kernel.api.KernelReadTracer;
@@ -44,25 +43,23 @@ import org.neo4j.internal.kernel.api.QueryContext;
 import org.neo4j.internal.kernel.api.Read;
 import org.neo4j.internal.kernel.api.RelationshipTraversalCursor;
 import org.neo4j.io.pagecache.context.CursorContext;
-import org.neo4j.kernel.impl.newapi.Cursors;
+import org.neo4j.lang.CloseListener;
 import org.neo4j.memory.DefaultScopedMemoryTracker;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.memory.ScopedMemoryTracker;
 import org.neo4j.storageengine.api.PropertySelection;
 import org.neo4j.storageengine.api.Reference;
 import org.neo4j.storageengine.api.RelationshipSelection;
-import org.neo4j.storageengine.api.txstate.NodeState;
 import org.neo4j.storageengine.api.txstate.ReadableTransactionState;
-import org.neo4j.storageengine.util.SingleDegree;
 
 /**
  * Utility for performing Expand(Into)
- *
+ * <p>
  * Expand(Into) is the operation of given two nodes, find all interconnecting relationships of a given type and direction.
  * This is often a computationally heavy operation so that given direction and types an instance of this class can be reused
  * and previously found connections will be cached and can significantly speed up traversals.
  */
-@SuppressWarnings({"unused", "UnnecessaryLocalVariable"})
+@SuppressWarnings({"unused"})
 public class CachingExpandInto extends DefaultCloseListenable {
     static final long CACHING_EXPAND_INTO_SHALLOW_SIZE =
             shallowSizeOfInstance(CachingExpandInto.class) + SCOPED_MEMORY_TRACKER_SHALLOW_SIZE;
@@ -71,7 +68,6 @@ public class CachingExpandInto extends DefaultCloseListenable {
             shallowSizeOfInstance(ExpandIntoSelectionCursor.class);
     static final long FROM_CACHE_SELECTION_CURSOR_SHALLOW_SIZE = shallowSizeOfInstance(FromCachedSelectionCursor.class);
 
-    private static final int EXPENSIVE_DEGREE = -1;
     private final RelationshipCache relationshipCache;
     private final NodeDegreeCache degreeCache;
 
@@ -113,192 +109,147 @@ public class CachingExpandInto extends DefaultCloseListenable {
         return scopedMemoryTracker == null;
     }
 
+    public RelationshipTraversalCursor connectingRelationships(
+            CursorFactory cursors,
+            NodeCursor fromCursor,
+            NodeCursor toCursor,
+            int[] types,
+            CursorContext cursorContext) {
+        return connectingRelationships(
+                fromCursor,
+                toCursor,
+                cursors.allocateRelationshipTraversalCursor(cursorContext, scopedMemoryTracker),
+                types);
+    }
+
+    /**
+     * @return The interconnecting relationships in the given direction with any of the given types, or `null` if
+     *              nodes can't be found.
+     */
+    public RelationshipTraversalCursor connectingRelationships(
+            long firstNode,
+            NodeCursor firstCursor,
+            long secondNode,
+            NodeCursor secondCursor,
+            RelationshipTraversalCursor traversalCursor,
+            int[] types) {
+        read.singleNode(firstNode, firstCursor);
+        if (!firstCursor.next()) {
+            return null;
+        }
+        // if we don't have anything in tx state, and we're on block format we only need to read the start node
+        if ((txState == null || !txState.hasChanges()) && firstCursor.supportsFastRelationshipsTo()) {
+            firstCursor.relationshipsTo(traversalCursor, selection(types, direction), secondNode);
+            return traversalCursor;
+        }
+        read.singleNode(secondNode, secondCursor);
+        if (secondCursor.next()) {
+            return connectingRelationships(firstCursor, secondCursor, traversalCursor, types);
+        } else {
+            return null;
+        }
+    }
+
     /**
      * Creates a cursor for all connecting relationships given a first and a second node.
-     *
+     * <p>
      * NOTE: Ownership of traversalCursor is _not_ transferred, so the caller is responsible
      *       for closing it when applicable
-     *
+     * <p>
      * NOTE: In case nodeCursor supports fast relationships, the given traversalCursor could be returned.
-     *       Otherwise a specialized relationship selection cursor will be created and returned, and
+     *       Otherwise, a specialized relationship selection cursor will be created and returned, and
      *       in this case it is important that this specialized cursor does not get reused as a general
      *       relationship traversal cursor just because it implements the RelationshipTraversalCursor interface.
      *
-     * @param nodeCursor Node cursor used in traversal
+     * @param firstCursor Node cursor pointing at the "first" node
+     * @param secondCursor Node cursor pointing at the "second" node
      * @param traversalCursor Traversal cursor used in traversal
-     * @param firstNode The first node
      * @param types The relationship types to traverse
-     * @param secondNode The second node
-     * @return The interconnecting relationships in the given direction with any of the given types.
+     * @return The interconnecting relationships in the given direction with any of the given types, or `null` if
+     *         nodes can't be found.
      */
     public RelationshipTraversalCursor connectingRelationships(
-            NodeCursor nodeCursor,
-            RelationshipTraversalCursor traversalCursor,
-            long firstNode,
-            int[] types,
-            long secondNode) {
+            NodeCursor firstCursor, NodeCursor secondCursor, RelationshipTraversalCursor traversalCursor, int[] types) {
         Direction reverseDirection = direction.reverse();
         // First of all check if the cursor can do this efficiently itself and if so make use of that faster path
-        if (nodeCursor.supportsFastRelationshipsTo()) {
+        boolean firstSupportsFastRelationshipsTo = firstCursor.supportsFastRelationshipsTo();
+        boolean secondSupportsFastRelationshipsTo = secondCursor.supportsFastRelationshipsTo();
+        long firstNode = firstCursor.nodeReference();
+        long secondNode = secondCursor.nodeReference();
+        if (firstSupportsFastRelationshipsTo && secondSupportsFastRelationshipsTo) {
             // The operation is fast on the store level, however if we have a high degree in the tx state it may still
             // pay off to start on the node with the lesser degree.
-            int txStateDegreeFirst = calculateDegreeInTxState(firstNode, selection(types, direction));
-            int txStateDegreeSecond = calculateDegreeInTxState(secondNode, selection(types, reverseDirection));
+            long txStateDegreeFirst = calculateDegreeInTxState(firstNode, selection(types, direction));
+            long txStateDegreeSecond = calculateDegreeInTxState(secondNode, selection(types, reverseDirection));
             if (txStateDegreeSecond >= txStateDegreeFirst) {
-                return fastExpandInto(nodeCursor, traversalCursor, firstNode, types, direction, secondNode);
+                firstCursor.relationshipsTo(traversalCursor, selection(types, direction), secondNode);
             } else {
-                return fastExpandInto(nodeCursor, traversalCursor, secondNode, types, reverseDirection, firstNode);
+                secondCursor.relationshipsTo(traversalCursor, selection(types, reverseDirection), firstNode);
             }
-        }
-
-        // Check if we've already done this before for these two nodes in this query
-        Iterator<Relationship> connections = relationshipCache.get(firstNode, secondNode, direction);
-        if (connections != null) {
-            return new FromCachedSelectionCursor(connections, read, firstNode, secondNode);
-        }
-
-        // Make sure we actually read the node once so that the nodeCursor is initialized,
-        // later uses can use positionCursor which will avoid re-reading the same node.
-        read.singleNode(firstNode, nodeCursor);
-        if (!nodeCursor.next()) {
-            return Cursors.emptyTraversalCursor(read);
-        }
-        boolean firstNodeHasCheapDegrees = nodeCursor.supportsFastDegreeLookup();
-        int firstDegree = degreeCache.getIfAbsentPut(firstNode, direction, () -> {
-            if (!nodeCursor.supportsFastDegreeLookup()) {
-                return EXPENSIVE_DEGREE;
-            }
-            return calculateTotalDegree(nodeCursor, direction, types);
-        });
-
-        int secondDegree = degreeCache.getIfAbsentPut(
-                secondNode,
-                reverseDirection,
-                () -> positionCursorAndCalculateTotalDegreeIfCheap(
-                        read, secondNode, nodeCursor, reverseDirection, types));
-
-        boolean secondNodeHasCheapDegrees = secondDegree != EXPENSIVE_DEGREE;
-
-        // Both can determine degree cheaply, start with the one with the lesser degree
-        if (firstNodeHasCheapDegrees && secondNodeHasCheapDegrees) {
-            return expandFromNodeWithLesserDegree(
-                    nodeCursor, traversalCursor, firstNode, types, secondNode, firstDegree <= secondDegree);
-        } else if (secondNodeHasCheapDegrees) {
-            int txStateDegreeFirst = calculateDegreeInTxState(firstNode, selection(types, direction));
-            return expandFromNodeWithLesserDegree(
-                    nodeCursor, traversalCursor, firstNode, types, secondNode, txStateDegreeFirst <= secondDegree);
-        } else if (firstNodeHasCheapDegrees) {
-            int txStateDegreeSecond = calculateDegreeInTxState(secondNode, selection(types, reverseDirection));
-            return expandFromNodeWithLesserDegree(
-                    nodeCursor, traversalCursor, firstNode, types, secondNode, txStateDegreeSecond > firstDegree);
+            return traversalCursor;
+        } else if (firstSupportsFastRelationshipsTo) {
+            firstCursor.relationshipsTo(traversalCursor, selection(types, direction), secondNode);
+            return traversalCursor;
+        } else if (secondSupportsFastRelationshipsTo) {
+            secondCursor.relationshipsTo(traversalCursor, selection(types, reverseDirection), firstNode);
+            return traversalCursor;
         } else {
-            // Both nodes have a costly degree to compute, in general this means that both nodes are non-dense
-            // we'll use the degree in the tx-state to decide what node to start with.
-            int txStateDegreeFirst = calculateDegreeInTxState(firstNode, selection(types, direction));
-            int txStateDegreeSecond = calculateDegreeInTxState(secondNode, selection(types, reverseDirection));
-            boolean startOnFirstNode = txStateDegreeSecond == txStateDegreeFirst
-                    ? nodeCursor.nodeReference() == firstNode
-                    : txStateDegreeSecond > txStateDegreeFirst;
-            return expandFromNodeWithLesserDegree(
-                    nodeCursor, traversalCursor, firstNode, types, secondNode, startOnFirstNode);
+            // Check if we've already done this before for these two nodes in this query
+            Iterator<Relationship> connections = relationshipCache.get(firstNode, secondNode, direction);
+            if (connections != null) {
+                return new FromCachedSelectionCursor(connections, read, firstNode, secondNode);
+            } else {
+                return expandFromNodeWithLesserDegree(
+                        firstCursor,
+                        secondCursor,
+                        traversalCursor,
+                        types,
+                        getAndCacheDegree(firstNode, firstCursor, types, direction)
+                                <= getAndCacheDegree(secondNode, secondCursor, types, reverseDirection));
+            }
         }
     }
 
-    private RelationshipTraversalCursor fastExpandInto(
-            NodeCursor nodeCursor,
-            RelationshipTraversalCursor traversalCursor,
-            long firstNode,
-            int[] types,
-            Direction direction,
-            long secondNode) {
-        read.singleNode(firstNode, nodeCursor);
-        if (nodeCursor.next()) {
-            nodeCursor.relationshipsTo(traversalCursor, selection(types, direction), secondNode);
-            return traversalCursor;
-        } else {
-            return Cursors.emptyTraversalCursor(read);
-        }
+    private long getAndCacheDegree(long node, NodeCursor nodeCursor, int[] types, Direction direction) {
+        return degreeCache.getIfAbsentPut(node, direction, () -> {
+            if (nodeCursor.supportsFastDegreeLookup()) {
+                return nodeCursor.degree(selection(types, direction));
+            } else {
+                return calculateDegreeInTxState(node, selection(types, direction));
+            }
+        });
     }
 
     private RelationshipTraversalCursor expandFromNodeWithLesserDegree(
-            NodeCursor nodeCursor,
+            NodeCursor firstCursor,
+            NodeCursor secondCursor,
             RelationshipTraversalCursor traversalCursor,
-            long firstNode,
             int[] types,
-            long secondNode,
             boolean startOnFirstNode) {
 
-        long toNode;
-        Direction relDirection;
         if (startOnFirstNode) {
-            positionCursor(read, nodeCursor, firstNode);
-            toNode = secondNode;
-            relDirection = direction;
+            return connectingRelationshipsCursor(
+                    relationshipsCursor(traversalCursor, firstCursor, types, direction),
+                    secondCursor.nodeReference(),
+                    firstCursor.nodeReference(),
+                    secondCursor.nodeReference(),
+                    direction);
         } else {
-            positionCursor(read, nodeCursor, secondNode);
-            toNode = firstNode;
-            relDirection = direction.reverse();
+            Direction reverseDirection = direction.reverse();
+            return connectingRelationshipsCursor(
+                    relationshipsCursor(traversalCursor, secondCursor, types, reverseDirection),
+                    firstCursor.nodeReference(),
+                    firstCursor.nodeReference(),
+                    secondCursor.nodeReference(),
+                    reverseDirection);
         }
-        return connectingRelationshipsCursor(
-                relationshipsCursor(traversalCursor, nodeCursor, types, relDirection),
-                toNode,
-                firstNode,
-                secondNode,
-                relDirection);
     }
 
-    public RelationshipTraversalCursor connectingRelationships(
-            CursorFactory cursors,
-            NodeCursor nodeCursor,
-            long fromNode,
-            int[] types,
-            long toNode,
-            CursorContext cursorContext) {
-        return connectingRelationships(
-                nodeCursor,
-                cursors.allocateRelationshipTraversalCursor(cursorContext, scopedMemoryTracker),
-                fromNode,
-                types,
-                toNode);
-    }
-
-    private int calculateDegreeInTxState(long node, RelationshipSelection selection) {
+    private long calculateDegreeInTxState(long node, RelationshipSelection selection) {
         if (txState == null) {
             return 0;
         } else {
-            NodeState nodeState = txState.getNodeState(node);
-            if (nodeState == null) {
-                return 0;
-            } else {
-                SingleDegree degrees = new SingleDegree();
-                nodeState.fillDegrees(selection, degrees);
-                return degrees.getTotal();
-            }
-        }
-    }
-
-    private static int positionCursorAndCalculateTotalDegreeIfCheap(
-            Read read, long node, NodeCursor nodeCursor, Direction direction, int[] types) {
-        if (!positionCursor(read, nodeCursor, node)) {
-            return 0;
-        }
-        if (!nodeCursor.supportsFastDegreeLookup()) {
-            return EXPENSIVE_DEGREE;
-        }
-        return calculateTotalDegree(nodeCursor, direction, types);
-    }
-
-    // NOTE: nodeCursor is assumed to point at the correct node
-    private static int calculateTotalDegree(NodeCursor nodeCursor, Direction direction, int[] types) {
-        return nodeCursor.degree(selection(types, direction));
-    }
-
-    private static boolean positionCursor(Read read, NodeCursor nodeCursor, long node) {
-        if (!nodeCursor.isClosed() && nodeCursor.nodeReference() == node) {
-            return true;
-        } else {
-            read.singleNode(node, nodeCursor);
-            return nodeCursor.next();
+            return txState.calculateDegreeInTxState(node, selection);
         }
     }
 
@@ -321,7 +272,7 @@ public class CachingExpandInto extends DefaultCloseListenable {
         @Unmetered
         private final Read read;
 
-        private int token = UNTRACKED;
+        private int trackingHandle = UNTRACKED;
 
         private final long firstNode;
         private final long secondNode;
@@ -391,13 +342,13 @@ public class CachingExpandInto extends DefaultCloseListenable {
         }
 
         @Override
-        public void setToken(int token) {
-            this.token = token;
+        public void setTrackingHandle(int handle) {
+            this.trackingHandle = handle;
         }
 
         @Override
-        public int getToken() {
-            return token;
+        public int getTrackingHandle() {
+            return trackingHandle;
         }
 
         @Override
@@ -434,7 +385,7 @@ public class CachingExpandInto extends DefaultCloseListenable {
         public void properties(PropertyCursor cursor, PropertySelection selection) {
             read.relationshipProperties(
                     currentRelationship.id,
-                    currentRelationship.from,
+                    currentRelationship.type,
                     currentRelationship.properties,
                     selection,
                     cursor);
@@ -602,7 +553,7 @@ public class CachingExpandInto extends DefaultCloseListenable {
         static final long DEGREE_CACHE_SHALLOW_SIZE = shallowSizeOfInstance(NodeDegreeCache.class);
 
         private final int capacity;
-        private final MutableLongIntMap degreeCache;
+        private final MutableLongLongMap degreeCache;
 
         NodeDegreeCache(MemoryTracker memoryTracker) {
             this(DEFAULT_CAPACITY, memoryTracker);
@@ -611,10 +562,10 @@ public class CachingExpandInto extends DefaultCloseListenable {
         NodeDegreeCache(int capacity, MemoryTracker memoryTracker) {
             this.capacity = capacity;
             memoryTracker.allocateHeap(DEGREE_CACHE_SHALLOW_SIZE);
-            this.degreeCache = HeapTrackingCollections.newLongIntMap(memoryTracker);
+            this.degreeCache = HeapTrackingCollections.newLongLongMap(memoryTracker);
         }
 
-        public int getIfAbsentPut(long node, Direction direction, IntFunction0 update) {
+        public long getIfAbsentPut(long node, Direction direction, LongFunction0 update) {
             assert node >= 0;
             // if incoming we flip the highest bit in the node id
             long nodeWithDirection = direction == INCOMING ? FLIP_HIGH_BIT_MASK | node : node;
@@ -623,13 +574,13 @@ public class CachingExpandInto extends DefaultCloseListenable {
                 if (degreeCache.containsKey(nodeWithDirection)) {
                     return degreeCache.get(nodeWithDirection);
                 } else {
-                    return update.getAsInt();
+                    return update.getAsLong();
                 }
             } else {
                 if (degreeCache.containsKey(nodeWithDirection)) {
                     return degreeCache.get(nodeWithDirection);
                 } else {
-                    int value = update.getAsInt();
+                    long value = update.getAsLong();
                     degreeCache.put(nodeWithDirection, value);
                     return value;
                 }
@@ -745,7 +696,7 @@ public class CachingExpandInto extends DefaultCloseListenable {
                 allRelationships.type());
     }
 
-    private static class Relationship {
+    static class Relationship {
         static final long RELATIONSHIP_SHALLOW_SIZE = shallowSizeOfInstance(Relationship.class);
 
         private final long id, from, to;

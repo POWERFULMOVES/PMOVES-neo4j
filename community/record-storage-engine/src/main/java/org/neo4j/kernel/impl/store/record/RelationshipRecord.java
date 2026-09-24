@@ -24,19 +24,35 @@ import static org.neo4j.kernel.impl.store.record.Record.NO_NEXT_RELATIONSHIP;
 import static org.neo4j.memory.HeapEstimator.shallowSizeOfInstance;
 
 import java.util.Objects;
+import org.neo4j.storageengine.api.LongReference;
 import org.neo4j.string.Mask;
+import org.neo4j.token.api.TokenConstants;
 
 public class RelationshipRecord extends PrimitiveRecord {
     public static final long SHALLOW_SIZE = shallowSizeOfInstance(RelationshipRecord.class);
-    private long firstNode;
-    private long secondNode;
-    private int type;
-    private long firstPrevRel;
-    private long firstNextRel;
-    private long secondPrevRel;
-    private long secondNextRel;
-    private boolean firstInFirstChain;
-    private boolean firstInSecondChain;
+
+    private static final long NO_FIRST_REL_ID = 1L;
+
+    private long firstNode = LongReference.NULL;
+    private long secondNode = LongReference.NULL;
+    private int type = TokenConstants.NO_TOKEN;
+    private long firstPrevRel = NO_FIRST_REL_ID;
+    private long firstNextRel = NO_NEXT_RELATIONSHIP.intValue();
+    private long secondPrevRel = NO_FIRST_REL_ID;
+    private long secondNextRel = NO_NEXT_RELATIONSHIP.intValue();
+    private boolean firstInFirstChain = true;
+    private boolean firstInSecondChain = true;
+
+    // These were introduced later, so a relationship record with a dense first node that was written prior to the
+    // introduction of these fields will have both of these set to false. If they are true, however,
+    // the node is guaranteed to be dense.
+    // Whenever a node turns dense, all it's relationship record will be rewritten and these flags will be set correctly
+    // to true.
+    // As of writing this, the only usage is to avoid a bug when traversing relationships of a sparse node becoming
+    // dense.
+    // Therefore, we do not need a format change with the introduction of these fields.
+    private boolean firstNodeIsGuaranteedDense;
+    private boolean secondNodeIsGuaranteedDense;
 
     public RelationshipRecord(long id) {
         super(id);
@@ -53,6 +69,8 @@ public class RelationshipRecord extends PrimitiveRecord {
         this.secondNextRel = other.secondNextRel;
         this.firstInFirstChain = other.firstInFirstChain;
         this.firstInSecondChain = other.firstInSecondChain;
+        this.firstNodeIsGuaranteedDense = other.firstNodeIsGuaranteedDense;
+        this.secondNodeIsGuaranteedDense = other.secondNodeIsGuaranteedDense;
     }
 
     public RelationshipRecord initialize(
@@ -66,7 +84,9 @@ public class RelationshipRecord extends PrimitiveRecord {
             long secondPrevRel,
             long secondNextRel,
             boolean firstInFirstChain,
-            boolean firstInSecondChain) {
+            boolean firstInSecondChain,
+            boolean firstIsGuaranteedDense,
+            boolean secondIsGuaranteedDense) {
         super.initialize(inUse, nextProp);
         this.firstNode = firstNode;
         this.secondNode = secondNode;
@@ -77,6 +97,8 @@ public class RelationshipRecord extends PrimitiveRecord {
         this.secondNextRel = secondNextRel;
         this.firstInFirstChain = firstInFirstChain;
         this.firstInSecondChain = firstInSecondChain;
+        this.firstNodeIsGuaranteedDense = firstIsGuaranteedDense;
+        this.secondNodeIsGuaranteedDense = secondIsGuaranteedDense;
         return this;
     }
 
@@ -85,15 +107,17 @@ public class RelationshipRecord extends PrimitiveRecord {
         initialize(
                 false,
                 NO_NEXT_PROPERTY.intValue(),
-                -1,
-                -1,
-                -1,
-                1,
+                LongReference.NULL,
+                LongReference.NULL,
+                TokenConstants.NO_TOKEN,
+                NO_FIRST_REL_ID,
                 NO_NEXT_RELATIONSHIP.intValue(),
-                1,
+                NO_FIRST_REL_ID,
                 NO_NEXT_RELATIONSHIP.intValue(),
                 true,
-                true);
+                true,
+                false,
+                false);
     }
 
     public void setLinks(long firstNode, long secondNode, int type) {
@@ -104,6 +128,37 @@ public class RelationshipRecord extends PrimitiveRecord {
 
     public long getFirstNode() {
         return firstNode;
+    }
+
+    public void setDense(long nodeId) {
+        assertEitherFirstOrSecondNode(nodeId);
+        if (nodeId == firstNode) {
+            this.firstNodeIsGuaranteedDense = true;
+        }
+        if (nodeId == secondNode) {
+            this.secondNodeIsGuaranteedDense = true;
+        }
+    }
+
+    public void setFirstNodeIsGuaranteedDense(boolean firstNodeIsGuaranteedDense) {
+        this.firstNodeIsGuaranteedDense = firstNodeIsGuaranteedDense;
+    }
+
+    public void setSecondNodeIsGuaranteedDense(boolean secondNodeIsGuaranteedDense) {
+        this.secondNodeIsGuaranteedDense = secondNodeIsGuaranteedDense;
+    }
+
+    public boolean isGuaranteedDense(long nodeId) {
+        assertEitherFirstOrSecondNode(nodeId);
+        return nodeId == firstNode ? firstNodeIsGuaranteedDense : secondNodeIsGuaranteedDense;
+    }
+
+    public boolean firstNodeIsGuaranteedDense() {
+        return firstNodeIsGuaranteedDense;
+    }
+
+    public boolean secondNodeIsGuaranteedDense() {
+        return secondNodeIsGuaranteedDense;
     }
 
     public void setFirstNode(long firstNode) {
@@ -240,6 +295,8 @@ public class RelationshipRecord extends PrimitiveRecord {
                 + getNextProp() + secondaryUnitToString()
                 + (firstInFirstChain ? ", sFirst" : ",!sFirst")
                 + (firstInSecondChain ? ", tFirst" : ",!tFirst")
+                + (firstNodeIsGuaranteedDense ? ", sDense" : ",!sDense")
+                + (secondNodeIsGuaranteedDense ? ", tDense" : ",!tDense")
                 + "]";
     }
 
@@ -268,7 +325,9 @@ public class RelationshipRecord extends PrimitiveRecord {
                 && secondPrevRel == that.secondPrevRel
                 && secondNextRel == that.secondNextRel
                 && firstInFirstChain == that.firstInFirstChain
-                && firstInSecondChain == that.firstInSecondChain;
+                && firstInSecondChain == that.firstInSecondChain
+                && firstNodeIsGuaranteedDense == that.firstNodeIsGuaranteedDense
+                && secondNodeIsGuaranteedDense == that.secondNodeIsGuaranteedDense;
     }
 
     @Override
@@ -283,6 +342,8 @@ public class RelationshipRecord extends PrimitiveRecord {
                 secondPrevRel,
                 secondNextRel,
                 firstInFirstChain,
-                firstInSecondChain);
+                firstInSecondChain,
+                firstNodeIsGuaranteedDense,
+                secondNodeIsGuaranteedDense);
     }
 }

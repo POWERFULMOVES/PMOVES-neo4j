@@ -34,11 +34,13 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.time.temporal.TemporalUnit;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.neo4j.exceptions.InvalidArgumentException;
+import org.neo4j.exceptions.TemporalParseException;
 import org.neo4j.exceptions.UnsupportedTemporalUnitException;
 import org.neo4j.values.AnyValue;
 import org.neo4j.values.StructureBuilder;
@@ -50,6 +52,7 @@ public final class LocalTimeValue extends TemporalValue<LocalTime, LocalTimeValu
 
     public static final LocalTimeValue MIN_VALUE = new LocalTimeValue(LocalTime.MIN);
     public static final LocalTimeValue MAX_VALUE = new LocalTimeValue(LocalTime.MAX);
+    public static final String CYPHER_TYPE_NAME = "LOCAL TIME";
 
     private final LocalTime value;
 
@@ -61,8 +64,9 @@ public final class LocalTimeValue extends TemporalValue<LocalTime, LocalTimeValu
         return new LocalTimeValue(requireNonNull(value, "LocalTime"));
     }
 
+    // Only used in tests
     public static LocalTimeValue localTime(int hour, int minute, int second, int nanosOfSecond) {
-        return new LocalTimeValue(assertValidArgument(() -> LocalTime.of(hour, minute, second, nanosOfSecond)));
+        return new LocalTimeValue(LocalTime.of(hour, minute, second, nanosOfSecond));
     }
 
     public static LocalTimeValue localTime(long nanoOfDay) {
@@ -70,7 +74,7 @@ public final class LocalTimeValue extends TemporalValue<LocalTime, LocalTimeValu
     }
 
     public static LocalTime localTimeRaw(long nanoOfDay) {
-        return assertValidArgument(() -> LocalTime.ofNanoOfDay(nanoOfDay));
+        return assertValidArgument("nanoOfDay", () -> LocalTime.ofNanoOfDay(nanoOfDay));
     }
 
     public static LocalTimeValue parse(CharSequence text) {
@@ -79,6 +83,16 @@ public final class LocalTimeValue extends TemporalValue<LocalTime, LocalTimeValu
 
     public static LocalTimeValue parse(TextValue text) {
         return parse(LocalTimeValue.class, PATTERN, LocalTimeValue::parse, text);
+    }
+
+    public static LocalTimeValue parsePattern(TextValue text, TextValue pattern) {
+        try {
+            DateTimeFormatter dtf = DateTimeFormatter.ofPattern(pattern.stringValue());
+            LocalTime lt = dtf.parse(text.stringValue(), LocalTime::from);
+            return new LocalTimeValue(lt);
+        } catch (IllegalArgumentException | DateTimeParseException e) {
+            throw TemporalParseException.mismatchedPattern(pattern.stringValue(), text.stringValue(), CYPHER_TYPE_NAME);
+        }
     }
 
     public static LocalTimeValue now(Clock clock) {
@@ -105,11 +119,11 @@ public final class LocalTimeValue extends TemporalValue<LocalTime, LocalTimeValu
             TemporalUnit unit, TemporalValue input, MapValue fields, Supplier<ZoneId> defaultZone) {
         LocalTime localTime = input.getLocalTimePart();
         LocalTime truncatedLT = assertValidUnit(unit, () -> localTime.truncatedTo(unit));
-        if (fields.size() == 0) {
+        if (fields.isEmpty()) {
             return localTime(truncatedLT);
         } else {
             return updateFieldMapWithConflictingSubseconds(fields, unit, truncatedLT, (mapValue, localTime1) -> {
-                if (mapValue.size() == 0) {
+                if (mapValue.isEmpty()) {
                     return localTime(localTime1);
                 } else {
                     return build(mapValue.updatedWith("time", localTime(localTime1)), defaultZone);
@@ -122,7 +136,7 @@ public final class LocalTimeValue extends TemporalValue<LocalTime, LocalTimeValu
             LocalTime.of(TemporalFields.hour.defaultValue, TemporalFields.minute.defaultValue);
 
     private static TimeValue.TimeBuilder<LocalTimeValue> builder(Supplier<ZoneId> defaultZone) {
-        return new TimeValue.TimeBuilder<>(defaultZone) {
+        return new TimeValue.TimeBuilder<>(defaultZone, "LOCAL TIME") {
             @Override
             protected boolean supportsTimeZone() {
                 return false;
@@ -178,8 +192,13 @@ public final class LocalTimeValue extends TemporalValue<LocalTime, LocalTimeValu
     }
 
     @Override
+    public String getTemporalCypherTypeName() {
+        return CYPHER_TYPE_NAME;
+    }
+
+    @Override
     LocalDate getDatePart() {
-        throw new UnsupportedTemporalUnitException(String.format("Cannot get the date of: %s", this));
+        throw UnsupportedTemporalUnitException.cannotGetDate(this.prettyPrint());
     }
 
     @Override
@@ -189,7 +208,8 @@ public final class LocalTimeValue extends TemporalValue<LocalTime, LocalTimeValu
 
     @Override
     OffsetTime getTimePart(Supplier<ZoneId> defaultZone) {
-        ZoneOffset currentOffset = assertValidArgument(() -> ZonedDateTime.ofInstant(Instant.now(), defaultZone.get()))
+        ZoneOffset currentOffset = assertValidArgument(
+                        "time", () -> ZonedDateTime.ofInstant(Instant.now(), defaultZone.get()))
                 .getOffset();
         return OffsetTime.of(value, currentOffset);
     }
@@ -201,7 +221,7 @@ public final class LocalTimeValue extends TemporalValue<LocalTime, LocalTimeValu
 
     @Override
     ZoneOffset getZoneOffset() {
-        throw new UnsupportedTemporalUnitException(String.format("Cannot get the offset of: %s", this));
+        throw UnsupportedTemporalUnitException.cannotGetZoneOffset(String.valueOf(this));
     }
 
     @Override
@@ -246,12 +266,14 @@ public final class LocalTimeValue extends TemporalValue<LocalTime, LocalTimeValu
 
     @Override
     public LocalTimeValue add(DurationValue duration) {
-        return replacement(assertValidArithmetic(() -> value.plusNanos(duration.nanosOfDay())));
+        return replacement(
+                assertValidArithmetic(() -> value.plusNanos(duration.nanosOfDay()), value + " + " + duration, "+"));
     }
 
     @Override
     public LocalTimeValue sub(DurationValue duration) {
-        return replacement(assertValidArithmetic(() -> value.minusNanos(duration.nanosOfDay())));
+        return replacement(
+                assertValidArithmetic(() -> value.minusNanos(duration.nanosOfDay()), value + " - " + duration, "-"));
     }
 
     @Override

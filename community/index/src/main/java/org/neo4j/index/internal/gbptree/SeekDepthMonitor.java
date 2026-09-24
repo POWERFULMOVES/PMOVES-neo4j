@@ -19,7 +19,7 @@
  */
 package org.neo4j.index.internal.gbptree;
 
-class SeekDepthMonitor extends SeekCursor.MonitorAdaptor {
+class SeekDepthMonitor implements SeekCursor.Monitor {
     boolean reachedLeafLevel;
     int treeDepth;
 

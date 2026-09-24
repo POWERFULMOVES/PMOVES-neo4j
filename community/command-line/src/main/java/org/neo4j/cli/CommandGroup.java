@@ -23,7 +23,8 @@ public enum CommandGroup {
     DATABASE("database", "Database-specific administration tasks."),
     DBMS("dbms", "DBMS-wide (for single and clustered environments) administration tasks."),
     SERVER("server", "Server-wide administration tasks."),
-    BACKUP("backup", "Backup-specific administration tasks.");
+    BACKUP("backup", "Backup-specific administration tasks."),
+    FLEET("fleet", "Fleet-wide administration tasks.");
 
     private final String displayName;
     private final String description;

@@ -55,6 +55,7 @@ import org.neo4j.internal.schema.IndexType;
 import org.neo4j.internal.schema.SchemaDescriptor;
 import org.neo4j.internal.schema.SchemaNameUtil;
 import org.neo4j.internal.schema.constraints.IndexBackedConstraintDescriptor;
+import org.neo4j.internal.schema.constraints.TypeConstraintDescriptor;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
@@ -241,6 +242,17 @@ public class StubStorageCursors implements StorageReader {
     }
 
     @Override
+    public boolean hasAnyTypeConstraintWithDefaultValue(EntityType entityType) {
+        throw new UnsupportedOperationException("Not implemented yet");
+    }
+
+    @Override
+    public Collection<TypeConstraintDescriptor> typeConstraintsWithDefaultValue(
+            int entityTokenId, EntityType entityType) {
+        throw new UnsupportedOperationException("Not implemented yet");
+    }
+
+    @Override
     public IntSet[] constraintsGetPropertyTokensForLogicalKey(int token, EntityType entityType) {
         throw new UnsupportedOperationException("Not implemented yet");
     }
@@ -275,18 +287,7 @@ public class StubStorageCursors implements StorageReader {
     }
 
     @Override
-    public long estimateCountsForNode(int labelId, CursorContext cursorContext) {
-        throw new UnsupportedOperationException("Not implemented yet");
-    }
-
-    @Override
     public long countsForRelationship(int startLabelId, int typeId, int endLabelId, CursorContext cursorContext) {
-        throw new UnsupportedOperationException("Not implemented yet");
-    }
-
-    @Override
-    public long estimateCountsForRelationship(
-            int startLabelId, int typeId, int endLabelId, CursorContext cursorContext) {
         throw new UnsupportedOperationException("Not implemented yet");
     }
 
@@ -321,7 +322,7 @@ public class StubStorageCursors implements StorageReader {
     }
 
     @Override
-    public boolean relationshipExists(long id, StoreCursors storeCursors) {
+    public boolean relationshipExists(long id, StoreCursors storeCursors, CursorContext context) {
         throw new UnsupportedOperationException("Not implemented yet");
     }
 
@@ -463,7 +464,7 @@ public class StubStorageCursors implements StorageReader {
         private Iterator<Long> iterator;
 
         @Override
-        public void scan() {
+        public void scan(boolean includeChangesFromThisTransaction) {
             this.iterator = nodeData.keySet().iterator();
             this.current = null;
         }
@@ -518,7 +519,10 @@ public class StubStorageCursors implements StorageReader {
         }
 
         @Override
-        public void relationships(StorageRelationshipTraversalCursor traversalCursor, RelationshipSelection selection) {
+        public void relationships(
+                StorageRelationshipTraversalCursor traversalCursor,
+                RelationshipSelection selection,
+                boolean includeChangesFromThisTransaction) {
             traversalCursor.init(current.id, NO_ID, selection);
         }
 
@@ -597,7 +601,7 @@ public class StubStorageCursors implements StorageReader {
         }
 
         @Override
-        public void setForceLoad() {}
+        public void check() {}
 
         @Override
         public void close() {
@@ -611,7 +615,7 @@ public class StubStorageCursors implements StorageReader {
         private long next;
 
         @Override
-        public void scan() {
+        public void scan(boolean includeChangesFromThisTransaction) {
             iterator = relationshipData.keySet().iterator();
             next = NO_ID;
         }
@@ -691,9 +695,6 @@ public class StubStorageCursors implements StorageReader {
         }
 
         @Override
-        public void setForceLoad() {}
-
-        @Override
         public void close() {
             reset();
         }
@@ -742,9 +743,6 @@ public class StubStorageCursors implements StorageReader {
         public void reset() {}
 
         @Override
-        public void setForceLoad() {}
-
-        @Override
         public boolean next() {
             if (iterator.hasNext()) {
                 current = iterator.next();
@@ -773,9 +771,6 @@ public class StubStorageCursors implements StorageReader {
             iterator = null;
             current = null;
         }
-
-        @Override
-        public void setForceLoad() {}
 
         @Override
         public void close() {}
@@ -826,7 +821,11 @@ public class StubStorageCursors implements StorageReader {
         }
 
         @Override
-        public void init(long nodeReference, long reference, RelationshipSelection selection) {
+        public void init(
+                long nodeReference,
+                long reference,
+                RelationshipSelection selection,
+                boolean includeChangesFromThisTransaction) {
             originNodeReference = nodeReference;
             iterator = relationshipData.values().stream()
                     .filter(relationship ->

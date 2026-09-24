@@ -64,18 +64,20 @@ public class Main implements AutoCloseable {
 
     public Main(CliArgs args) {
         boolean isInteractive = !args.getNonInteractive() && ShellRunner.isInputInteractive();
-        this.printer = new AnsiPrinter(Format.VERBOSE, System.out, System.err);
+        this.printer = new AnsiPrinter(Format.VERBOSE, args.getErrorFormat(), System.out, System.err);
         this.args = args;
-        var boltStateHandler = new BoltStateHandler(shouldBeInteractive(args, isInteractive), args.getAccessMode());
+        var boltStateHandler = new BoltStateHandler(
+                shouldBeInteractive(args, isInteractive), args.getAccessMode(), args.getTxTimeout());
         var completionsEnabledByConfig = args.getEnableAutocompletions();
         this.parameters = ParameterService.create(boltStateHandler);
         var dbInfo = new DbInfoImpl(parameters, boltStateHandler, completionsEnabledByConfig);
-        CompletionEngine completionEngine = new CompletionEngine(dbInfo);
+        CompletionEngine completionEngine = new CompletionEngine(dbInfo, boltStateHandler);
         this.terminal = terminalBuilder()
                 .interactive(isInteractive)
                 .logger(printer)
                 .parameters(parameters)
                 .idleTimeout(args.getIdleTimeout(), args.getIdleTimeoutDelay())
+                .enableHistory(args.getHistoryBehaviour().historyEnabled())
                 .build(dbInfo, completionEngine);
         this.shell = new CypherShell(
                 printer,
@@ -99,7 +101,7 @@ public class Main implements AutoCloseable {
             ParameterService parameters) {
         this.terminal = terminal;
         this.args = args;
-        this.printer = new AnsiPrinter(Format.VERBOSE, out, err);
+        this.printer = new AnsiPrinter(Format.VERBOSE, args.getErrorFormat(), out, err);
         final var isInteractive = shouldBeInteractive(args, terminal.isInteractive());
         this.parameters = parameters;
         this.shell = new CypherShell(

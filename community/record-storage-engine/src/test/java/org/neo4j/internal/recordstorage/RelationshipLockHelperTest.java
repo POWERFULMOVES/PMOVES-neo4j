@@ -44,7 +44,6 @@ import org.eclipse.collections.impl.factory.primitive.LongLists;
 import org.eclipse.collections.impl.factory.primitive.LongObjectMaps;
 import org.eclipse.collections.impl.factory.primitive.LongSets;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
@@ -58,9 +57,9 @@ import org.neo4j.lock.ResourceType;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class RelationshipLockHelperTest {
     @Inject
     RandomSupport random;
@@ -193,7 +192,7 @@ class RelationshipLockHelperTest {
         idsToDelete.add(1);
 
         RelationshipRecord record = new RelationshipRecord(1);
-        record.initialize(true, 1, 2, 3, 4, 5, 7, 7, 5, false, false);
+        record.initialize(true, 1, 2, 3, 4, 5, 7, 7, 5, false, false, false, false);
         var proxy = mock(RecordAccess.RecordProxy.class);
         when(proxy.forReadingLinkage()).thenAnswer(invocation -> record);
         proxies.put(1, proxy);
@@ -208,7 +207,7 @@ class RelationshipLockHelperTest {
         RelationshipLockHelper.lockRelationshipsInOrder(
                 idsAsBatch(idsToDelete), 2, relRecords, locks, EmptyMemoryTracker.INSTANCE);
 
-        var activeLocks = locks.activeLocks();
+        var activeLocks = locks.activeLocks(EmptyMemoryTracker.INSTANCE);
         assertThat(activeLocks)
                 .hasSize(4)
                 .contains(new ActiveLock(ResourceType.RELATIONSHIP, LockType.EXCLUSIVE, -1, 1))
@@ -288,7 +287,9 @@ class RelationshipLockHelperTest {
                     -1,
                     -1,
                     firstChain && firstInChain,
-                    !firstChain && firstInChain);
+                    !firstChain && firstInChain,
+                    false,
+                    false);
             if (!firstInChain) {
                 RelationshipRecord prev = chain.get(i - 1);
                 prev.setNextRel(id, nodeId);
@@ -310,7 +311,7 @@ class RelationshipLockHelperTest {
 
         VolatileRelationshipRecord(long id, MutableLongBag usedIds, long maxId) {
             super(id);
-            initialize(true, -1, -1, -1, -1, -1, -1, -1, -1, false, false);
+            initialize(true, -1, -1, -1, -1, -1, -1, -1, -1, false, false, false, false);
 
             this.usedIds = usedIds;
             usedIds.add(id);

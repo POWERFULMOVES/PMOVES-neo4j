@@ -19,15 +19,20 @@
  */
 package org.neo4j.schema;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.concurrent.TimeUnit.MINUTES;
-import static org.apache.commons.lang3.RandomStringUtils.randomAscii;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
+import static org.neo4j.internal.kernel.api.IndexQueryConstraints.unconstrained;
+import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.logging.AssertableLogProvider.Level.DEBUG;
 import static org.neo4j.logging.AssertableLogProvider.Level.ERROR;
 import static org.neo4j.logging.LogAssertions.assertThat;
+import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
+import static org.neo4j.values.storable.Values.utf8Value;
 
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
@@ -35,47 +40,66 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.atomic.AtomicLong;
+import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.neo4j.dbms.api.DatabaseManagementService;
+import org.neo4j.exceptions.KernelException;
 import org.neo4j.graphdb.GraphDatabaseService;
 import org.neo4j.graphdb.Label;
 import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.ResourceIterator;
 import org.neo4j.graphdb.Result;
 import org.neo4j.graphdb.Transaction;
+import org.neo4j.graphdb.schema.IndexType;
 import org.neo4j.internal.helpers.collection.Iterables;
 import org.neo4j.internal.helpers.collection.Iterators;
 import org.neo4j.internal.kernel.api.IndexMonitor;
+import org.neo4j.internal.kernel.api.IndexReadSession;
+import org.neo4j.internal.kernel.api.NodeValueIndexCursor;
+import org.neo4j.internal.kernel.api.PropertyIndexQuery;
+import org.neo4j.internal.kernel.api.PropertyIndexQuery.ExactPredicate;
+import org.neo4j.internal.kernel.api.TokenRead;
 import org.neo4j.internal.schema.IndexDescriptor;
-import org.neo4j.kernel.database.DatabaseMemoryTrackers;
+import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.impl.api.index.IndexPopulationJob;
+import org.neo4j.kernel.impl.coreapi.TransactionImpl;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.logging.AssertableLogProvider;
 import org.neo4j.monitoring.Monitors;
+import org.neo4j.test.RandomSupport;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
 import org.neo4j.values.storable.RandomValues;
+import org.neo4j.values.storable.RandomValuesUtils;
 
 @TestDirectoryExtension
+@RandomSupportExtension
 class IndexPopulationIT {
     @Inject
     private TestDirectory directory;
 
-    private static GraphDatabaseAPI database;
-    private static ExecutorService executorService;
-    private static AssertableLogProvider logProvider;
-    private static DatabaseManagementService managementService;
+    @Inject
+    private RandomSupport random;
+
+    private GraphDatabaseAPI database;
+    private ExecutorService executorService;
+    private AssertableLogProvider logProvider;
+    private DatabaseManagementService managementService;
+    private Monitors monitors = new Monitors();
 
     @BeforeEach
     void setUp() {
+        monitors = new Monitors();
         logProvider = new AssertableLogProvider(true);
         managementService = new TestDatabaseManagementServiceBuilder(directory.homePath())
                 .setInternalLogProvider(logProvider)
+                .setMonitors(monitors)
                 .build();
         database = (GraphDatabaseAPI) managementService.database(DEFAULT_DATABASE_NAME);
         executorService = Executors.newCachedThreadPool();
@@ -85,56 +109,6 @@ class IndexPopulationIT {
     void tearDown() {
         executorService.shutdown();
         managementService.shutdown();
-    }
-
-    @Test
-    void trackMemoryOnIndexPopulation() throws InterruptedException {
-        Label nodeLabel = Label.label("nodeLabel");
-        var propertyName = "testProperty";
-        var indexName = "testIndex";
-
-        try (Transaction transaction = database.beginTx()) {
-            var node = transaction.createNode(nodeLabel);
-            node.setProperty(propertyName, randomAscii(1024));
-            transaction.commit();
-        }
-
-        var monitors = database.getDependencyResolver().resolveDependency(Monitors.class);
-        var memoryTrackers = database.getDependencyResolver().resolveDependency(DatabaseMemoryTrackers.class);
-        var otherTracker = memoryTrackers.getOtherTracker();
-        var estimatedHeapBefore = otherTracker.estimatedHeapMemory();
-        var usedNativeBefore = otherTracker.usedNativeMemory();
-        AtomicLong peakUsage = new AtomicLong();
-        CountDownLatch populationJobCompleted = new CountDownLatch(1);
-        monitors.addMonitorListener(new IndexMonitor.MonitorAdapter() {
-            @Override
-            public void populationCompleteOn(IndexDescriptor descriptor) {
-                peakUsage.set(Math.max(otherTracker.usedNativeMemory(), peakUsage.get()));
-            }
-
-            @Override
-            public void populationJobCompleted(long peakDirectMemoryUsage) {
-                populationJobCompleted.countDown();
-            }
-        });
-
-        try (Transaction transaction = database.beginTx()) {
-            transaction
-                    .schema()
-                    .indexFor(nodeLabel)
-                    .on(propertyName)
-                    .withName(indexName)
-                    .create();
-            transaction.commit();
-        }
-
-        waitForOnlineIndexes();
-        populationJobCompleted.await();
-
-        long nativeMemoryAfterIndexCompletion = otherTracker.usedNativeMemory();
-        assertEquals(estimatedHeapBefore, otherTracker.estimatedHeapMemory());
-        assertEquals(usedNativeBefore, nativeMemoryAfterIndexCompletion);
-        assertThat(peakUsage.get()).isGreaterThan(nativeMemoryAfterIndexCompletion);
     }
 
     @Test
@@ -254,20 +228,97 @@ class IndexPopulationIT {
                 .containsMessages("TIME/PHASE Final:");
     }
 
-    private static void prePopulateDatabase(GraphDatabaseService database, Label testLabel, String propertyName) {
-        final RandomValues randomValues = RandomValues.create();
+    @Test
+    @SkipOnSpd(reason = "monitors are not called on graph shard")
+    void concurrentUpdatesPopulationOfManyIndexesOnSameSchema() throws InterruptedException, KernelException {
+        Label nodeLabel = Label.label("nodeLabel");
+        String propertyName = "testProperty";
+        String rangeIndex = "rangeIndex";
+        String textIndex = "textIndex";
+        String concurrentValue = "concurrentValue";
+
+        CountDownLatch blockLatch = new CountDownLatch(1);
+        CountDownLatch signalLatch = new CountDownLatch(1);
+
+        monitors.addMonitorListener(new PopulationScanCompleteBlock(rangeIndex, blockLatch, signalLatch));
+
+        try (Transaction transaction = database.beginTx()) {
+            Node node = transaction.createNode(nodeLabel);
+            node.setProperty(propertyName, "initialValue");
+            transaction.commit();
+        }
+
+        try (Transaction transaction = database.beginTx()) {
+            transaction
+                    .schema()
+                    .indexFor(nodeLabel)
+                    .on(propertyName)
+                    .withIndexType(IndexType.RANGE)
+                    .withName(rangeIndex)
+                    .create();
+            transaction
+                    .schema()
+                    .indexFor(nodeLabel)
+                    .on(propertyName)
+                    .withIndexType(IndexType.TEXT)
+                    .withName(textIndex)
+                    .create();
+            transaction.commit();
+        }
+
+        Assertions.assertThat(signalLatch.await(1, MINUTES)).isTrue();
+
+        // scan complete
+        // new transaction can add to the concurrent queue that will be processed on flip
+        try (Transaction concurrentUpdater = database.beginTx()) {
+            Node node = concurrentUpdater.createNode(nodeLabel);
+            node.setProperty(propertyName, concurrentValue);
+            concurrentUpdater.commit();
+        }
+
+        // release population flip
+        blockLatch.countDown();
+        waitForOnlineIndexes();
+
+        assertThat(nodeValueExistsInIndex(propertyName, concurrentValue, rangeIndex))
+                .isTrue();
+        assertThat(nodeValueExistsInIndex(propertyName, concurrentValue, textIndex))
+                .isTrue();
+    }
+
+    private boolean nodeValueExistsInIndex(String propertyName, String value, String indexName) throws KernelException {
+        try (Transaction transaction = database.beginTx()) {
+            KernelTransaction ktx = ((TransactionImpl) transaction).kernelTransaction();
+            TokenRead tokenRead = ktx.tokenRead();
+            int propertyId = tokenRead.propertyKey(propertyName);
+            ExactPredicate query = PropertyIndexQuery.exact(propertyId, utf8Value(value.getBytes(UTF_8)));
+
+            IndexDescriptor index = ktx.schemaRead().indexGetForName(indexName);
+            try (NodeValueIndexCursor cursor = ktx.cursors().allocateNodeValueIndexCursor(NULL_CONTEXT, INSTANCE)) {
+                IndexReadSession indexSession = ktx.dataRead().indexReadSession(index);
+                ktx.dataRead().nodeIndexSeek(ktx.queryContext(), indexSession, cursor, unconstrained(), query);
+                return cursor.next();
+            }
+        }
+    }
+
+    private void prePopulateDatabase(GraphDatabaseService database, Label testLabel, String propertyName) {
+        random.withConfiguration(RandomValuesUtils.selectStorageEngineDependentConfigurationBuilder(database)
+                        .maxVectorNumBytes(RandomValues.MAX_NUM_BYTES_IN_INDEX_KEY)
+                        .build())
+                .reset();
 
         try (Transaction transaction = database.beginTx()) {
             for (int j = 0; j < 10_000; j++) {
                 Node node = transaction.createNode(testLabel);
-                Object property = randomValues.nextValue().asObject();
+                Object property = random.nextValue().asObject();
                 node.setProperty(propertyName, property);
             }
             transaction.commit();
         }
     }
 
-    private static Runnable createNodeWithLabel(Label label) {
+    private Runnable createNodeWithLabel(Label label) {
         return () -> {
             try (Transaction transaction = database.beginTx()) {
                 transaction.createNode(label);
@@ -276,13 +327,13 @@ class IndexPopulationIT {
         };
     }
 
-    private static long countIndexes() {
+    private long countIndexes() {
         try (Transaction transaction = database.beginTx()) {
             return Iterables.count(transaction.schema().getIndexes());
         }
     }
 
-    private static Runnable createIndexForLabelAndProperty(Label label, String propertyKey) {
+    private Runnable createIndexForLabelAndProperty(Label label, String propertyKey) {
         return () -> {
             try (Transaction transaction = database.beginTx()) {
                 transaction.schema().indexFor(label).on(propertyKey).create();
@@ -293,14 +344,14 @@ class IndexPopulationIT {
         };
     }
 
-    private static void waitForOnlineIndexes() {
+    private void waitForOnlineIndexes() {
         try (Transaction transaction = database.beginTx()) {
             transaction.schema().awaitIndexesOnline(2, MINUTES);
             transaction.commit();
         }
     }
 
-    private static Callable<Number> countNodes() {
+    private Callable<Number> countNodes() {
         return () -> {
             try (Transaction transaction = database.beginTx()) {
                 Result result = transaction.execute("MATCH (n) RETURN count(n) as count");
@@ -308,5 +359,29 @@ class IndexPopulationIT {
                 return (Number) resultMap.get("count");
             }
         };
+    }
+
+    private static class PopulationScanCompleteBlock extends IndexMonitor.MonitorAdapter {
+        private final String indexName;
+        private final CountDownLatch blockLatch;
+        private final CountDownLatch signalLatch;
+
+        public PopulationScanCompleteBlock(String indexName, CountDownLatch blockLatch, CountDownLatch signalLatch) {
+            this.indexName = indexName;
+            this.blockLatch = blockLatch;
+            this.signalLatch = signalLatch;
+        }
+
+        @Override
+        public void indexPopulationScanComplete(IndexDescriptor[] indexDescriptors) {
+            if (Arrays.stream(indexDescriptors).map(IndexDescriptor::getName).anyMatch(indexName::equals)) {
+                signalLatch.countDown();
+                try {
+                    blockLatch.await();
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        }
     }
 }

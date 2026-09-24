@@ -19,6 +19,7 @@
  */
 package org.neo4j.kernel.impl.locking.multiversion;
 
+import static org.neo4j.lock.ResourceType.DENSE_VALIDATION;
 import static org.neo4j.lock.ResourceType.PAGE;
 
 import java.util.Collection;
@@ -106,7 +107,7 @@ public class MultiVersionLockManager implements LockManager {
 
         @Override
         public boolean tryExclusiveLock(ResourceType resourceType, long resourceId) {
-            if (resourceType != PAGE) {
+            if (resourceType != PAGE && resourceType != DENSE_VALIDATION) {
                 return false;
             }
             return delegate.tryExclusiveLock(resourceType, resourceId);
@@ -114,18 +115,18 @@ public class MultiVersionLockManager implements LockManager {
 
         @Override
         public void acquireExclusive(LockTracer tracer, ResourceType resourceType, long... resourceIds) {
-            if (resourceType != PAGE) {
-                return;
+            switch (resourceType) {
+                case PAGE, RELATIONSHIP_TYPE, LABEL, SCHEMA_NAME, INDEX_ENTRY, DENSE_VALIDATION ->
+                    delegate.acquireExclusive(tracer, resourceType, resourceIds);
             }
-            delegate.acquireExclusive(tracer, resourceType, resourceIds);
         }
 
         @Override
         public void releaseExclusive(ResourceType resourceType, long... resourceIds) {
-            if (resourceType != PAGE) {
-                return;
+            switch (resourceType) {
+                case PAGE, RELATIONSHIP_TYPE, LABEL, SCHEMA_NAME, INDEX_ENTRY, DENSE_VALIDATION ->
+                    delegate.releaseExclusive(resourceType, resourceIds);
             }
-            delegate.releaseExclusive(resourceType, resourceIds);
         }
 
         @Override
@@ -145,8 +146,8 @@ public class MultiVersionLockManager implements LockManager {
         }
 
         @Override
-        public Collection<ActiveLock> activeLocks() {
-            return delegate.activeLocks();
+        public Collection<ActiveLock> activeLocks(MemoryTracker memoryTracker) {
+            return delegate.activeLocks(memoryTracker);
         }
 
         @Override

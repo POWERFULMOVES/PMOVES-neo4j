@@ -21,7 +21,6 @@ package org.neo4j.kernel.impl.api.commit;
 
 import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_CONSENSUS_INDEX;
 
-import java.util.List;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.kernel.KernelVersionProvider;
@@ -29,17 +28,18 @@ import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.impl.api.CompleteTransaction;
 import org.neo4j.kernel.impl.api.KernelTransactionImplementation;
 import org.neo4j.kernel.impl.api.LeaseClient;
+import org.neo4j.kernel.impl.api.StorageCommands;
 import org.neo4j.kernel.impl.api.TransactionCommitProcess;
 import org.neo4j.kernel.impl.api.txid.TransactionIdGenerator;
-import org.neo4j.kernel.impl.transaction.log.CompleteCommandBatch;
-import org.neo4j.kernel.impl.transaction.log.TransactionCommitmentFactory;
 import org.neo4j.kernel.impl.transaction.tracing.TransactionRollbackEvent;
 import org.neo4j.kernel.impl.transaction.tracing.TransactionWriteEvent;
+import org.neo4j.lock.Lock;
 import org.neo4j.lock.LockTracer;
 import org.neo4j.memory.MemoryTracker;
-import org.neo4j.storageengine.api.StorageCommand;
 import org.neo4j.storageengine.api.TransactionApplicationMode;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
+import org.neo4j.wal.CompleteCommandBatch;
+import org.neo4j.wal.TransactionCommitmentFactory;
 
 public final class DefaultCommitter implements TransactionCommitter {
     private final KernelTransactionImplementation ktx;
@@ -70,7 +70,7 @@ public final class DefaultCommitter implements TransactionCommitter {
             LeaseClient leaseClient,
             CursorContext cursorContext,
             MemoryTracker memoryTracker,
-            KernelTransaction.KernelTransactionMonitor kernelTransactionMonitor,
+            KernelTransaction.Monitor monitor,
             LockTracer lockTracer,
             long commitTime,
             long startTimeMillis,
@@ -78,44 +78,51 @@ public final class DefaultCommitter implements TransactionCommitter {
             boolean commit,
             TransactionApplicationMode mode)
             throws KernelException {
-        // Gather-up commands from the various sources
-        List<StorageCommand> extractedCommands = ktx.extractCommands(memoryTracker);
+        try (Lock upgradeBarrier = ktx.enterRaftUpgradeBarrier()) {
+            // Gather-up commands from the various sources
+            StorageCommands extractedCommands = ktx.extractCommands(memoryTracker);
 
-        /* Here's the deal: we track a quick-to-access hasChanges in transaction state which is true
-         * if there are any changes imposed by this transaction. Some changes made inside a transaction undo
-         * previously made changes in that same transaction, and so at some point a transaction may have
-         * changes and at another point, after more changes seemingly,
-         * the transaction may not have any changes.
-         * However, to track that "undoing" of the changes is a bit tedious, intrusive and hard to maintain
-         * and get right.... So to really make sure the transaction has changes we re-check by looking if we
-         * have produced any commands to add to the logical log.
-         */
-        if (!extractedCommands.isEmpty()) {
-            // Finish up the whole transaction representation
+            /* Here's the deal: we track a quick-to-access hasChanges in transaction state which is true
+             * if there are any changes imposed by this transaction. Some changes made inside a transaction undo
+             * previously made changes in that same transaction, and so at some point a transaction may have
+             * changes and at another point, after more changes seemingly,
+             * the transaction may not have any changes.
+             * However, to track that "undoing" of the changes is a bit tedious, intrusive and hard to maintain
+             * and get right.... So to really make sure the transaction has changes we re-check by looking if we
+             * have produced any commands to add to the logical log.
+             */
+            if (!extractedCommands.commands().isEmpty()) {
+                // Finish up the whole transaction representation
 
-            CompleteCommandBatch transactionRepresentation = new CompleteCommandBatch(
-                    extractedCommands,
-                    UNKNOWN_CONSENSUS_INDEX,
-                    startTimeMillis,
-                    lastTransactionIdWhenStarted,
-                    commitTime,
-                    leaseClient.leaseId(),
-                    kernelVersionProvider.kernelVersion(),
-                    ktx.securityContext().subject().userSubject());
+                CompleteCommandBatch transactionRepresentation = new CompleteCommandBatch(
+                        extractedCommands.commands(),
+                        UNKNOWN_CONSENSUS_INDEX,
+                        startTimeMillis,
+                        lastTransactionIdWhenStarted,
+                        commitTime,
+                        leaseClient.leaseId(),
+                        extractedCommands.leases(),
+                        kernelVersionProvider.kernelVersion(),
+                        ktx.securityContext().subject().userSubject());
 
-            // Commit the transaction
-            CompleteTransaction batch = new CompleteTransaction(
-                    transactionRepresentation,
-                    cursorContext,
-                    transactionalCursors,
-                    commitmentFactory.newCommitment(),
-                    transactionIdGenerator);
+                // Commit the transaction
+                CompleteTransaction batch = new CompleteTransaction(
+                        transactionRepresentation,
+                        cursorContext,
+                        transactionalCursors,
+                        commitmentFactory.newCommitment(),
+                        transactionIdGenerator);
 
-            kernelTransactionMonitor.beforeApply();
-            // TODO:misha in default mode append index is the same as transaction id, until log merge will happen.
-            // Transaction id will need to be extracted from result object when that is available to work regardless
-            // mode and log merge progress
-            return commitProcess.commit(batch, transactionWriteEvent, mode);
+                monitor.beforeApply();
+                // TODO:misha in default mode append index is the same as transaction id, until log merge will happen.
+                // Transaction id will need to be extracted from result object when that is available to work regardless
+                // mode and log merge progress
+                try {
+                    return commitProcess.commit(batch, transactionWriteEvent, mode, memoryTracker);
+                } finally {
+                    monitor.afterApply();
+                }
+            }
         }
         return KernelTransaction.READ_ONLY_ID;
     }

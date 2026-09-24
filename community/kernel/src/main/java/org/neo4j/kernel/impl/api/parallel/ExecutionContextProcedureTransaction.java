@@ -21,6 +21,8 @@ package org.neo4j.kernel.impl.api.parallel;
 
 import static org.neo4j.kernel.impl.api.parallel.ExecutionContextProcedureKernelTransaction.failure;
 
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -35,7 +37,7 @@ import org.neo4j.graphdb.RelationshipType;
 import org.neo4j.graphdb.ResourceIterable;
 import org.neo4j.graphdb.ResourceIterator;
 import org.neo4j.graphdb.Result;
-import org.neo4j.graphdb.TransactionTerminatedException;
+import org.neo4j.graphdb.TransactionTerminatedHelper;
 import org.neo4j.graphdb.schema.Schema;
 import org.neo4j.graphdb.traversal.BidirectionalTraversalDescription;
 import org.neo4j.graphdb.traversal.TraversalDescription;
@@ -44,7 +46,7 @@ import org.neo4j.internal.kernel.api.CursorFactory;
 import org.neo4j.internal.kernel.api.NodeCursor;
 import org.neo4j.internal.kernel.api.QueryContext;
 import org.neo4j.internal.kernel.api.Read;
-import org.neo4j.internal.kernel.api.RelationshipDataAccessor;
+import org.neo4j.internal.kernel.api.RelationshipCursor;
 import org.neo4j.internal.kernel.api.RelationshipScanCursor;
 import org.neo4j.internal.kernel.api.SchemaRead;
 import org.neo4j.internal.kernel.api.TokenRead;
@@ -62,6 +64,7 @@ import org.neo4j.kernel.impl.coreapi.TransactionImpl;
 import org.neo4j.kernel.impl.coreapi.internal.CursorIterator;
 import org.neo4j.kernel.impl.coreapi.schema.SchemaImpl;
 import org.neo4j.memory.MemoryTracker;
+import org.neo4j.monitoring.ExceptionHandlerService;
 import org.neo4j.values.ElementIdMapper;
 
 public class ExecutionContextProcedureTransaction extends DataLookup implements InternalTransaction {
@@ -244,7 +247,7 @@ public class ExecutionContextProcedureTransaction extends DataLookup implements 
     }
 
     @Override
-    public Relationship newRelationshipEntity(RelationshipDataAccessor cursor) {
+    public Relationship newRelationshipEntity(RelationshipCursor cursor) {
         return newRelationshipEntity(cursor.relationshipReference());
     }
 
@@ -300,6 +303,15 @@ public class ExecutionContextProcedureTransaction extends DataLookup implements 
     }
 
     @Override
+    public List<String> bookmarks() {
+        InternalTransaction internalTransaction = ktx.internalTransaction();
+        if (internalTransaction != null) {
+            return internalTransaction.bookmarks();
+        }
+        return Collections.emptyList();
+    }
+
+    @Override
     public KernelTransaction.Revertable overrideWith(SecurityContext context) {
         return ktx.overrideWith(context);
     }
@@ -318,7 +330,7 @@ public class ExecutionContextProcedureTransaction extends DataLookup implements 
     public void checkInTransaction() {
         if (ktx.isTerminated()) {
             Status terminationReason = ktx.getReasonIfTerminated().orElse(Status.Transaction.Terminated);
-            throw new TransactionTerminatedException(terminationReason);
+            throw TransactionTerminatedHelper.transactionTerminated(terminationReason);
         }
     }
 
@@ -353,8 +365,13 @@ public class ExecutionContextProcedureTransaction extends DataLookup implements 
     }
 
     @Override
-    public void commit(KernelTransaction.KernelTransactionMonitor monitor) {
+    public void commit(KernelTransaction.Monitor monitor) {
         commit();
+    }
+
+    @Override
+    public ExceptionHandlerService exceptionHandlerService() {
+        return ktx.exceptionHandlerService();
     }
 
     @Override

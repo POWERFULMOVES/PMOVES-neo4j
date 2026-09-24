@@ -19,19 +19,18 @@
  */
 package org.neo4j.bolt.tls;
 
-import java.util.Map;
-import org.assertj.core.api.Assertions;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+
 import org.neo4j.bolt.test.annotation.BoltTestExtension;
-import org.neo4j.bolt.test.annotation.connection.initializer.Connected;
 import org.neo4j.bolt.test.annotation.connection.transport.preset.SecureTransportOnly;
 import org.neo4j.bolt.test.annotation.setup.SettingsFunction;
 import org.neo4j.bolt.test.annotation.test.TransportTest;
+import org.neo4j.bolt.test.connection.setup.SettingBuilder;
 import org.neo4j.bolt.test.provider.ConnectionProvider;
 import org.neo4j.bolt.testing.client.error.BoltTestClientIOException;
 import org.neo4j.bolt.testing.messages.BoltWire;
 import org.neo4j.bolt.transport.Neo4jWithSocketExtension;
 import org.neo4j.configuration.connectors.BoltConnector;
-import org.neo4j.graphdb.config.Setting;
 import org.neo4j.test.extension.testdirectory.EphemeralTestDirectoryExtension;
 
 /**
@@ -44,16 +43,16 @@ import org.neo4j.test.extension.testdirectory.EphemeralTestDirectoryExtension;
 public class PlaintextIT {
 
     @SettingsFunction
-    static void customizeSettings(Map<Setting<?>, Object> settings) {
-        settings.put(BoltConnector.encryption_level, BoltConnector.EncryptionLevel.DISABLED);
+    static void customizeSettings(SettingBuilder settings) {
+        settings.set(BoltConnector.encryption_level, BoltConnector.EncryptionLevel.DISABLED);
     }
 
     @TransportTest
     @SecureTransportOnly
-    void shouldTerminateConnectionDuringHandshake(BoltWire wire, @Connected ConnectionProvider connectionProvider)
+    void shouldTerminateConnectionDuringHandshake(BoltWire wire, ConnectionProvider connectionProvider)
             throws Exception {
-        Assertions.assertThatExceptionOfType(BoltTestClientIOException.class)
-                .isThrownBy(() -> connectionProvider.create().send(wire.getProtocolVersion()))
-                .withStackTraceContaining("Connection closed");
+        assertThatExceptionOfType(BoltTestClientIOException.class)
+                .isThrownBy(() -> connectionProvider.create().connect().send(wire.getProtocolVersion()))
+                .withStackTraceContaining("Failed to establish connection.");
     }
 }

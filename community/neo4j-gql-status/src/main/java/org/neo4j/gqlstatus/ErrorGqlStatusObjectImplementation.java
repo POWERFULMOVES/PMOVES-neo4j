@@ -19,6 +19,9 @@
  */
 package org.neo4j.gqlstatus;
 
+import static java.util.stream.Collectors.toMap;
+
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -28,7 +31,7 @@ import java.util.Optional;
 public class ErrorGqlStatusObjectImplementation extends CommonGqlStatusObjectImplementation
         implements ErrorGqlStatusObject {
     private boolean isCause = false;
-    private Optional<ErrorGqlStatusObject> cause;
+    private ErrorGqlStatusObject cause;
     private final Map<GqlParams.GqlParam, Object> paramMap;
     private final GqlStatusInfoCodes gqlStatusInfoCode;
 
@@ -39,21 +42,23 @@ public class ErrorGqlStatusObjectImplementation extends CommonGqlStatusObjectImp
             DiagnosticRecord diagnosticRecord) {
         super(gqlStatusInfoCode, diagnosticRecord, parameters);
         this.gqlStatusInfoCode = gqlStatusInfoCode;
-        this.cause = Optional.ofNullable(cause);
-        this.paramMap = Map.copyOf(parameters);
+        this.cause = cause;
+        this.paramMap = replaceNulls(parameters);
+    }
+
+    // Decrease the risk of NullPointers in errors
+    private Map<GqlParams.GqlParam, Object> replaceNulls(Map<GqlParams.GqlParam, Object> parameters) {
+        return parameters.entrySet().stream()
+                .collect(toMap(Map.Entry::getKey, e -> e.getValue() == null ? "null" : e.getValue()));
     }
 
     @Override
     public boolean equals(Object obj) {
-        if (obj instanceof ErrorGqlStatusObjectImplementation gql
+        return obj instanceof ErrorGqlStatusObjectImplementation gql
                 && Objects.equals(gqlStatusInfoCode, gql.gqlStatusInfoCode)
                 && Objects.equals(diagnosticRecord, gql.diagnosticRecord)
                 && Objects.equals(cause, gql.cause)
-                && Objects.equals(paramMap, gql.paramMap)) {
-            return true;
-        } else {
-            return false;
-        }
+                && Objects.equals(paramMap, gql.paramMap);
     }
 
     public static Builder from(GqlStatusInfoCodes gqlStatusInfo) {
@@ -62,7 +67,7 @@ public class ErrorGqlStatusObjectImplementation extends CommonGqlStatusObjectImp
 
     @Override
     public Optional<ErrorGqlStatusObject> cause() {
-        return cause;
+        return Optional.ofNullable(cause);
     }
 
     public boolean isCause() {
@@ -75,7 +80,29 @@ public class ErrorGqlStatusObjectImplementation extends CommonGqlStatusObjectImp
     }
 
     public void setCause(ErrorGqlStatusObject cause) {
-        this.cause = Optional.of(cause);
+        this.cause = cause;
+        removeLoops(cause);
+        propagatePositions(this.diagnosticRecord, cause);
+    }
+
+    private void removeCause() {
+        this.cause = null;
+    }
+
+    public ErrorGqlStatusObject insertCause(ErrorGqlStatusObjectImplementation newCause) {
+        if (this.cause == null) {
+            setCause(newCause);
+        } else {
+            if (this.cause instanceof ErrorGqlStatusObjectImplementation implCause) {
+                setCause(implCause.insertCause(newCause));
+            } else {
+                // It is possible we will never end up in this case, but in that case we make sure that all codes are
+                // preserved.
+                newCause.setCause(this.cause);
+                setCause(newCause);
+            }
+        }
+        return this;
     }
 
     public void markAsCause() {
@@ -83,13 +110,13 @@ public class ErrorGqlStatusObjectImplementation extends CommonGqlStatusObjectImp
     }
 
     @Override
-    public void adjustPosition(int oldLine, int oldColumn, int oldOffset, int newLine, int newCol, int newOffset) {
-        super.adjustPosition(oldLine, oldColumn, oldOffset, newLine, newCol, newOffset);
-        cause.ifPresent(gqlStatusObjectCause -> {
+    public void adjustPosition(int oldOffset, int oldLine, int oldColumn, int newOffset, int newLine, int newCol) {
+        super.adjustPosition(oldOffset, oldLine, oldColumn, newOffset, newLine, newCol);
+        cause().ifPresent(gqlStatusObjectCause -> {
             if (gqlStatusObjectCause instanceof ErrorGqlStatusObjectImplementation errorGqlStatusObjectImplementation) {
                 // Recursive call for the chain of causes
                 errorGqlStatusObjectImplementation.adjustPosition(
-                        oldLine, oldColumn, oldOffset, newLine, newCol, newOffset);
+                        oldOffset, oldLine, oldColumn, newOffset, newLine, newCol);
             }
         });
     }
@@ -103,9 +130,28 @@ public class ErrorGqlStatusObjectImplementation extends CommonGqlStatusObjectImp
         return gqlStatus();
     }
 
+    public Object getParamValue(GqlParams.GqlParam gqlParam) {
+        return paramMap.get(gqlParam);
+    }
+
     @Override
     public String legacyMessage() {
         return "";
+    }
+
+    @Override
+    public String obfuscatedStatusDescription() {
+        Map<GqlParams.GqlParam, Object> obfuscatedParams = new HashMap<>();
+        var nonSensitiveKeys = gqlStatusInfoCode.getNonSensitiveParameterKeys();
+        paramMap.forEach((key, value) -> {
+            if (nonSensitiveKeys.contains(key.name())) {
+                obfuscatedParams.put(key, value);
+            } else {
+                obfuscatedParams.put(key, "******");
+            }
+        });
+        String obfuscatedMessage = gqlStatusInfoCode.getMessage(obfuscatedParams);
+        return createStatusDescriptionForMessage(obfuscatedMessage);
     }
 
     @Override
@@ -124,11 +170,16 @@ public class ErrorGqlStatusObjectImplementation extends CommonGqlStatusObjectImp
         sb.append("\n");
         sb.append("Subcondition: ");
         sb.append(gqlStatusInfoCode.getSubCondition().trim());
-        if (cause.isPresent()) {
+        diagnosticRecord.getPosition().ifPresent(s -> {
+            sb.append("\n");
+            sb.append("Position: ");
+            sb.append(s);
+        });
+        if (cause != null) {
             sb.append("\n");
             sb.append("Caused by:");
 
-            return sb.append(indent(4, cause.get().toString())).toString();
+            return sb.append(indent(4, cause.toString())).toString();
         } else {
             return sb.toString();
         }
@@ -144,7 +195,7 @@ public class ErrorGqlStatusObjectImplementation extends CommonGqlStatusObjectImp
             sb.append(indent).append(line).append("\n");
         }
 
-        if (sb.length() > 0) {
+        if (!sb.isEmpty()) {
             sb.setLength(sb.length() - 1);
         }
 
@@ -153,7 +204,7 @@ public class ErrorGqlStatusObjectImplementation extends CommonGqlStatusObjectImp
 
     public static class Builder {
         private ErrorGqlStatusObject cause = null;
-        private Map<GqlParams.GqlParam, Object> paramMap = new HashMap<>();
+        private final Map<GqlParams.GqlParam, Object> paramMap = new HashMap<>();
         private final GqlStatusInfoCodes gqlStatusInfoCode;
         private final DiagnosticRecord.Builder diagnosticRecordBuilder = DiagnosticRecord.from();
 
@@ -162,7 +213,9 @@ public class ErrorGqlStatusObjectImplementation extends CommonGqlStatusObjectImp
         }
 
         public Builder withParam(GqlParams.StringParam param, String value) {
-            this.paramMap.put(param, value);
+            if (value != null) {
+                this.paramMap.put(param, value);
+            }
             return this;
         }
 
@@ -172,17 +225,16 @@ public class ErrorGqlStatusObjectImplementation extends CommonGqlStatusObjectImp
         }
 
         public Builder withParam(GqlParams.NumberParam param, Number value) {
-            this.paramMap.put(param, value);
+            if (value != null) {
+                this.paramMap.put(param, value);
+            }
             return this;
         }
 
         public Builder withParam(GqlParams.ListParam param, List<?> value) {
-            this.paramMap.put(param, value);
-            return this;
-        }
-
-        Builder withParamMap(Map<GqlParams.GqlParam, Object> paramMap) {
-            this.paramMap = paramMap;
+            if (value != null) {
+                this.paramMap.put(param, value);
+            }
             return this;
         }
 
@@ -194,20 +246,75 @@ public class ErrorGqlStatusObjectImplementation extends CommonGqlStatusObjectImp
             return this;
         }
 
-        public Builder withClassification(GqlClassification classification) {
-            // TODO: This is a no-op method which will be cleaned up after error migration is ready
+        public <T> Builder withDiagnosticRecordProperty(DiagnosticRecordProperty<T> property, T value) {
+            diagnosticRecordBuilder.withProperty(property, value);
             return this;
         }
 
-        public Builder atPosition(int line, int col, int offset) {
-            diagnosticRecordBuilder.atPosition(line, col, offset);
+        public Builder atPosition(int offset, int line, int col) {
+            // Assert that the position is valid (only run in tests)
+            // An invalid position might indicate that offset, line and column is provided in incorrect order
+            assert line < 1 // Default/test position
+                    || (line == 1 && col == offset + 1)
+                    || (line > 1 && offset >= col);
+            diagnosticRecordBuilder.atPosition(offset, line, col);
             return this;
         }
 
         public ErrorGqlStatusObject build() {
             diagnosticRecordBuilder.withClassification(gqlStatusInfoCode.getClassification());
             DiagnosticRecord diagnosticRecord = diagnosticRecordBuilder.build();
+            /*
+             * Theoretically, it would be enough to run removeLoops() and propagatePositions() when we are on the
+             * top-level error, but there is no way to know if we are constructing a cause or a top-level error.
+             * As errors seldom have more than 3 causes,
+             * we can live with the inefficiency of running them on every step.
+             */
+            removeLoops(cause);
+            propagatePositions(diagnosticRecord, cause);
             return new ErrorGqlStatusObjectImplementation(gqlStatusInfoCode, paramMap, cause, diagnosticRecord);
+        }
+
+        public ErrorGqlStatusObjectImplementation buildImpl() {
+            return (ErrorGqlStatusObjectImplementation) build();
+        }
+    }
+
+    private static void removeLoops(ErrorGqlStatusObject cause) {
+        ErrorGqlStatusObject currentCause = cause;
+        final List<ErrorGqlStatusObject> list = new ArrayList<>();
+        while (currentCause != null) {
+            if (list.contains(currentCause)) {
+                ((ErrorGqlStatusObjectImplementation) list.getLast()).removeCause();
+                break;
+            } else {
+                list.add(currentCause);
+                currentCause = currentCause.cause().orElse(null);
+            }
+        }
+    }
+
+    private static void propagatePositions(
+            DiagnosticRecord currentDiagnosticRecord, ErrorGqlStatusObject currentCause) {
+        if (currentCause instanceof ErrorGqlStatusObjectImplementation c) {
+            // The current error has no position but its cause has one => propagate cause position to current error
+            if (!currentDiagnosticRecord.hasPosition() && c.diagnosticRecord.hasPosition()) {
+                var position = c.diagnosticRecord.getPositionMap();
+                currentDiagnosticRecord.updatePosition(
+                        position.getOrDefault("offset", -1),
+                        position.getOrDefault("line", -1),
+                        position.getOrDefault("column", -1));
+            }
+            // The current error has a position but its cause does not => propagate current error position to cause
+            else if (currentDiagnosticRecord.hasPosition() && !c.diagnosticRecord.hasPosition()) {
+                var position = currentDiagnosticRecord.getPositionMap();
+                c.diagnosticRecord.updatePosition(
+                        position.getOrDefault("offset", -1),
+                        position.getOrDefault("line", -1),
+                        position.getOrDefault("column", -1));
+            }
+            // Continue down the chain of causes
+            propagatePositions(c.diagnosticRecord, c.cause);
         }
     }
 }

@@ -20,17 +20,16 @@
 package org.neo4j.internal.counts;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.eclipse.collections.api.factory.Sets.immutable;
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
 import static org.neo4j.internal.counts.GBPTreeCountsStore.NO_MONITOR;
 import static org.neo4j.internal.counts.GBPTreeCountsStore.keyToString;
 import static org.neo4j.internal.counts.GBPTreeCountsStore.nodeKey;
 import static org.neo4j.internal.counts.GBPTreeCountsStore.relationshipKey;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
@@ -39,7 +38,6 @@ import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_ID;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
-import java.nio.file.Path;
 import org.eclipse.collections.impl.factory.Sets;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -49,8 +47,10 @@ import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
-import org.neo4j.io.pagecache.tracing.FileFlushEvent;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
+import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.recovery.RecoveryStartupChecker;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.test.extension.Inject;
@@ -105,17 +105,18 @@ class GBPTreeCountsStoreTest {
     void applySeveralChunksOfSameTransaction() {
         long txId = BASE_TX_ID + 1;
 
-        assertDoesNotThrow(() -> {
-            for (int i = 0; i < 100; i++) {
-                try (var updater = countsStore.updater(txId, false, NULL_CONTEXT)) {
-                    updater.incrementNodeCount(LABEL_ID_1, 10);
-                }
-            }
+        assertThatCode(() -> {
+                    for (int i = 0; i < 100; i++) {
+                        try (var updater = countsStore.updater(txId, false, NULL_CONTEXT)) {
+                            updater.incrementNodeCount(LABEL_ID_1, 10);
+                        }
+                    }
 
-            try (var updater = countsStore.updater(txId, true, NULL_CONTEXT)) {
-                updater.incrementNodeCount(LABEL_ID_1, 10);
-            }
-        });
+                    try (var updater = countsStore.updater(txId, true, NULL_CONTEXT)) {
+                        updater.incrementNodeCount(LABEL_ID_1, 10);
+                    }
+                })
+                .doesNotThrowAnyException();
     }
 
     @Test
@@ -132,12 +133,14 @@ class GBPTreeCountsStoreTest {
             updater.incrementRelationshipCount(LABEL_ID_1, RELATIONSHIP_TYPE_ID_1, LABEL_ID_2, 2); // now at 5
         }
 
-        countsStore.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+        countsStore.checkpoint(DatabaseFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
 
         // when/then
-        assertEquals(15, countsStore.nodeCount(LABEL_ID_1, NULL_CONTEXT));
-        assertEquals(5, countsStore.relationshipCount(LABEL_ID_1, RELATIONSHIP_TYPE_ID_1, LABEL_ID_2, NULL_CONTEXT));
-        assertEquals(7, countsStore.relationshipCount(LABEL_ID_1, RELATIONSHIP_TYPE_ID_2, LABEL_ID_2, NULL_CONTEXT));
+        assertThat(countsStore.nodeCount(LABEL_ID_1, NULL_CONTEXT)).isEqualTo(15);
+        assertThat(countsStore.relationshipCount(LABEL_ID_1, RELATIONSHIP_TYPE_ID_1, LABEL_ID_2, NULL_CONTEXT))
+                .isEqualTo(5);
+        assertThat(countsStore.relationshipCount(LABEL_ID_1, RELATIONSHIP_TYPE_ID_2, LABEL_ID_2, NULL_CONTEXT))
+                .isEqualTo(7);
 
         // and when
         try (CountsUpdater updater = countsStore.updater(++txId, true, NULL_CONTEXT)) {
@@ -147,30 +150,11 @@ class GBPTreeCountsStoreTest {
         }
 
         // then
-        assertEquals(8, countsStore.nodeCount(LABEL_ID_1, NULL_CONTEXT));
-        assertEquals(0, countsStore.relationshipCount(LABEL_ID_1, RELATIONSHIP_TYPE_ID_1, LABEL_ID_2, NULL_CONTEXT));
-        assertEquals(5, countsStore.relationshipCount(LABEL_ID_1, RELATIONSHIP_TYPE_ID_2, LABEL_ID_2, NULL_CONTEXT));
-    }
-
-    @Test
-    void shouldEstimateSomeCounts() throws IOException {
-        // GBPTreeCountsStore estimations are exact
-        long txId = BASE_TX_ID;
-        try (CountsUpdater updater = countsStore.updater(++txId, true, NULL_CONTEXT)) {
-            updater.incrementNodeCount(LABEL_ID_1, 10);
-            updater.incrementRelationshipCount(LABEL_ID_1, RELATIONSHIP_TYPE_ID_1, LABEL_ID_2, 3);
-            updater.incrementRelationshipCount(LABEL_ID_1, RELATIONSHIP_TYPE_ID_2, LABEL_ID_2, 7);
-        }
-        try (CountsUpdater updater = countsStore.updater(++txId, true, NULL_CONTEXT)) {
-            updater.incrementNodeCount(LABEL_ID_1, 5); // now at 15
-            updater.incrementRelationshipCount(LABEL_ID_1, RELATIONSHIP_TYPE_ID_1, LABEL_ID_2, 2); // now at 5
-        }
-
-        assertEquals(15, countsStore.estimateNodeCount(LABEL_ID_1, NULL_CONTEXT));
-        assertEquals(
-                5, countsStore.estimateRelationshipCount(LABEL_ID_1, RELATIONSHIP_TYPE_ID_1, LABEL_ID_2, NULL_CONTEXT));
-        assertEquals(
-                7, countsStore.estimateRelationshipCount(LABEL_ID_1, RELATIONSHIP_TYPE_ID_2, LABEL_ID_2, NULL_CONTEXT));
+        assertThat(countsStore.nodeCount(LABEL_ID_1, NULL_CONTEXT)).isEqualTo(8);
+        assertThat(countsStore.relationshipCount(LABEL_ID_1, RELATIONSHIP_TYPE_ID_1, LABEL_ID_2, NULL_CONTEXT))
+                .isZero();
+        assertThat(countsStore.relationshipCount(LABEL_ID_1, RELATIONSHIP_TYPE_ID_2, LABEL_ID_2, NULL_CONTEXT))
+                .isEqualTo(5);
     }
 
     @Test
@@ -193,23 +177,24 @@ class GBPTreeCountsStoreTest {
             }
         };
         openCountsStore(builder);
-        assertTrue(builder.lastCommittedTxIdCalled);
-        assertTrue(builder.initializeCalled);
-        assertEquals(10, countsStore.nodeCount(labelId, NULL_CONTEXT));
-        assertEquals(0, countsStore.nodeCount(labelId2, NULL_CONTEXT));
-        assertEquals(14, countsStore.relationshipCount(labelId, relationshipTypeId, labelId2, NULL_CONTEXT));
+        assertThat(builder.lastCommittedTxIdCalled).isTrue();
+        assertThat(builder.initializeCalled).isTrue();
+        assertThat(countsStore.nodeCount(labelId, NULL_CONTEXT)).isEqualTo(10);
+        assertThat(countsStore.nodeCount(labelId2, NULL_CONTEXT)).isZero();
+        assertThat(countsStore.relationshipCount(labelId, relationshipTypeId, labelId2, NULL_CONTEXT))
+                .isEqualTo(14);
 
         // and when
         checkpointAndRestartCountsStore();
         // Re-applying a txId below or equal to the "rebuild transaction id" should not apply it
         incrementNodeCount(rebuiltAtTransactionId - 1, labelId, 100);
-        assertEquals(10, countsStore.nodeCount(labelId, NULL_CONTEXT));
+        assertThat(countsStore.nodeCount(labelId, NULL_CONTEXT)).isEqualTo(10);
         incrementNodeCount(rebuiltAtTransactionId, labelId, 100);
-        assertEquals(10, countsStore.nodeCount(labelId, NULL_CONTEXT));
+        assertThat(countsStore.nodeCount(labelId, NULL_CONTEXT)).isEqualTo(10);
 
         // then
         incrementNodeCount(rebuiltAtTransactionId + 1, labelId, 100);
-        assertEquals(110, countsStore.nodeCount(labelId, NULL_CONTEXT));
+        assertThat(countsStore.nodeCount(labelId, NULL_CONTEXT)).isEqualTo(110);
     }
 
     @Test
@@ -221,7 +206,7 @@ class GBPTreeCountsStoreTest {
             updater.incrementRelationshipCount(LABEL_ID_1, RELATIONSHIP_TYPE_ID_1, LABEL_ID_2, 3);
             updater.incrementRelationshipCount(LABEL_ID_1, RELATIONSHIP_TYPE_ID_2, LABEL_ID_2, 7);
         }
-        countsStore.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+        countsStore.checkpoint(DatabaseFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
         closeCountsStore();
 
         // when
@@ -238,12 +223,11 @@ class GBPTreeCountsStoreTest {
 
         // then
         String dump = out.toString();
-        assertThat(dump).contains(keyToString(nodeKey(LABEL_ID_1)) + " = 10");
         assertThat(dump)
-                .contains(keyToString(relationshipKey(LABEL_ID_1, RELATIONSHIP_TYPE_ID_1, LABEL_ID_2)) + " = 3");
-        assertThat(dump)
-                .contains(keyToString(relationshipKey(LABEL_ID_1, RELATIONSHIP_TYPE_ID_2, LABEL_ID_2)) + " = 7");
-        assertThat(dump).contains("Highest gap-free txId: " + txId);
+                .contains(keyToString(nodeKey(LABEL_ID_1)) + " = 10")
+                .contains(keyToString(relationshipKey(LABEL_ID_1, RELATIONSHIP_TYPE_ID_1, LABEL_ID_2)) + " = 3")
+                .contains(keyToString(relationshipKey(LABEL_ID_1, RELATIONSHIP_TYPE_ID_2, LABEL_ID_2)) + " = 7")
+                .contains("Highest gap-free txId: " + txId);
     }
 
     private void incrementNodeCount(long txId, int labelId, int delta) {
@@ -253,17 +237,17 @@ class GBPTreeCountsStoreTest {
     }
 
     private void checkpointAndRestartCountsStore() throws Exception {
-        countsStore.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+        countsStore.checkpoint(DatabaseFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
         closeCountsStore();
         openCountsStore();
     }
 
     private void deleteCountsStore() throws IOException {
-        directory.getFileSystem().deleteFile(countsStoreFile());
+        countsStoreFile().delete(directory.getFileSystem());
     }
 
-    private Path countsStoreFile() {
-        return directory.file("counts.db");
+    private StoreFile countsStoreFile() {
+        return new StoreFile(directory.file("counts.db"));
     }
 
     private void openCountsStore(CountsBuilder builder) throws IOException {
@@ -287,7 +271,8 @@ class GBPTreeCountsStoreTest {
                 NullLogProvider.getInstance(),
                 new CursorContextFactory(cacheTracer, EMPTY_CONTEXT_SUPPLIER),
                 cacheTracer,
-                Sets.immutable.empty());
+                Sets.immutable.empty(),
+                RecoveryStartupChecker.EMPTY_CHECKER);
     }
 
     private static class TestableCountsBuilder implements CountsBuilder {

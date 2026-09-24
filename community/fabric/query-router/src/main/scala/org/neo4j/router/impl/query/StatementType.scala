@@ -21,14 +21,17 @@ package org.neo4j.router.impl.query
 
 import org.neo4j.cypher.internal.ast.AdministrationCommand
 import org.neo4j.cypher.internal.ast.CallClause
+import org.neo4j.cypher.internal.ast.CommandClause.shouldRouteToSystem
 import org.neo4j.cypher.internal.ast.Query
 import org.neo4j.cypher.internal.ast.SchemaCommand
+import org.neo4j.cypher.internal.ast.SingleQuery
 import org.neo4j.cypher.internal.ast.Statement
 import org.neo4j.cypher.internal.ast.UnresolvedCall
 import org.neo4j.cypher.internal.ast.UpdateClause
-import org.neo4j.cypher.internal.frontend.phases.ResolvedCall
+import org.neo4j.cypher.internal.frontend.phases.ResolvedNonLocalCall
 import org.neo4j.cypher.internal.frontend.phases.ScopedProcedureSignatureResolver
 import org.neo4j.cypher.internal.util.ASTNode
+import org.neo4j.exceptions.InternalException
 import org.neo4j.fabric.util.Folded.FoldableOps
 import org.neo4j.fabric.util.Folded.Stop
 import org.neo4j.router.impl.query.StatementType.CommandOrQueryType.AdminCommand
@@ -98,9 +101,15 @@ object StatementType {
     val maybeContainsUpdates = containsUpdates(statement, callClause => containsUpdates(callClause, resolver))
 
     statement match {
-      case _: Query                 => StatementType(Query, maybeContainsUpdates)
-      case _: SchemaCommand         => StatementType(SchemaCommand, maybeContainsUpdates)
-      case _: AdministrationCommand => StatementType(AdminCommand, maybeContainsUpdates)
+      // Since we moved SHOW DATABASES to not be an AdministrationCommand we need to special case it here
+      case sq: SingleQuery if shouldRouteToSystem(sq.clauses) => StatementType(AdminCommand, maybeContainsUpdates)
+      case _: Query                                           => StatementType(Query, maybeContainsUpdates)
+      case _: SchemaCommand                                   => StatementType(SchemaCommand, maybeContainsUpdates)
+      case _: AdministrationCommand                           => StatementType(AdminCommand, maybeContainsUpdates)
+      case x => throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"Expected Query, SchemaCommand or AdministrationCommand but got ${x.getClass}"
+        )
     }
   }
 
@@ -120,9 +129,9 @@ object StatementType {
     }
 
   private def containsUpdates(ast: CallClause): Mode = ast match {
-    case _: UnresolvedCall                      => MaybeWrite
-    case c: ResolvedCall if c.containsNoUpdates => Read
-    case _                                      => Write
+    case _: UnresolvedCall                              => MaybeWrite
+    case c: ResolvedNonLocalCall if c.containsNoUpdates => Read
+    case _                                              => Write
   }
 
   private def containsUpdates(ast: CallClause, resolver: ScopedProcedureSignatureResolver): Mode = ast match {
@@ -131,7 +140,7 @@ object StatementType {
   }
 
   private def tryResolve(unresolved: UnresolvedCall, resolver: ScopedProcedureSignatureResolver): CallClause =
-    Try(ResolvedCall(resolver.procedureSignature)(unresolved)).getOrElse(unresolved)
+    Try(ResolvedNonLocalCall(resolver.procedureSignature)(unresolved)).getOrElse(unresolved)
 
   private def merge: (Mode, Mode) => Mode = {
     case (Write, _)   => Write

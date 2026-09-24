@@ -20,30 +20,25 @@
 package org.neo4j.kernel.api.impl.schema.trigram;
 
 import java.util.concurrent.atomic.AtomicBoolean;
-import org.apache.lucene.index.IndexReader;
-import org.apache.lucene.search.IndexSearcher;
-import org.neo4j.internal.kernel.api.exceptions.schema.IndexNotFoundKernelException;
 import org.neo4j.io.pagecache.context.CursorContext;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneIndexSearcher;
 import org.neo4j.kernel.api.index.IndexSample;
 import org.neo4j.kernel.api.index.IndexSampler;
 
-@SuppressWarnings("ClassCanBeRecord")
 public class TrigramIndexSampler implements IndexSampler {
-    private final IndexSearcher indexSearcher;
+    private final LuceneIndexSearcher indexSearcher;
 
-    public TrigramIndexSampler(IndexSearcher indexSearcher) {
+    public TrigramIndexSampler(LuceneIndexSearcher indexSearcher) {
         this.indexSearcher = indexSearcher;
     }
 
     @Override
-    public IndexSample sampleIndex(CursorContext cursorContext, AtomicBoolean stopped)
-            throws IndexNotFoundKernelException {
+    public IndexSample sampleIndex(CursorContext cursorContext, AtomicBoolean stopped) {
         // This way of sampling will not provide a correct estimate for the number of unique value.
         // Getting the number of unique values in a trigram index is really difficult so instead of
         // for example getting an estimate by reading from the store or storing some extra information
         // in the index itself, we consider the index size to be good enough.
-        IndexReader indexReader = indexSearcher.getIndexReader();
-        var numDocs = indexReader.numDocs();
+        int numDocs = indexSearcher.numDocs();
         return new IndexSample(numDocs, numDocs, numDocs);
     }
 }

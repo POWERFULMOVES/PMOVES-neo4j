@@ -31,11 +31,14 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.neo4j.configuration.Config;
 import org.neo4j.graphdb.GraphDatabaseService;
 import org.neo4j.graphdb.Label;
 import org.neo4j.graphdb.Transaction;
+import org.neo4j.internal.kernel.api.IndexMonitor;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.io.fs.FileSystemAbstraction;
+import org.neo4j.kernel.api.index.IndexDirectoryStructure;
 import org.neo4j.kernel.api.index.IndexProvider;
 import org.neo4j.kernel.impl.api.TransactionVisibilityProvider;
 import org.neo4j.kernel.impl.api.index.IndexProviderMap;
@@ -86,26 +89,28 @@ class MultiVersionIndexDropControllerIT {
 
         awaitIndexes();
 
-        var indexDescriptors = getIndexDescriptors(label);
-        var indexProvider = getIndexProvider(indexDescriptors);
+        List<IndexDescriptor> indexDescriptors = getIndexDescriptors(label);
+        IndexProvider indexProvider = getIndexProvider(indexDescriptors);
 
         indexDropController = new MultiVersionIndexDropController(
                 jobScheduler,
                 new TestTransactionVisibilityProvider(10, 100),
                 indexingService,
                 fileSystem,
-                NullLogProvider.getInstance());
+                NullLogProvider.getInstance(),
+                IndexMonitor.NO_MONITOR,
+                Config.defaults());
         indexDropController.start();
 
         for (IndexDescriptor indexDescriptor : indexDescriptors) {
             indexDropController.dropIndex(indexDescriptor);
         }
 
-        indexDropController.dropIndexes();
+        indexDropController.maintenance();
 
         assertThat(indexDropController.getAsyncDeleteQueue()).hasSize(3);
 
-        var directoryStructure = indexProvider.directoryStructure();
+        IndexDirectoryStructure directoryStructure = indexProvider.directoryStructure();
         for (IndexDescriptor indexDescriptor : indexDescriptors) {
             Path indexDirectory = directoryStructure.directoryForIndex(indexDescriptor.getId());
             assertTrue(
@@ -126,8 +131,8 @@ class MultiVersionIndexDropControllerIT {
 
         awaitIndexes();
 
-        var indexDescriptors = getIndexDescriptors(label);
-        var indexProvider = getIndexProvider(indexDescriptors);
+        List<IndexDescriptor> indexDescriptors = getIndexDescriptors(label);
+        IndexProvider indexProvider = getIndexProvider(indexDescriptors);
 
         AtomicLong oldestValue = new AtomicLong(5);
         indexDropController = new MultiVersionIndexDropController(
@@ -136,7 +141,9 @@ class MultiVersionIndexDropControllerIT {
                         new AtomicStateLongSupplier(oldestValue), new ArrayStateLongSupplier(new long[] {10, 20, 30})),
                 indexingService,
                 fileSystem,
-                NullLogProvider.getInstance());
+                NullLogProvider.getInstance(),
+                IndexMonitor.NO_MONITOR,
+                Config.defaults());
 
         indexDropController.start();
 
@@ -145,22 +152,22 @@ class MultiVersionIndexDropControllerIT {
         }
 
         // nothing was dropped
-        indexDropController.dropIndexes();
+        indexDropController.maintenance();
         assertThat(indexDropController.getAsyncDeleteQueue()).hasSize(3);
 
         oldestValue.set(11);
 
         // one index is dropped now
-        indexDropController.dropIndexes();
+        indexDropController.maintenance();
         assertThat(indexDropController.getAsyncDeleteQueue()).hasSize(2);
 
         oldestValue.set(22);
 
         // two indexes dropped
-        indexDropController.dropIndexes();
+        indexDropController.maintenance();
         assertThat(indexDropController.getAsyncDeleteQueue()).hasSize(1);
 
-        var directoryStructure = indexProvider.directoryStructure();
+        IndexDirectoryStructure directoryStructure = indexProvider.directoryStructure();
         assertFalse(fileSystem.fileExists(
                 directoryStructure.directoryForIndex(indexDescriptors.get(0).getId())));
         assertFalse(fileSystem.fileExists(
@@ -182,24 +189,30 @@ class MultiVersionIndexDropControllerIT {
 
         awaitIndexes();
 
-        var indexDescriptors = getIndexDescriptors(label);
+        List<IndexDescriptor> indexDescriptors = getIndexDescriptors(label);
 
         AssertableLogProvider logProvider = new AssertableLogProvider();
         indexDropController = new MultiVersionIndexDropController(
-                jobScheduler, new TestTransactionVisibilityProvider(11, 10), indexingService, fileSystem, logProvider);
+                jobScheduler,
+                new TestTransactionVisibilityProvider(11, 10),
+                indexingService,
+                fileSystem,
+                logProvider,
+                IndexMonitor.NO_MONITOR,
+                Config.defaults());
         indexDropController.start();
 
         for (IndexDescriptor indexDescriptor : indexDescriptors) {
             indexDropController.dropIndex(indexDescriptor);
         }
-        indexDropController.dropIndexes();
+        indexDropController.maintenance();
         assertThat(indexDropController.getAsyncDeleteQueue()).hasSize(0);
         LogAssertions.assertThat(logProvider).doesNotContainMessage("Exception on multi version index async drop.");
 
         for (IndexDescriptor indexDescriptor : indexDescriptors) {
             indexDropController.dropIndex(indexDescriptor);
         }
-        indexDropController.dropIndexes();
+        indexDropController.maintenance();
 
         assertThat(indexDropController.getAsyncDeleteQueue()).hasSize(0);
         LogAssertions.assertThat(logProvider).containsMessages("Exception on multi version index async drop.");
@@ -217,7 +230,7 @@ class MultiVersionIndexDropControllerIT {
 
         awaitIndexes();
 
-        var indexDescriptors = getIndexDescriptors(label);
+        List<IndexDescriptor> indexDescriptors = getIndexDescriptors(label);
 
         AtomicLong oldestValue = new AtomicLong(5);
         indexDropController = new MultiVersionIndexDropController(
@@ -226,7 +239,9 @@ class MultiVersionIndexDropControllerIT {
                         new AtomicStateLongSupplier(oldestValue), new ArrayStateLongSupplier(new long[] {6, 7, 8})),
                 indexingService,
                 fileSystem,
-                NullLogProvider.getInstance());
+                NullLogProvider.getInstance(),
+                IndexMonitor.NO_MONITOR,
+                Config.defaults());
 
         indexDropController.start();
 
@@ -234,13 +249,13 @@ class MultiVersionIndexDropControllerIT {
             indexDropController.dropIndex(indexDescriptor);
             oldestValue.incrementAndGet();
         }
-        indexDropController.dropIndexes();
+        indexDropController.maintenance();
 
         assertThat(indexDropController.getAsyncDeleteQueue()).hasSize(1);
     }
 
     private IndexProvider getIndexProvider(List<IndexDescriptor> indexDescriptors) {
-        return providerMap.lookup(indexDescriptors.get(0).getIndexProvider());
+        return providerMap.lookup(indexDescriptors.getFirst().getIndexProvider());
     }
 
     private List<IndexDescriptor> getIndexDescriptors(Label label) {
@@ -284,12 +299,12 @@ class MultiVersionIndexDropControllerIT {
         }
 
         @Override
-        public long oldestVisibleClosedTransactionId() {
+        public long oldestVisibilityHorizon() {
             return 0;
         }
 
         @Override
-        public long oldestObservableHorizon() {
+        public long oldestCleanupHorizon() {
             return oldestBoundarySupplier == null ? oldestBoundary : oldestBoundarySupplier.getAsLong();
         }
 

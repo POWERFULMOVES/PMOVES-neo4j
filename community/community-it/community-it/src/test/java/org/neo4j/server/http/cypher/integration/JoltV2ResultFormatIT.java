@@ -77,7 +77,8 @@ class JoltV2ResultFormatIT extends AbstractRestFunctionalTestBase {
                 "{\"header\":{\"fields\":[\"1\",\"5.5\",\"true\"]}}",
                 "{\"data\":[{\"Z\":\"1\"},{\"R\":\"5.5\"},{\"?\":\"true\"}]}",
                 "{\"summary\":{}}",
-                "{\"info\":{\"commit\":\"" + commitResource + "\",\"lastBookmarks\":[");
+                "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "],\"commit\":\"" + commitResource
+                        + "\",\"lastBookmarks\":[");
     }
 
     @ParameterizedTest
@@ -100,7 +101,8 @@ class JoltV2ResultFormatIT extends AbstractRestFunctionalTestBase {
                 "{\"header\":{\"fields\":[\"1\",\"5.5\",\"true\"]}}\n",
                 "{\"data\":[{\"Z\":\"1\"},{\"R\":\"5.5\"},{\"?\":\"true\"}]}\n",
                 "{\"summary\":{}}\n",
-                "{\"info\":{\"commit\":\"" + commitResource + "\",\"lastBookmarks\":[");
+                "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "],\"commit\":\"" + commitResource
+                        + "\",\"lastBookmarks\":[");
     }
 
     @Test
@@ -118,7 +120,8 @@ class JoltV2ResultFormatIT extends AbstractRestFunctionalTestBase {
                 "{\"header\":{\"fields\":[\"1\",\"5.5\",\"true\"]}}",
                 "{\"data\":[1,{\"R\":\"5.5\"},true]}",
                 "{\"summary\":{}}",
-                "{\"info\":{\"commit\":\"" + commitResource + "\",\"lastBookmarks\":[");
+                "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "],\"commit\":\"" + commitResource
+                        + "\",\"lastBookmarks\":[");
     }
 
     @Test
@@ -136,7 +139,26 @@ class JoltV2ResultFormatIT extends AbstractRestFunctionalTestBase {
                 "{\"header\":{\"fields\":[\"1\",\"5.5\",\"true\"]}}\n",
                 "{\"data\":[1,{\"R\":\"5.5\"},true]}\n",
                 "{\"summary\":{}}\n",
-                "{\"info\":{\"commit\":\"" + commitResource + "\",\"lastBookmarks\":[");
+                "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "],\"commit\":\"" + commitResource
+                        + "\",\"lastBookmarks\":[");
+    }
+
+    @Test
+    void shouldConsistentOutputPropertyArrays() {
+        var propertyArrayResponse = http.withHeaders(
+                        HttpHeaders.ACCEPT, SequentialEventSourceJoltV2MessageBodyWriter.JSON_JOLT_MIME_TYPE_VALUE_V2)
+                .POST(
+                        txCommitUri(),
+                        queryAsJsonRow("MERGE (n:TEST {p: [\\\"a\\\", \\\"b\\\"]}) RETURN properties(n) AS map"));
+
+        var mapResponse = http.withHeaders(
+                        HttpHeaders.ACCEPT, SequentialEventSourceJoltV2MessageBodyWriter.JSON_JOLT_MIME_TYPE_VALUE_V2)
+                .POST(txCommitUri(), queryAsJsonRow("RETURN {p: [\\\"a\\\", \\\"b\\\"]} AS map"));
+
+        assertThat(propertyArrayResponse.status()).isEqualTo(200);
+        assertThat(mapResponse.status()).isEqualTo(200);
+
+        assertThat(propertyArrayResponse.rawContent()).isEqualTo(mapResponse.rawContent());
     }
 
     private static HTTP.RawPayload queryAsJsonRow(String query) {

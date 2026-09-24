@@ -25,11 +25,11 @@ import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.kernel.database.DatabaseTracers;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.storageengine.api.RecoveryState;
 import org.neo4j.storageengine.api.StorageEngineFactory;
 import org.neo4j.storageengine.api.StorageFilesState;
+import org.neo4j.wal.LogTailMetadata;
 
 /**
  * Utility that can determine if a given store will need recovery.
@@ -45,10 +45,12 @@ class RecoveryRequiredChecker {
             PageCache pageCache,
             Config config,
             StorageEngineFactory storageEngineFactory,
-            DatabaseTracers databaseTracers) {
+            DatabaseTracers databaseTracers,
+            RecoveryPredicate recoveryPredicate) {
         this.fs = fs;
         this.pageCache = pageCache;
-        this.logTailExtractor = new LogTailExtractor(fs, config, storageEngineFactory, databaseTracers);
+        this.logTailExtractor = new LogTailExtractor(
+                fs, config, storageEngineFactory, databaseTracers, true, recoveryPredicate.maxPosition());
         this.storageEngineFactory = storageEngineFactory;
     }
 
@@ -61,10 +63,13 @@ class RecoveryRequiredChecker {
         if (!storageEngineFactory.storageExists(fs, databaseLayout)) {
             return false;
         }
-        StorageFilesState filesRecoveryState = storageEngineFactory.checkStoreFileState(fs, databaseLayout, pageCache);
-        if (filesRecoveryState.recoveryState() != RecoveryState.RECOVERED) {
+
+        if (logTailMetadata.isRecoveryRequired()) {
             return true;
         }
-        return logTailMetadata.isRecoveryRequired();
+
+        StorageFilesState filesRecoveryState =
+                storageEngineFactory.checkStoreFileState(fs, databaseLayout, pageCache, logTailMetadata, false);
+        return filesRecoveryState.recoveryState() != RecoveryState.RECOVERED;
     }
 }

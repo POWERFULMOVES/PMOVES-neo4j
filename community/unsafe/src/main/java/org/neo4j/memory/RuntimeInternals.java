@@ -20,6 +20,7 @@
 package org.neo4j.memory;
 
 import static com.sun.jna.Platform.is64Bit;
+import static org.neo4j.internal.helpers.VarHandleUtils.getVarHandle;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
@@ -78,26 +79,35 @@ final class RuntimeInternals {
             OBJECT_ALIGNMENT = 8;
         }
 
-        // get min/max value of cached Long class instances:
-        long longCacheMinValue = 0;
-        while (longCacheMinValue > Long.MIN_VALUE
-                && Long.valueOf(longCacheMinValue - 1) == Long.valueOf(longCacheMinValue - 1)) {
-            longCacheMinValue -= 1;
+        // bypass cache estimation on a valhalla enabled VM's
+        if (new Long(0) == new Long(0)) {
+            LONG_CACHE_MIN_VALUE = Long.MIN_VALUE;
+            LONG_CACHE_MAX_VALUE = Long.MAX_VALUE;
+        } else {
+            // get min/max value of cached Long class instances:
+            long longCacheMinValue = 0;
+            while (longCacheMinValue > Long.MIN_VALUE
+                    && Long.valueOf(longCacheMinValue - 1) == Long.valueOf(longCacheMinValue - 1)) {
+                longCacheMinValue -= 1;
+            }
+            long longCacheMaxValue = -1;
+            while (longCacheMaxValue < Long.MAX_VALUE
+                    && Long.valueOf(longCacheMaxValue + 1) == Long.valueOf(longCacheMaxValue + 1)) {
+                longCacheMaxValue += 1;
+            }
+            LONG_CACHE_MIN_VALUE = longCacheMinValue;
+            LONG_CACHE_MAX_VALUE = longCacheMaxValue;
         }
-        long longCacheMaxValue = -1;
-        while (longCacheMaxValue < Long.MAX_VALUE
-                && Long.valueOf(longCacheMaxValue + 1) == Long.valueOf(longCacheMaxValue + 1)) {
-            longCacheMaxValue += 1;
-        }
-        LONG_CACHE_MIN_VALUE = longCacheMinValue;
-        LONG_CACHE_MAX_VALUE = longCacheMaxValue;
 
         // Compensate for compressed string in Java 9+
         VarHandle stringValueArray;
         try {
-            stringValueArray = MethodHandles.privateLookupIn(String.class, MethodHandles.lookup())
-                    .findVarHandle(String.class, "value", byte[].class);
-        } catch (NoSuchFieldException | IllegalAccessException e) {
+            stringValueArray = getVarHandle(
+                    MethodHandles.privateLookupIn(String.class, MethodHandles.lookup()),
+                    String.class,
+                    "value",
+                    byte[].class);
+        } catch (RuntimeException | IllegalAccessException e) {
             stringValueArray = null;
         }
         STRING_VALUE_ARRAY = stringValueArray;

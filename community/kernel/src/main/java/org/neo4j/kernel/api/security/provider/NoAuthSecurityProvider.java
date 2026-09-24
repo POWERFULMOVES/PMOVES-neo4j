@@ -38,7 +38,7 @@ public class NoAuthSecurityProvider extends LifecycleAdapter implements Security
     }
 
     @Override
-    public AuthManager loopbackAuthManager() {
+    public AuthManager domainSocketAuthManager() {
         return AuthManager.NO_AUTH;
     }
 }

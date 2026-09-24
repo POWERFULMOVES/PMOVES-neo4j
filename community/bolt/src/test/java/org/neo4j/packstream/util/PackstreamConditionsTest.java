@@ -19,11 +19,15 @@
  */
 package org.neo4j.packstream.util;
 
+import static org.neo4j.bolt.testing.util.ErrorUtil.useNewMessage;
+
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.TestFactory;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.packstream.error.struct.IllegalStructArgumentException;
 import org.neo4j.packstream.error.struct.IllegalStructSizeException;
 import org.neo4j.packstream.struct.StructHeader;
@@ -44,14 +48,25 @@ class PackstreamConditionsTest {
     @TestFactory
     Stream<DynamicTest> requireLengthShouldRejectMismatchingValues() {
         return IntStream.of(1, 2, 4, 5, 7, 9, 42, 84, 128, 255)
-                .mapToObj(expected ->
-                        DynamicTest.dynamicTest(expected + " fields", () -> Assertions.assertThatExceptionOfType(
-                                        IllegalStructSizeException.class)
-                                .isThrownBy(() -> PackstreamConditions.requireLength(
-                                        new StructHeader(expected + 1, (short) (expected * 2)), expected))
-                                .withMessage("Illegal struct size: Expected struct to be " + expected
-                                        + " fields but got " + (expected + 1))
-                                .withNoCause()));
+                .mapToObj(expected -> DynamicTest.dynamicTest(
+                        expected + " fields",
+                        () -> ErrorGqlStatusObjectAssertions.assertThatThrownBy(
+                                        () -> PackstreamConditions.requireLength(
+                                                new StructHeader(expected + 1, (short) (expected * 2)), expected))
+                                .isInstanceOf(IllegalStructSizeException.class)
+                                .hasMessage(useNewMessage(
+                                                "08N11: The request is invalid and could not be processed by the server. See cause for further details.")
+                                        .whenLegacyFallbackTo("Illegal struct size: Expected struct to be " + expected
+                                                + " fields but got " + (expected + 1)))
+                                .hasNoCause()
+                                .hasGqlStatus(GqlStatusInfoCodes.STATUS_08N11)
+                                .hasStatusDescription(
+                                        "error: connection exception - request error. The request is invalid and could not be processed by the server. See cause for further details.")
+                                .gqlCause()
+                                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N57)
+                                .hasStatusDescription(String.format(
+                                        "error: data exception - invalid protocol type. Protocol type is invalid. Invalid number of struct components (received %s but expected %s).",
+                                        expected + 1, expected))));
     }
 
     @TestFactory
@@ -66,21 +81,25 @@ class PackstreamConditionsTest {
     Stream<DynamicTest> requireEmptyShouldRejectNonEmptyStructures() {
         return IntStream.of(1, 2, 4, 5, 7, 9, 42, 84, 128, 255)
                 .mapToObj(length -> new StructHeader(length, (short) (length * 2)))
-                .map(header ->
-                        DynamicTest.dynamicTest(header.length() + " fields", () -> Assertions.assertThatExceptionOfType(
-                                        IllegalStructSizeException.class)
+                .map(header -> DynamicTest.dynamicTest(
+                        header.length() + " fields",
+                        () -> Assertions.assertThatExceptionOfType(IllegalStructSizeException.class)
                                 .isThrownBy(() -> PackstreamConditions.requireEmpty(header))
-                                .withMessage("Illegal struct size: Expected struct to be 0 fields but got "
-                                        + header.length())
+                                .withMessage(useNewMessage(
+                                                "08N11: The request is invalid and could not be processed by the server. See cause for further details.")
+                                        .whenLegacyFallbackTo(
+                                                "Illegal struct size: Expected struct to be 0 fields but got "
+                                                        + header.length()))
                                 .withNoCause()));
     }
 
     @TestFactory
     Stream<DynamicTest> requireNonNullShouldAcceptNonNullValues() {
-        return Stream.of("foo", "bar", "baz").flatMap(fieldName -> Stream.of(42, 84L, "potato", new Object())
-                .map(fieldValue -> DynamicTest.dynamicTest(
-                        fieldName + " = " + fieldValue,
-                        () -> PackstreamConditions.requireNonNull(fieldName, fieldValue))));
+        return Stream.of("foo", "bar", "baz")
+                .flatMap(fieldName -> Stream.of(42, 84L, "potato", new Object())
+                        .map(fieldValue -> DynamicTest.dynamicTest(
+                                fieldName + " = " + fieldValue,
+                                () -> PackstreamConditions.requireNonNull(fieldName, fieldValue))));
     }
 
     @TestFactory
@@ -95,24 +114,50 @@ class PackstreamConditionsTest {
     @TestFactory
     Stream<DynamicTest> requireNonNullShouldRejectNullValues() {
         return Stream.of("foo", "bar", "baz")
-                .map(fieldName ->
-                        DynamicTest.dynamicTest(fieldName + " = null", () -> Assertions.assertThatExceptionOfType(
-                                        IllegalStructArgumentException.class)
-                                .isThrownBy(() -> PackstreamConditions.requireNonNull(fieldName, null))
-                                .withMessage(
-                                        "Illegal value for field \"" + fieldName + "\": Expected value to be non-null")
-                                .withNoCause()));
+                .map(fieldName -> DynamicTest.dynamicTest(
+                        fieldName + " = null",
+                        () -> ErrorGqlStatusObjectAssertions.assertThatThrownBy(
+                                        () -> PackstreamConditions.requireNonNull(fieldName, null))
+                                .isInstanceOf(IllegalStructArgumentException.class)
+                                .hasMessage(useNewMessage("08N06: General network protocol error.")
+                                        .whenLegacyFallbackTo("Illegal value for field \"" + fieldName
+                                                + "\": Expected value to be non-null"))
+                                .hasNoCause()
+                                .hasGqlStatus(GqlStatusInfoCodes.STATUS_08N06)
+                                .hasStatusDescription(
+                                        "error: connection exception - protocol error. General network protocol error.")
+                                .gqlCause()
+                                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N05)
+                                .hasStatusDescription(
+                                        "error: data exception - input failed validation. Invalid input 'null' for field '"
+                                                + fieldName + "'.")
+                                .gqlCause()
+                                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22004)
+                                .hasStatusDescription("error: data exception - null value not allowed")));
     }
 
     @TestFactory
     Stream<DynamicTest> requireNonNullShouldRejectNoneValues() {
         return Stream.of("foo", "bar", "baz")
-                .map(fieldName ->
-                        DynamicTest.dynamicTest(fieldName + " = null", () -> Assertions.assertThatExceptionOfType(
-                                        IllegalStructArgumentException.class)
-                                .isThrownBy(() -> PackstreamConditions.requireNonNullValue(fieldName, Values.NO_VALUE))
-                                .withMessage(
-                                        "Illegal value for field \"" + fieldName + "\": Expected value to be non-null")
-                                .withNoCause()));
+                .map(fieldName -> DynamicTest.dynamicTest(
+                        fieldName + " = null",
+                        () -> ErrorGqlStatusObjectAssertions.assertThatThrownBy(
+                                        () -> PackstreamConditions.requireNonNullValue(fieldName, Values.NO_VALUE))
+                                .isInstanceOf(IllegalStructArgumentException.class)
+                                .hasMessage(useNewMessage("08N06: General network protocol error.")
+                                        .whenLegacyFallbackTo("Illegal value for field \"" + fieldName
+                                                + "\": Expected value to be non-null"))
+                                .hasNoCause()
+                                .hasGqlStatus(GqlStatusInfoCodes.STATUS_08N06)
+                                .hasStatusDescription(
+                                        "error: connection exception - protocol error. General network protocol error.")
+                                .gqlCause()
+                                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N05)
+                                .hasStatusDescription(
+                                        "error: data exception - input failed validation. Invalid input 'null' for field '"
+                                                + fieldName + "'.")
+                                .gqlCause()
+                                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22004)
+                                .hasStatusDescription("error: data exception - null value not allowed")));
     }
 }

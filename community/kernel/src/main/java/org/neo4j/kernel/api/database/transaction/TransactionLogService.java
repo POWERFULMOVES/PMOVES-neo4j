@@ -23,8 +23,8 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Optional;
 import java.util.OptionalLong;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
 import org.neo4j.storageengine.api.TransactionId;
+import org.neo4j.wal.LogPosition;
 
 /**
  * Service to access database transaction logs
@@ -56,6 +56,7 @@ public interface TransactionLogService {
      * @param kernelVersionByte optional known kernel version
      * @param checksum previous checksum if this marked the beginning of a new file on src
      * @param offset the position of this buffer on src
+     * @param logFormatByte optional know log format version
      * @return log position before any buffer content updates happen
      * @throws IOException on failure performing underlying transaction logs operation
      */
@@ -64,7 +65,8 @@ public interface TransactionLogService {
             OptionalLong appendIndex,
             Optional<Byte> kernelVersionByte,
             int checksum,
-            long offset)
+            long offset,
+            Optional<Byte> logFormatByte)
             throws IOException;
 
     /**

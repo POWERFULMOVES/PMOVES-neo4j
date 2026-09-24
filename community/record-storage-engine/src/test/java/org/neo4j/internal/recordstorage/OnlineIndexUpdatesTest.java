@@ -20,16 +20,13 @@
 package org.neo4j.internal.recordstorage;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.neo4j.common.EntityType.NODE;
 import static org.neo4j.common.EntityType.RELATIONSHIP;
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
 import static org.neo4j.internal.recordstorage.RecordCursorTypes.NODE_CURSOR;
 import static org.neo4j.internal.recordstorage.RecordCursorTypes.PROPERTY_CURSOR;
 import static org.neo4j.internal.recordstorage.RecordCursorTypes.RELATIONSHIP_CURSOR;
-import static org.neo4j.internal.schema.SchemaDescriptors.fulltext;
+import static org.neo4j.internal.schema.SchemaDescriptors.forSemanticSearch;
 import static org.neo4j.io.IOUtils.closeAllUnchecked;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
@@ -40,27 +37,33 @@ import static org.neo4j.kernel.impl.store.record.Record.NO_LABELS_FIELD;
 import static org.neo4j.kernel.impl.store.record.Record.NO_NEXT_PROPERTY;
 import static org.neo4j.kernel.impl.store.record.Record.NO_NEXT_RELATIONSHIP;
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
+import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_ID;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.neo4j.configuration.Config;
+import org.neo4j.internal.batchimport.cache.NumberArrayFactories;
 import org.neo4j.internal.counts.GBPTreeCountsStore;
 import org.neo4j.internal.counts.GBPTreeGenericCountsStore;
 import org.neo4j.internal.id.DefaultIdGeneratorFactory;
 import org.neo4j.internal.recordstorage.Command.NodeCommand;
 import org.neo4j.internal.recordstorage.Command.PropertyCommand;
-import org.neo4j.internal.schema.FulltextSchemaDescriptor;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexPrototype;
 import org.neo4j.internal.schema.SchemaCache;
+import org.neo4j.internal.schema.SemanticSearchSchemaDescriptor;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.recordstorage.RecordDatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.PageCursor;
+import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.store.CountsComputer;
 import org.neo4j.kernel.impl.store.DynamicAllocatorProvider;
 import org.neo4j.kernel.impl.store.DynamicAllocatorProviders;
@@ -76,16 +79,18 @@ import org.neo4j.kernel.impl.store.record.PrimitiveRecord;
 import org.neo4j.kernel.impl.store.record.PropertyBlock;
 import org.neo4j.kernel.impl.store.record.PropertyRecord;
 import org.neo4j.kernel.impl.store.record.RelationshipRecord;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.kernel.lifecycle.LifeSupport;
 import org.neo4j.kernel.lifecycle.Lifecycle;
 import org.neo4j.kernel.lifecycle.LifecycleAdapter;
-import org.neo4j.logging.NullLog;
+import org.neo4j.kernel.recovery.RecoveryStartupChecker;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.EmptyMemoryTracker;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
+import org.neo4j.storageengine.api.IndexUpdateListener;
 import org.neo4j.storageengine.api.StandardConstraintRuleAccessor;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
+import org.neo4j.storageengine.util.IndexUpdatesWorkSync;
 import org.neo4j.test.LatestVersions;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.Neo4jLayoutExtension;
@@ -121,6 +126,8 @@ class OnlineIndexUpdatesTest {
     private DirectRecordAccess<PropertyRecord, PrimitiveRecord> recordAccess;
     private StoreCursors storeCursors;
     private DynamicAllocatorProvider allocatorProvider;
+    private List<IndexEntryUpdate> observedIndexUpdates;
+    private IndexUpdatesWorkSync indexUpdatesSync;
 
     @BeforeEach
     void setUp() throws IOException {
@@ -140,7 +147,7 @@ class OnlineIndexUpdatesTest {
                 nullLogProvider,
                 contextFactory,
                 false,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL);
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
 
         neoStores = storeFactory.openAllNeoStores();
         allocatorProvider = DynamicAllocatorProviders.nonTransactionalAllocator(neoStores);
@@ -150,8 +157,7 @@ class OnlineIndexUpdatesTest {
                 databaseLayout.countStore(),
                 fileSystem,
                 immediate(),
-                new CountsComputer(
-                        neoStores, pageCache, contextFactory, databaseLayout, INSTANCE, NullLog.getInstance()),
+                new CountsComputer(neoStores, BASE_TX_ID, contextFactory, INSTANCE, NumberArrayFactories.OFF_HEAP),
                 false,
                 GBPTreeGenericCountsStore.NO_MONITOR,
                 databaseLayout.getDatabaseName(),
@@ -159,7 +165,8 @@ class OnlineIndexUpdatesTest {
                 NullLogProvider.getInstance(),
                 contextFactory,
                 pageCacheTracer,
-                neoStores.getOpenOptions());
+                neoStores.getOpenOptions(),
+                RecoveryStartupChecker.EMPTY_CHECKER);
         life.add(wrapInLifecycle(counts));
         nodeStore = neoStores.getNodeStore();
         relationshipStore = neoStores.getRelationshipStore();
@@ -181,6 +188,16 @@ class OnlineIndexUpdatesTest {
                 PROPERTY_CURSOR,
                 storeCursors,
                 EmptyMemoryTracker.INSTANCE);
+        observedIndexUpdates = new ArrayList<>();
+        indexUpdatesSync = new IndexUpdatesWorkSync(
+                new IndexUpdateListener.Adapter() {
+                    @Override
+                    public void applyUpdates(
+                            Iterator<IndexEntryUpdate> updates, CursorContext cursorContext, boolean parallel) {
+                        updates.forEachRemaining(observedIndexUpdates::add);
+                    }
+                },
+                false);
     }
 
     @AfterEach
@@ -190,7 +207,7 @@ class OnlineIndexUpdatesTest {
     }
 
     @Test
-    void shouldContainFedNodeUpdate() {
+    void shouldContainFedNodeUpdate() throws IOException {
         OnlineIndexUpdates onlineIndexUpdates = new OnlineIndexUpdates(
                 nodeStore,
                 schemaCache,
@@ -198,7 +215,8 @@ class OnlineIndexUpdatesTest {
                 new RecordStorageReader(neoStores),
                 NULL_CONTEXT,
                 INSTANCE,
-                storeCursors);
+                storeCursors,
+                indexUpdatesSync);
 
         int nodeId = 0;
         NodeRecord inUse = getNode(nodeId, true);
@@ -215,21 +233,25 @@ class OnlineIndexUpdatesTest {
         PropertyCommand propertyCommand = new PropertyCommand(
                 LATEST_LOG_SERIALIZATION, recordAccess.getIfLoaded(propertyId).forReadingData(), propertyBlocks);
 
-        IndexDescriptor indexDescriptor = IndexPrototype.forSchema(fulltext(NODE, ENTITY_TOKENS, new int[] {1, 4, 6}))
+        IndexDescriptor indexDescriptor = IndexPrototype.forSchema(
+                        forSemanticSearch(NODE, ENTITY_TOKENS, new int[] {1, 4, 6}))
                 .withName("index")
                 .materialise(0);
         createIndexes(indexDescriptor);
 
         onlineIndexUpdates.feed(
                 nodeGroup(nodeCommand, propertyCommand), relationshipGroup(null), CommandSelector.NORMAL);
-        assertTrue(onlineIndexUpdates.hasUpdates());
-        Iterator<IndexEntryUpdate<IndexDescriptor>> iterator = onlineIndexUpdates.iterator();
-        assertEquals(iterator.next(), IndexEntryUpdate.remove(nodeId, indexDescriptor, propertyValue, null, null));
-        assertFalse(iterator.hasNext());
+        // Tests that apply() close "pending" updates
+        for (int i = 0; i < 2; i++) {
+            onlineIndexUpdates.apply();
+            assertThat(observedIndexUpdates)
+                    .containsExactly(
+                            EagerValueIndexEntryUpdate.remove(nodeId, indexDescriptor, propertyValue, null, null));
+        }
     }
 
     @Test
-    void shouldContainFedRelationshipUpdate() {
+    void shouldContainFedRelationshipUpdate() throws IOException {
         OnlineIndexUpdates onlineIndexUpdates = new OnlineIndexUpdates(
                 nodeStore,
                 schemaCache,
@@ -237,7 +259,8 @@ class OnlineIndexUpdatesTest {
                 new RecordStorageReader(neoStores),
                 NULL_CONTEXT,
                 INSTANCE,
-                storeCursors);
+                storeCursors,
+                indexUpdatesSync);
 
         long relId = 0;
         RelationshipRecord inUse = getRelationship(relId, true, ENTITY_TOKEN);
@@ -256,21 +279,24 @@ class OnlineIndexUpdatesTest {
                 LATEST_LOG_SERIALIZATION, recordAccess.getIfLoaded(propertyId).forReadingData(), propertyBlocks);
 
         IndexDescriptor indexDescriptor = IndexPrototype.forSchema(
-                        fulltext(RELATIONSHIP, ENTITY_TOKENS, new int[] {1, 4, 6}))
+                        forSemanticSearch(RELATIONSHIP, ENTITY_TOKENS, new int[] {1, 4, 6}))
                 .withName("index")
                 .materialise(0);
         createIndexes(indexDescriptor);
 
         onlineIndexUpdates.feed(
                 nodeGroup(null), relationshipGroup(relationshipCommand, propertyCommand), CommandSelector.NORMAL);
-        assertTrue(onlineIndexUpdates.hasUpdates());
-        Iterator<IndexEntryUpdate<IndexDescriptor>> iterator = onlineIndexUpdates.iterator();
-        assertEquals(iterator.next(), IndexEntryUpdate.remove(relId, indexDescriptor, propertyValue, null, null));
-        assertFalse(iterator.hasNext());
+        // Tests that apply() close "pending" updates
+        for (int i = 0; i < 2; i++) {
+            onlineIndexUpdates.apply();
+            assertThat(observedIndexUpdates)
+                    .containsExactly(
+                            EagerValueIndexEntryUpdate.remove(relId, indexDescriptor, propertyValue, null, null));
+        }
     }
 
     @Test
-    void shouldDifferentiateNodesAndRelationships() {
+    void shouldDifferentiateNodesAndRelationships() throws IOException {
         OnlineIndexUpdates onlineIndexUpdates = new OnlineIndexUpdates(
                 nodeStore,
                 schemaCache,
@@ -278,7 +304,8 @@ class OnlineIndexUpdatesTest {
                 new RecordStorageReader(neoStores),
                 NULL_CONTEXT,
                 INSTANCE,
-                storeCursors);
+                storeCursors,
+                indexUpdatesSync);
 
         int nodeId = 0;
         NodeRecord inUseNode = getNode(nodeId, true);
@@ -298,7 +325,7 @@ class OnlineIndexUpdatesTest {
                 nodePropertyBlocks);
 
         IndexDescriptor nodeIndexDescriptor = IndexPrototype.forSchema(
-                        fulltext(NODE, ENTITY_TOKENS, new int[] {1, 4, 6}))
+                        forSemanticSearch(NODE, ENTITY_TOKENS, new int[] {1, 4, 6}))
                 .withName("index")
                 .materialise(0);
         createIndexes(nodeIndexDescriptor);
@@ -321,7 +348,7 @@ class OnlineIndexUpdatesTest {
                 recordAccess.getIfLoaded(propertyId).forReadingData(),
                 relationshipPropertyBlocks);
 
-        FulltextSchemaDescriptor schema = fulltext(RELATIONSHIP, ENTITY_TOKENS, new int[] {1, 4, 6});
+        SemanticSearchSchemaDescriptor schema = forSemanticSearch(RELATIONSHIP, ENTITY_TOKENS, new int[] {1, 4, 6});
         IndexDescriptor relationshipIndexDescriptor =
                 IndexPrototype.forSchema(schema).withName("index").materialise(1);
         createIndexes(relationshipIndexDescriptor);
@@ -330,16 +357,20 @@ class OnlineIndexUpdatesTest {
                 nodeGroup(nodeCommand, nodePropertyCommand),
                 relationshipGroup(relationshipCommand, relationshipPropertyCommand),
                 CommandSelector.NORMAL);
-        assertTrue(onlineIndexUpdates.hasUpdates());
-        assertThat(onlineIndexUpdates)
-                .contains(
-                        IndexEntryUpdate.remove(
-                                relId, relationshipIndexDescriptor, relationshipPropertyValue, null, null),
-                        IndexEntryUpdate.remove(nodeId, nodeIndexDescriptor, nodePropertyValue, null, null));
+        // Tests that apply() close "pending" updates
+        for (int i = 0; i < 2; i++) {
+            onlineIndexUpdates.apply();
+            assertThat(observedIndexUpdates)
+                    .containsExactly(
+                            EagerValueIndexEntryUpdate.remove(
+                                    nodeId, nodeIndexDescriptor, nodePropertyValue, null, null),
+                            EagerValueIndexEntryUpdate.remove(
+                                    relId, relationshipIndexDescriptor, relationshipPropertyValue, null, null));
+        }
     }
 
     @Test
-    void shouldUpdateCorrectIndexes() {
+    void shouldUpdateCorrectIndexes() throws IOException {
         OnlineIndexUpdates onlineIndexUpdates = new OnlineIndexUpdates(
                 nodeStore,
                 schemaCache,
@@ -347,7 +378,8 @@ class OnlineIndexUpdatesTest {
                 new RecordStorageReader(neoStores),
                 NULL_CONTEXT,
                 INSTANCE,
-                storeCursors);
+                storeCursors,
+                indexUpdatesSync);
 
         long relId = 0;
         RelationshipRecord inUse = getRelationship(relId, true, ENTITY_TOKEN);
@@ -373,15 +405,15 @@ class OnlineIndexUpdatesTest {
                 LATEST_LOG_SERIALIZATION, recordAccess.getIfLoaded(propertyId2).forReadingData(), propertyBlocks2);
 
         IndexDescriptor indexDescriptor0 = IndexPrototype.forSchema(
-                        fulltext(RELATIONSHIP, ENTITY_TOKENS, new int[] {1, 4, 6}))
+                        forSemanticSearch(RELATIONSHIP, ENTITY_TOKENS, new int[] {1, 4, 6}))
                 .withName("index_0")
                 .materialise(0);
         IndexDescriptor indexDescriptor1 = IndexPrototype.forSchema(
-                        fulltext(RELATIONSHIP, ENTITY_TOKENS, new int[] {2, 4, 6}))
+                        forSemanticSearch(RELATIONSHIP, ENTITY_TOKENS, new int[] {2, 4, 6}))
                 .withName("index_1")
                 .materialise(1);
         IndexDescriptor indexDescriptor = IndexPrototype.forSchema(
-                        fulltext(RELATIONSHIP, new int[] {ENTITY_TOKEN, OTHER_ENTITY_TOKEN}, new int[] {1}))
+                        forSemanticSearch(RELATIONSHIP, new int[] {ENTITY_TOKEN, OTHER_ENTITY_TOKEN}, new int[] {1}))
                 .withName("index_2")
                 .materialise(2);
         createIndexes(indexDescriptor0, indexDescriptor1, indexDescriptor);
@@ -390,12 +422,16 @@ class OnlineIndexUpdatesTest {
                 nodeGroup(null),
                 relationshipGroup(relationshipCommand, propertyCommand, propertyCommand2),
                 CommandSelector.NORMAL);
-        assertTrue(onlineIndexUpdates.hasUpdates());
-        assertThat(onlineIndexUpdates)
-                .contains(
-                        IndexEntryUpdate.remove(relId, indexDescriptor0, propertyValue, propertyValue2, null),
-                        IndexEntryUpdate.remove(relId, indexDescriptor1, null, propertyValue2, null),
-                        IndexEntryUpdate.remove(relId, indexDescriptor, propertyValue));
+        // Tests that apply() close "pending" updates
+        for (int i = 0; i < 2; i++) {
+            onlineIndexUpdates.apply();
+            assertThat(observedIndexUpdates)
+                    .containsExactly(
+                            EagerValueIndexEntryUpdate.remove(
+                                    relId, indexDescriptor0, propertyValue, propertyValue2, null),
+                            EagerValueIndexEntryUpdate.remove(relId, indexDescriptor1, null, propertyValue2, null),
+                            EagerValueIndexEntryUpdate.remove(relId, indexDescriptor, propertyValue));
+        }
     }
 
     private void createIndexes(IndexDescriptor... indexDescriptors) {
@@ -442,7 +478,8 @@ class OnlineIndexUpdatesTest {
                 allocatorProvider.allocator(PROPERTY_STRING),
                 allocatorProvider.allocator(PROPERTY_ARRAY),
                 NULL_CONTEXT,
-                INSTANCE);
+                INSTANCE,
+                "db-format-2000");
         propertyRecord.addPropertyBlock(propertyBlock);
 
         return propertyRecord.getId();
@@ -479,6 +516,8 @@ class OnlineIndexUpdatesTest {
                         NO_NEXT_RELATIONSHIP.longValue(),
                         NO_NEXT_RELATIONSHIP.longValue(),
                         true,
+                        false,
+                        false,
                         false);
     }
 

@@ -20,13 +20,22 @@
 package org.neo4j.cypher.internal.compiler.planner.logical.cardinality.assumeIndependence
 
 import org.neo4j.cypher.internal.compiler.planner.logical.Metrics.LabelInfo
+import org.neo4j.cypher.internal.compiler.planner.logical.Metrics.RichLabelInfo
+import org.neo4j.cypher.internal.compiler.planner.logical.cardinality.assumeIndependence.QueryGraphPredicates.DISTRIBUTE_LABEL_DISJUNCTION_LIMIT
+import org.neo4j.cypher.internal.compiler.planner.logical.cardinality.assumeIndependence.QueryGraphPredicates.DisjunctiveHasLabels
+import org.neo4j.cypher.internal.compiler.planner.logical.cardinality.assumeIndependence.QueryGraphPredicates.PredicatesWithDisjunctiveLabelInfos
 import org.neo4j.cypher.internal.compiler.planner.logical.idp.expandSolverStep.VariableList
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.QuerySolvableByGetDegree.SetExtractor
 import org.neo4j.cypher.internal.expressions.HasLabels
+import org.neo4j.cypher.internal.expressions.LabelName
 import org.neo4j.cypher.internal.expressions.LogicalVariable
+import org.neo4j.cypher.internal.expressions.Ors
 import org.neo4j.cypher.internal.expressions.Unique
+import org.neo4j.cypher.internal.expressions.UniqueNodes
 import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.ir.Predicate
 import org.neo4j.cypher.internal.ir.Selections
+import org.neo4j.cypher.internal.ir.Selections.AsHasLabelsPredicate
 import org.neo4j.cypher.internal.util.helpers.MapSupport.PowerMap
 
 /**
@@ -39,6 +48,7 @@ import org.neo4j.cypher.internal.util.helpers.MapSupport.PowerMap
  *                            localLabelInfo U previousLabelInfo
  * @param previousLabelInfo   previously known nodes labels
  * @param uniqueRelationships relationships with Unique predicates as introduced by AddUniquenessPredicates.
+ * @param uniqueNodes         nodes with UniqueNodes predicates as introduced by AddUniquenessPredicates.
  * @param otherPredicates     kitchen sink, all the predicates that weren't picked up in the other parameters.
  */
 case class QueryGraphPredicates(
@@ -47,23 +57,92 @@ case class QueryGraphPredicates(
   allLabelInfo: LabelInfo,
   previousLabelInfo: LabelInfo,
   uniqueRelationships: Set[LogicalVariable],
+  uniqueNodes: Set[LogicalVariable],
   otherPredicates: Set[Predicate]
-)
+) {
+
+  /**
+   * We obtain the labelInfo (meaning that we know that a node has a label) from the top-level hasLabel predicates.
+   * That is, if we have a:A|B, we do not include that in the label info at all.
+   *
+   * This value allows to iterate through all the different (disjunctive/ored) label infos that arise from looking at one option at a time.
+   */
+  lazy val distributeLabelDisjunctionAsLabelInfo: PredicatesWithDisjunctiveLabelInfos = {
+
+    case class DisjunctiveHasLabelPredicate(predicate: Predicate, labelInfos: Set[(LogicalVariable, LabelName)])
+
+    val disjunctiveHasLabelPredicates =
+      otherPredicates.collect {
+        // if this is dependent on only one variable, then all hasLabels refer to the same variable
+        case pred @ Predicate(SetExtractor(_), DisjunctiveHasLabels(labelInfos)) =>
+          DisjunctiveHasLabelPredicate(pred, labelInfos)
+      }
+
+    val thisWithoutDisjunctiveHasLabels =
+      copy(otherPredicates = otherPredicates -- disjunctiveHasLabelPredicates.map(_.predicate))
+
+    val distributedLabelInfo =
+      disjunctiveHasLabelPredicates
+        .map(_.labelInfos)
+        .foldLeft(Set(Set.empty[(LogicalVariable, LabelName)])) {
+          case (acc, right) =>
+            for (l <- acc; r <- right) yield l + r
+        }
+    val distributedPredicatesWithLabelInfo =
+      distributedLabelInfo.map { labelInfo =>
+        thisWithoutDisjunctiveHasLabels.copy(
+          localLabelInfo = thisWithoutDisjunctiveHasLabels.localLabelInfo.extend(labelInfo),
+          localOnlyLabelInfo = thisWithoutDisjunctiveHasLabels.localOnlyLabelInfo.extend(labelInfo),
+          allLabelInfo = thisWithoutDisjunctiveHasLabels.allLabelInfo.extend(labelInfo)
+        )
+      }.toSeq
+
+    if (distributedPredicatesWithLabelInfo.size > DISTRIBUTE_LABEL_DISJUNCTION_LIMIT)
+      PredicatesWithDisjunctiveLabelInfos(this, Seq(this))
+    else
+      PredicatesWithDisjunctiveLabelInfos(thisWithoutDisjunctiveHasLabels, distributedPredicatesWithLabelInfo)
+  }
+}
 
 object QueryGraphPredicates {
+
+  /**
+   * @param basePredicates base predicates from which the disjunction of labels was removed
+   * @param predicatesWithLabelDisjunctionsDistributed predicates that each have additional label info from distributing label info
+   */
+  case class PredicatesWithDisjunctiveLabelInfos(
+    basePredicates: QueryGraphPredicates,
+    predicatesWithLabelDisjunctionsDistributed: Seq[QueryGraphPredicates]
+  )
+
+  /**
+   * Matches on the label names in `Ors(ListSet(HasLabels(...), ..., HasLabels(...)))`.
+   */
+  object DisjunctiveHasLabels {
+
+    def unapply(arg: Ors): Option[Set[(LogicalVariable, LabelName)]] =
+      arg.exprs.foldLeft(Option(Set.empty[(LogicalVariable, LabelName)])) {
+        case (Some(previous), HasLabels(variable: LogicalVariable, Seq(labelName))) =>
+          Some(previous + (variable -> labelName))
+        case _ => None
+      }
+  }
 
   def partitionSelections(
     previousLabelInfo: LabelInfo,
     localLabelInfo: LabelInfo,
     selections: Selections
   ): QueryGraphPredicates = {
-    val (uniqueRelationships, otherPredicates) =
-      selections.predicates.foldLeft((Set.empty[LogicalVariable], Set.empty[Predicate])) {
-        case ((uniqueRelationships, otherPredicates), Predicate(_, HasLabels(_: Variable, _))) =>
-          (uniqueRelationships, otherPredicates)
-        case ((uniqueRelationships, otherPredicates), Predicate(_, Unique(VariableList(relationships)))) =>
-          (uniqueRelationships ++ relationships, otherPredicates)
-        case ((uniqueRelationships, otherPredicates), otherPred) => (uniqueRelationships, otherPredicates + otherPred)
+    val (uniqueRelationships, uniqueNodes, otherPredicates) =
+      selections.predicates.foldLeft((Set.empty[LogicalVariable], Set.empty[LogicalVariable], Set.empty[Predicate])) {
+        case (acc, AsHasLabelsPredicate(HasLabels(_: Variable, _))) =>
+          acc
+        case ((uniqueRelationships, uniqueNodes, otherPredicates), Predicate(_, Unique(VariableList(relationships)))) =>
+          (uniqueRelationships ++ relationships, uniqueNodes, otherPredicates)
+        case ((uniqueRelationships, uniqueNodes, otherPredicates), Predicate(_, UniqueNodes(VariableList(nodes), _))) =>
+          (uniqueRelationships, uniqueNodes ++ nodes, otherPredicates)
+        case ((uniqueRelationships, uniqueNodes, otherPredicates), otherPred) =>
+          (uniqueRelationships, uniqueNodes, otherPredicates + otherPred)
       }
 
     val localOnlyLabelInfo = localLabelInfo.fuseLeft(previousLabelInfo)(_ -- _)
@@ -74,7 +153,21 @@ object QueryGraphPredicates {
       allLabelInfo = localLabelInfo.fuse(previousLabelInfo)(_ ++ _),
       previousLabelInfo = previousLabelInfo,
       uniqueRelationships = uniqueRelationships,
+      uniqueNodes = uniqueNodes,
       otherPredicates = otherPredicates
     )
   }
+
+  val empty: QueryGraphPredicates =
+    QueryGraphPredicates(
+      LabelInfo.empty,
+      LabelInfo.empty,
+      LabelInfo.empty,
+      LabelInfo.empty,
+      Set.empty,
+      Set.empty,
+      Set.empty
+    )
+
+  val DISTRIBUTE_LABEL_DISJUNCTION_LIMIT = 8 // arbitrary chosen limit
 }

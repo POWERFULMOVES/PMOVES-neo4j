@@ -23,13 +23,13 @@ import java.time.Duration;
 import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
-import org.neo4j.bolt.protocol.common.message.AccessMode;
 import org.neo4j.bolt.protocol.common.message.decoder.transaction.AbstractRunMessageDecoderTest;
-import org.neo4j.bolt.protocol.common.message.request.transaction.RunMessage;
 import org.neo4j.bolt.testing.mock.ConnectionMockFactory;
+import org.neo4j.boltmessages.AccessMode;
+import org.neo4j.boltmessages.request.transaction.RunMessage;
 import org.neo4j.packstream.error.reader.PackstreamReaderException;
 import org.neo4j.packstream.io.PackstreamBuf;
-import org.neo4j.packstream.io.value.PackstreamValueReader;
+import org.neo4j.packstream.io.value.AbstractPackstreamValueReader;
 import org.neo4j.packstream.struct.StructHeader;
 import org.neo4j.values.storable.Values;
 import org.neo4j.values.virtual.ListValueBuilder;
@@ -52,7 +52,7 @@ class RunMessageDecoderV44Test extends AbstractRunMessageDecoderTest<RunMessageD
     @Test
     void shouldReadMessage() throws PackstreamReaderException {
         var buf = PackstreamBuf.allocUnpooled();
-        var reader = Mockito.mock(PackstreamValueReader.class);
+        var reader = Mockito.mock(AbstractPackstreamValueReader.class);
 
         buf.writeString("RETURN $n");
 
@@ -102,7 +102,7 @@ class RunMessageDecoderV44Test extends AbstractRunMessageDecoderTest<RunMessageD
     @Test
     void shouldIgnoreNotifications() throws PackstreamReaderException {
         var buf = PackstreamBuf.allocUnpooled();
-        var reader = Mockito.mock(PackstreamValueReader.class);
+        var reader = Mockito.mock(AbstractPackstreamValueReader.class);
         buf.writeString("RETURN $n");
 
         var meta = new MapValueBuilder();

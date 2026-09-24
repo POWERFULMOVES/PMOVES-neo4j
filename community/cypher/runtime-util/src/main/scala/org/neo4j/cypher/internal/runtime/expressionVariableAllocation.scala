@@ -24,6 +24,7 @@ import org.neo4j.cypher.internal.expressions.CachedProperty
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.Property
 import org.neo4j.cypher.internal.expressions.ScopeExpression
+import org.neo4j.cypher.internal.expressions.functions.Properties
 import org.neo4j.cypher.internal.logical.plans.BFSPruningVarExpand
 import org.neo4j.cypher.internal.logical.plans.FindShortestPaths
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
@@ -32,6 +33,7 @@ import org.neo4j.cypher.internal.logical.plans.PruningVarExpand
 import org.neo4j.cypher.internal.logical.plans.StatefulShortestPath
 import org.neo4j.cypher.internal.logical.plans.VarExpand
 import org.neo4j.cypher.internal.runtime.ast.ExpressionVariable
+import org.neo4j.cypher.internal.runtime.ast.PropertiesUsingCachedProperties
 import org.neo4j.cypher.internal.runtime.ast.RuntimeConstant
 import org.neo4j.cypher.internal.runtime.ast.TraversalEndpoint
 import org.neo4j.cypher.internal.util.Foldable
@@ -166,12 +168,14 @@ object expressionVariableAllocation {
       topDown(Rewriter.lift {
         // Cached properties would have to be cached together with the Expression Variables.
         // Not caching the property until we have support for that.
-        case cp @ CachedProperty(_, v, p, _, _) if globalMapping.contains(v.name) =>
+        case cp @ CachedProperty(_, v, p, _, _, _) if globalMapping.contains(v.name) =>
           Property(globalMapping(v.name), p)(cp.position)
         case cp @ CachedHasProperty(_, v, p, _, _) if globalMapping.contains(v.name) =>
           Property(globalMapping(v.name), p)(cp.position)
         case x: LogicalVariable if globalMapping.contains(x.name) =>
           globalMapping(x.name)
+        case p @ PropertiesUsingCachedProperties(v, _) if globalMapping.contains(v.name) =>
+          Properties(v)(p.position)
       })
 
     val nExpressionSlots = globalMapping.values.map(_.offset).reduceOption(math.max).map(_ + 1).getOrElse(0)

@@ -19,8 +19,7 @@
  */
 package org.neo4j.graphdb;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.neo4j.kernel.impl.api.index.SchemaIndexTestHelper.singleInstanceIndexProviderFactory;
 
 import java.util.concurrent.TimeUnit;
@@ -37,8 +36,10 @@ import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.ExtensionCallback;
 import org.neo4j.test.extension.ImpermanentDbmsExtension;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
 
 @ImpermanentDbmsExtension(configurationCallback = "configure")
+@SkipOnSpd
 public class SchemaIndexWaitingAcceptanceTest {
     @Inject
     private GraphDatabaseService database;
@@ -77,12 +78,13 @@ public class SchemaIndexWaitingAcceptanceTest {
 
         barrier.await();
 
-        var e = assertThrows(IllegalStateException.class, () -> {
-            try (Transaction tx = database.beginTx()) {
-                tx.schema().awaitIndexOnline(index, 1, TimeUnit.MILLISECONDS);
-            }
-        });
-        assertThat(e).hasMessageContaining("come online");
+        assertThatThrownBy(() -> {
+                    try (Transaction tx = database.beginTx()) {
+                        tx.schema().awaitIndexOnline(index, 1, TimeUnit.MILLISECONDS);
+                    }
+                })
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("come online");
         barrier.release();
     }
 
@@ -100,12 +102,13 @@ public class SchemaIndexWaitingAcceptanceTest {
 
         barrier.await();
 
-        var e = assertThrows(IllegalStateException.class, () -> {
-            try (Transaction tx = database.beginTx()) {
-                tx.schema().awaitIndexOnline("my_index", 1, TimeUnit.MILLISECONDS);
-            }
-        });
-        assertThat(e).hasMessageContaining("come online");
+        assertThatThrownBy(() -> {
+                    try (Transaction tx = database.beginTx()) {
+                        tx.schema().awaitIndexOnline("my_index", 1, TimeUnit.MILLISECONDS);
+                    }
+                })
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("come online");
         barrier.release();
     }
 
@@ -124,12 +127,13 @@ public class SchemaIndexWaitingAcceptanceTest {
         barrier.await();
 
         // when
-        var e = assertThrows(IllegalStateException.class, () -> {
-            try (Transaction tx = database.beginTx()) {
-                tx.schema().awaitIndexesOnline(1, TimeUnit.MILLISECONDS);
-            }
-        });
-        assertThat(e).hasMessageContaining("come online");
+        assertThatThrownBy(() -> {
+                    try (Transaction tx = database.beginTx()) {
+                        tx.schema().awaitIndexesOnline(1, TimeUnit.MILLISECONDS);
+                    }
+                })
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("come online");
         barrier.release();
     }
 }

@@ -124,7 +124,7 @@ public class ConfigFileMigrator {
             writeToFile(config, destinationConfigFile);
             validate(destinationConfigFile);
         } catch (ConfigurationException e) {
-            throw new CommandFailedException(e.getMessage(), e);
+            throw new CommandFailedException("Failed to migrate config file", e);
         }
     }
 
@@ -202,7 +202,7 @@ public class ConfigFileMigrator {
                 // it means the previous setting was commented out.
                 // This means that the free lines should be part of the comment
                 // to be between the original previous setting and this one.
-                comment.append(join(COMMENT_LINE_SEPARATOR.repeat(originalFreeLines)));
+                comment.repeat(COMMENT_LINE_SEPARATOR, originalFreeLines);
             } else {
                 leadingEmptyLines = originalFreeLines;
             }
@@ -302,12 +302,12 @@ public class ConfigFileMigrator {
             Consumer<String> removedValueConsumer,
             Consumer<String> unrecognisedValueConsumer) {
         Set<String> migratedKeys = new HashSet<>();
-        Map<String, List<String>> migratedValues = new HashMap<>(originalValues.size());
-        Map<String, Map<String, String>> originalValueMapping = new HashMap<>(originalValues.size());
+        Map<String, List<String>> migratedValues = HashMap.newHashMap(originalValues.size());
+        Map<String, Map<String, String>> originalValueMapping = HashMap.newHashMap(originalValues.size());
 
         for (String originalValue : originalValues) {
             Map<String, String> map = Maps.mutable.of(originalKey, originalValue);
-            migrators.forEach(m -> m.migrate(map, Map.of(), NullLog.getInstance()));
+            migrators.forEach(m -> m.migrate(map, Maps.mutable.of(), NullLog.getInstance()));
             if (!map.isEmpty()) {
                 for (var entry : map.entrySet()) {
                     // Remove any unrecognized "garbage"
@@ -318,7 +318,7 @@ public class ConfigFileMigrator {
                                 .computeIfAbsent(migratedKey, ignored -> new ArrayList<>(originalValues.size()))
                                 .add(entry.getValue());
                         originalValueMapping
-                                .computeIfAbsent(migratedKey, ignored -> new HashMap<>(originalValues.size()))
+                                .computeIfAbsent(migratedKey, ignored -> HashMap.newHashMap(originalValues.size()))
                                 .put(entry.getValue(), originalValue);
                     } else {
                         unrecognisedValueConsumer.accept(originalValue);
@@ -399,7 +399,9 @@ public class ConfigFileMigrator {
                 new JvmArg("--add-opens=java.base/java.nio=ALL-UNNAMED", true),
                 new JvmArg("--add-opens=java.base/java.io=ALL-UNNAMED", true),
                 new JvmArg("--add-opens=java.base/sun.nio.ch=ALL-UNNAMED", true),
+                new JvmArg("--add-opens=java.base/java.util.concurrent=ALL-UNNAMED", true),
                 new JvmArg("--enable-native-access=ALL-UNNAMED", true),
+                new JvmArg("-Dorg.neo4j.shaded.lucene9.vectorization.upperJavaFeatureVersion=25", true),
                 new JvmArg("-Dlog4j2.disable.jmx=true", false));
     }
 

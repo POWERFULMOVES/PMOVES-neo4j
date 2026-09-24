@@ -38,13 +38,20 @@ import javax.net.ssl.TrustManagerFactory;
 import org.bouncycastle.cert.ocsp.BasicOCSPResp;
 import org.bouncycastle.cert.ocsp.OCSPException;
 import org.bouncycastle.cert.ocsp.OCSPResp;
-import org.neo4j.bolt.testing.client.error.BoltTestClientException;
+import org.neo4j.bolt.protocol.common.connector.transport.ConnectorTransport;
+import org.neo4j.bolt.testing.client.error.BoltTestClientClosedException;
+import org.neo4j.bolt.testing.messages.BoltWire;
 
 public final class CertConfiguredSecureSocketConnection extends SecureSocketConnection {
+
     private final X509Certificate rootCert;
 
-    public CertConfiguredSecureSocketConnection(InetSocketAddress address, X509Certificate trustedRootCertificate) {
-        super(address);
+    public CertConfiguredSecureSocketConnection(
+            ConnectorTransport transport,
+            BoltWire wire,
+            InetSocketAddress address,
+            X509Certificate trustedRootCertificate) {
+        super(transport, wire, address);
         this.rootCert = trustedRootCertificate;
     }
 
@@ -64,6 +71,7 @@ public final class CertConfiguredSecureSocketConnection extends SecureSocketConn
             // TODO: This does not support retrieval of seen certificates at the moment
             return SslContextBuilder.forClient()
                     .keyManager(kmf)
+                    .endpointIdentificationAlgorithm(null)
                     .trustManager(tmf)
                     .build();
         } catch (KeyStoreException
@@ -71,7 +79,7 @@ public final class CertConfiguredSecureSocketConnection extends SecureSocketConn
                 | NoSuchAlgorithmException
                 | CertificateException
                 | UnrecoverableKeyException ex) {
-            throw new BoltTestClientException("Failed to initialize SslContext", ex);
+            throw new BoltTestClientClosedException("Failed to initialize SslContext", ex);
         }
     }
 

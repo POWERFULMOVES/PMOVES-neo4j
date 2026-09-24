@@ -269,24 +269,6 @@ public final class SettingConstraints {
         };
     }
 
-    public static SettingConstraint<List<String>> singleControlledValueOrFreeList(final String controlledvalue) {
-        return new SettingConstraint<>() {
-            @Override
-            public void validate(List<String> list, Configuration config) {
-                if (list != null && list.size() > 1 && list.contains(controlledvalue)) {
-                    throw new IllegalArgumentException(format(
-                            "The list's length can not be greater than 1 if it contains the value %s.",
-                            controlledvalue));
-                }
-            }
-
-            @Override
-            public String getDescription() {
-                return format("One single controlled value (`%s`) or free list.", controlledvalue);
-            }
-        };
-    }
-
     public static final SettingConstraint<SocketAddress> HOSTNAME_ONLY = new SettingConstraint<>() {
         @Override
         public void validate(SocketAddress value, Configuration config) {
@@ -299,7 +281,7 @@ public final class SettingConstraints {
             }
 
             if (StringUtils.isBlank(value.getHostname())) {
-                throw new IllegalArgumentException("needs not a hostname");
+                throw new IllegalArgumentException("needs a hostname");
             }
         }
 
@@ -394,20 +376,20 @@ public final class SettingConstraints {
         };
     }
 
-    public static SettingConstraint<Integer> greaterThanOrEqual(Setting<Integer> other) {
+    public static <T extends Comparable<T>> SettingConstraint<T> greaterThanOrEqual(Setting<T> other) {
         return new SettingConstraint<>() {
             @Override
-            public void validate(Integer value, Configuration config) {
-                var otherValue = config.get(other);
+            public void validate(T value, Configuration config) {
+                T otherValue = config.get(other);
                 if (value == null) {
                     throw new IllegalArgumentException("can not be null");
                 }
                 if (otherValue == null) {
                     throw new IllegalArgumentException(other.name() + " can not be null");
                 }
-                if (value < otherValue) {
+                if (value.compareTo(otherValue) < 0) {
                     throw new IllegalArgumentException(getDescription()
-                            + format("was %d, which is not more than or equal to %d", value, otherValue));
+                            + format("was %s, which is not more than or equal to %s", value, otherValue));
                 }
             }
 
@@ -513,6 +495,48 @@ public final class SettingConstraints {
                     return ChronoUnit.DAYS;
                 }
                 throw new IllegalArgumentException("cannot resolve the resolution of " + duration);
+            }
+        };
+    }
+
+    public static <T> SettingConstraint<T> valueDependency(List<T> restrictedValues, Setting<Boolean> dependency) {
+        return new SettingConstraint<>() {
+            @Override
+            public void validate(T value, Configuration config) {
+                // Only allow the restricted values if the dependency setting valuates to true
+                if (restrictedValues.contains(value)) {
+                    Boolean allowRestrictedValue = config.get(dependency);
+                    if (!allowRestrictedValue) {
+                        throw new IllegalArgumentException(format(
+                                "%s is not allowed since '%s' was %b", value, dependency.name(), allowRestrictedValue));
+                    }
+                }
+            }
+
+            @Override
+            public String getDescription() {
+                // Note, when `restrictedValues` is empty this constraint is a no-op.
+                return restrictedValues.isEmpty()
+                        ? ""
+                        : format("the %s values acceptance depend on '%s'", restrictedValues, dependency.name());
+            }
+        };
+    }
+
+    public static <T, U> SettingConstraint<T> mutuallyExclusiveWith(Setting<U> other) {
+        return new SettingConstraint<>() {
+            @Override
+            public void validate(T value, Configuration config) {
+                U otherValue = config.get(other);
+
+                if (value != null && otherValue != null) {
+                    throw new IllegalArgumentException(getDescription());
+                }
+            }
+
+            @Override
+            public String getDescription() {
+                return String.format("Cannot be set in combination with %s", other.name());
             }
         };
     }

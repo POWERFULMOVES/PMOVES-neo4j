@@ -38,7 +38,6 @@ import org.neo4j.values.virtual.VirtualNodeValue
 import org.neo4j.values.virtual.VirtualRelationshipValue
 
 import scala.collection.mutable
-import scala.reflect.ClassTag
 import scala.util.hashing.MurmurHash3
 
 object CypherRow {
@@ -71,15 +70,22 @@ case class RuntimeMetadataValue(value: Measurable) extends AnyValue {
 object RuntimeMetadataValue {
   final val SHALLOW_SIZE: Long = HeapEstimator.shallowSizeOfInstance(classOf[RuntimeMetadataValue])
 
-  def extract[A](value: AnyValue)(implicit ct: ClassTag[A]): A =
+  def extract[A](value: AnyValue): A = {
     value match {
-      case RuntimeMetadataValue(value: A) => value
-      case RuntimeMetadataValue(value) => throw new IllegalStateException(
-          s"Runtime metadata value extraction failed; expected ${ct.runtimeClass.getSimpleName}, found ${value.getClass.getSimpleName}."
-        )
+      case rmv: RuntimeMetadataValue =>
+        try {
+          rmv.value.asInstanceOf[A]
+        } catch {
+          case e: ClassCastException =>
+            throw new IllegalStateException(
+              s"Runtime metadata value extraction failed; inner value was ${rmv.value}",
+              e
+            )
+        }
       case _ =>
-        throw new IllegalStateException(s"Runtime metadata value extraction failed; value was ${value.getTypeName}")
+        throw new IllegalStateException(s"Expected runtime metadata value but found: ${value.getTypeName}")
     }
+  }
 }
 
 case class ResourceLinenumber(filename: String, linenumber: Long, last: Boolean = false) extends Measurable {
@@ -195,7 +201,8 @@ class MapCypherRow(
   override def setRefAt(offset: Int, value: AnyValue): Unit = fail()
   override def getRefAt(offset: Int): AnyValue = fail()
 
-  private def fail(): Nothing = throw new InternalException("Tried using a map context as a slotted context")
+  private def fail(): Nothing =
+    throw InternalException.internalError(this.getClass.getSimpleName, "Tried using a map context as a slotted context")
 
   override def mergeWith(other: ReadableRow, entityById: EntityById, checkNullability: Boolean = true): Unit =
     other match {

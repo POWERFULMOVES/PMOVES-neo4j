@@ -21,22 +21,19 @@ package org.neo4j.bolt.protocol.common.connector.netty;
 
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.ServerChannel;
 import java.net.SocketAddress;
-import java.nio.file.Path;
 import java.time.Clock;
-import java.time.Duration;
 import org.neo4j.bolt.protocol.BoltProtocolRegistry;
 import org.neo4j.bolt.protocol.common.connection.BoltDriverMetricsMonitor;
 import org.neo4j.bolt.protocol.common.connection.hint.ConnectionHintRegistry;
 import org.neo4j.bolt.protocol.common.connector.accounting.error.ErrorAccountant;
+import org.neo4j.bolt.protocol.common.connector.accounting.thread.ThreadAccountant;
 import org.neo4j.bolt.protocol.common.connector.accounting.traffic.NoopTrafficAccountant;
+import org.neo4j.bolt.protocol.common.connector.config.LocalConnectorConfiguration;
 import org.neo4j.bolt.protocol.common.connector.connection.Connection;
-import org.neo4j.bolt.protocol.common.connector.netty.LocalNettyConnector.LocalConfiguration;
 import org.neo4j.bolt.protocol.common.connector.transport.ConnectorTransport;
 import org.neo4j.bolt.security.Authentication;
 import org.neo4j.bolt.tx.TransactionManager;
-import org.neo4j.configuration.connectors.BoltConnectorInternalSettings.ProtocolLoggingMode;
 import org.neo4j.dbms.routing.RoutingService;
 import org.neo4j.kernel.api.net.NetworkConnectionTracker;
 import org.neo4j.kernel.database.DefaultDatabaseResolver;
@@ -48,11 +45,7 @@ import org.neo4j.server.config.AuthConfigProvider;
  * Connector that uses netty's {@link io.netty.channel.local.LocalServerChannel} for intra-JVM
  * communication.
  */
-public class LocalNettyConnector extends AbstractNettyConnector<LocalConfiguration> {
-
-    private final ConnectorTransport transport;
-
-    private final InternalLogProvider internalLogProvider;
+public class LocalNettyConnector extends AbstractNettyConnector<LocalConnectorConfiguration> {
 
     public LocalNettyConnector(
             String id,
@@ -72,11 +65,12 @@ public class LocalNettyConnector extends AbstractNettyConnector<LocalConfigurati
             TransactionManager transactionManager,
             RoutingService routingService,
             ErrorAccountant errorAccountant,
+            ThreadAccountant threadAccountant,
             BoltDriverMetricsMonitor driverMetricsMonitor,
             InternalLogProvider userLogProvider,
             InternalLogProvider internalLogProvider,
-            ConnectorTransport connectorTransport,
-            LocalConfiguration configuration) {
+            ConnectorTransport transport,
+            LocalConnectorConfiguration configuration) {
         super(
                 id,
                 bindAddress,
@@ -85,6 +79,7 @@ public class LocalNettyConnector extends AbstractNettyConnector<LocalConfigurati
                 allocator,
                 bossGroup,
                 workerGroup,
+                transport,
                 connectionFactory,
                 connectionTracker,
                 protocolRegistry,
@@ -96,64 +91,15 @@ public class LocalNettyConnector extends AbstractNettyConnector<LocalConfigurati
                 routingService,
                 errorAccountant,
                 NoopTrafficAccountant.getInstance(),
+                threadAccountant,
                 driverMetricsMonitor,
                 configuration,
                 userLogProvider,
                 internalLogProvider);
-        this.transport = connectorTransport;
-        this.internalLogProvider = internalLogProvider;
     }
 
     @Override
-    protected Class<? extends ServerChannel> channelType() {
-        return transport.getLocalChannelType();
-    }
-
-    public static class LocalConfiguration extends NettyConfiguration {
-
-        public LocalConfiguration(
-                boolean enableProtocolCapture,
-                Path protocolCapturePath,
-                boolean enableProtocolLogging,
-                ProtocolLoggingMode protocolLoggingMode,
-                long maxAuthenticationInboundBytes,
-                int maxAuthenticationStructureElements,
-                int maxAuthenticationStructureDepth,
-                boolean enableOutboundBufferThrottle,
-                int outboundBufferThrottleLowWatermark,
-                int outboundBufferThrottleHighWatermark,
-                Duration outboundBufferThrottleDuration,
-                int inboundBufferThrottleLowWatermark,
-                int inboundBufferThrottleHighWatermark,
-                int streamingBufferSize,
-                int streamingFlushThreshold,
-                Duration connectionShutdownDuration,
-                boolean enableTransactionThreadBinding,
-                Duration threadBindingTimeout,
-                boolean enableMergeCumulator) {
-            super(
-                    enableProtocolCapture,
-                    protocolCapturePath,
-                    enableProtocolLogging,
-                    protocolLoggingMode,
-                    maxAuthenticationInboundBytes,
-                    maxAuthenticationStructureElements,
-                    maxAuthenticationStructureDepth,
-                    enableOutboundBufferThrottle,
-                    outboundBufferThrottleLowWatermark,
-                    outboundBufferThrottleHighWatermark,
-                    outboundBufferThrottleDuration,
-                    inboundBufferThrottleLowWatermark,
-                    inboundBufferThrottleHighWatermark,
-                    streamingBufferSize,
-                    streamingFlushThreshold,
-                    connectionShutdownDuration,
-                    enableTransactionThreadBinding,
-                    threadBindingTimeout,
-                    null, // Doesn't advertise address
-                    enableMergeCumulator,
-                    false, // Currently always disabled on local connector
-                    null);
-        }
+    public boolean supportsKeepAlive() {
+        return !this.configuration().enableJavaObjectMessages();
     }
 }

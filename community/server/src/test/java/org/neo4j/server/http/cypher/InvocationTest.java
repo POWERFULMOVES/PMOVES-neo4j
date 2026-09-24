@@ -59,14 +59,14 @@ import org.mockito.InOrder;
 import org.mockito.Mockito;
 import org.neo4j.bolt.protocol.common.connector.tx.TransactionOwner;
 import org.neo4j.bolt.protocol.common.fsm.response.ResponseHandler;
-import org.neo4j.bolt.protocol.common.message.AccessMode;
 import org.neo4j.bolt.testing.mock.MockResult;
 import org.neo4j.bolt.testing.mock.StatementMockFactory;
 import org.neo4j.bolt.tx.Transaction;
 import org.neo4j.bolt.tx.TransactionManager;
-import org.neo4j.bolt.tx.TransactionType;
 import org.neo4j.bolt.tx.error.TransactionException;
 import org.neo4j.bolt.tx.error.statement.StatementExecutionException;
+import org.neo4j.boltmessages.AccessMode;
+import org.neo4j.boltmessages.TransactionType;
 import org.neo4j.exceptions.SyntaxException;
 import org.neo4j.graphdb.security.AuthorizationViolationException;
 import org.neo4j.internal.kernel.api.connectioninfo.ClientConnectionInfo;
@@ -622,7 +622,7 @@ class InvocationTest {
                         nullable(Duration.class),
                         anyMap(),
                         nullable(NotificationConfiguration.class)))
-                .thenThrow(new AuthorizationViolationException("Forbidden"));
+                .thenThrow(AuthorizationViolationException.authorizationViolation("Forbidden"));
 
         when(registry.begin(any(TransactionHandle.class))).thenReturn(1337L);
         TransactionHandle handle = getTransactionHandle(registry);
@@ -659,7 +659,8 @@ class InvocationTest {
         // given
         String queryText = "matsch (n) return n";
         when(transaction.run(queryText, MapValue.EMPTY))
-                .thenThrow(new RuntimeException(new SyntaxException("did you mean MATCH?")));
+                .thenThrow(new RuntimeException(
+                        SyntaxException.internalError(this.getClass().getSimpleName(), "did you mean MATCH?")));
 
         when(registry.begin(any(TransactionHandle.class))).thenReturn(123L);
         TransactionHandle handle = getTransactionHandle(registry);
@@ -848,7 +849,8 @@ class InvocationTest {
     @Test
     void deadlockExceptionHasCorrectStatus() throws Throwable {
         // given
-        when(transaction.run("query", MapValue.EMPTY)).thenThrow(new DeadlockDetectedException("deadlock"));
+        when(transaction.run("query", MapValue.EMPTY))
+                .thenThrow(DeadlockDetectedException.deadlockDetected("deadlock"));
 
         when(registry.begin(any(TransactionHandle.class))).thenReturn(123L);
         TransactionHandle handle = getTransactionHandle(registry);
@@ -951,7 +953,8 @@ class InvocationTest {
 
         InputEventStream inputEventStream = mock(InputEventStream.class);
         when(inputEventStream.read())
-                .thenThrow(new InputFormatException("Cannot parse input", new IOException("JSON ERROR")));
+                .thenThrow(
+                        InputFormatException.jsonParingException("Cannot parse input", new IOException("JSON ERROR")));
 
         Invocation invocation = new Invocation(
                 log,

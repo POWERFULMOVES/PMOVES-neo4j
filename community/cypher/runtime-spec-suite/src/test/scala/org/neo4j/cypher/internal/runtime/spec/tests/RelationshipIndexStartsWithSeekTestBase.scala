@@ -28,6 +28,8 @@ import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.graphdb.RelationshipType
 import org.neo4j.graphdb.schema.IndexType
 
+object RelationshipIndexStartsWithSeekTestBase
+
 abstract class RelationshipIndexStartsWithSeekTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
@@ -48,7 +50,7 @@ abstract class RelationshipIndexStartsWithSeekTestBase[CONTEXT <: RuntimeContext
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("text")
       .projection("r.text AS text")
-      .relationshipIndexOperator("(x)-[r:R(text STARTS WITH 'ca')]->(y)", indexType = IndexType.TEXT)
+      .relationshipIndexOperator("()-[r:R(text STARTS WITH 'ca')]->()", indexType = IndexType.TEXT)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
@@ -72,7 +74,7 @@ abstract class RelationshipIndexStartsWithSeekTestBase[CONTEXT <: RuntimeContext
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("text")
       .projection("r.text AS text")
-      .relationshipIndexOperator("(x)-[r:R(text STARTS WITH 'ca')]-(y)", indexType = IndexType.TEXT)
+      .relationshipIndexOperator("()-[r:R(text STARTS WITH 'ca')]-()", indexType = IndexType.TEXT)
       .build()
 
     val runtimeResult = execute(logicalQuery, runtime)
@@ -96,7 +98,7 @@ abstract class RelationshipIndexStartsWithSeekTestBase[CONTEXT <: RuntimeContext
       .produceResults("text")
       .projection("r.text AS text")
       .relationshipIndexOperator(
-        "(x)-[r:R(text STARTS WITH ???)]->(y)",
+        "()-[r:R(text STARTS WITH ???)]->()",
         paramExpr = Some(nullLiteral),
         indexType = IndexType.TEXT
       )
@@ -122,7 +124,7 @@ abstract class RelationshipIndexStartsWithSeekTestBase[CONTEXT <: RuntimeContext
       .produceResults("text")
       .projection("r.text AS text")
       .relationshipIndexOperator(
-        "(x)-[r:R(text STARTS WITH ???)]-(y)",
+        "()-[r:R(text STARTS WITH ???)]-()",
         paramExpr = Some(nullLiteral),
         indexType = IndexType.TEXT
       )
@@ -148,7 +150,7 @@ abstract class RelationshipIndexStartsWithSeekTestBase[CONTEXT <: RuntimeContext
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("text")
       .projection("r.text AS text")
-      .relationshipIndexOperator("(x)-[r:R(text STARTS WITH 1337)]->(y)", indexType = IndexType.TEXT)
+      .relationshipIndexOperator("()-[r:R(text STARTS WITH 1337)]->()", indexType = IndexType.TEXT)
       .build()
 
     // then
@@ -169,7 +171,7 @@ abstract class RelationshipIndexStartsWithSeekTestBase[CONTEXT <: RuntimeContext
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("text")
       .projection("r.text AS text")
-      .relationshipIndexOperator("(x)-[r:R(text STARTS WITH 1337)]-(y)", indexType = IndexType.TEXT)
+      .relationshipIndexOperator("()-[r:R(text STARTS WITH 1337)]-()", indexType = IndexType.TEXT)
       .build()
 
     // then
@@ -247,7 +249,7 @@ abstract class RelationshipIndexStartsWithSeekTestBase[CONTEXT <: RuntimeContext
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("r")
-      .relationshipIndexOperator("(n)-[r:R(text STARTS WITH 'val')]-(m)", indexType = IndexType.TEXT)
+      .relationshipIndexOperator("()-[r:R(text STARTS WITH 'val')]-()", indexType = IndexType.TEXT)
       .build(readOnly = false)
 
     execute(logicalQuery, runtime) should beColumns("r").withSingleRow(rel)

@@ -21,9 +21,8 @@ package org.neo4j.cypher.internal.runtime.slotted.pipes
 
 import org.neo4j.cypher.internal.logical.plans.IndexOrder
 import org.neo4j.cypher.internal.runtime.ClosingIterator
-import org.neo4j.cypher.internal.runtime.ClosingLongIterator
+import org.neo4j.cypher.internal.runtime.ClosingRelationshipIterator
 import org.neo4j.cypher.internal.runtime.CypherRow
-import org.neo4j.cypher.internal.runtime.RelationshipIterator
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.CypherRowFactory
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.LazyType
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.LazyTypeStatic
@@ -33,11 +32,12 @@ import org.neo4j.cypher.internal.runtime.slotted.pipes.UndirectedRelationshipTyp
 import org.neo4j.cypher.internal.util.attribution.Id
 
 case class UndirectedRelationshipTypeScanSlottedPipe(
-  relOffset: Int,
-  fromOffset: Int,
+  relOffset: Option[Int],
+  fromOffset: Option[Int],
   typ: LazyTypeStatic,
-  toOffset: Int,
-  indexOrder: IndexOrder
+  toOffset: Option[Int],
+  indexOrder: IndexOrder,
+  includeChangesFromThisTransaction: Boolean
 )(val id: Id = Id.INVALID_ID) extends Pipe {
 
   protected def internalCreateResults(state: QueryState): ClosingIterator[CypherRow] = {
@@ -45,7 +45,12 @@ case class UndirectedRelationshipTypeScanSlottedPipe(
     if (typeId == LazyType.UNKNOWN) {
       ClosingIterator.empty
     } else {
-      val iterator = state.query.getRelationshipsByType(state.relTypeTokenReadSession.get, typeId, indexOrder)
+      val iterator = state.query.getRelationshipsByType(
+        state.relTypeTokenReadSession.get,
+        typeId,
+        indexOrder,
+        includeChangesFromThisTransaction
+      )
       new UndirectedIterator(iterator, relOffset, fromOffset, toOffset, rowFactory, state)
     }
   }
@@ -54,34 +59,31 @@ case class UndirectedRelationshipTypeScanSlottedPipe(
 object UndirectedRelationshipTypeScanSlottedPipe {
 
   class UndirectedIterator(
-    relIterator: ClosingLongIterator with RelationshipIterator,
-    relOffset: Int,
-    fromOffset: Int,
-    toOffset: Int,
+    relIterator: ClosingRelationshipIterator,
+    relOffset: Option[Int],
+    fromOffset: Option[Int],
+    toOffset: Option[Int],
     rowFactory: CypherRowFactory,
     state: QueryState
   ) extends ClosingIterator[CypherRow] {
     private var emitSibling = false
     private var lastRelationship: Long = -1L
-    private var lastStart: Long = -1L
-    private var lastEnd: Long = -1L
+
+    private val relationshipWriter = Relationships.compileRelationshipWriter(relOffset, fromOffset, toOffset)
 
     def next(): CypherRow = {
       val context = state.newRowWithArgument(rowFactory)
       if (emitSibling) {
         emitSibling = false
-        context.setLongAt(fromOffset, lastEnd)
-        context.setLongAt(toOffset, lastStart)
+        relationshipWriter.writeRow(context, lastRelationship, relIterator.endNodeId(), relIterator.startNodeId())
       } else {
         lastRelationship = relIterator.next()
-        lastStart = relIterator.startNodeId()
-        lastEnd = relIterator.endNodeId()
+        val lastStart = relIterator.startNodeId()
+        val lastEnd = relIterator.endNodeId()
         // For self-loops, we don't emit sibling
         emitSibling = lastStart != lastEnd
-        context.setLongAt(fromOffset, lastStart)
-        context.setLongAt(toOffset, lastEnd)
+        relationshipWriter.writeRow(context, lastRelationship, lastStart, lastEnd)
       }
-      context.setLongAt(relOffset, lastRelationship)
       context
     }
 

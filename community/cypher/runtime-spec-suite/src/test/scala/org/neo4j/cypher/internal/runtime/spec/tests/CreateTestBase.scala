@@ -34,17 +34,20 @@ import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RecordingRuntimeResult
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.exceptions.CypherTypeException
-import org.neo4j.exceptions.InternalException
+import org.neo4j.exceptions.InvalidArgumentException
 import org.neo4j.graphdb.Label.label
 import org.neo4j.graphdb.RelationshipType
 import org.neo4j.internal.helpers.collection.Iterables
 import org.neo4j.internal.helpers.collection.Iterators
 import org.neo4j.internal.kernel.api.exceptions.schema.IllegalTokenNameException
+import org.neo4j.kernel.api.exceptions.Status
 
 import scala.jdk.CollectionConverters.IterableHasAsJava
 import scala.jdk.CollectionConverters.IterableHasAsScala
 import scala.jdk.CollectionConverters.IteratorHasAsScala
 import scala.jdk.CollectionConverters.MapHasAsScala
+
+object CreateTestBase
 
 abstract class CreateTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
@@ -119,14 +122,31 @@ abstract class CreateTestBase[CONTEXT <: RuntimeContext](
       .input(variables = Seq("label"))
       .build(readOnly = false)
 
+    def theDynamicLabel(v: Any): Unit = consume(execute(logicalQuery, runtime, inputValues(Array(v))))
+
     // then
-    a[CypherTypeException] shouldBe thrownBy(consume(execute(logicalQuery, runtime, inputValues(Array(1)))))
-    an[IllegalTokenNameException] shouldBe thrownBy(consume(execute(logicalQuery, runtime, inputValues(Array("")))))
-    an[IllegalTokenNameException] shouldBe thrownBy(consume(execute(
-      logicalQuery,
-      runtime,
-      inputValues(Array("\u0000"))
-    )))
+    the[CypherTypeException] thrownBy theDynamicLabel(
+      1
+    ) should have message "Expected node label to be a string or list of strings."
+    the[CypherTypeException] thrownBy theDynamicLabel(
+      Array(1)
+    ) should have message "Expected node label to be a string or list of strings."
+    the[CypherTypeException] thrownBy theDynamicLabel(
+      null
+    ) should have message "Expected node label to be a string or list of strings."
+    val emptyStringException = the[IllegalTokenNameException] thrownBy theDynamicLabel("")
+    emptyStringException.getMessage should equal(
+      "'' is not a valid token name. Token names cannot be empty or contain any null-bytes."
+    )
+    emptyStringException.gqlStatus() should equal("42001")
+    emptyStringException.cause() should not be empty
+    val emptyStringExceptionCause = emptyStringException.cause().get()
+    emptyStringExceptionCause.gqlStatus() should equal("42I11")
+    emptyStringExceptionCause.statusDescription() should equal(
+      "error: syntax error or access rule violation - invalid name. A label name cannot be empty or contain any null-bytes: ''."
+    )
+
+    a[IllegalTokenNameException] shouldBe thrownBy(theDynamicLabel("\u0000"))
   }
 
   test("should create node with properties") {
@@ -368,7 +388,7 @@ abstract class CreateTestBase[CONTEXT <: RuntimeContext](
   }
 
   test("should create relationship with dynamic type") {
-    // given an empty data base
+    // given
     givenGraph {
       val n = tx.createNode(label("A"))
       n.setProperty("prop", "R")
@@ -389,6 +409,78 @@ abstract class CreateTestBase[CONTEXT <: RuntimeContext](
       relationshipsCreated = 1
     )
     relationship.getType.name() should equal("R")
+  }
+
+  test("should not incorrectly cache the dynamic relationship type!") {
+    // given
+    givenGraph {
+      tx.createNode()
+    }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("r")
+      .create(createRelationshipWithDynamicType("r", "n", "relType", "n", OUTGOING))
+      .cartesianProduct()
+      .|.allNodeScan("n")
+      .unwind("['B', 'C'] as relType")
+      .argument()
+      .build(readOnly = false)
+
+    // then
+    val runtimeResult = execute(logicalQuery, runtime)
+    consume(runtimeResult)
+
+    tx.getAllRelationships.asScala.map(_.getType.name()) should contain theSameElementsAs Seq("B", "C")
+  }
+
+  test("should throw the correct error if the dynamic type is invalid") {
+    // given
+    val nodes = givenGraph {
+      Seq(tx.createNode(label("A")), tx.createNode(label("B")))
+    }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("r")
+      .create(createRelationshipWithDynamicType("r", "a", "type", "b", OUTGOING))
+      .input(nodes = Seq("a", "b"), variables = Seq("type"))
+      .build(readOnly = false)
+
+    def theDynamicType(v: Any): Unit = consume(execute(logicalQuery, runtime, inputValues((nodes :+ v).toArray)))
+
+    // then
+    the[IllegalArgumentException] thrownBy theDynamicType(
+      Array[String]()
+    ) should have message "Exactly one relationship type must be specified, but 0 were found."
+    the[IllegalArgumentException] thrownBy theDynamicType(
+      Array[String]("C", "D")
+    ) should have message "Exactly one relationship type must be specified, but 2 were found."
+    the[IllegalArgumentException] thrownBy theDynamicType(
+      Array[String]("A", "A")
+    ) should have message "Exactly one relationship type must be specified, but 2 were found."
+    the[CypherTypeException] thrownBy theDynamicType(
+      1
+    ) should have message "Expected relationship type to be a string or list of strings."
+    the[CypherTypeException] thrownBy theDynamicType(
+      Array(1)
+    ) should have message "Expected relationship type to be a string or list of strings."
+    the[CypherTypeException] thrownBy theDynamicType(
+      null
+    ) should have message "Expected relationship type to be a string or list of strings."
+    a[IllegalTokenNameException] shouldBe thrownBy(theDynamicType(""))
+    val emptyStringException = the[IllegalTokenNameException] thrownBy theDynamicType("")
+    emptyStringException.getMessage should equal(
+      "'' is not a valid token name. Token names cannot be empty or contain any null-bytes."
+    )
+    emptyStringException.gqlStatus() should equal("42001")
+    emptyStringException.cause() should not be empty
+    val emptyStringExceptionCause = emptyStringException.cause().get()
+    emptyStringExceptionCause.gqlStatus() should equal("42I11")
+    emptyStringExceptionCause.statusDescription() should equal(
+      "error: syntax error or access rule violation - invalid name. A relationship type name cannot be empty or contain any null-bytes: ''."
+    )
+    a[IllegalTokenNameException] shouldBe thrownBy(theDynamicType("\u0000"))
   }
 
   test("should create relationship with null property") {
@@ -486,11 +578,14 @@ abstract class CreateTestBase[CONTEXT <: RuntimeContext](
       .input(nodes = Seq("n"))
       .build(readOnly = false)
 
-    the[InternalException] thrownBy consume(
+    val error = the[InvalidArgumentException] thrownBy consume(
       execute(logicalQuery, runtime, inputValues(Array[Any](null)))
-    ) should have message
+    )
+
+    error should have message
       "Failed to create relationship `r`, node `n` is missing. If you prefer to simply ignore rows where a relationship node is missing, " +
       "set 'dbms.cypher.lenient_create_relationship = true' in neo4j.conf"
+    error.status() shouldBe Status.Statement.ArgumentError
   }
 
   test("should fail to create relationship if start node is missing") {
@@ -503,11 +598,13 @@ abstract class CreateTestBase[CONTEXT <: RuntimeContext](
       .input(nodes = Seq("n"))
       .build(readOnly = false)
 
-    the[InternalException] thrownBy consume(
+    val error = the[InvalidArgumentException] thrownBy consume(
       execute(logicalQuery, runtime, inputValues(Array[Any](null)))
-    ) should have message
+    )
+    error should have message
       "Failed to create relationship `r`, node `n` is missing. If you prefer to simply ignore rows where a relationship node is missing, " +
       "set 'dbms.cypher.lenient_create_relationship = true' in neo4j.conf"
+    error.status() shouldBe Status.Statement.ArgumentError
   }
 
   test("should fail to create relationship if end node is missing") {
@@ -520,11 +617,13 @@ abstract class CreateTestBase[CONTEXT <: RuntimeContext](
       .input(nodes = Seq("m"))
       .build(readOnly = false)
 
-    the[InternalException] thrownBy consume(
+    val error = the[InvalidArgumentException] thrownBy consume(
       execute(logicalQuery, runtime, inputValues(Array[Any](null)))
-    ) should have message
+    )
+    error should have message
       "Failed to create relationship `r`, node `m` is missing. If you prefer to simply ignore rows where a relationship node is missing, " +
       "set 'dbms.cypher.lenient_create_relationship = true' in neo4j.conf"
+    error.status() shouldBe Status.Statement.ArgumentError
   }
 
   test("should create node with similarly named labels") {
@@ -829,7 +928,7 @@ abstract class CreateTestBase[CONTEXT <: RuntimeContext](
       .nonFuseable()
       .unwind(s"range(1, 10) AS r2")
       .create(createNode("o", "A", "B", "C"))
-      .directedRelationshipByIdSeek("r", "from", "to", Set.empty, rels.head.getId)
+      .relationshipByIdSeek("(from)-[r]->(to)", Set.empty, rels.head.getId)
       .build(readOnly = false)
 
     // then
@@ -852,7 +951,7 @@ abstract class CreateTestBase[CONTEXT <: RuntimeContext](
       .nonFuseable()
       .unwind(s"range(1, 10) AS r2")
       .create(createNode("o", "A", "B", "C"))
-      .directedRelationshipByIdSeek("r", "from", "to", Set.empty, rels.map(_.getId): _*)
+      .relationshipByIdSeek("(from)-[r]->(to)", Set.empty, rels.map(_.getId): _*)
       .build(readOnly = false)
 
     // then
@@ -875,7 +974,7 @@ abstract class CreateTestBase[CONTEXT <: RuntimeContext](
       .nonFuseable()
       .unwind(s"range(1, 10) AS r2")
       .create(createNode("o", "A", "B", "C"))
-      .undirectedRelationshipByIdSeek("r", "from", "to", Set.empty, rels.head.getId)
+      .relationshipByIdSeek("(from)-[r]-(to)", Set.empty, rels.head.getId)
       .build(readOnly = false)
 
     // then
@@ -898,7 +997,7 @@ abstract class CreateTestBase[CONTEXT <: RuntimeContext](
       .nonFuseable()
       .unwind(s"range(1, 10) AS r2")
       .create(createNode("o", "A", "B", "C"))
-      .undirectedRelationshipByIdSeek("r", "from", "to", Set.empty, rels.map(_.getId): _*)
+      .relationshipByIdSeek("(from)-[r]-(to)", Set.empty, rels.map(_.getId): _*)
       .build(readOnly = false)
 
     // then
@@ -1143,5 +1242,24 @@ abstract class LenientCreateRelationshipTestBase[CONTEXT <: RuntimeContext](
 
     val results = execute(logicalQuery, runtime, inputValues(Array[Any](null)))
     results should beColumns("r").withSingleRow(null).withStatistics(nodesCreated = 1, labelsAdded = 1)
+  }
+
+  test("should not fail on lenient merge + return null") {
+    assume(!isPipelined || canFuse)
+    // given an empty data base
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("r")
+      .apply()
+      .|.merge(relationships = Seq(createRelationship("r", "n", "R", "n", OUTGOING)))
+      .|.expand("(n)-[r]->(n)")
+      .|.argument("n")
+      .optional()
+      .allNodeScan("n")
+      .build(readOnly = false)
+
+    val results = execute(logicalQuery, runtime)
+    results should beColumns("r").withSingleRow(null).withNoUpdates()
   }
 }

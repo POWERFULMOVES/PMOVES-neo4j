@@ -25,10 +25,12 @@ import static org.mockito.Mockito.verify;
 import static org.neo4j.batchimport.api.input.Collector.STRICT;
 import static org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker.writable;
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.CursorContextFactory.NULL_CONTEXT_FACTORY;
 import static org.neo4j.io.pagecache.tracing.PageCacheTracer.NULL;
 import static org.neo4j.storageengine.api.StorageEngineFactory.defaultStorageEngine;
+import static org.neo4j.test.LatestVersions.LATEST_KERNEL_VERSION;
 import static org.neo4j.token.ReadOnlyTokenCreator.READ_ONLY;
 
 import java.io.IOException;
@@ -51,6 +53,7 @@ import org.neo4j.batchimport.api.input.Collector;
 import org.neo4j.batchimport.api.input.Group;
 import org.neo4j.configuration.Config;
 import org.neo4j.internal.batchimport.PopulationWorkJobScheduler;
+import org.neo4j.internal.batchimport.cache.idmapping.cuckoo.KeyCollisionException;
 import org.neo4j.internal.batchimport.input.Groups;
 import org.neo4j.internal.helpers.progress.ProgressMonitorFactory;
 import org.neo4j.internal.schema.IndexDescriptor;
@@ -76,7 +79,7 @@ import org.neo4j.kernel.lifecycle.LifeSupport;
 import org.neo4j.logging.internal.NullLogService;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.scheduler.JobScheduler;
-import org.neo4j.storageengine.api.IndexEntryUpdate;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.pagecache.PageCacheExtension;
 import org.neo4j.test.utils.TestDirectory;
@@ -95,7 +98,7 @@ class IndexIdMapperIT {
     private static final int ID_THRESHOLD = 1_000;
     private static final LongToObjectFunction<Object> ID_FUNCTION =
             id -> id < ID_THRESHOLD ? String.valueOf(id) : String.valueOf(id - ID_THRESHOLD);
-    private static final PropertyValueLookup ID_LOOKUP = () -> new PropertyValueLookup.Lookup() {
+    private static final PropertyValueLookup ID_LOOKUP = r -> new PropertyValueLookup.Lookup() {
         @Override
         public Object lookupProperty(long nodeId, MemoryTracker memoryTracker) {
             return ID_FUNCTION.valueOf(nodeId);
@@ -239,27 +242,29 @@ class IndexIdMapperIT {
         // then
         assertId(9, group1);
         assertId(123, group2);
-        verify(collector).collectDuplicateNode(ID_FUNCTION.valueOf(duplicateNode1), duplicateNode1, group1);
-        verify(collector).collectDuplicateNode(ID_FUNCTION.valueOf(duplicateNode2), duplicateNode2, group2);
+        verify(collector).collectDuplicateNode(ID_FUNCTION.valueOf(duplicateNode1), duplicateNode1, group1, null, 0L);
+        verify(collector).collectDuplicateNode(ID_FUNCTION.valueOf(duplicateNode2), duplicateNode2, group2, null, 0L);
         assertThat(asLongSet(idMapper.leftOverDuplicateNodesIds()))
                 .isEqualTo(LongSets.immutable.of(duplicateNode1, duplicateNode2));
     }
 
     @Test
-    void shouldFindNodesThatAreDuplicatesInTheIncrement() throws IOException, IndexEntryConflictException {
+    void shouldFindNodesThatAreDuplicatesInTheIncrement()
+            throws IOException, IndexEntryConflictException, KeyCollisionException {
         // given
         var group = groups.getOrCreate("group");
         buildInitialIndex(group, 1L, 0, 1, sequentialNodes(0, 100));
         start();
 
         // when
-        idMapper.put("110", 101, group);
-        idMapper.put("110", 102, group);
+        IdMapper.Setter setter = idMapper.newSetter(0);
+        setter.put("110", 101, group);
+        setter.put("110", 102, group);
         var collector = mock(Collector.class);
         prepare(collector);
 
         // then
-        verify(collector).collectDuplicateNode("110", 102, group);
+        verify(collector).collectDuplicateNode("110", 102, group, null, 0L);
     }
 
     @Test
@@ -292,17 +297,15 @@ class IndexIdMapperIT {
     }
 
     private void prepare(Collector collector) {
-        idMapper.completeBuild(collector, Runnable::run);
-        idMapper.validate(collector);
-        idMapper.prepare(ID_LOOKUP, collector, ProgressMonitorFactory.NONE);
+        idMapper.prepare(ID_LOOKUP, collector, ProgressMonitorFactory.NONE, LongSets.immutable.empty());
     }
 
-    private void put(long nodeId, Group group) {
-        idMapper.put(ID_FUNCTION.valueOf(nodeId), nodeId, group);
+    private void put(long nodeId, Group group) throws KeyCollisionException {
+        idMapper.newSetter(0).put(ID_FUNCTION.valueOf(nodeId), nodeId, group);
     }
 
     private void assertId(long nodeId, Group group) {
-        try (var getter = idMapper.newGetter()) {
+        try (var getter = idMapper.newGetter(0)) {
             assertThat(getter.get(ID_FUNCTION.valueOf(nodeId), group)).isEqualTo(nodeId);
         }
     }
@@ -318,7 +321,7 @@ class IndexIdMapperIT {
 
     private void buildInitialIndex(Group group, long indexId, int labelId, int propertyKeyId, Map<Object, Long> data)
             throws IOException, IndexEntryConflictException {
-        var indexProvider = indexProviders.getDefaultProvider();
+        var indexProvider = indexProviders.getDefaultProvider(LATEST_KERNEL_VERSION);
         var descriptor = IndexPrototype.uniqueForSchema(SchemaDescriptors.forLabel(labelId, propertyKeyId))
                 .withName(group.descriptiveName())
                 .withIndexProvider(indexProvider.getProviderDescriptor())
@@ -333,10 +336,11 @@ class IndexIdMapperIT {
                 indexingBehaviour);
         try (var updater = accessor.newUpdater(IndexUpdateMode.ONLINE, NULL_CONTEXT, false)) {
             for (var dataEntry : data.entrySet()) {
-                updater.process(IndexEntryUpdate.add(dataEntry.getValue(), descriptor, Values.of(dataEntry.getKey())));
+                updater.process(EagerValueIndexEntryUpdate.add(
+                        dataEntry.getValue(), descriptor, Values.of(dataEntry.getKey())));
             }
         }
-        accessor.force(FileFlushEvent.NULL, NULL_CONTEXT);
+        accessor.force(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
         accessors.put(group.name(), accessor);
         descriptors.put(group.name(), descriptor);
     }

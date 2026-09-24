@@ -21,30 +21,34 @@ package org.neo4j.kernel.api.impl.schema.trigram;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import org.apache.lucene.search.BooleanClause;
-import org.apache.lucene.search.BooleanQuery;
-import org.apache.lucene.search.Query;
-import org.apache.lucene.search.TotalHitCountCollector;
 import org.neo4j.internal.helpers.collection.BoundedIterable;
-import org.neo4j.internal.kernel.api.IndexQueryConstraints;
 import org.neo4j.internal.kernel.api.PropertyIndexQuery;
-import org.neo4j.internal.kernel.api.PropertyIndexQuery.ExactPredicate;
-import org.neo4j.internal.kernel.api.PropertyIndexQuery.StringContainsPredicate;
-import org.neo4j.internal.kernel.api.PropertyIndexQuery.StringPrefixPredicate;
-import org.neo4j.internal.kernel.api.PropertyIndexQuery.StringSuffixPredicate;
 import org.neo4j.internal.schema.IndexDescriptor;
+import org.neo4j.internal.schema.IndexQuery;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.kernel.api.impl.index.SearcherReference;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDocumentsFactory;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneQueryContext;
 import org.neo4j.kernel.api.impl.schema.AbstractTextIndexReader;
+import org.neo4j.kernel.api.impl.schema.LuceneQueryFactory;
 import org.neo4j.kernel.api.index.IndexSampler;
 import org.neo4j.kernel.impl.index.schema.IndexUsageTracking;
+import org.neo4j.logging.LogProvider;
 import org.neo4j.util.Preconditions;
 import org.neo4j.values.storable.Value;
 
 public class TrigramIndexReader extends AbstractTextIndexReader {
     TrigramIndexReader(
-            SearcherReference searcherReference, IndexDescriptor descriptor, IndexUsageTracking usageTracker) {
-        super(descriptor, searcherReference, usageTracker);
+            SearcherReference searcherReference,
+            IndexDescriptor descriptor,
+            IndexUsageTracking usageTracker,
+            LogProvider logProvider) {
+        super(
+                descriptor,
+                searcherReference,
+                usageTracker,
+                LuceneQueryFactory.TrigramQueryFactory.INSTANCE,
+                logProvider);
     }
 
     @Override
@@ -53,38 +57,13 @@ public class TrigramIndexReader extends AbstractTextIndexReader {
     }
 
     @Override
-    protected Query toLuceneQuery(PropertyIndexQuery predicate, IndexQueryConstraints constraints) {
-        return switch (predicate.type()) {
-            case ALL_ENTRIES -> TrigramQueryFactory.allValues();
-            case EXACT -> {
-                final var value =
-                        ((ExactPredicate) predicate).value().asObject().toString();
-                yield TrigramQueryFactory.exact(value);
-            }
-            case STRING_PREFIX -> {
-                final var spp = (StringPrefixPredicate) predicate;
-                yield TrigramQueryFactory.stringPrefix(spp.prefix().stringValue());
-            }
-            case STRING_CONTAINS -> {
-                final var scp = (StringContainsPredicate) predicate;
-                yield TrigramQueryFactory.stringContains(scp.contains().stringValue());
-            }
-            case STRING_SUFFIX -> {
-                final var ssp = (StringSuffixPredicate) predicate;
-                yield TrigramQueryFactory.stringSuffix(ssp.suffix().stringValue());
-            }
-            default -> throw invalidQuery(IllegalArgumentException::new, predicate);
-        };
-    }
-
-    @Override
     protected String entityIdFieldKey() {
-        return TrigramDocumentStructure.ENTITY_ID_KEY;
+        return LuceneDocumentsFactory.ENTITY_ID_KEY;
     }
 
     @Override
     protected boolean needStoreFilter(PropertyIndexQuery predicate) {
-        return TrigramQueryFactory.needStoreFilter(predicate);
+        return !predicate.type().equals(IndexQuery.IndexQueryType.ALL_ENTRIES);
     }
 
     /**
@@ -98,33 +77,28 @@ public class TrigramIndexReader extends AbstractTextIndexReader {
     @Override
     public long countIndexedEntities(
             long entityId, CursorContext cursorContext, int[] propertyKeyIds, Value... propertyValues) {
-        final var entityIdQuery = TrigramQueryFactory.getById(entityId);
-
-        final var entityIdAndValueQuery = new BooleanQuery.Builder();
-        entityIdAndValueQuery.add(entityIdQuery, BooleanClause.Occur.MUST);
+        LuceneQueryContext queryContext = getIndexSearcher().newQueryContext();
+        queryContext.addMustTerm(LuceneDocumentsFactory.ENTITY_ID_KEY, String.valueOf(entityId));
 
         Preconditions.checkState(
                 propertyKeyIds.length == 1,
                 "Text index does not support composite indexing. Tried to query index with multiple property keys.");
-        final var value = propertyValues[0].asObject().toString();
-        final var valueQuery = TrigramQueryFactory.exact(value);
-        entityIdAndValueQuery.add(valueQuery, BooleanClause.Occur.MUST);
+        String value = propertyValues[0].asObject().toString();
+        queryContext.addExactTrigram(value);
 
         try {
-            final var collector = new TotalHitCountCollector();
-            getIndexSearcher().search(entityIdAndValueQuery.build(), collector);
+            return getIndexSearcher().count(queryContext);
             // A <label,propertyKeyId,nodeId> tuple should only match at most a single propertyValue
-            return collector.getTotalHits();
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
     }
 
-    BoundedIterable<Long> newAllEntriesValueReader(long fromIdInclusive, long toIdExclusive) throws IOException {
+    BoundedIterable<Long> newAllEntriesValueReader(long fromIdInclusive, long toIdExclusive) {
         return newAllEntriesValueReaderForPartition(
-                TrigramDocumentStructure.ENTITY_ID_KEY,
+                LuceneDocumentsFactory.ENTITY_ID_KEY,
                 getIndexSearcher(),
-                TrigramQueryFactory.allValues(),
+                getIndexSearcher().newQueryContext().matchAll(),
                 fromIdInclusive,
                 toIdExclusive);
     }

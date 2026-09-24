@@ -19,12 +19,13 @@
  */
 package org.neo4j.cypher.internal.compiler.planner.logical.cardinality.assumeIndependence
 
-import org.neo4j.cypher.internal.compiler.planner.logical.idp.extractQPPPredicates
+import org.neo4j.cypher.internal.compiler.planner.logical.idp.extractQppPredicates
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.ir.NodeConnection
 import org.neo4j.cypher.internal.ir.PatternRelationship
 import org.neo4j.cypher.internal.ir.QuantifiedPathPattern
 import org.neo4j.cypher.internal.ir.SelectivePathPattern
+import org.neo4j.cypher.internal.logical.plans.TraversalPathMode
 import org.neo4j.cypher.internal.util.Cardinality
 import org.neo4j.cypher.internal.util.Multiplier
 
@@ -38,7 +39,8 @@ trait NodeConnectionCardinalityModel
     predicates: QueryGraphPredicates,
     boundNodesAndArguments: BoundNodesAndArguments,
     nodeConnection: NodeConnection,
-    coveredIdsForPattern: Set[LogicalVariable]
+    coveredIdsForPattern: Set[LogicalVariable],
+    pathMode: TraversalPathMode
   ): (BoundNodesAndArguments, Multiplier) =
     nodeConnection match {
       case relationship: PatternRelationship =>
@@ -65,10 +67,15 @@ trait NodeConnectionCardinalityModel
       case quantifiedPathPattern: QuantifiedPathPattern =>
         val qppWithExtractedPredicates = {
           val extractedPredicates =
-            extractQPPPredicates(
+            extractQppPredicates(
               predicates.otherPredicates.map(_.expr).toSeq,
               quantifiedPathPattern.variableGroupings,
-              coveredIdsForPattern ++ boundNodesAndArguments.argumentIds
+              coveredIdsForPattern ++ boundNodesAndArguments.argumentIds,
+              // both Unique and IsRepeatTrailUnique are mapped to a selectivity of one in PatternRelationshipMultiplierCalculator,
+              // so this should not matter. But it would technically be false in the case of shortest path queries if that should be used with this
+              insideRepeat = false,
+              // always assume that the processing starts from the LHS
+              repeatStartNode = quantifiedPathPattern.getGroupVariable(quantifiedPathPattern.leftBinding.inner)
             )
 
           quantifiedPathPattern.copy(selections =
@@ -86,7 +93,10 @@ trait NodeConnectionCardinalityModel
             predicates.allLabelInfo,
             qppWithExtractedPredicates,
             predicates.uniqueRelationships,
-            boundaryNodePredicates
+            predicates.uniqueNodes,
+            boundaryNodePredicates,
+            predicates.otherPredicates,
+            pathMode
           )
         boundNodesAndArguments.bindEndpoints(context, predicates, quantifiedPathPattern, cardinality)
 

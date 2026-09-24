@@ -21,17 +21,19 @@ package org.neo4j.io.pagecache;
 
 import static org.eclipse.collections.impl.factory.Sets.immutable;
 import static org.neo4j.io.pagecache.impl.muninn.EvictionBouncer.ALWAYS_ALLOW;
+import static org.neo4j.io.pagecache.segment.FileSegmentTracker.EMPTY_FILE_TRACKER;
 
 import java.io.IOException;
 import java.nio.file.OpenOption;
-import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.List;
 import java.util.Optional;
 import org.eclipse.collections.api.set.ImmutableSet;
 import org.neo4j.io.pagecache.buffer.IOBufferFactory;
 import org.neo4j.io.pagecache.impl.muninn.EvictionBouncer;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.impl.muninn.VersionStorage;
+import org.neo4j.io.pagecache.segment.FileSegmentTracker;
 import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
 
 /**
@@ -54,21 +56,67 @@ public interface PageCache extends AutoCloseable {
     int RESERVED_BYTES = Long.BYTES * 2;
 
     /**
+     * Ask for a handle to a paged file, backed by an empty set of file open options and page size equal to the page cache page size.
+     * <p>
+     * Note that this currently asks for the pageSize to use, which is an artifact or records being
+     * of varying size in the stores. This should be consolidated to use a standard page size for the
+     * whole cache, with records aligning on those page boundaries.
+     *
+     * @param storeFile The file to map.
+     * @param databaseName name of the database mapped file belongs to
+     * @throws java.nio.file.NoSuchFileException if the given file does not exist.
+     * @throws IOException if the file could otherwise not be mapped. Causes include the file being locked.
+     */
+    default PagedFile map(StoreFile storeFile, String databaseName) throws IOException {
+        return map(storeFile, databaseName, immutable.empty());
+    }
+
+    /**
      * Ask for a handle to a paged file, backed by an empty set of file open options.
      * <p>
      * Note that this currently asks for the pageSize to use, which is an artifact or records being
      * of varying size in the stores. This should be consolidated to use a standard page size for the
      * whole cache, with records aligning on those page boundaries.
      *
-     * @param path The file to map.
+     * @param storeFile The file to map.
      * @param pageSize The file page size to use for this mapping. If the file is already mapped with a different page
      * size, an exception will be thrown.
      * @param databaseName name of the database mapped file belongs to
      * @throws java.nio.file.NoSuchFileException if the given file does not exist.
      * @throws IOException if the file could otherwise not be mapped. Causes include the file being locked.
      */
-    default PagedFile map(Path path, int pageSize, String databaseName) throws IOException {
-        return map(path, pageSize, databaseName, immutable.empty());
+    default PagedFile map(StoreFile storeFile, int pageSize, String databaseName) throws IOException {
+        return map(storeFile, pageSize, databaseName, immutable.empty());
+    }
+
+    /**
+     * Ask for a handle to a paged file with a page size equal to the page cache page size.
+     * <p>
+     *
+     * @param storeFile The file to map.
+     * @param databaseName name of the database mapped file belongs to
+     * @param openOptions The set of open options to use for mapping this file.
+     * The {@link StandardOpenOption#READ} and {@link StandardOpenOption#WRITE} options always implicitly specified.
+     * The {@link StandardOpenOption#CREATE} open option will create the given file if it does not already exist, and
+     * the {@link StandardOpenOption#TRUNCATE_EXISTING} will truncate any existing file <em>iff</em> it has not already
+     * been mapped.
+     * The {@link StandardOpenOption#DELETE_ON_CLOSE} will cause the file to be deleted after the last unmapping.
+     * All other options are either silently ignored, or will cause an exception to be thrown.
+     * @throws java.nio.file.NoSuchFileException if the given file does not exist, and the
+     * {@link StandardOpenOption#CREATE} option was not specified.
+     * @throws IOException if the file could otherwise not be mapped. Causes include the file being locked.
+     */
+    default PagedFile map(StoreFile storeFile, String databaseName, ImmutableSet<OpenOption> openOptions)
+            throws IOException {
+        return map(
+                storeFile,
+                pageSize(),
+                databaseName,
+                openOptions,
+                IOController.DISABLED,
+                ALWAYS_ALLOW,
+                VersionStorage.EMPTY_STORAGE,
+                EMPTY_FILE_TRACKER);
     }
 
     /**
@@ -78,7 +126,7 @@ public interface PageCache extends AutoCloseable {
      * of varying size in the stores. This should be consolidated to use a standard page size for the
      * whole cache, with records aligning on those page boundaries.
      *
-     * @param path The file to map.
+     * @param storeFile The file to map.
      * @param pageSize The file page size to use for this mapping. If the file is already mapped with a different page
      * size, an exception will be thrown.
      * @param databaseName name of the database mapped file belongs to
@@ -93,26 +141,67 @@ public interface PageCache extends AutoCloseable {
      * {@link StandardOpenOption#CREATE} option was not specified.
      * @throws IOException if the file could otherwise not be mapped. Causes include the file being locked.
      */
-    default PagedFile map(Path path, int pageSize, String databaseName, ImmutableSet<OpenOption> openOptions)
+    default PagedFile map(StoreFile storeFile, int pageSize, String databaseName, ImmutableSet<OpenOption> openOptions)
             throws IOException {
         return map(
-                path,
+                storeFile,
                 pageSize,
                 databaseName,
                 openOptions,
                 IOController.DISABLED,
                 ALWAYS_ALLOW,
-                VersionStorage.EMPTY_STORAGE);
+                VersionStorage.EMPTY_STORAGE,
+                EMPTY_FILE_TRACKER);
+    }
+
+    /**
+     * Ask for a handle to a paged file, backed by this page cache with a page size equal to the page cache page size.
+     * <p>
+     *
+     * @param storeFile The file to map.
+     * @param databaseName an name of the database the mapped file belongs to. This option associates the mapped file with a database.
+     * @param openOptions The set of open options to use for mapping this file.
+     * The {@link StandardOpenOption#READ} and {@link StandardOpenOption#WRITE} options always implicitly specified.
+     * The {@link StandardOpenOption#CREATE} open option will create the given file if it does not already exist, and
+     * the {@link StandardOpenOption#TRUNCATE_EXISTING} will truncate any existing file <em>iff</em> it has not already
+     * been mapped.
+     * The {@link StandardOpenOption#DELETE_ON_CLOSE} will cause the file to be deleted after the last unmapping.
+     * All other options are either silently ignored, or will cause an exception to be thrown.
+     * @param ioController database specific io controller
+     * @throws java.nio.file.NoSuchFileException if the given file does not exist, and the
+     * {@link StandardOpenOption#CREATE} option was not specified.
+     * @throws IOException if the file could otherwise not be mapped. Causes include the file being locked.
+     */
+    default PagedFile map(
+            StoreFile storeFile, String databaseName, ImmutableSet<OpenOption> openOptions, IOController ioController)
+            throws IOException {
+        return map(
+                storeFile,
+                pageSize(),
+                databaseName,
+                openOptions,
+                ioController,
+                ALWAYS_ALLOW,
+                VersionStorage.EMPTY_STORAGE,
+                EMPTY_FILE_TRACKER);
     }
 
     default PagedFile map(
-            Path path,
+            StoreFile storeFile,
             int pageSize,
             String databaseName,
             ImmutableSet<OpenOption> openOptions,
             IOController ioController)
             throws IOException {
-        return map(path, pageSize, databaseName, openOptions, ioController, ALWAYS_ALLOW, VersionStorage.EMPTY_STORAGE);
+        return map(
+                storeFile,
+                pageSize,
+                databaseName,
+                openOptions,
+                ioController,
+                ALWAYS_ALLOW,
+                VersionStorage.EMPTY_STORAGE,
+                EMPTY_FILE_TRACKER);
     }
 
     /**
@@ -122,7 +211,7 @@ public interface PageCache extends AutoCloseable {
      * of varying size in the stores. This should be consolidated to use a standard page size for the
      * whole cache, with records aligning on those page boundaries.
      *
-     * @param path The file to map.
+     * @param storeFile The file to map.
      * @param pageSize The file page size to use for this mapping. If the file is already mapped with a different page
      * size, an exception will be thrown.
      * @param databaseName an name of the database the mapped file belongs to. This option associates the mapped file with a database.
@@ -139,13 +228,14 @@ public interface PageCache extends AutoCloseable {
      * @throws IOException if the file could otherwise not be mapped. Causes include the file being locked.
      */
     PagedFile map(
-            Path path,
+            StoreFile storeFile,
             int pageSize,
             String databaseName,
             ImmutableSet<OpenOption> openOptions,
             IOController ioController,
             EvictionBouncer evictionBouncer,
-            VersionStorage versionStorage)
+            VersionStorage versionStorage,
+            FileSegmentTracker segmentTracker)
             throws IOException;
 
     /**
@@ -153,18 +243,18 @@ public interface PageCache extends AutoCloseable {
      * <p>
      * If mapping exist, the returned {@link Optional} will report {@link Optional#isPresent()} true and
      * {@link Optional#get()} will return the same {@link PagedFile} instance that was initially returned by
-     * {@link #map(Path, int, String, ImmutableSet)}.
+     * {@link #map(StoreFile, int, String, ImmutableSet)}.
      * If no mapping exist for this file, then returned {@link Optional} will report {@link Optional#isPresent()}
      * false.
      * <p>
      * <strong>NOTE:</strong> The calling code is responsible for closing the returned paged file, if any.
      *
-     * @param path The file to try to get the mapped paged file for.
+     * @param storeFile The file to try to get the mapped paged file for.
      * @return {@link Optional} containing the {@link PagedFile} mapped by this {@link PageCache} for given file, or an
      * empty {@link Optional} if no mapping exist.
      * @throws IOException if page cache has been closed or page eviction problems occur.
      */
-    Optional<PagedFile> getExistingMapping(Path path) throws IOException;
+    Optional<PagedFile> getExistingMapping(StoreFile storeFile) throws IOException;
 
     /**
      * List a snapshot of the current file mappings.
@@ -203,6 +293,11 @@ public interface PageCache extends AutoCloseable {
      * The size in bytes of the pages managed by this cache.
      */
     int pageSize();
+
+    /**
+     * Number of reserved bytes in pages when file is mapped with provided options.
+     */
+    int pagePayloadSize(ImmutableSet<OpenOption> openOptions);
 
     /**
      * Number of reserved bytes in pages when file is mapped with provided options.

@@ -16,13 +16,13 @@
  */
 package org.neo4j.cypher.internal.rewriting
 
+import org.neo4j.cypher.internal.CypherVersionHelpers
 import org.neo4j.cypher.internal.ast.Statement
-import org.neo4j.cypher.internal.ast.semantics.SemanticCheckContext
 import org.neo4j.cypher.internal.ast.semantics.SemanticState
+import org.neo4j.cypher.internal.rewriting.rewriters.astRewriters.DesugarMapProjection
 import org.neo4j.cypher.internal.rewriting.rewriters.computeDependenciesForExpressions
-import org.neo4j.cypher.internal.rewriting.rewriters.desugarMapProjection
-import org.neo4j.cypher.internal.rewriting.rewriters.normalizeWithAndReturnClauses
-import org.neo4j.cypher.internal.util.OpenCypherExceptionFactory
+import org.neo4j.cypher.internal.rewriting.rewriters.preparatoryRewriters.NormalizeWithAndReturnClauses
+import org.neo4j.cypher.internal.util.Neo4jCypherExceptionFactory
 import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.inSequence
 import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
@@ -78,13 +78,16 @@ class DesugarDesugaredMapProjectionTest extends CypherFunSuite with AstRewriting
   def assertRewrite(originalQuery: String, expectedQuery: String): Unit = {
     test(originalQuery + " is rewritten to " + expectedQuery) {
       def rewrite(q: String): Statement = {
-        val exceptionFactory = OpenCypherExceptionFactory(None)
-        val sequence: Rewriter = inSequence(normalizeWithAndReturnClauses(exceptionFactory))
+        val version = CypherVersionHelpers.arbitrarySemanticContext()
+        val exceptionFactory = Neo4jCypherExceptionFactory(originalQuery, None)
+        val sequence: Rewriter =
+          inSequence(NormalizeWithAndReturnClauses(exceptionFactory, Some(version.cypherVersion)))
         val originalAst = parse(q, exceptionFactory).endoRewrite(sequence)
-        val semanticCheckResult = originalAst.semanticCheck.run(SemanticState.clean, SemanticCheckContext.default)
+        val semanticCheckResult =
+          originalAst.semanticCheck.run(SemanticState.clean, version)
         val withScopes = originalAst.endoRewrite(computeDependenciesForExpressions(semanticCheckResult.state))
 
-        withScopes.endoRewrite(desugarMapProjection.instance)
+        withScopes.endoRewrite(DesugarMapProjection.instance)
       }
 
       val rewrittenOriginal = rewrite(originalQuery)

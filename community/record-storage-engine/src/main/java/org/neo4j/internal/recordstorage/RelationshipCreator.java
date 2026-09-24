@@ -97,7 +97,7 @@ public class RelationshipCreator {
             RecordAccessSet recordChanges,
             DegreeUpdater groupDegreesUpdater,
             NodeDataLookup nodeDataLookup) {
-        creations.forEach((id, type, start, end, addedProps, changedProps, removedProps) ->
+        creations.forEach((id, type, start, end, addedProps, removedProps) ->
                 relationshipCreate(id, type, start, end, recordChanges, groupDegreesUpdater, nodeDataLookup));
     }
 
@@ -177,9 +177,13 @@ public class RelationshipCreator {
 
         if (!firstNode.isDense()) {
             rel.setFirstNextRel(firstNode.getNextRel());
+        } else {
+            rel.setFirstNodeIsGuaranteedDense(true);
         }
         if (!secondNode.isDense()) {
             rel.setSecondNextRel(secondNode.getNextRel());
+        } else {
+            rel.setSecondNodeIsGuaranteedDense(true);
         }
 
         boolean loop = firstNode.getId() == secondNode.getId();
@@ -263,6 +267,9 @@ public class RelationshipCreator {
             relId = relRecord.getNextRel(node.getId());
             relRecord.setPrevRel(NO_NEXT_RELATIONSHIP.longValue(), node.getId());
             relRecord.setNextRel(NO_NEXT_RELATIONSHIP.longValue(), node.getId());
+
+            relRecord.setDense(node.getId());
+
             connectRelationshipToDenseNode(
                     nodeChange,
                     relRecord,

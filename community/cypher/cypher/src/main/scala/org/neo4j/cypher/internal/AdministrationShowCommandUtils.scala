@@ -19,7 +19,9 @@
  */
 package org.neo4j.cypher.internal
 
+import org.neo4j.cypher.internal.ast.AddedInRewriteGeneral
 import org.neo4j.cypher.internal.ast.AliasedReturnItem
+import org.neo4j.cypher.internal.ast.FreeProjection
 import org.neo4j.cypher.internal.ast.OrderBy
 import org.neo4j.cypher.internal.ast.ProjectionClause
 import org.neo4j.cypher.internal.ast.Return
@@ -34,13 +36,15 @@ import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.runtime.ast.ParameterFromSlot
 import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.util.Stringifier.backtick
 
 object AdministrationShowCommandUtils {
 
-  private val prettifier = Prettifier(ExpressionStringifier {
-    case ParameterFromSlot(_, name, _) => s"$$${ExpressionStringifier.backtick(name)}"
+  private val intermediatePrettifier: Prettifier = Prettifier(ExpressionStringifier {
+    case ParameterFromSlot(_, name, _) => s"$$${backtick(name)}"
     case expression                    => ExpressionStringifier.failingExtender(expression)
-  }).IndentingQueryPrettifier()
+  })
+  private val prettifier = intermediatePrettifier.IndentingQueryPrettifier()
 
   private def genDefaultOrderBy(columns: List[String], defaultOrder: Seq[String]): Option[OrderBy] =
     defaultOrder.filter(columns.contains) match {
@@ -106,21 +110,43 @@ object AdministrationShowCommandUtils {
 
     val clauses = (yieldColumns, returnColumns) match {
       // YIELD with WHERE and no RETURN so convert YIELD / WHERE to WITH and YIELD to RETURN
-      case (Some(y @ Yield(returnItems, orderBy, skip, limit, Some(where))), None) =>
+      case (Some(y @ Yield(returnItems, orderBy, skip, limit, Some(where), _)), None) =>
         Seq(
-          With(distinct = false, returnItems, orderBy, skip, limit, Some(where))(y.position),
-          Return(distinct = false, generateReturnItemsFromAliases(returnItems), orderBy, skip, limit)(y.position)
+          With(
+            distinct = false,
+            returnItems,
+            None,
+            orderBy,
+            skip,
+            limit,
+            Some(where),
+            withType = AddedInRewriteGeneral()
+          )(y.position),
+          Return(distinct = false, generateReturnItemsFromAliases(returnItems), None, orderBy, skip, limit)(y.position)
         )
       // YIELD with no WHERE so convert YIELD to RETURN
-      case (Some(y @ Yield(returnItems, orderBy, skip, limit, None)), None) =>
-        Seq(Return(distinct = false, returnItems, orderBy, skip, limit)(y.position))
+      case (Some(y @ Yield(returnItems, orderBy, skip, limit, None, _)), None) =>
+        Seq(Return(distinct = false, returnItems, None, orderBy, skip, limit)(y.position))
       // YIELD and RETURN so convert YIELD to WITH, and keep the RETURN
-      case (Some(y @ Yield(returnItems, orderBy, skip, limit, where)), Some(returnClause)) =>
-        Seq(With(distinct = false, returnItems, orderBy, skip, limit, where)(y.position), returnClause)
+      case (Some(y @ Yield(returnItems, orderBy, skip, limit, where, _)), Some(returnClause)) =>
+        Seq(
+          With(
+            distinct = false,
+            returnItems,
+            None,
+            orderBy,
+            skip,
+            limit,
+            where,
+            withType = AddedInRewriteGeneral()
+          )(y.position),
+          returnClause
+        )
       // No YIELD or RETURN so just make up a RETURN with everything
       case (None, _) => Seq(Return(
           distinct = false,
-          ReturnItems(includeExisting = false, symbolsToReturnItems(defaultSymbols.map(_.name)))(InputPosition.NONE),
+          ReturnItems(FreeProjection, symbolsToReturnItems(defaultSymbols.map(_.name)))(InputPosition.NONE),
+          None,
           genDefaultOrderBy(defaultSymbols.map(_.name), defaultOrder),
           None,
           None

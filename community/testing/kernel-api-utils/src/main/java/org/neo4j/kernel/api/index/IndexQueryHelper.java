@@ -20,9 +20,8 @@
 package org.neo4j.kernel.api.index;
 
 import org.neo4j.internal.kernel.api.PropertyIndexQuery;
-import org.neo4j.internal.schema.SchemaDescriptorSupplier;
-import org.neo4j.storageengine.api.IndexEntryUpdate;
-import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
+import org.neo4j.internal.schema.IndexDescriptor;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.Values;
 
@@ -37,31 +36,27 @@ public final class IndexQueryHelper {
         return PropertyIndexQuery.exact(propertyKeyId, value);
     }
 
-    public static ValueIndexEntryUpdate<SchemaDescriptorSupplier> add(
-            long nodeId, SchemaDescriptorSupplier schema, Object... objects) {
-        return IndexEntryUpdate.add(nodeId, schema, toValues(objects));
+    public static EagerValueIndexEntryUpdate add(long nodeId, IndexDescriptor schema, Object... objects) {
+        return EagerValueIndexEntryUpdate.add(nodeId, schema, toValues(objects));
     }
 
-    public static ValueIndexEntryUpdate<SchemaDescriptorSupplier> remove(
-            long nodeId, SchemaDescriptorSupplier schema, Object... objects) {
-        return IndexEntryUpdate.remove(nodeId, schema, toValues(objects));
+    public static EagerValueIndexEntryUpdate remove(long nodeId, IndexDescriptor schema, Object... objects) {
+        return EagerValueIndexEntryUpdate.remove(nodeId, schema, toValues(objects));
     }
 
-    public static ValueIndexEntryUpdate<SchemaDescriptorSupplier> change(
-            long nodeId, SchemaDescriptorSupplier schema, Object o1, Object o2) {
-        return IndexEntryUpdate.change(nodeId, schema, Values.of(o1), Values.of(o2));
+    public static EagerValueIndexEntryUpdate change(long nodeId, IndexDescriptor schema, Object o1, Object o2) {
+        return EagerValueIndexEntryUpdate.change(nodeId, schema, Values.of(o1), Values.of(o2));
     }
 
-    public static ValueIndexEntryUpdate<SchemaDescriptorSupplier> change(
-            long nodeId, SchemaDescriptorSupplier schema, Object[] o1, Object[] o2) {
-        return IndexEntryUpdate.change(nodeId, schema, toValues(o1), toValues(o2));
+    public static EagerValueIndexEntryUpdate change(long nodeId, IndexDescriptor schema, Object[] o1, Object[] o2) {
+        return EagerValueIndexEntryUpdate.change(nodeId, schema, toValues(o1), toValues(o2));
     }
 
     private static Value[] toValues(Object[] objects) {
         Value[] values = new Value[objects.length];
         for (int i = 0; i < objects.length; i++) {
             Object object = objects[i];
-            values[i] = object instanceof Value ? (Value) object : Values.of(object);
+            values[i] = object instanceof Value v ? v : Values.of(object);
         }
         return values;
     }

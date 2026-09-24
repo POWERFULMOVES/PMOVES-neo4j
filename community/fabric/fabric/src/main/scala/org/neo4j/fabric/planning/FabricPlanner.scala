@@ -19,23 +19,26 @@
  */
 package org.neo4j.fabric.planning
 
-import org.neo4j.cypher.internal.FullyParsedQuery
-import org.neo4j.cypher.internal.PreParsedQuery
-import org.neo4j.cypher.internal.QueryOptions
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.CatalogName
 import org.neo4j.cypher.internal.cache.CacheSize
 import org.neo4j.cypher.internal.cache.CaffeineCacheFactory
+import org.neo4j.cypher.internal.cache.CypherQueryCaches.CacheStrategy
 import org.neo4j.cypher.internal.config.CypherConfiguration
-import org.neo4j.cypher.internal.frontend.phases.InternalSyntaxUsageStats
-import org.neo4j.cypher.internal.frontend.phases.InternalSyntaxUsageStatsNoOp
+import org.neo4j.cypher.internal.frontend.phases.InternalUsageStats
+import org.neo4j.cypher.internal.frontend.phases.InternalUsageStatsNoOp
 import org.neo4j.cypher.internal.frontend.phases.ProcedureSignatureResolver
 import org.neo4j.cypher.internal.frontend.phases.QueryLanguage
 import org.neo4j.cypher.internal.frontend.phases.ScopedProcedureSignatureResolver
+import org.neo4j.cypher.internal.notification.InternalNotificationLogger
+import org.neo4j.cypher.internal.notification.RecordingNotificationLogger
 import org.neo4j.cypher.internal.options.CypherExpressionEngineOption
 import org.neo4j.cypher.internal.options.CypherRuntimeOption
+import org.neo4j.cypher.internal.options.CypherVersionOption
+import org.neo4j.cypher.internal.preparser.FullyParsedQuery
+import org.neo4j.cypher.internal.preparser.PreParsedQuery
+import org.neo4j.cypher.internal.preparser.QueryOptions
 import org.neo4j.cypher.internal.util.CancellationChecker
-import org.neo4j.cypher.internal.util.InternalNotificationLogger
-import org.neo4j.cypher.internal.util.RecordingNotificationLogger
 import org.neo4j.cypher.rendering.QueryOptionsRenderer
 import org.neo4j.fabric.cache.FabricQueryCache
 import org.neo4j.fabric.config.FabricConfig
@@ -55,10 +58,10 @@ case class FabricPlanner(
   monitors: Monitors,
   cacheFactory: CaffeineCacheFactory
 ) {
-
   private[planning] val queryCache = new FabricQueryCache(cacheFactory, CacheSize.Dynamic(cypherConfig.queryCacheSize))
 
-  private val frontend = FabricFrontEnd(cypherConfig, monitors, cacheFactory)
+  private val frontend = FabricFrontEnd(cypherConfig, () => config.getProfiling.enabled, monitors, cacheFactory)
+  private val initialCacheStrategy = CacheStrategy.default.withConfig(cypherConfig)
 
   /**
    * Convenience method without cancellation checker or InternalSyntaxUsageStats. Should be used for tests only.
@@ -68,7 +71,9 @@ case class FabricPlanner(
     queryString: String,
     queryParams: MapValue,
     sessionDatabase: DatabaseReference,
-    catalog: Catalog
+    catalog: Catalog,
+    defaultLanguage: CypherVersion,
+    shadowedFunctions: Set[String]
   ): PlannerInstance =
     instance(
       signatureResolver,
@@ -76,8 +81,10 @@ case class FabricPlanner(
       queryParams,
       sessionDatabase,
       catalog,
-      InternalSyntaxUsageStatsNoOp,
-      CancellationChecker.NeverCancelled
+      InternalUsageStatsNoOp,
+      CancellationChecker.NeverCancelled,
+      defaultLanguage,
+      shadowedFunctions
     )
 
   def instance(
@@ -86,15 +93,21 @@ case class FabricPlanner(
     queryParams: MapValue,
     sessionDatabase: DatabaseReference,
     catalog: Catalog,
-    internalSyntaxUsageStats: InternalSyntaxUsageStats,
-    cancellationChecker: CancellationChecker
+    internalSyntaxUsageStats: InternalUsageStats,
+    cancellationChecker: CancellationChecker,
+    defaultLanguage: CypherVersion,
+    shadowedFunctions: Set[String]
   ): PlannerInstance = {
     val notificationLogger = new RecordingNotificationLogger()
-    val query = frontend.preParsing.preParse(queryString, notificationLogger)
+
+    val query = frontend.preParsing.preParse(queryString, notificationLogger, defaultLanguage, initialCacheStrategy)
+    val cacheStrategy = initialCacheStrategy
+      .updateFromQueryText(query.statement)
+      .updateFromQueryOptions(query.options.queryOptions)
     PlannerInstance(
       ScopedProcedureSignatureResolver.from(
         signatureResolver,
-        QueryLanguage.from(query.options.queryOptions.cypherVersion.actualVersion)
+        QueryLanguage.from(query.resolvedLanguage)
       ),
       query,
       queryParams,
@@ -102,7 +115,28 @@ case class FabricPlanner(
       catalog,
       cancellationChecker,
       notificationLogger,
-      internalSyntaxUsageStats
+      internalSyntaxUsageStats,
+      shadowedFunctions,
+      cacheStrategy
+    )
+  }
+
+  def testInstance(
+    signatureResolver: ProcedureSignatureResolver,
+    queryString: String,
+    queryParams: MapValue,
+    sessionDatabase: DatabaseReference,
+    catalog: Catalog,
+    defaultLanguage: CypherVersion
+  ): PlannerInstance = {
+    instance(
+      signatureResolver,
+      queryString,
+      queryParams,
+      sessionDatabase,
+      catalog,
+      defaultLanguage,
+      Set.empty
     )
   }
 
@@ -114,7 +148,9 @@ case class FabricPlanner(
     catalog: Catalog,
     cancellationChecker: CancellationChecker,
     notificationLogger: InternalNotificationLogger,
-    internalSyntaxUsageStats: InternalSyntaxUsageStats
+    internalSyntaxUsageStats: InternalUsageStats,
+    shadowedFunctions: Set[String],
+    cacheStrategy: CacheStrategy
   ) {
 
     private lazy val pipeline =
@@ -125,7 +161,8 @@ case class FabricPlanner(
         cancellationChecker,
         notificationLogger,
         internalSyntaxUsageStats,
-        sessionDatabase
+        sessionDatabase,
+        shadowedFunctions
       )
 
     private val useHelper = new UseHelper(catalog, sessionDatabase.alias().name())
@@ -133,14 +170,20 @@ case class FabricPlanner(
     private val sessionDatabaseAlias: String = sessionDatabase.alias().name()
 
     lazy val plan: FabricPlan = {
-      val plan = queryCache.computeIfAbsent(
-        query.cacheKey,
-        queryParams,
-        sessionDatabaseAlias,
-        () => computePlan(),
-        shouldCache,
-        cypherConfig.useParameterSizeHint
-      )
+      val plan =
+        if (cacheStrategy.astShouldBeCached) {
+          queryCache.computeIfAbsent(
+            query.cacheKey,
+            queryParams,
+            sessionDatabaseAlias,
+            () => computePlan(),
+            shouldCache,
+            cypherConfig.useParameterSizeHint
+          )
+        } else {
+          computePlan()
+        }
+
       plan.copy(
         executionType = frontend.preParsing.executionType(query.options, plan.inCompositeContext),
         queryOptionsOffset = query.options.offset
@@ -151,7 +194,7 @@ case class FabricPlanner(
       val prepared = pipeline.parseAndPrepare.process()
 
       val fragmenter =
-        new FabricFragmenter(sessionDatabaseAlias, query.statement, prepared.statement(), prepared.semantics())
+        new FabricFragmenter(sessionDatabaseAlias, prepared.statement(), prepared.semantics())
       val fragments = fragmenter.fragment
 
       val compositeContext = useHelper.rootTargetsCompositeContext(fragments)
@@ -160,7 +203,7 @@ case class FabricPlanner(
         FabricStitcher(
           query.statement,
           compositeContext,
-          query.options.queryOptions.cypherVersion.actualVersion,
+          query.resolvedLanguage,
           pipeline,
           useHelper
         )
@@ -175,24 +218,38 @@ case class FabricPlanner(
         obfuscationMetadata = prepared.obfuscationMetadata(),
         inCompositeContext = compositeContext,
         internalNotifications = pipeline.internalNotifications,
-        queryOptionsOffset = query.options.offset
+        queryOptionsOffset = query.options.offset,
+        maybeResolvedParameters = prepared.maybeResolvedParams
       )
     }
 
     private def shouldCache(plan: FabricPlan): Boolean =
-      !QueryType.sensitive(plan.query)
+      !QueryType.sensitive(plan.query) && plan.maybeResolvedParameters.isEmpty
 
-    private def optionsFor(fragment: Fragment) =
-      if (useHelper.fragmentTargetsCompositeContext(fragment))
-        QueryOptions.default.copy(
-          queryOptions = QueryOptions.default.queryOptions.copy(
+    private def optionsFor(fragment: Fragment) = {
+      val languageOption = query.resolvedLanguage match {
+        case CypherVersion.Cypher5  => CypherVersionOption.cypher5
+        case CypherVersion.Cypher25 => CypherVersionOption.cypher25
+      }
+      if (useHelper.fragmentTargetsCompositeContext(fragment)) {
+        val defaultOptions = QueryOptions.default(cypherConfig, query.resolvedLanguage)
+        defaultOptions.copy(
+          queryOptions = defaultOptions.queryOptions.copy(
             runtime = CypherRuntimeOption.slotted,
-            expressionEngine = CypherExpressionEngineOption.interpreted
+            expressionEngine = CypherExpressionEngineOption.interpreted,
+            cypherVersion = languageOption,
+            executionMode = query.options.queryOptions.executionMode
           ),
-          materializedEntitiesMode = true
+          materializedEntitiesMode = true,
+          defaultLanguage = query.resolvedLanguage
         )
-      else
-        query.options
+      } else {
+        query.options.copy(
+          queryOptions = query.options.queryOptions.copy(cypherVersion = languageOption),
+          defaultLanguage = query.resolvedLanguage
+        )
+      }
+    }
 
     private def trace(compute: => FabricPlan): FabricPlan = {
       val event = pipeline.traceStart()
@@ -200,10 +257,16 @@ case class FabricPlanner(
       finally event.close()
     }
 
-    def asLocal(fragment: Fragment.Exec): LocalQuery = LocalQuery(
-      FullyParsedQuery(fragment.localQuery, optionsFor(fragment)),
-      fragment.queryType
-    )
+    def asLocal(fragment: Fragment.Exec, compositeContext: Boolean): LocalQuery = {
+      val localQuery = pipeline.checkAndFinalize.process(
+        fragment.query,
+        useFullQueryText = !compositeContext
+      )
+      LocalQuery(
+        FullyParsedQuery(localQuery, optionsFor(fragment)),
+        fragment.queryType
+      )
+    }
 
     def asRemote(fragment: Fragment.Exec): RemoteQuery = RemoteQuery(
       QueryOptionsRenderer.addOptions(fragment.remoteQuery.query, optionsFor(fragment)),
@@ -218,8 +281,10 @@ case class FabricPlanner(
 
 class UseHelper(catalog: Catalog, defaultContextName: String) {
 
-  def rootTargetsCompositeContext(fragment: Fragment): Boolean =
-    isComposite(CatalogName(defaultContextName)) || fragmentTargetsCompositeContext(fragment)
+  def rootTargetsCompositeContext(fragment: Fragment): Boolean = {
+    // always resolve root databases strictly
+    isComposite(CatalogName(true, defaultContextName)) || fragmentTargetsCompositeContext(fragment)
+  }
 
   def fragmentTargetsCompositeContext(fragment: Fragment): Boolean = {
     def check(frag: Fragment): Boolean = frag match {

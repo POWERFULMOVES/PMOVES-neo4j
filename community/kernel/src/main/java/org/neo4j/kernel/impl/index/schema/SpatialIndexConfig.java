@@ -26,6 +26,8 @@ import static org.neo4j.values.storable.CoordinateReferenceSystem.WGS_84_3D;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Map.Entry;
+import org.neo4j.exceptions.InvalidArgumentException;
 import org.neo4j.gis.spatial.index.Envelope;
 import org.neo4j.graphdb.schema.IndexSettingImpl;
 import org.neo4j.graphdb.schema.IndexSettingUtil;
@@ -53,8 +55,8 @@ public final class SpatialIndexConfig {
      */
     static void addSpatialConfig(
             Map<String, Value> map, CoordinateReferenceSystem crs, SpaceFillingCurveSettings settings) {
-        double[] min = settings.indexExtents().getMin();
-        double[] max = settings.indexExtents().getMax();
+        double[] min = settings.indexExtents().min();
+        double[] max = settings.indexExtents().max();
         addSpatialConfig(map, crs, min, max);
     }
 
@@ -77,7 +79,7 @@ public final class SpatialIndexConfig {
             IndexConfig indexConfig, CoordinateReferenceSystem crs, SpaceFillingCurveSettings settings) {
         Map<String, Value> spatialConfig = new HashMap<>();
         addSpatialConfig(spatialConfig, crs, settings);
-        for (var entry : spatialConfig.entrySet()) {
+        for (Entry<String, Value> entry : spatialConfig.entrySet()) {
             indexConfig = indexConfig.withIfAbsent(entry.getKey(), entry.getValue());
         }
         return indexConfig;
@@ -103,19 +105,20 @@ public final class SpatialIndexConfig {
 
     private static SpaceFillingCurveSettings settingFromIndexConfig(
             IndexConfig indexConfig, CoordinateReferenceSystem crs) {
-        final double[] min = asDoubleArray(
-                indexConfig.get(IndexSettingUtil.spatialMinSettingForCrs(crs).getSettingName()));
-        final double[] max = asDoubleArray(
-                indexConfig.get(IndexSettingUtil.spatialMaxSettingForCrs(crs).getSettingName()));
-        final Envelope envelope = new Envelope(min, max);
+        String minSettingName = IndexSettingUtil.spatialMinSettingForCrs(crs).getSettingName();
+        String maxSettingName = IndexSettingUtil.spatialMaxSettingForCrs(crs).getSettingName();
+        double[] min = asDoubleArray(indexConfig.get(minSettingName), minSettingName);
+        double[] max = asDoubleArray(indexConfig.get(maxSettingName), maxSettingName);
+        Envelope envelope = new Envelope(min, max);
         return new SpaceFillingCurveSettings(crs.getDimension(), envelope);
     }
 
-    private static double[] asDoubleArray(Value value) {
+    private static double[] asDoubleArray(Value value, String settingName) {
         if (value instanceof DoubleArray) {
             return ((DoubleArray) value).asObjectCopy();
+        } else {
+            throw InvalidArgumentException.invalidType(
+                    settingName, value.prettyPrint(), "DoubleArray", value.getTypeName());
         }
-        throw new IllegalStateException(
-                String.format("Expected value to be of type %s but was %s.", DoubleArray.class, value));
     }
 }

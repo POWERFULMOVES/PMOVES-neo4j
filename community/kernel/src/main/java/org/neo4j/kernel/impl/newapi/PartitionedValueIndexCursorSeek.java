@@ -33,7 +33,7 @@ public class PartitionedValueIndexCursorSeek<Cursor extends org.neo4j.internal.k
     private final PropertyIndexQuery[] query;
     private final IndexDescriptor descriptor;
 
-    PartitionedValueIndexCursorSeek(
+    public PartitionedValueIndexCursorSeek(
             IndexDescriptor descriptor, PartitionedValueSeek valueSeek, PropertyIndexQuery... query) {
         this.descriptor = descriptor;
         this.valueSeek = valueSeek;
@@ -47,10 +47,13 @@ public class PartitionedValueIndexCursorSeek<Cursor extends org.neo4j.internal.k
 
     @Override
     public boolean reservePartition(Cursor cursor, ExecutionContext executionContext) {
-        final var indexCursor = (DefaultEntityValueIndexCursor<?>) cursor;
+        DefaultEntityValueIndexCursor<?> indexCursor = (DefaultEntityValueIndexCursor<?>) cursor;
         indexCursor.initState(
-                executionContext.dataRead(), executionContext.txStateHolder(), executionContext.accessModeProvider());
-        final var indexProgressor = valueSeek.reservePartition(indexCursor, executionContext.cursorContext());
+                executionContext.dataRead(),
+                executionContext.txStateHolder(),
+                executionContext.accessModeProvider(),
+                true);
+        IndexProgressor indexProgressor = valueSeek.reservePartition(indexCursor, executionContext.cursorContext());
         if (indexProgressor == IndexProgressor.EMPTY) {
             return false;
         }

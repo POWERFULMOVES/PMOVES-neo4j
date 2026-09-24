@@ -20,7 +20,7 @@ import org.neo4j.cypher.internal.util.InputPosition
 
 case class NumberType(isNullable: Boolean)(val position: InputPosition) extends CypherType {
   val parentType: AnyType = CTAny
-  override val toString = "Number"
+  override val toClassString = "Number"
   override val toCypherTypeString = "NUMBER"
 
   override def normalizedCypherTypeString(): String = {
@@ -32,7 +32,7 @@ case class NumberType(isNullable: Boolean)(val position: InputPosition) extends 
 
   override def hasCypherParserSupport: Boolean = false
 
-  override def hasValueRepresentation: Boolean = true
+  override def couldBeStoredInProperty: Boolean = true
 
   override def withIsNullable(isNullable: Boolean): CypherType = this.copy(isNullable = isNullable)(position)
 

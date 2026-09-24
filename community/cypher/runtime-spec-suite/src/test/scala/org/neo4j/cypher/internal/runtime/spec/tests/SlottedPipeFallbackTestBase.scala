@@ -29,6 +29,8 @@ import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.cypher.result.OperatorProfile
 import org.neo4j.exceptions.HintException
 
+object SlottedPipeFallbackTestBase
+
 abstract class SlottedPipeFallbackTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
@@ -165,7 +167,7 @@ abstract class SlottedPipeFallbackTestBase[CONTEXT <: RuntimeContext](
     val runtimeResult = execute(logicalQuery, runtime)
 
     // then
-    val expected = rels.map { _ => Array(null) }
+    val expected = rels.map { _ => Array[Any](null) }
     runtimeResult should beColumns("foo").withRows(expected)
   }
 
@@ -175,7 +177,7 @@ abstract class SlottedPipeFallbackTestBase[CONTEXT <: RuntimeContext](
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("x")
-      .errorPlan(new HintException("hello"))
+      .errorPlan(HintException.internalError(this.getClass.getSimpleName, "hello"))
       .allNodeScan("x")
       .build()
 

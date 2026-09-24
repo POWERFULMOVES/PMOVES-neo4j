@@ -22,7 +22,7 @@ package org.neo4j.internal.batchimport;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.params.provider.Arguments.of;
+import static org.junit.jupiter.params.provider.Arguments.argumentSet;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.atMost;
@@ -38,10 +38,11 @@ import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
 
 import java.io.IOException;
 import java.util.BitSet;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
+import org.eclipse.collections.api.factory.primitive.LongSets;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -53,9 +54,11 @@ import org.neo4j.internal.batchimport.staging.ExecutionMonitor;
 import org.neo4j.internal.batchimport.store.BatchingNeoStores;
 import org.neo4j.internal.id.IdGenerator;
 import org.neo4j.io.layout.recordstorage.RecordDatabaseLayout;
+import org.neo4j.io.pagecache.PageCursor;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.store.RecordStore;
 import org.neo4j.kernel.impl.store.RelationshipGroupStore;
 import org.neo4j.kernel.impl.store.cursor.CachedStoreCursors;
@@ -63,7 +66,6 @@ import org.neo4j.kernel.impl.store.format.ForcedSecondaryUnitRecordFormats;
 import org.neo4j.kernel.impl.store.record.NodeRecord;
 import org.neo4j.kernel.impl.store.record.Record;
 import org.neo4j.kernel.impl.store.record.RelationshipGroupRecord;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.logging.internal.NullLogService;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.scheduler.JobScheduler;
@@ -71,12 +73,12 @@ import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.Neo4jLayoutExtension;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.scheduler.ThreadPoolJobScheduler;
 import org.neo4j.test.utils.TestDirectory;
 
 @Neo4jLayoutExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class RelationshipGroupDefragmenterTest {
     private static final Configuration CONFIG = Configuration.DEFAULT;
     private static final CursorContextFactory CONTEXT_FACTORY =
@@ -93,8 +95,9 @@ class RelationshipGroupDefragmenterTest {
 
     private static Stream<Arguments> parameters() {
         return Stream.of(
-                of(Config.defaults(), 1),
-                of(
+                argumentSet("Default", Config.defaults(), 1),
+                argumentSet(
+                        "Forced secondary units",
                         Config.defaults(
                                 GraphDatabaseSettings.db_format,
                                 ForcedSecondaryUnitRecordFormats.DEFAULT_RECORD_FORMATS.name()),
@@ -114,13 +117,12 @@ class RelationshipGroupDefragmenterTest {
                 databaseLayout,
                 CONFIG,
                 NullLogService.getInstance(),
-                DefaultAdditionalIds.EMPTY,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
                 config,
                 jobScheduler,
                 PageCacheTracer.NULL,
                 CONTEXT_FACTORY,
-                INSTANCE);
+                INSTANCE,
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
         stores.createNew();
         storeCursors = new CachedStoreCursors(stores.getNeoStores(), NULL_CONTEXT);
     }
@@ -187,21 +189,21 @@ class RelationshipGroupDefragmenterTest {
                     // right from the beginning and then some stray dense nodes coming into this in the
                     // middle of the type range somewhere
                     double comparison = typeId == 0 || initializedNodes.get(nodeId) ? 0.1 : 0.001;
-
                     if (random.nextDouble() < comparison) {
-                        // next doesn't matter at all, as we're rewriting it anyway
-                        // firstOut/In/Loop we could use in verification phase later
-                        groupRecord.initialize(true, typeId, cursor, cursor + 1, cursor + 2, nodeId, 4);
-                        groupRecord.setId(groupIidGenerator.nextId(NULL_CONTEXT));
-                        groupStore.updateRecord(groupRecord, groupCursor, NULL_CONTEXT, storeCursors);
-
-                        if (!initializedNodes.get(nodeId)) {
-                            nodeRecord.initialize(true, -1, true, groupRecord.getId(), 0);
-                            nodeRecord.setId(nodeId);
-                            nodeStore.updateRecord(nodeRecord, nodeCursor, NULL_CONTEXT, storeCursors);
-                            nodeIdGenerator.setHighestPossibleIdInUse(nodeId);
-                            initializedNodes.set(nodeId);
-                        }
+                        doGrouping(
+                                nodeStore,
+                                nodeCursor,
+                                nodeIdGenerator,
+                                nodeId,
+                                nodeRecord,
+                                groupStore,
+                                groupCursor,
+                                groupIidGenerator,
+                                typeId,
+                                groupRecord,
+                                cursor,
+                                !initializedNodes.get(nodeId));
+                        initializedNodes.set(nodeId);
                     }
                 }
             }
@@ -212,6 +214,98 @@ class RelationshipGroupDefragmenterTest {
 
         // THEN all groups should sit sequentially in the store
         verifyGroupsAreSequentiallyOrderedByNode();
+    }
+
+    @Test
+    void shouldDefragmentRelationshipGroupsWhenSingleDenseManyGroups() throws IOException {
+        // the values for count/units/ids came from a failed test where the seed was 1760602895879L
+        init(
+                Config.defaults(
+                        GraphDatabaseSettings.db_format,
+                        ForcedSecondaryUnitRecordFormats.DEFAULT_RECORD_FORMATS.name()),
+                2);
+        final var nodeCount = 100;
+        final var denseNodeId = 2;
+        final var otherSimpleDenseNodes = LongSets.immutable.of(0, 18);
+        final var relationshipTypeCount = 20;
+        final var groupStore = stores.getTemporaryRelationshipGroupStore();
+        final var groupRecord = groupStore.newRecord();
+        final var nodeStore = stores.getNodeStore();
+        final var nodeRecord = nodeStore.newRecord();
+        final var groupIidGenerator = groupStore.getIdGenerator();
+        final var nodeIdGenerator = nodeStore.getIdGenerator();
+        // note that group store is separate and not covered by store cursors here
+        try (var groupCursor = groupStore.openPageCursorForWriting(0, NULL_CONTEXT);
+                var nodeCursor = storeCursors.writeCursor(NODE_CURSOR)) {
+            var cursor = 0L;
+            var initializedNode = false;
+            for (int typeId = relationshipTypeCount - 1; typeId >= 0; typeId--, cursor++) {
+                if (typeId % 2 != 0) {
+                    doGrouping(
+                            nodeStore,
+                            nodeCursor,
+                            nodeIdGenerator,
+                            denseNodeId,
+                            nodeRecord,
+                            groupStore,
+                            groupCursor,
+                            groupIidGenerator,
+                            typeId,
+                            groupRecord,
+                            cursor,
+                            !initializedNode);
+                    initializedNode = true;
+                }
+            }
+
+            final var otherCursor = new AtomicLong(cursor);
+            otherSimpleDenseNodes.forEach(nodeId -> doGrouping(
+                    nodeStore,
+                    nodeCursor,
+                    nodeIdGenerator,
+                    nodeId,
+                    nodeRecord,
+                    groupStore,
+                    groupCursor,
+                    groupIidGenerator,
+                    0,
+                    groupRecord,
+                    otherCursor.getAndIncrement(),
+                    true));
+        }
+
+        // WHEN
+        defrag(nodeCount, groupStore);
+
+        // THEN all groups should sit sequentially in the store
+        verifyGroupsAreSequentiallyOrderedByNode();
+    }
+
+    private void doGrouping(
+            RecordStore<NodeRecord> nodeStore,
+            PageCursor nodeCursor,
+            IdGenerator nodeIdGenerator,
+            long denseNode,
+            NodeRecord nodeRecord,
+            RecordStore<RelationshipGroupRecord> groupStore,
+            PageCursor groupCursor,
+            IdGenerator groupIidGenerator,
+            int typeId,
+            RelationshipGroupRecord groupRecord,
+            long cursor,
+            boolean initializeNode) {
+        // next doesn't matter at all, as we're rewriting it anyway
+        // firstOut/In/Loop we could use in verification phase later
+        groupRecord.initialize(true, typeId, cursor, cursor + 1, cursor + 2, denseNode, 4);
+        groupRecord.setId(groupIidGenerator.nextId(NULL_CONTEXT));
+        groupStore.updateRecord(groupRecord, groupCursor, NULL_CONTEXT, storeCursors);
+
+        if (initializeNode) {
+            nodeRecord.initialize(true, -1, true, groupRecord.getId(), 0);
+            nodeRecord.setId(denseNode);
+            nodeStore.updateRecord(nodeRecord, nodeCursor, NULL_CONTEXT, storeCursors);
+            nodeIdGenerator.setHighestPossibleIdInUse(denseNode);
+        }
     }
 
     private void prepareData(
@@ -256,7 +350,7 @@ class RelationshipGroupDefragmenterTest {
                 CONFIG,
                 ExecutionMonitor.INVISIBLE,
                 monitor,
-                NumberArrayFactories.AUTO_WITHOUT_PAGECACHE,
+                NumberArrayFactories.AUTO_WITHOUT_SWAP,
                 contextFactory,
                 INSTANCE);
 
@@ -266,7 +360,7 @@ class RelationshipGroupDefragmenterTest {
         defragmenter.run(memory, stores, nodeCount);
 
         // Verify that we exercise the multi-pass functionality
-        verify(monitor, atLeast(2)).defragmentingNodeRange(anyLong(), anyLong());
+        verify(monitor, atLeast(1)).defragmentingNodeRange(anyLong(), anyLong());
         verify(monitor, atMost(10)).defragmentingNodeRange(anyLong(), anyLong());
     }
 

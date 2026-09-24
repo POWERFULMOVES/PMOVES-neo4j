@@ -19,36 +19,123 @@
  */
 package org.neo4j.internal.kernel.api.security;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.internal.kernel.api.connectioninfo.ClientConnectionInfo;
+import org.neo4j.internal.kernel.api.security.AbstractSecurityLog.ContextInfo;
 
 public class AbstractSecurityLogTest {
+
+    @Test
+    public void testOnlyMessage() {
+        AbstractSecurityLog.SecurityLogLine ll = new AbstractSecurityLog.SecurityLogLine("message");
+
+        StringBuilder sb = new StringBuilder();
+        ll.formatAsString(sb);
+        assertThat(sb).hasToString("message");
+    }
 
     @Test
     public void testSecurityLogLineAsString() {
 
         AbstractSecurityLog.SecurityLogLine ll = new AbstractSecurityLog.SecurityLogLine(
-                ClientConnectionInfo.EMBEDDED_CONNECTION, "database", "executingUser", "message", "authUser");
+                new ContextInfo(ClientConnectionInfo.EMBEDDED_CONNECTION, "database", "authUser", "executingUser"),
+                "message",
+                GqlStatusInfoCodes.STATUS_42NFF.getGqlStatus());
 
         StringBuilder sb = new StringBuilder();
         ll.formatAsString(sb);
-        assertEquals("[authUser:executingUser]: message", sb.toString());
+        assertThat(sb).hasToString("[authUser:executingUser]: Exception thrown, 42NFF: message");
+    }
+
+    @Test
+    public void testSecurityLogLineSameUserAsString() {
+
+        AbstractSecurityLog.SecurityLogLine ll = new AbstractSecurityLog.SecurityLogLine(
+                new ContextInfo(ClientConnectionInfo.EMBEDDED_CONNECTION, "database", "user", "user"),
+                "message",
+                GqlStatusInfoCodes.STATUS_42NFF.getGqlStatus());
+
+        StringBuilder sb = new StringBuilder();
+        ll.formatAsString(sb);
+        assertThat(sb).hasToString("[user]: Exception thrown, 42NFF: message");
+    }
+
+    @Test
+    public void testSecurityLogLineAsStringWithoutOptionalValues() {
+
+        AbstractSecurityLog.SecurityLogLine ll = new AbstractSecurityLog.SecurityLogLine(
+                new ContextInfo(ClientConnectionInfo.EMBEDDED_CONNECTION, "database", null, null), "message", null);
+
+        StringBuilder sb = new StringBuilder();
+        ll.formatAsString(sb);
+        assertThat(sb).hasToString("message");
+    }
+
+    @Test
+    public void testSecurityLogLineAsStringWithoutConnectionInfo() {
+
+        AbstractSecurityLog.SecurityLogLine ll = new AbstractSecurityLog.SecurityLogLine(
+                new ContextInfo(ClientConnectionInfo.EMBEDDED_CONNECTION, "database", null, null),
+                "message",
+                GqlStatusInfoCodes.STATUS_42NFF.getGqlStatus());
+
+        StringBuilder sb = new StringBuilder();
+        ll.formatAsString(sb);
+        assertThat(sb).hasToString("Exception thrown, 42NFF: message");
+    }
+
+    @Test
+    public void testSecurityLogLineAsStringWithoutExceptionThrown() {
+
+        AbstractSecurityLog.SecurityLogLine ll = new AbstractSecurityLog.SecurityLogLine(
+                new ContextInfo(ClientConnectionInfo.EMBEDDED_CONNECTION, "database", "authUser", "executingUser"),
+                "message",
+                null);
+
+        StringBuilder sb = new StringBuilder();
+        ll.formatAsString(sb);
+        assertThat(sb).hasToString("[authUser:executingUser]: message");
     }
 
     @Test
     public void testSecurityLogLineAsStringHandlesNewlines() {
 
         AbstractSecurityLog.SecurityLogLine ll = new AbstractSecurityLog.SecurityLogLine(
-                ClientConnectionInfo.EMBEDDED_CONNECTION,
-                "database",
-                "executingUser",
+                new ContextInfo(ClientConnectionInfo.EMBEDDED_CONNECTION, "database", "authUser", "executingUser"),
                 "message1\nmessage2\r\nmessage3",
-                "authUser");
+                GqlStatusInfoCodes.STATUS_42NFF.getGqlStatus());
 
         StringBuilder sb = new StringBuilder();
         ll.formatAsString(sb);
-        assertEquals("[authUser:executingUser]: message1 message2 message3", sb.toString());
+        assertThat(sb).hasToString("[authUser:executingUser]: Exception thrown, 42NFF: message1 message2 message3");
+    }
+
+    @Test
+    public void testNewlinesScrubbedFromFormattedArguments() {
+        AbstractSecurityLog.SecurityLogLine ll =
+                new AbstractSecurityLog.SecurityLogLine("message %s", new Object[] {"line1\nline2\r\nline3"});
+
+        StringBuilder sb = new StringBuilder();
+        ll.formatAsString(sb);
+        assertThat(sb).hasToString("message line1 line2 line3");
+    }
+
+    @Test
+    public void testMapPopulatedOnAccess() {
+        AbstractSecurityLog.SecurityLogLine ll = new AbstractSecurityLog.SecurityLogLine(
+                new ContextInfo(ClientConnectionInfo.EMBEDDED_CONNECTION, "database", "authUser", "executingUser"),
+                "message %d",
+                new Object[] {42},
+                GqlStatusInfoCodes.STATUS_42NFF.getGqlStatus());
+
+        assertThat(ll.get("type")).isEqualTo("security");
+        assertThat(ll.get("database")).isEqualTo("database");
+        assertThat(ll.get("executingUser")).isEqualTo("executingUser");
+        assertThat(ll.get("authenticatedUser")).isEqualTo("authUser");
+        assertThat(ll.get("message")).isEqualTo("message 42");
+        assertThat(ll.asString("JSON")).contains("\"message\":\"message 42\"");
     }
 }

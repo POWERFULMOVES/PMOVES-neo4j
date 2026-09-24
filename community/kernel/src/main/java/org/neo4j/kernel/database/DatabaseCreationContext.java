@@ -28,16 +28,14 @@ import org.neo4j.dbms.identity.ServerIdentity;
 import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.HostedOnMode;
 import org.neo4j.function.Factory;
 import org.neo4j.graphdb.config.Configuration;
-import org.neo4j.internal.id.IdController;
-import org.neo4j.internal.id.IdGeneratorFactory;
 import org.neo4j.io.device.DeviceMapper;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.fs.watcher.DatabaseLayoutWatcher;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.layout.Neo4jLayout;
 import org.neo4j.io.pagecache.PageCache;
-import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.prefetch.PagePrefetcher;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.api.procedure.GlobalProcedures;
 import org.neo4j.kernel.availability.DatabaseAvailabilityGuard;
 import org.neo4j.kernel.extension.ExtensionFactory;
@@ -53,20 +51,21 @@ import org.neo4j.kernel.impl.index.DatabaseIndexStats;
 import org.neo4j.kernel.impl.pagecache.IOControllerService;
 import org.neo4j.kernel.impl.pagecache.VersionStorageFactory;
 import org.neo4j.kernel.impl.query.QueryEngineProvider;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.StoreCopyCheckPointMutex;
 import org.neo4j.kernel.impl.transaction.stats.DatabaseTransactionStats;
-import org.neo4j.kernel.impl.util.collection.CollectionsFactorySupplier;
 import org.neo4j.kernel.internal.event.GlobalTransactionEventListeners;
 import org.neo4j.kernel.internal.locker.FileLockerService;
 import org.neo4j.kernel.monitoring.DatabaseEventListeners;
 import org.neo4j.logging.internal.DatabaseLogService;
 import org.neo4j.memory.GlobalMemoryGroupTracker;
 import org.neo4j.monitoring.DatabaseHealth;
-import org.neo4j.monitoring.Monitors;
+import org.neo4j.monitoring.ExceptionHandlerService;
 import org.neo4j.scheduler.JobScheduler;
+import org.neo4j.storageengine.VectorStoreCreator;
 import org.neo4j.storageengine.api.StorageEngineFactory;
 import org.neo4j.time.SystemNanoClock;
 import org.neo4j.token.TokenHolders;
+import org.neo4j.wal.checkpoint.StoreCopyCheckPointMutex;
+import org.neo4j.wal.pruning.LogPruneStrategyFactory;
 
 public interface DatabaseCreationContext {
     ServerIdentity getServerIdentity();
@@ -77,7 +76,9 @@ public interface DatabaseCreationContext {
 
     DatabaseConfig getDatabaseConfig();
 
-    IdGeneratorFactory getIdGeneratorFactory();
+    IdContextFactory idContextFactory();
+
+    IdGeneratorSettings idGeneratorSettings();
 
     DatabaseLogService getDatabaseLogService();
 
@@ -103,8 +104,6 @@ public interface DatabaseCreationContext {
 
     ConstraintSemantics getConstraintSemantics();
 
-    Monitors getMonitors();
-
     DatabaseTracers getTracers();
 
     GlobalProcedures getGlobalProcedures();
@@ -117,13 +116,9 @@ public interface DatabaseCreationContext {
 
     StoreCopyCheckPointMutex getStoreCopyCheckPointMutex();
 
-    IdController getIdController();
-
     DbmsInfo getDbmsInfo();
 
     HostedOnMode getMode();
-
-    CollectionsFactorySupplier getCollectionsFactorySupplier();
 
     Iterable<ExtensionFactory<?>> getExtensionFactories();
 
@@ -149,7 +144,7 @@ public interface DatabaseCreationContext {
 
     ReadOnlyDatabases getDbmsReadOnlyChecker();
 
-    CursorContextFactory getContextFactory();
+    CursorContextFactorySupplier getCursorContextFactorySupplier();
 
     ExternalIdReuseConditionProvider externalIdReuseConditionProvider();
 
@@ -167,4 +162,18 @@ public interface DatabaseCreationContext {
     CommandCommitListeners getCommandCommitListeners();
 
     PagePrefetcher getPagePrefetcher();
+
+    DatabaseMonitorsFactory getDatabaseMonitorsFactory();
+
+    ExceptionHandlerService getExceptionHandlerService();
+
+    VectorStoreCreator getVectorStoreCreator();
+
+    DatabaseCreationOptions getDatabaseCreationOptions();
+
+    LogPruneStrategyFactory logPruneStrategyFactory();
+
+    boolean raftTriggersUpgrade();
+
+    boolean mergedLogs();
 }

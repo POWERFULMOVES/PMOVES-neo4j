@@ -28,7 +28,6 @@ import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.logging.InternalLog;
 import org.neo4j.logging.Neo4jLogMessage;
-import org.neo4j.logging.Neo4jMessageSupplier;
 import org.neo4j.storageengine.api.DeprecatedFormatWarning;
 import org.neo4j.storageengine.api.StorageEngineFactory;
 import org.neo4j.util.VisibleForTesting;
@@ -98,13 +97,7 @@ public class Neo4jConfigValidator implements ConfigValidator {
         public void debug(Neo4jLogMessage message) {}
 
         @Override
-        public void debug(Neo4jMessageSupplier supplier) {}
-
-        @Override
         public void info(Neo4jLogMessage message) {}
-
-        @Override
-        public void info(Neo4jMessageSupplier supplier) {}
 
         @Override
         public void warn(Neo4jLogMessage message) {
@@ -112,18 +105,8 @@ public class Neo4jConfigValidator implements ConfigValidator {
         }
 
         @Override
-        public void warn(Neo4jMessageSupplier supplier) {
-            warn(supplier.get());
-        }
-
-        @Override
         public void error(Neo4jLogMessage message) {
             error(message, message.getThrowable());
-        }
-
-        @Override
-        public void error(Neo4jMessageSupplier supplier) {
-            error(supplier.get());
         }
 
         @Override
@@ -134,6 +117,21 @@ public class Neo4jConfigValidator implements ConfigValidator {
         @Override
         public boolean isDebugEnabled() {
             return false;
+        }
+
+        @Override
+        public boolean isWarnEnabled() {
+            return true;
+        }
+
+        @Override
+        public boolean isInfoEnabled() {
+            return true;
+        }
+
+        @Override
+        public boolean isErrorEnabled() {
+            return true;
         }
 
         @Override
@@ -156,7 +154,7 @@ public class Neo4jConfigValidator implements ConfigValidator {
 
         @Override
         public void warn(String message) {
-            warn(Neo4jMessageSupplier.forMessage(message));
+            warn(message, (Throwable) null);
         }
 
         @Override
@@ -166,12 +164,12 @@ public class Neo4jConfigValidator implements ConfigValidator {
 
         @Override
         public void warn(String format, Object... arguments) {
-            warn(Neo4jMessageSupplier.forMessage(format, arguments));
+            warn(String.format(format, arguments), (Throwable) null);
         }
 
         @Override
         public void error(String message) {
-            error(Neo4jMessageSupplier.forMessage(message));
+            error(message, (Throwable) null);
         }
 
         @Override
@@ -181,7 +179,7 @@ public class Neo4jConfigValidator implements ConfigValidator {
 
         @Override
         public void error(String format, Object... arguments) {
-            error(Neo4jMessageSupplier.forMessage(format, arguments));
+            error(String.format(format, arguments), (Throwable) null);
         }
     }
 }

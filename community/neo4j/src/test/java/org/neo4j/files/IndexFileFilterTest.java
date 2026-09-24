@@ -30,7 +30,6 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestInstance.Lifecycle;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.neo4j.internal.schema.AllIndexProviderDescriptors;
@@ -41,7 +40,7 @@ import org.neo4j.kernel.internal.LuceneIndexFileFilter;
 import org.neo4j.kernel.internal.NativeIndexFileFilter;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
 
@@ -54,12 +53,15 @@ class IndexFileFilterTest {
     private static final List<IndexProviderDescriptor> LUCENE = List.of(
             AllIndexProviderDescriptors.TEXT_V1_DESCRIPTOR,
             AllIndexProviderDescriptors.TEXT_V2_DESCRIPTOR,
-            AllIndexProviderDescriptors.FULLTEXT_DESCRIPTOR,
+            AllIndexProviderDescriptors.TEXT_V3_DESCRIPTOR,
+            AllIndexProviderDescriptors.FULLTEXT_V1_DESCRIPTOR,
+            AllIndexProviderDescriptors.FULLTEXT_V2_DESCRIPTOR,
             AllIndexProviderDescriptors.VECTOR_V1_DESCRIPTOR,
-            AllIndexProviderDescriptors.VECTOR_V2_DESCRIPTOR);
+            AllIndexProviderDescriptors.VECTOR_V2_DESCRIPTOR,
+            AllIndexProviderDescriptors.VECTOR_V3_DESCRIPTOR);
 
     @TestDirectoryExtension
-    @ExtendWith(RandomExtension.class)
+    @RandomSupportExtension
     @TestInstance(Lifecycle.PER_CLASS)
     abstract static class IndexFileFilterTestBase {
         @Inject

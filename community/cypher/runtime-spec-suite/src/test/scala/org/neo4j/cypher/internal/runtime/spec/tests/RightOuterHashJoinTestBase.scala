@@ -26,10 +26,13 @@ import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.cypher.internal.runtime.spec.rewriters.TestPlanCombinationRewriter.NoRewrites
 import org.neo4j.graphdb.Label
+import org.neo4j.graphdb.Node
 import org.neo4j.values.storable.Values.stringValue
 
 import scala.jdk.CollectionConverters.IterableHasAsScala
 import scala.util.Random
+
+object RightOuterHashJoinTestBase
 
 abstract class RightOuterHashJoinTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
@@ -93,7 +96,7 @@ abstract class RightOuterHashJoinTestBase[CONTEXT <: RuntimeContext](
 
     val expectedRows = for {
       (n, r) <- rhsRows
-      (_, l) <- matchingRowsOuter(lhsRows, n)
+      (_, l) <- matchingRowsOuter[Node, Any](lhsRows, n)
     } yield Array(n, l, r)
 
     runtimeResult should beColumns("n", "l", "r").withRows(expectedRows)
@@ -135,8 +138,8 @@ abstract class RightOuterHashJoinTestBase[CONTEXT <: RuntimeContext](
 
     val expectedRows = for {
       (n, r) <- rhsRows
-      (_, l) <- matchingRowsOuter(lhsRows, n)
-    } yield Array(n, l, r)
+      (_, l) <- matchingRowsOuter[Node, Any](lhsRows, n)
+    } yield Array[Any](n, l, r)
 
     runtimeResult should beColumns("n", "l", "r").withRows(expectedRows)
   }
@@ -179,7 +182,7 @@ abstract class RightOuterHashJoinTestBase[CONTEXT <: RuntimeContext](
 
     val expectedRows = for {
       (n, r) <- rhsRows
-      (_, l) <- matchingRowsOuter(lhsRows, n)
+      (_, l) <- matchingRowsOuter[Node, Any](lhsRows, n)
     } yield Array(n, l, r)
 
     runtimeResult should beColumns("n", "l", "r").withRows(expectedRows)
@@ -224,8 +227,8 @@ abstract class RightOuterHashJoinTestBase[CONTEXT <: RuntimeContext](
 
     val expectedRows = for {
       (n, r) <- rhsRows
-      (_, l) <- matchingRowsOuter(lhsRows, n)
-    } yield Array(n, l, r)
+      (_, l) <- matchingRowsOuter[Node, Any](lhsRows, n)
+    } yield Array[Any](n, l, r)
 
     runtimeResult should beColumns("n", "l", "r").withRows(expectedRows)
   }
@@ -271,7 +274,7 @@ abstract class RightOuterHashJoinTestBase[CONTEXT <: RuntimeContext](
 
     val expectedRows = for {
       (n, r) <- rhsRows
-      (_, l) <- matchingRowsOuter(lhsRows, n)
+      (_, l) <- matchingRowsOuter[Node, Any](lhsRows, n)
     } yield Array(n, l, r)
 
     runtimeResult should beColumns("n", "l", "r").withRows(expectedRows)
@@ -379,17 +382,19 @@ abstract class RightOuterHashJoinTestBase[CONTEXT <: RuntimeContext](
 
     val expectedRows = for {
       (n, _) <- rhsRows
-      (_, _) <- matchingRowsOuter(lhsRows, n)
+      (_, _) <- matchingRowsOuter[Node, Any](lhsRows, n)
       l = n.getProperty("leftProp").asInstanceOf[Int]
       r = n.getProperty("rightProp").asInstanceOf[Int]
     } yield Array[Any](n, l, r)
 
     runtimeResult should beColumns("n", "l", "r").withRows(expectedRows)
 
-    val lhsFilterDbHits = runtimeResult.runtimeResult.queryProfile().operatorProfile(5).dbHits()
-
     // final projection should only need to look up n.leftProp for :Right nodes
-    runtimeResult.runtimeResult.queryProfile().operatorProfile(1).dbHits() shouldBe lhsFilterDbHits / 2
+    val expected = if (isPipelined || isParallel) {
+      // for pipelined/parallel we count the calls to next as a dbHit
+      sizeHint * 2
+    } else sizeHint
+    runtimeResult.runtimeResult.queryProfile().operatorProfile(1).dbHits() shouldBe expected
   }
 
   // Emulates outer join.
@@ -687,7 +692,7 @@ abstract class RightOuterHashJoinTestBase[CONTEXT <: RuntimeContext](
       .allNodeScan("n")
       .build()
 
-    val result = execute(logicalQuery, runtime, testPlanCombinationRewriterHints = Set(NoRewrites))
+    val result = executeQuery(logicalQuery, runtime, testPlanCombinationRewriterHints = Set(NoRewrites))
 
     result should beColumns("lhsKeep", "rhsKeep", "rhsDiscard")
       .withRows(inAnyOrder(Range(0, size).map(i => Array(s"$i", s"${i + 2}", s"${i + 3}"))))

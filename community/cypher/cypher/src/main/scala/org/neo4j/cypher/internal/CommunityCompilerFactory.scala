@@ -22,12 +22,13 @@ package org.neo4j.cypher.internal
 import org.neo4j.cypher.internal.cache.CypherQueryCaches
 import org.neo4j.cypher.internal.compiler.CypherParsingConfig
 import org.neo4j.cypher.internal.compiler.CypherPlannerConfiguration
-import org.neo4j.cypher.internal.frontend.phases.InternalSyntaxUsageStats
+import org.neo4j.cypher.internal.frontend.notification.InternalNotificationStats
+import org.neo4j.cypher.internal.frontend.phases.InternalUsageStats
 import org.neo4j.cypher.internal.options.CypherPlannerOption
 import org.neo4j.cypher.internal.options.CypherRuntimeOption
-import org.neo4j.cypher.internal.planning.CypherPlanner
+import org.neo4j.cypher.internal.planning.DefaultCypherPlanner
 import org.neo4j.cypher.internal.runtime.CypherRuntimeConfiguration
-import org.neo4j.cypher.internal.util.InternalNotificationStats
+import org.neo4j.internal.kernel.api.security.AbstractSecurityLog
 import org.neo4j.kernel.GraphDatabaseQueryService
 import org.neo4j.kernel.database.DatabaseReferenceRepository
 import org.neo4j.logging.InternalLog
@@ -61,19 +62,20 @@ class CommunityCompilerFactory(
 
     val dependencies = graph.getDependencyResolver
 
-    val planner =
-      CypherPlanner(
-        parsingConfig,
-        plannerConfig,
-        MasterCompiler.CLOCK,
-        kernelMonitors,
-        log,
-        queryCaches,
-        cypherPlanner,
-        dependencies.resolveDependency(classOf[DatabaseReferenceRepository]),
-        dependencies.resolveDependency(classOf[InternalNotificationStats]),
-        dependencies.resolveDependency(classOf[InternalSyntaxUsageStats])
-      )
+    val planner = DefaultCypherPlanner(
+      parsingConfig = parsingConfig,
+      plannerConfig = plannerConfig,
+      clock = MasterCompiler.CLOCK,
+      kernelMonitors = kernelMonitors,
+      log = log,
+      securityLog = dependencies.resolveDependency(classOf[AbstractSecurityLog]),
+      queryCaches = queryCaches,
+      plannerOption = cypherPlanner,
+      databaseReferenceRepository = dependencies.resolveDependency(classOf[DatabaseReferenceRepository]),
+      schemaCommandRuntime = CommunitySchemaCommandRuntime,
+      internalNotificationStats = dependencies.resolveDependency(classOf[InternalNotificationStats]),
+      internalUsageStats = dependencies.resolveDependency(classOf[InternalUsageStats])
+    )
 
     val runtime =
       if (plannerConfig.planSystemCommands)
@@ -85,6 +87,7 @@ class CommunityCompilerFactory(
       planner,
       runtime,
       CommunityRuntimeContextManager(log, runtimeConfig),
+      CommunitySchemaCommandRuntime,
       kernelMonitors,
       queryCaches
     )

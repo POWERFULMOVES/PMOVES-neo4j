@@ -31,6 +31,7 @@ import org.neo4j.logging.LogProvider;
 import org.neo4j.memory.DelegatingMemoryPool;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.memory.ExecutionContextMemoryTracker;
+import org.neo4j.memory.HeapEstimatorCacheConfig;
 import org.neo4j.memory.HighWaterMarkMemoryPool;
 import org.neo4j.memory.LocalMemoryTracker;
 import org.neo4j.memory.MemoryGroup;
@@ -78,10 +79,11 @@ public class TransactionMemoryPool extends DelegatingMemoryPool implements Scope
         throw new UnsupportedOperationException("Use getExecutionContextPoolMemoryTracker instead");
     }
 
-    public MemoryTracker getExecutionContextPoolMemoryTracker(long grabSize, long maxGrabSize) {
+    public MemoryTracker getExecutionContextPoolMemoryTracker(
+            long grabSize, long maxGrabSize, HeapEstimatorCacheConfig heapEstimatorCacheConfig) {
         if (config.get(memory_tracking)) {
             hasExecutionContextMemoryTrackers = true;
-            return createExecutionContextMemoryTracker(grabSize, maxGrabSize);
+            return createExecutionContextMemoryTracker(grabSize, maxGrabSize, heapEstimatorCacheConfig);
         } else {
             return EmptyMemoryTracker.INSTANCE;
         }
@@ -99,6 +101,12 @@ public class TransactionMemoryPool extends DelegatingMemoryPool implements Scope
     }
 
     @Override
+    public void reserveHeapNoThrow(long bytes) {
+        delegate.reserveHeapNoThrow(bytes);
+        super.reserveHeapNoThrow(bytes);
+    }
+
+    @Override
     public void releaseHeap(long bytes) {
         super.releaseHeap(bytes);
         delegate.releaseHeap(bytes);
@@ -113,6 +121,12 @@ public class TransactionMemoryPool extends DelegatingMemoryPool implements Scope
             delegate.releaseNative(bytes);
             throw e;
         }
+    }
+
+    @Override
+    public void reserveNativeNoThrow(long bytes) {
+        delegate.reserveNativeNoThrow(bytes);
+        super.reserveNativeNoThrow(bytes);
     }
 
     @Override
@@ -140,12 +154,14 @@ public class TransactionMemoryPool extends DelegatingMemoryPool implements Scope
         return pool;
     }
 
-    private ExecutionContextMemoryTracker createExecutionContextMemoryTracker(long grabSize, long maxGrabSize) {
+    private ExecutionContextMemoryTracker createExecutionContextMemoryTracker(
+            long grabSize, long maxGrabSize, HeapEstimatorCacheConfig heapEstimatorCacheConfig) {
         return new ExecutionContextMemoryTracker(
                 highWaterMarkMemoryPool(),
                 LocalMemoryTracker.NO_LIMIT,
                 grabSize,
                 maxGrabSize,
+                heapEstimatorCacheConfig,
                 memory_transaction_max_size.name(),
                 openCheck);
     }

@@ -26,7 +26,6 @@ import static org.neo4j.kernel.api.KernelTransaction.Type.EXPLICIT;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.common.EntityType;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.graphdb.Transaction;
@@ -37,7 +36,6 @@ import org.neo4j.internal.kernel.api.RelationshipTypeIndexCursor;
 import org.neo4j.internal.kernel.api.TokenPredicate;
 import org.neo4j.internal.kernel.api.TokenReadSession;
 import org.neo4j.internal.kernel.api.security.LoginContext;
-import org.neo4j.internal.schema.AnyTokenSchemaDescriptor;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexType;
 import org.neo4j.kernel.availability.DatabaseAvailabilityGuard;
@@ -49,12 +47,12 @@ import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.DbmsExtension;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.token.TokenHolders;
 import org.neo4j.values.ElementIdMapper;
 
 @DbmsExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class KernelAPIParallelTypeScanStressIT {
     private static final int N_THREADS = 10;
     private static final int N_RELS = 10_000;
@@ -84,7 +82,7 @@ class KernelAPIParallelTypeScanStressIT {
                 IndexDescriptor index = ((IndexDefinitionImpl) indexDef).getIndexReference();
 
                 if (index.getIndexType() == IndexType.LOOKUP
-                        && index.schema().isSchemaDescriptorType(AnyTokenSchemaDescriptor.class)
+                        && index.schema().isAnyTokenSchemaDescriptor()
                         && index.schema().entityType() == EntityType.RELATIONSHIP) {
                     rti = index;
                 }
@@ -111,7 +109,9 @@ class KernelAPIParallelTypeScanStressIT {
                 tx -> {
                     var statement = tx.acquireStatement();
                     var executionContext = tx.createExecutionContext();
-                    var cursor = kernel.cursors().allocateRelationshipTypeIndexCursor(executionContext.cursorContext());
+                    var cursor = executionContext
+                            .cursors()
+                            .allocateRelationshipTypeIndexCursor(executionContext.cursorContext());
                     return new WorkerContext<>(cursor, executionContext, tx, statement);
                 },
                 (read, workerContext) -> typeScan(read, workerContext, types[random.nextInt(types.length)]));

@@ -24,24 +24,28 @@ import static java.lang.String.format;
 import java.util.Arrays;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
+import org.neo4j.gqlstatus.GqlHelper;
 import org.neo4j.gqlstatus.GqlParams;
 import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 
 public class InvalidSpatialArgumentException extends InvalidArgumentException {
-
-    @Deprecated
-    private InvalidSpatialArgumentException(String message) {
-        super(message);
-    }
 
     private InvalidSpatialArgumentException(ErrorGqlStatusObject gqlStatusObject, String message) {
         super(gqlStatusObject, message);
     }
 
     public static InvalidSpatialArgumentException invalidDimension(String crs, int dimension, double... coordinate) {
-        return new InvalidSpatialArgumentException(format(
-                "Cannot create point, CRS %s expects %d dimensions, but got coordinates %s",
-                crs, dimension, Arrays.toString(coordinate)));
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N20)
+                .withParam(GqlParams.NumberParam.dim1, dimension)
+                .withParam(GqlParams.NumberParam.value, coordinate.length)
+                .withParam(GqlParams.NumberParam.dim2, coordinate.length)
+                .build();
+
+        return new InvalidSpatialArgumentException(
+                gql,
+                format(
+                        "Cannot create point, CRS %s expects %d dimensions, but got coordinates %s",
+                        crs, dimension, Arrays.toString(coordinate)));
     }
 
     public static InvalidSpatialArgumentException infiniteCoordinateValue(double... coordinate) {
@@ -71,7 +75,12 @@ public class InvalidSpatialArgumentException extends InvalidArgumentException {
         return invalidCoordinateSystem("code=" + crs);
     }
 
+    public static InvalidSpatialArgumentException invalidCoordinateSystem(long crs) {
+        return invalidCoordinateSystem("code=" + crs);
+    }
+
     public static InvalidSpatialArgumentException invalidCoordinateSystem(String crs) {
-        return new InvalidSpatialArgumentException("Unknown coordinate reference system: " + crs);
+        var gql = GqlHelper.getGql22000_22N21(crs);
+        return new InvalidSpatialArgumentException(gql, "Unknown coordinate reference system: " + crs);
     }
 }

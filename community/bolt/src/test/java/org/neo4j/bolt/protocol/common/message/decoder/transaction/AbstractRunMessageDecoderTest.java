@@ -20,18 +20,19 @@
 package org.neo4j.bolt.protocol.common.message.decoder.transaction;
 
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.neo4j.bolt.testing.util.ErrorUtil.useNewMessage;
 
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.neo4j.bolt.protocol.common.message.decoder.MessageDecoder;
 import org.neo4j.bolt.protocol.common.message.decoder.MultiParameterMessageDecoderTest;
-import org.neo4j.bolt.protocol.common.message.request.transaction.RunMessage;
 import org.neo4j.bolt.testing.mock.ConnectionMockFactory;
+import org.neo4j.boltmessages.request.transaction.RunMessage;
 import org.neo4j.packstream.error.reader.PackstreamReaderException;
 import org.neo4j.packstream.error.reader.UnexpectedTypeException;
 import org.neo4j.packstream.error.struct.IllegalStructArgumentException;
 import org.neo4j.packstream.io.PackstreamBuf;
-import org.neo4j.packstream.io.value.PackstreamValueReader;
+import org.neo4j.packstream.io.value.AbstractPackstreamValueReader;
 import org.neo4j.packstream.struct.StructHeader;
 import org.neo4j.values.storable.Values;
 import org.neo4j.values.virtual.MapValue;
@@ -47,16 +48,18 @@ public abstract class AbstractRunMessageDecoderTest<D extends MessageDecoder<Run
         assertThatExceptionOfType(IllegalStructArgumentException.class)
                 .isThrownBy(() -> this.getDecoder()
                         .read(ConnectionMockFactory.newInstance(), buf, new StructHeader(3, (short) 0x42)))
-                .withMessage("Illegal value for field \"statement\": Unexpected type: Expected STRING but got INT")
+                .withMessage(useNewMessage("08N06: General network protocol error.")
+                        .whenLegacyFallbackTo(
+                                "Illegal value for field \"statement\": Unexpected type: Expected STRING but got INT"))
                 .withCauseInstanceOf(UnexpectedTypeException.class);
     }
 
     @Test
     void shouldFailWithIllegalStructArgumentWhenInvalidParamsArgumentIsPassed() throws PackstreamReaderException {
         var buf = PackstreamBuf.allocUnpooled().writeString("RETURN 1");
-        var ex = new PackstreamReaderException("Something went kaput :(");
+        var ex = PackstreamReaderException.internalError(this.getClass().getSimpleName(), "Something went kaput :(");
 
-        var reader = Mockito.mock(PackstreamValueReader.class);
+        var reader = Mockito.mock(AbstractPackstreamValueReader.class);
         Mockito.doThrow(ex).when(reader).readMap();
 
         var connection =
@@ -64,14 +67,15 @@ public abstract class AbstractRunMessageDecoderTest<D extends MessageDecoder<Run
 
         assertThatExceptionOfType(IllegalStructArgumentException.class)
                 .isThrownBy(() -> this.getDecoder().read(connection, buf, new StructHeader(3, (short) 0x42)))
-                .withMessage("Illegal value for field \"params\": Something went kaput :(")
+                .withMessage(useNewMessage("08N06: General network protocol error.")
+                        .whenLegacyFallbackTo("Illegal value for field \"params\": Something went kaput :("))
                 .withCause(ex);
     }
 
     @Test
     void shouldFailWithIllegalStructArgumentWhenInvalidMetadataEntryIsPassed() throws PackstreamReaderException {
         var buf = PackstreamBuf.allocUnpooled();
-        var reader = Mockito.mock(PackstreamValueReader.class);
+        var reader = Mockito.mock(AbstractPackstreamValueReader.class);
 
         buf.writeString("RETURN $n");
 
@@ -86,7 +90,9 @@ public abstract class AbstractRunMessageDecoderTest<D extends MessageDecoder<Run
         assertThatExceptionOfType(IllegalStructArgumentException.class)
                 .isThrownBy(() -> this.getDecoder().read(connection, buf, new StructHeader(3, (short) 0x42)))
                 .withMessage(
-                        "Illegal value for field \"metadata\": Illegal value for field \"tx_timeout\": Expected long")
+                        useNewMessage("08N06: General network protocol error.")
+                                .whenLegacyFallbackTo(
+                                        "Illegal value for field \"metadata\": Illegal value for field \"tx_timeout\": Expected long"))
                 .withCauseInstanceOf(IllegalStructArgumentException.class);
     }
 }

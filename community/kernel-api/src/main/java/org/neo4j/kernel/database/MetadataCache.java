@@ -19,28 +19,8 @@
  */
 package org.neo4j.kernel.database;
 
-import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.KernelVersionRepository;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
+import org.neo4j.wal.LogFormatVersionRepository;
+import org.neo4j.wal.LogTermRepository;
 
-public class MetadataCache implements KernelVersionRepository {
-    private volatile KernelVersion kernelVersion;
-
-    public MetadataCache(LogTailMetadata logTailMetadata) {
-        this(logTailMetadata.kernelVersion());
-    }
-
-    public MetadataCache(KernelVersion kernelVersion) {
-        setKernelVersion(kernelVersion);
-    }
-
-    @Override
-    public KernelVersion kernelVersion() {
-        return kernelVersion;
-    }
-
-    @Override
-    public void setKernelVersion(KernelVersion kernelVersion) {
-        this.kernelVersion = kernelVersion;
-    }
-}
+public interface MetadataCache extends KernelVersionRepository, LogFormatVersionRepository, LogTermRepository {}

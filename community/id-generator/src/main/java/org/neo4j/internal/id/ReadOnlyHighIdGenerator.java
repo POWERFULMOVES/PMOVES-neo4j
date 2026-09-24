@@ -19,11 +19,16 @@
  */
 package org.neo4j.internal.id;
 
+import org.eclipse.collections.api.set.primitive.LongSet;
 import org.neo4j.annotations.documented.ReporterFactory;
+import org.neo4j.collection.PrimitiveLongResourceCollections;
+import org.neo4j.collection.PrimitiveLongResourceIterator;
 import org.neo4j.internal.helpers.progress.ProgressMonitorFactory;
 import org.neo4j.internal.id.range.PageIdRange;
+import org.neo4j.io.async.AsyncBlockAccessor;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.context.OldestVisibilityHorizonFactory;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 
 /**
@@ -69,6 +74,26 @@ class ReadOnlyHighIdGenerator implements IdGenerator {
     }
 
     @Override
+    public PrimitiveLongResourceIterator notUsedIdsIterator() {
+        return PrimitiveLongResourceCollections.emptyIterator();
+    }
+
+    @Override
+    public PrimitiveLongResourceIterator notUsedIdsIterator(long fromIdInclusive, long toIdExclusive) {
+        return PrimitiveLongResourceCollections.emptyIterator();
+    }
+
+    @Override
+    public PrimitiveLongResourceIterator freeIdsIterator() {
+        return PrimitiveLongResourceCollections.emptyIterator();
+    }
+
+    @Override
+    public PrimitiveLongResourceIterator usedIdsIterator() {
+        return PrimitiveLongResourceCollections.emptyIterator();
+    }
+
+    @Override
     public TransactionalMarker transactionalMarker(CursorContext cursorContext) {
         throw new UnsupportedOperationException("Should not be required");
     }
@@ -84,12 +109,14 @@ class ReadOnlyHighIdGenerator implements IdGenerator {
     }
 
     @Override
-    public void checkpoint(FileFlushEvent flushEvent, CursorContext cursorContext) {
+    public void checkpoint(
+            FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext) {
         // no-op
     }
 
     @Override
-    public void maintenance(CursorContext cursorContext) {
+    public void maintenance(
+            CursorContext cursorContext, OldestVisibilityHorizonFactory oldestVisibilityHorizonFactory) {
         throw new UnsupportedOperationException("Should not be required");
     }
 
@@ -109,7 +136,7 @@ class ReadOnlyHighIdGenerator implements IdGenerator {
     }
 
     @Override
-    public long nextConsecutiveIdRange(int numberOfIds, boolean favorSamePage, CursorContext cursorContext) {
+    public ConsecutiveId nextConsecutiveIdRange(int numberOfIds, int flags, CursorContext cursorContext) {
         throw new UnsupportedOperationException("Should not be required");
     }
 
@@ -119,7 +146,17 @@ class ReadOnlyHighIdGenerator implements IdGenerator {
     }
 
     @Override
+    public PageIdRange nextContinuousPageRange(int idsPerPage, CursorContext cursorContext) {
+        throw new UnsupportedOperationException("Should not be required");
+    }
+
+    @Override
     public void releasePageRange(PageIdRange range, CursorContext cursorContext) {
+        throw new UnsupportedOperationException("Should not be required");
+    }
+
+    @Override
+    public void releasePageRangesLocks(LongSet pageIds, CursorContext cursorContext) {
         throw new UnsupportedOperationException("Should not be required");
     }
 

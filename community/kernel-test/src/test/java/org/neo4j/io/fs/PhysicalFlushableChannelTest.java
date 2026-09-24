@@ -36,6 +36,8 @@ import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
 import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_CHECKSUM;
 import static org.neo4j.test.LatestVersions.LATEST_KERNEL_VERSION;
 import static org.neo4j.test.LatestVersions.LATEST_LOG_FORMAT;
+import static org.neo4j.wal.LogChannelUtils.estimateBytesWrittenToLogChannel;
+import static org.neo4j.wal.entry.LogHeader.UNSPECIFIED_CREATION_TIME;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -57,17 +59,18 @@ import org.neo4j.io.memory.HeapScopedBuffer;
 import org.neo4j.io.memory.ScopedBuffer;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.impl.api.tracer.DefaultDatabaseTracer;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
-import org.neo4j.kernel.impl.transaction.log.PhysicalFlushableLogPositionAwareChannel;
-import org.neo4j.kernel.impl.transaction.log.PhysicalLogVersionedStoreChannel;
-import org.neo4j.kernel.impl.transaction.log.entry.LogHeader;
-import org.neo4j.kernel.impl.transaction.log.files.LogFileChannelNativeAccessor;
 import org.neo4j.kernel.impl.transaction.tracing.DatabaseTracer;
 import org.neo4j.memory.LocalMemoryTracker;
-import org.neo4j.storageengine.api.StoreId;
+import org.neo4j.storageengine.api.StoreIdentifier;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
+import org.neo4j.wal.LogPosition;
+import org.neo4j.wal.PhysicalFlushableLogPositionAwareChannel;
+import org.neo4j.wal.PhysicalLogVersionedStoreChannel;
+import org.neo4j.wal.StoreChannelNativeAccessor;
+import org.neo4j.wal.entry.LogEnvelopeHeader;
+import org.neo4j.wal.entry.LogFormat;
 
 @TestDirectoryExtension
 class PhysicalFlushableChannelTest {
@@ -77,7 +80,7 @@ class PhysicalFlushableChannelTest {
     @Inject
     private TestDirectory directory;
 
-    private final LogFileChannelNativeAccessor nativeChannelAccessor = mock(LogFileChannelNativeAccessor.class);
+    private final StoreChannelNativeAccessor nativeChannelAccessor = mock(StoreChannelNativeAccessor.class);
     private final DatabaseTracer databaseTracer = DatabaseTracer.NULL;
 
     @Test
@@ -306,17 +309,31 @@ class PhysicalFlushableChannelTest {
         PhysicalLogVersionedStoreChannel versionedStoreChannel = new PhysicalLogVersionedStoreChannel(
                 storeChannel, 1, LATEST_LOG_FORMAT, file, nativeChannelAccessor, databaseTracer);
         final var logHeader = LATEST_LOG_FORMAT.newHeader(
-                1, 1, LogHeader.UNKNOWN_TERM, StoreId.UNKNOWN, 1024, BASE_TX_CHECKSUM, LATEST_KERNEL_VERSION);
+                1,
+                1,
+                ReadableChannel.BASE_TERM,
+                StoreIdentifier.UNKNOWN,
+                1024,
+                BASE_TX_CHECKSUM,
+                LATEST_KERNEL_VERSION,
+                UNSPECIFIED_CREATION_TIME);
+        LogFormat.writeLogHeader(versionedStoreChannel, logHeader, INSTANCE);
+        versionedStoreChannel.position(logHeader.getStartPosition().getByteOffset());
         try (var channel = new PhysicalFlushableLogPositionAwareChannel(versionedStoreChannel, logHeader, INSTANCE)) {
             LogPosition initialPosition = channel.getCurrentLogPosition();
-
             // WHEN
+            channel.beginChecksumForWriting();
+            channel.putVersion(LATEST_KERNEL_VERSION.version());
+            channel.putContentType(LogEnvelopeHeader.KERNEL_CONTENT_TYPE);
             channel.putLong(67);
             channel.putInt(1234);
+            channel.putChecksum();
             LogPosition positionAfterSomeData = channel.getCurrentLogPosition();
 
             // THEN
-            assertEquals(12, positionAfterSomeData.getByteOffset() - initialPosition.getByteOffset());
+            assertEquals(
+                    estimateBytesWrittenToLogChannel(Long.BYTES + Integer.BYTES, logHeader, true),
+                    positionAfterSomeData.getByteOffset() - initialPosition.getByteOffset());
         }
     }
 

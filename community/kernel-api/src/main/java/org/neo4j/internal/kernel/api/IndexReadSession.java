@@ -20,6 +20,7 @@
 package org.neo4j.internal.kernel.api;
 
 import org.neo4j.internal.schema.IndexDescriptor;
+import org.neo4j.kernel.api.index.ValueIndexReader;
 
 /**
  * Token which represents a read session towards a specific value index. The life-span of this session is tied to
@@ -28,4 +29,6 @@ import org.neo4j.internal.schema.IndexDescriptor;
  */
 public interface IndexReadSession {
     IndexDescriptor reference();
+
+    ValueIndexReader reader();
 }

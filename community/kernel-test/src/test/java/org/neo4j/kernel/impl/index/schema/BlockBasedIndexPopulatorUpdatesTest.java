@@ -34,7 +34,7 @@ import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_C
 import static org.neo4j.kernel.api.index.IndexDirectoryStructure.directoriesByProvider;
 import static org.neo4j.kernel.api.schema.SchemaTestUtil.SIMPLE_NAME_LOOKUP;
 import static org.neo4j.kernel.impl.api.index.PhaseTracker.nullInstance;
-import static org.neo4j.storageengine.api.IndexEntryUpdate.add;
+import static org.neo4j.storageengine.api.EagerValueIndexEntryUpdate.add;
 
 import java.io.IOException;
 import java.util.concurrent.Callable;
@@ -44,6 +44,7 @@ import org.junit.jupiter.api.Test;
 import org.neo4j.common.TokenNameLookup;
 import org.neo4j.internal.kernel.api.PropertyIndexQuery;
 import org.neo4j.internal.kernel.api.QueryContext;
+import org.neo4j.internal.kernel.api.exceptions.schema.IndexNotApplicableKernelException;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexProviderDescriptor;
 import org.neo4j.internal.schema.IndexType;
@@ -61,7 +62,7 @@ import org.neo4j.scheduler.Group;
 import org.neo4j.scheduler.JobHandle;
 import org.neo4j.scheduler.JobMonitoringParams;
 import org.neo4j.scheduler.JobScheduler;
-import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.storageengine.api.schema.SimpleEntityValueClient;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.pagecache.PageCacheExtension;
@@ -78,7 +79,7 @@ abstract class BlockBasedIndexPopulatorUpdatesTest<KEY extends NativeIndexKey<KE
             .withName("constraint")
             .withIndexType(indexType())
             .materialise(1);
-    final TokenNameLookup tokenNameLookup = SIMPLE_NAME_LOOKUP;
+    static final TokenNameLookup TOKEN_NAME_LOOKUP = SIMPLE_NAME_LOOKUP;
 
     @Inject
     private FileSystemAbstraction fs;
@@ -106,7 +107,7 @@ abstract class BlockBasedIndexPopulatorUpdatesTest<KEY extends NativeIndexKey<KE
         IndexDirectoryStructure directoryStructure =
                 directoriesByProvider(directory.homePath()).forProvider(providerDescriptor);
         indexFiles = new IndexFiles(fs, directoryStructure, INDEX_DESCRIPTOR.getId());
-        var pageCacheTracer = PageCacheTracer.NULL;
+        PageCacheTracer pageCacheTracer = PageCacheTracer.NULL;
         databaseIndexContext = DatabaseIndexContext.builder(
                         pageCache,
                         fs,
@@ -132,7 +133,8 @@ abstract class BlockBasedIndexPopulatorUpdatesTest<KEY extends NativeIndexKey<KE
     }
 
     @Test
-    void shouldSeeExternalUpdateBothBeforeAndAfterScanCompleted() throws IndexEntryConflictException, IOException {
+    void shouldSeeExternalUpdateBothBeforeAndAfterScanCompleted()
+            throws IndexEntryConflictException, IOException, IndexNotApplicableKernelException {
         // given
         BlockBasedIndexPopulator<KEY> populator = instantiatePopulator(INDEX_DESCRIPTOR);
         try {
@@ -160,8 +162,9 @@ abstract class BlockBasedIndexPopulatorUpdatesTest<KEY extends NativeIndexKey<KE
         try {
             // when
             Value duplicate = supportedValue(1);
-            ValueIndexEntryUpdate<?> firstScanUpdate = ValueIndexEntryUpdate.add(1, INDEX_DESCRIPTOR, duplicate);
-            ValueIndexEntryUpdate<?> secondScanUpdate = ValueIndexEntryUpdate.add(2, INDEX_DESCRIPTOR, duplicate);
+            EagerValueIndexEntryUpdate firstScanUpdate = EagerValueIndexEntryUpdate.add(1, INDEX_DESCRIPTOR, duplicate);
+            EagerValueIndexEntryUpdate secondScanUpdate =
+                    EagerValueIndexEntryUpdate.add(2, INDEX_DESCRIPTOR, duplicate);
             assertThrows(IndexEntryConflictException.class, () -> {
                 populator.add(singleton(firstScanUpdate), CursorContext.NULL_CONTEXT);
                 populator.add(singleton(secondScanUpdate), CursorContext.NULL_CONTEXT);
@@ -179,8 +182,10 @@ abstract class BlockBasedIndexPopulatorUpdatesTest<KEY extends NativeIndexKey<KE
         try {
             // when
             Value duplicate = supportedValue(1);
-            ValueIndexEntryUpdate<?> firstExternalUpdate = ValueIndexEntryUpdate.add(1, INDEX_DESCRIPTOR, duplicate);
-            ValueIndexEntryUpdate<?> secondExternalUpdate = ValueIndexEntryUpdate.add(2, INDEX_DESCRIPTOR, duplicate);
+            EagerValueIndexEntryUpdate firstExternalUpdate =
+                    EagerValueIndexEntryUpdate.add(1, INDEX_DESCRIPTOR, duplicate);
+            EagerValueIndexEntryUpdate secondExternalUpdate =
+                    EagerValueIndexEntryUpdate.add(2, INDEX_DESCRIPTOR, duplicate);
             assertThrows(IndexEntryConflictException.class, () -> {
                 try (IndexUpdater updater = populator.newPopulatingUpdater(CursorContext.NULL_CONTEXT)) {
                     updater.process(firstExternalUpdate);
@@ -200,8 +205,8 @@ abstract class BlockBasedIndexPopulatorUpdatesTest<KEY extends NativeIndexKey<KE
         try {
             // when
             Value duplicate = supportedValue(1);
-            ValueIndexEntryUpdate<?> externalUpdate = ValueIndexEntryUpdate.add(1, INDEX_DESCRIPTOR, duplicate);
-            ValueIndexEntryUpdate<?> scanUpdate = ValueIndexEntryUpdate.add(2, INDEX_DESCRIPTOR, duplicate);
+            EagerValueIndexEntryUpdate externalUpdate = EagerValueIndexEntryUpdate.add(1, INDEX_DESCRIPTOR, duplicate);
+            EagerValueIndexEntryUpdate scanUpdate = EagerValueIndexEntryUpdate.add(2, INDEX_DESCRIPTOR, duplicate);
             assertThrows(IndexEntryConflictException.class, () -> {
                 try (IndexUpdater updater = populator.newPopulatingUpdater(CursorContext.NULL_CONTEXT)) {
                     updater.process(externalUpdate);
@@ -215,17 +220,19 @@ abstract class BlockBasedIndexPopulatorUpdatesTest<KEY extends NativeIndexKey<KE
     }
 
     @Test
-    void shouldNotThrowOnDuplicationsLaterFixedByExternalUpdates() throws IndexEntryConflictException, IOException {
+    void shouldNotThrowOnDuplicationsLaterFixedByExternalUpdates()
+            throws IndexEntryConflictException, IOException, IndexNotApplicableKernelException {
         // given
         BlockBasedIndexPopulator<KEY> populator = instantiatePopulator(UNIQUE_INDEX_DESCRIPTOR);
         try {
             // when
             Value duplicate = supportedValue(1);
             Value unique = supportedValue(2);
-            ValueIndexEntryUpdate<?> firstScanUpdate = ValueIndexEntryUpdate.add(1, INDEX_DESCRIPTOR, duplicate);
-            ValueIndexEntryUpdate<?> secondScanUpdate = ValueIndexEntryUpdate.add(2, INDEX_DESCRIPTOR, duplicate);
-            ValueIndexEntryUpdate<?> externalUpdate =
-                    ValueIndexEntryUpdate.change(1, INDEX_DESCRIPTOR, duplicate, unique);
+            EagerValueIndexEntryUpdate firstScanUpdate = EagerValueIndexEntryUpdate.add(1, INDEX_DESCRIPTOR, duplicate);
+            EagerValueIndexEntryUpdate secondScanUpdate =
+                    EagerValueIndexEntryUpdate.add(2, INDEX_DESCRIPTOR, duplicate);
+            EagerValueIndexEntryUpdate externalUpdate =
+                    EagerValueIndexEntryUpdate.change(1, INDEX_DESCRIPTOR, duplicate, unique);
             populator.add(singleton(firstScanUpdate), CursorContext.NULL_CONTEXT);
             try (IndexUpdater updater = populator.newPopulatingUpdater(CursorContext.NULL_CONTEXT)) {
                 updater.process(externalUpdate);
@@ -241,12 +248,13 @@ abstract class BlockBasedIndexPopulatorUpdatesTest<KEY extends NativeIndexKey<KE
         }
     }
 
-    void assertHasEntry(BlockBasedIndexPopulator<KEY> populator, Value entry, int expectedId) {
-        try (NativeIndexReader<KEY> reader = populator.newReader()) {
-            SimpleEntityValueClient valueClient = new SimpleEntityValueClient();
+    void assertHasEntry(BlockBasedIndexPopulator<KEY> populator, Value entry, int expectedId)
+            throws IndexNotApplicableKernelException {
+        try (NativeIndexReader<KEY> reader = populator.newReader();
+                SimpleEntityValueClient valueClient = new SimpleEntityValueClient()) {
             PropertyIndexQuery.ExactPredicate exact =
                     PropertyIndexQuery.exact(INDEX_DESCRIPTOR.schema().getPropertyId(), entry);
-            reader.query(valueClient, QueryContext.NULL_CONTEXT, unconstrained(), exact);
+            reader.query(valueClient, QueryContext.NULL_CONTEXT, CursorContext.NULL_CONTEXT, unconstrained(), exact);
             assertTrue(valueClient.next());
             long id = valueClient.reference;
             assertEquals(expectedId, id);
@@ -262,12 +270,14 @@ abstract class BlockBasedIndexPopulatorUpdatesTest<KEY extends NativeIndexKey<KE
         }
     }
 
-    private void assertMatch(BlockBasedIndexPopulator<KEY> populator, Value value, long id) {
-        try (NativeIndexReader<KEY> reader = populator.newReader()) {
-            SimpleEntityValueClient cursor = new SimpleEntityValueClient();
+    private void assertMatch(BlockBasedIndexPopulator<KEY> populator, Value value, long id)
+            throws IndexNotApplicableKernelException {
+        try (NativeIndexReader<KEY> reader = populator.newReader();
+                SimpleEntityValueClient cursor = new SimpleEntityValueClient()) {
             reader.query(
                     cursor,
                     QueryContext.NULL_CONTEXT,
+                    CursorContext.NULL_CONTEXT,
                     unorderedValues(),
                     PropertyIndexQuery.exact(INDEX_DESCRIPTOR.schema().getPropertyId(), value));
             assertTrue(cursor.next());

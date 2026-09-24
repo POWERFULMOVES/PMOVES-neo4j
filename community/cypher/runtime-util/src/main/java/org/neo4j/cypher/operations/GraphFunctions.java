@@ -44,7 +44,7 @@ public final class GraphFunctions {
                 .filter(constituent -> securityContext.databaseAccessMode().canAccessDatabase(constituent))
                 .map(constituent -> constituent.fullName().name())
                 .toArray(String[]::new);
-        return Values.arrayValue(graphNames, false);
+        return Values.stringArray(graphNames);
     }
 
     public static DatabaseReference graphByName(
@@ -84,8 +84,6 @@ public final class GraphFunctions {
     }
 
     private static EntityNotFoundException graphNotFound(String compositeGraph, String graph) {
-        return new EntityNotFoundException(String.format(
-                "When connected to a composite database, access is allowed only to its constituents. Attempted to access '%s' while connected to '%s'",
-                graph, compositeGraph));
+        return EntityNotFoundException.unsupportedAccessOfStandardDb(graph, compositeGraph);
     }
 }

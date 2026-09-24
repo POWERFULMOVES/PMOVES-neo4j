@@ -20,9 +20,13 @@
 package org.neo4j.internal.batchimport;
 
 import static java.lang.String.format;
+import static org.neo4j.internal.batchimport.SchemaMonitor.EMPTY_UNIQUENESS_UPDATES_LISTENER;
 import static org.neo4j.storageengine.util.IdUpdateListener.IGNORE;
 
+import java.util.Collections;
 import java.util.function.LongFunction;
+import org.eclipse.collections.api.factory.primitive.IntSets;
+import org.neo4j.batchimport.api.input.ApplicationMode;
 import org.neo4j.batchimport.api.input.Collector;
 import org.neo4j.batchimport.api.input.Group;
 import org.neo4j.batchimport.api.input.InputChunk;
@@ -68,6 +72,7 @@ public class RelationshipImporter extends EntityImporter {
     private String type;
 
     protected RelationshipImporter(
+            int workerId,
             BatchingNeoStores stores,
             IdMapper idMapper,
             DataStatistics typeDistribution,
@@ -81,7 +86,7 @@ public class RelationshipImporter extends EntityImporter {
         super(stores, monitor, contextFactory, memoryTracker, schemaMonitor);
         this.doubleRecordUnits = doubleRecordUnits;
         this.relationshipTypeTokenRepository = stores.getTokenHolders().relationshipTypeTokens();
-        this.idMapper = idMapper.newGetter();
+        this.idMapper = idMapper.newGetter(workerId);
         this.badCollector = badCollector;
         this.validateRelationshipData = validateRelationshipData;
         this.relationshipStore = stores.getRelationshipStore();
@@ -97,6 +102,11 @@ public class RelationshipImporter extends EntityImporter {
     @Override
     protected PrimitiveRecord primitiveRecord() {
         return relationshipRecord;
+    }
+
+    @Override
+    public boolean id(long id) {
+        return true;
     }
 
     @Override
@@ -143,7 +153,6 @@ public class RelationshipImporter extends EntityImporter {
     @Override
     public boolean type(int typeId) {
         relationshipRecord.setType(typeId);
-        schemaMonitor.entityToken(typeId);
         return true;
     }
 
@@ -164,17 +173,34 @@ public class RelationshipImporter extends EntityImporter {
                 && relationshipRecord.getSecondNode() != IdMapper.ID_NOT_FOUND
                 && relationshipRecord.getType() != -1) {
             relationshipRecord.setId(relationshipIds.nextId(cursorContext));
-            if (schemaMonitor.endOfEntity(
+            var entity = new SchemaMonitor.Entity(
+                    null,
                     relationshipRecord.getId(),
-                    (entityId, tokens, properties, constraintDescription) ->
-                            badCollector.collectRelationshipViolatingConstraint(
-                                    namedProperties(properties),
-                                    constraintDescription,
-                                    startId,
-                                    startIdGroup,
-                                    type,
-                                    endId,
-                                    endIdGroup))) {
+                    properties,
+                    Collections.emptyList(),
+                    null,
+                    false,
+                    IntSets.immutable.empty(),
+                    IntSets.immutable.empty(),
+                    IntSets.immutable.of(relationshipRecord.getType()),
+                    IntSets.immutable.empty(),
+                    ApplicationMode.CREATE,
+                    sourceDescription,
+                    lineNumber);
+            if (schemaMonitor.handle(
+                    entity,
+                    SchemaMonitor.NO_EXISTING_PROPERTY_KEYS_LOOKUP,
+                    (e, constraintDescription) -> badCollector.collectRelationshipViolatingConstraint(
+                            namedProperties(e.propertiesMap()),
+                            constraintDescription,
+                            startId,
+                            startIdGroup,
+                            type,
+                            endId,
+                            endIdGroup,
+                            sourceDescription,
+                            lineNumber),
+                    EMPTY_UNIQUENESS_UPDATES_LISTENER)) {
                 if (doubleRecordUnits) {
                     // simply reserve one id for this relationship to grow during linking stage
                     relationshipIds.nextId(cursorContext);
@@ -209,7 +235,9 @@ public class RelationshipImporter extends EntityImporter {
                     idToReport(type, relationshipRecord.getType()),
                     idToReport(endId, relationshipRecord.getSecondNode()),
                     endIdGroup,
-                    relationshipRecord.getFirstNode() == IdMapper.ID_NOT_FOUND ? startId : endId);
+                    relationshipRecord.getFirstNode() == IdMapper.ID_NOT_FOUND ? startId : endId,
+                    sourceDescription,
+                    lineNumber);
             entityPropertyCount = 0;
         }
         reset();

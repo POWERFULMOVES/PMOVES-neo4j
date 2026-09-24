@@ -25,12 +25,15 @@ import java.nio.file.OpenOption;
 import java.util.HashMap;
 import java.util.Map;
 import org.eclipse.collections.api.set.ImmutableSet;
+import org.neo4j.common.TokenNameLookup;
 import org.neo4j.configuration.Config;
 import org.neo4j.gis.spatial.index.curves.SpaceFillingCurveConfiguration;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.io.memory.ByteBufferFactory;
+import org.neo4j.kernel.api.index.IndexPopulator;
 import org.neo4j.kernel.api.index.IndexValueValidator;
 import org.neo4j.kernel.impl.index.schema.config.IndexSpecificSpaceFillingCurveSettings;
+import org.neo4j.logging.LogProvider;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.values.storable.Value;
 
@@ -50,7 +53,10 @@ public class PointBlockBasedIndexPopulator extends BlockBasedIndexPopulator<Poin
             Config config,
             MemoryTracker memoryTracker,
             Monitor monitor,
-            ImmutableSet<OpenOption> openOptions) {
+            ImmutableSet<OpenOption> openOptions,
+            LogProvider logProvider,
+            TokenNameLookup tokenNameLookup,
+            IndexPopulator.Configuration populatorConfiguration) {
         super(
                 databaseIndexContext,
                 indexFiles,
@@ -61,7 +67,10 @@ public class PointBlockBasedIndexPopulator extends BlockBasedIndexPopulator<Poin
                 config,
                 memoryTracker,
                 monitor,
-                openOptions);
+                openOptions,
+                logProvider,
+                tokenNameLookup,
+                populatorConfiguration);
         this.spatialSettings = spatialSettings;
         this.configuration = configuration;
     }
@@ -79,7 +88,13 @@ public class PointBlockBasedIndexPopulator extends BlockBasedIndexPopulator<Poin
     @Override
     NativeIndexReader<PointKey> newReader() {
         return new PointIndexReader(
-                tree, layout, descriptor, spatialSettings, configuration, IndexUsageTracking.NO_USAGE_TRACKING);
+                tree,
+                layout,
+                descriptor,
+                spatialSettings,
+                configuration,
+                IndexUsageTracking.NO_USAGE_TRACKING,
+                logProvider);
     }
 
     @Override

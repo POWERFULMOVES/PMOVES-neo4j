@@ -22,6 +22,7 @@ package org.neo4j.cypher.internal.runtime.interpreted.commands
 import org.neo4j.cypher.internal.expressions.SemanticDirection
 import org.neo4j.cypher.internal.expressions.SemanticDirection.INCOMING
 import org.neo4j.cypher.internal.expressions.SemanticDirection.OUTGOING
+import org.neo4j.cypher.internal.logical.plans.TraversalPathMode
 import org.neo4j.cypher.internal.runtime.interpreted.GraphElementPropertyFunctions
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Expression
 import org.neo4j.cypher.internal.runtime.interpreted.commands.values.KeyToken
@@ -43,8 +44,8 @@ trait Pattern extends AstNode[Pattern] {
 object RelationshipPattern {
 
   def unapply(x: Any): Option[(RelationshipPattern, SingleNode, SingleNode)] = x match {
-    case pattern @ ShortestPath(_, left, right, _, _, _, _, _, _) => Some((pattern, left, right))
-    case _                                                        => None
+    case pattern @ ShortestPath(_, left, right, _, _, _, _, _, _, _) => Some((pattern, left, right))
+    case _                                                           => None
   }
 }
 
@@ -65,7 +66,7 @@ case class SingleNode(
 
   override def relTypes: Seq[String] = Seq.empty
 
-  override def rewrite(f: Expression => Expression) =
+  override def rewrite(f: Expression => Expression): SingleNode =
     SingleNode(name, value.map(_.rewrite(f)), labels.map(_.typedRewrite[KeyToken](f)), properties.rewrite(f))
 
   override def children: Seq[AstNode[_]] = labels ++ properties.values
@@ -95,7 +96,8 @@ case class ShortestPath(
   allowZeroLength: Boolean,
   maxDepth: Option[Int],
   single: Boolean,
-  relIterator: Option[String]
+  relIterator: Option[String],
+  pathMode: TraversalPathMode
 ) extends PathPattern {
 
   override def toString: String =
@@ -115,7 +117,7 @@ case class ShortestPath(
     info + "]"
   }
 
-  override def rewrite(f: Expression => Expression) =
+  override def rewrite(f: Expression => Expression): ShortestPath =
     ShortestPath(
       pathName,
       left.rewrite(f),
@@ -125,7 +127,8 @@ case class ShortestPath(
       allowZeroLength,
       maxDepth,
       single,
-      relIterator
+      relIterator,
+      pathMode
     )
 
   override def rels: Seq[String] = Seq()

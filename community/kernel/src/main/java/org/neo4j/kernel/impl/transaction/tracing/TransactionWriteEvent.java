@@ -19,7 +19,7 @@
  */
 package org.neo4j.kernel.impl.transaction.tracing;
 
-import org.neo4j.kernel.impl.transaction.log.LogAppendEvent;
+import org.neo4j.wal.LogAppendEvent;
 
 /**
  * A trace event that represents the commit process of a transaction.
@@ -40,7 +40,8 @@ public interface TransactionWriteEvent extends AutoCloseable {
         }
 
         @Override
-        public void chunkAppended(int chunkNumber, long transactionSequenceNumber, long transactionId) {}
+        public void chunkAppended(
+                int chunkNumber, long transactionSequenceNumber, long transactionId, long appendIndex) {}
     };
 
     /**
@@ -65,5 +66,5 @@ public interface TransactionWriteEvent extends AutoCloseable {
      * @param transactionSequenceNumber sequence number of transaction
      * @param transactionId transaction id
      */
-    void chunkAppended(int chunkNumber, long transactionSequenceNumber, long transactionId);
+    void chunkAppended(int chunkNumber, long transactionSequenceNumber, long transactionId, long appendIndex);
 }

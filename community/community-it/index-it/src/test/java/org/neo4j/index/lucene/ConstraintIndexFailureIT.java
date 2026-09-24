@@ -41,6 +41,7 @@ import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.RelationshipType;
 import org.neo4j.graphdb.Transaction;
 import org.neo4j.io.fs.FileUtils;
+import org.neo4j.kernel.api.exceptions.schema.IndexBrokenKernelException;
 import org.neo4j.kernel.api.exceptions.schema.UnableToValidateConstraintException;
 import org.neo4j.kernel.api.index.IndexDirectoryStructure;
 import org.neo4j.kernel.impl.coreapi.TransactionImpl;
@@ -62,48 +63,57 @@ class ConstraintIndexFailureIT {
     void shouldFailToValidateConstraintsIfUnderlyingIndexIsFailed(EntityType entityType) throws Exception {
         // given a perfectly normal constraint
         Path dir = directory.homePath();
-        DatabaseManagementService managementService = new TestDatabaseManagementServiceBuilder(dir)
+        try (DatabaseManagementService managementService = new TestDatabaseManagementServiceBuilder(dir)
                 // use delegating index provider with custom descriptor, so it can be replaced with failing provider
                 .addExtension(new BuiltInDelegatingIndexProviderFactory(new RangeIndexProviderFactory(), DESCRIPTOR))
                 .setConfig(GraphDatabaseInternalSettings.always_use_latest_index_provider, false)
-                .build();
-        GraphDatabaseService db = managementService.database(DEFAULT_DATABASE_NAME);
-        try (TransactionImpl tx = (TransactionImpl) db.beginTx()) {
-            createConstraint(entityType, tx);
-            tx.commit();
-        } finally {
-            managementService.shutdown();
+                .build()) {
+            GraphDatabaseService db = managementService.database(DEFAULT_DATABASE_NAME);
+            try (TransactionImpl tx = (TransactionImpl) db.beginTx()) {
+                createConstraint(entityType, tx);
+                tx.commit();
+            }
         }
 
         // Remove the indexes offline and start up with an index provider which reports FAILED as initial state. An
         // ordeal, I know right...
         FileUtils.deleteDirectory(IndexDirectoryStructure.baseSchemaIndexFolder(dir));
-        managementService = new TestDatabaseManagementServiceBuilder(dir)
+        try (DatabaseManagementService managementService = new TestDatabaseManagementServiceBuilder(dir)
                 .addExtension(new FailingNativeIndexProviderFactory(INITIAL_STATE))
-                .build();
-        db = managementService.database(DEFAULT_DATABASE_NAME);
-        // when
-        try (Transaction tx = db.beginTx()) {
-            var e = assertThrows(ConstraintViolationException.class, () -> createData(entityType, tx));
-            assertThat(e.getCause()).isInstanceOf(UnableToValidateConstraintException.class);
-            assertThat(e.getCause().getCause().getMessage())
-                    .contains("The index is in a failed state:")
-                    .contains(INITIAL_STATE_FAILURE_MESSAGE);
-        } finally {
-            managementService.shutdown();
+                .build()) {
+            GraphDatabaseService db = managementService.database(DEFAULT_DATABASE_NAME);
+            // when
+            try (Transaction tx = db.beginTx()) {
+                ConstraintViolationException e =
+                        assertThrows(ConstraintViolationException.class, () -> createData(entityType, tx));
+                Throwable cause = e.getCause();
+                assertThat(cause).isInstanceOf(UnableToValidateConstraintException.class);
+                assertThat(cause.getCause()).isInstanceOf(IndexBrokenKernelException.class);
+                IndexBrokenKernelException causeCause = (IndexBrokenKernelException) cause.getCause();
+                assertThat(causeCause.getMessage())
+                        .contains("The index is in a failed state:")
+                        .contains(INITIAL_STATE_FAILURE_MESSAGE);
+                assertThat(causeCause.gqlStatus()).isEqualTo("51N62");
+                assertThat(causeCause.statusDescription())
+                        .contains(
+                                "error: system configuration or operation exception - index is in a failed state. Unable to use index",
+                                "because it is in a failed state. See logs for more information.");
+            }
         }
     }
 
-    private void createConstraint(EntityType entityType, TransactionImpl tx) throws KernelException {
+    private static void createConstraint(EntityType entityType, TransactionImpl tx) throws KernelException {
         switch (entityType) {
-            case NODE -> IndexingTestUtil.createNodePropUniqueConstraintWithSpecifiedProvider(
-                    tx, DESCRIPTOR, label("Label1"), "key1");
-            case RELATIONSHIP -> IndexingTestUtil.createRelPropUniqueConstraintWithSpecifiedProvider(
-                    tx, DESCRIPTOR, RelationshipType.withName("Type1"), "key1");
+            case NODE ->
+                IndexingTestUtil.createNodePropUniqueConstraintWithSpecifiedProvider(
+                        tx, DESCRIPTOR, label("Label1"), "key1");
+            case RELATIONSHIP ->
+                IndexingTestUtil.createRelPropUniqueConstraintWithSpecifiedProvider(
+                        tx, DESCRIPTOR, RelationshipType.withName("Type1"), "key1");
         }
     }
 
-    private void createData(EntityType entityType, Transaction tx) {
+    private static void createData(EntityType entityType, Transaction tx) {
         switch (entityType) {
             case NODE -> tx.createNode(label("Label1")).setProperty("key1", "value1");
             case RELATIONSHIP -> {

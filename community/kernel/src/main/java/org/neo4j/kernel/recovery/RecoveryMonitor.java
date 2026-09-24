@@ -20,7 +20,8 @@
 package org.neo4j.kernel.recovery;
 
 import org.neo4j.kernel.impl.transaction.CommittedCommandBatchRepresentation;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
+import org.neo4j.storageengine.AppendIndexProvider;
+import org.neo4j.wal.LogPosition;
 
 public interface RecoveryMonitor {
     default void recoveryRequired(RecoveryStartInformation recoveryStartInfo) {}
@@ -46,4 +47,11 @@ public interface RecoveryMonitor {
     default void rollbackTransaction(long transactionId, long appendIndex) {}
 
     default void recoveryCompleted() {}
+
+    default void transactionsRecovered(
+            CommittedCommandBatchRepresentation.BatchInformation highestTransactionRecoveredBatch,
+            AppendIndexProvider recoverAppendIndexProvider,
+            LogPosition lastTransactionPosition,
+            LogPosition positionAfterLastRecoveredTransaction,
+            LogPosition checkpointPosition) {}
 }

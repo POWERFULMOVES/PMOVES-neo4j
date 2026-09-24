@@ -20,7 +20,6 @@
 package org.neo4j.index.internal.gbptree;
 
 import static org.neo4j.index.internal.gbptree.PointerChecking.checkOutOfBounds;
-import static org.neo4j.io.IOUtils.closeAllSilently;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -29,6 +28,7 @@ import java.util.function.LongSupplier;
 import org.neo4j.io.pagecache.PageCursor;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.util.Preconditions;
+import org.neo4j.util.VisibleForTesting;
 
 /**
  * {@link Seeker} over tree leaves, making keys/values accessible to user. Given a starting leaf
@@ -140,32 +140,25 @@ import org.neo4j.util.Preconditions;
  * he find the place where he left off, K4.
  */
 class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
-
     interface Monitor {
         /**
          * @param depth where {@code depth==0} is the root.
          * @param keyCount number of keys in the visited internal node.
          */
-        void internalNode(int depth, int keyCount);
+        default void internalNode(int depth, int keyCount) {}
 
         /**
          * @param depth where {@code depth==0} is a root-only tree, where the root is a leaf.
          * @param keyCount number of keys in the visited leaf node.
          */
-        void leafNode(int depth, int keyCount);
+        default void leafNode(int depth, int keyCount) {}
+
+        default void sibling() {}
+
+        default void restartFromRoot() {}
     }
 
-    static class MonitorAdaptor implements Monitor {
-        @Override
-        public void internalNode(int depth, int keyCount) { // no-op
-        }
-
-        @Override
-        public void leafNode(int depth, int keyCount) { // no-op
-        }
-    }
-
-    static final Monitor NO_MONITOR = new MonitorAdaptor();
+    static final Monitor NO_MONITOR = new Monitor() {};
 
     static final int DEFAULT_MAX_READ_AHEAD = 20;
     static final int LEAF_LEVEL = Integer.MAX_VALUE;
@@ -182,28 +175,10 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
      */
     private final CursorContext cursorContext;
 
-    /**
-     * Key instances to use for reading keys from current node.
-     */
-    private KEY[] mutableKeys;
+    private final Cache cache = new Cache();
 
     /**
-     * Value instances to use for reading values from current node.
-     */
-    private ValueHolder<VALUE>[] mutableValues;
-
-    /**
-     * Index into {@link #mutableKeys}/{@link #mutableValues}, i.e. which key/value to consider as result next.
-     */
-    private int cachedIndex;
-
-    /**
-     * Number of keys/values read into {@link #mutableKeys} and {@link #mutableValues} from the most recently read batch.
-     */
-    private int cachedLength;
-
-    /**
-     * Initially set to {@code false} after a {@link #readAndValidateNextKeyValueBatch()} and will become {@code true}
+     * Initially set to {@code false} after a {@link #readAndValidateNextKeyValueBatch(boolean)} ()} and will become {@code true}
      * as soon as coming across a key which is a result key. From that point on and until the next batch read,
      * having this a {@code true} will allow fewer comparisons to figure out whether or not a key is a result key.
      */
@@ -295,11 +270,6 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
     private int keyCount;
 
     /**
-     * Set if the position of the last returned key need to be found again.
-     */
-    private boolean concurrentWriteHappened;
-
-    /**
      * {@link TreeNodeUtil#generation(PageCursor) generation} of the current leaf node, read every call to {@link #next()}.
      */
     private long currentNodeGeneration;
@@ -341,14 +311,7 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
      * <p>
      * Pointer to successor of node.
      */
-    private long successor;
-
-    /**
-     * Set within should retry loop.
-     * <p>
-     * Generation of successor pointer
-     */
-    private long successorGeneration;
+    private PointerWithGeneration successor = PointerWithGeneration.EMPTY;
 
     /**
      * Set within should retry loop.
@@ -360,17 +323,9 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
     /**
      * Set within should retry loop.
      * <p>
-     * Used to store next child pointer to follow while traversing down the tree
-     * or next sibling pointer to follow if traversing along the leaves.
+     * Used to store next sibling pointer to follow if traversing along the leaves.
      */
-    private long pointerId;
-
-    /**
-     * Set within should retry loop.
-     * <p>
-     * Generation of {@link #pointerId}.
-     */
-    private long pointerGeneration;
+    private PointerWithGeneration nextSibling;
 
     // ┌── Special variables for backwards seek ──┐
     // v                                          v
@@ -380,14 +335,7 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
      * <p>
      * Pointer to sibling opposite to seek direction. Only used when seeking backwards.
      */
-    private long prevSiblingId;
-
-    /**
-     * Set within should retry loop.
-     * <p>
-     * Generation of {@link #prevSiblingId}.
-     */
-    private long prevSiblingGeneration;
+    private PointerWithGeneration prevSibling;
 
     /**
      * Set by linked cursor scouting next sibling to go to when seeking backwards.
@@ -432,18 +380,18 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
     private Monitor monitor;
 
     /**
-     * Normally {@link #readHeader()} is called when {@link #concurrentWriteHappened} is {@code true}. However this flag
-     * guards for cases where the header must be read and {@link #concurrentWriteHappened} is {@code false},
+     * Normally {@link #readHeader()} is called when concurrent write happened. However, this flag
+     * guards for cases where the header must be read despite no concurrent writes
      * such as when moving over to the next sibling and continuing reading.
      */
     private boolean forceReadHeader;
 
-    /**
-     * Place where read generations will be kept when reading child/sibling/successor pointers.
-     */
-    private final GenerationKeeper generationKeeper = new GenerationKeeper();
-
     private final int maxKeyCount;
+
+    /**
+     * Temporary key instance to use in key searches
+     */
+    private final KEY tempKey;
 
     SeekCursor(
             PageCursor cursor,
@@ -464,9 +412,9 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
         this.expectedFirstAfterGoToNext = layout.newKey();
         this.firstKeyInNode = layout.newKey();
         this.maxKeyCount = Math.max(leafNode.maxKeyCount(), internalNode.maxKeyCount());
+        this.tempKey = layout.newKey();
     }
 
-    @SuppressWarnings("unchecked")
     SeekCursor<KEY, VALUE> initialize(
             RootInitializer rootInitializer,
             RootCatchup rootCatchup,
@@ -476,15 +424,13 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
             int searchLevel,
             Monitor monitor)
             throws IOException {
-        this.rootInitializer = rootInitializer;
         Preconditions.checkState(!closed, "Seeker already closed");
+        this.rootInitializer = rootInitializer;
         this.rootCatchup = rootCatchup;
         this.lastFollowedPointerGeneration = rootInitializer.goToRoot(cursor, cursorContext);
         long generation = generationSupplier.getAsLong();
         this.stableGeneration = Generation.stableGeneration(generation);
         this.unstableGeneration = Generation.unstableGeneration(generation);
-        this.cachedIndex = 0;
-        this.cachedLength = 0;
         this.resultOnTrack = false;
         this.expectedCurrentNodeGeneration = 0;
         this.verifyExpectedFirstAfterGoToNext = false;
@@ -497,34 +443,22 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
         this.stride = seekForward ? 1 : -1;
         this.searchLevel = searchLevel;
         this.monitor = monitor;
-        int batchSize = exactMatch ? 1 : maxReadAhead;
-        if (mutableKeys == null || batchSize > mutableKeys.length) {
-            this.mutableKeys = (KEY[]) new Object[batchSize];
-            this.mutableValues = new ValueHolder[batchSize];
-            this.mutableKeys[0] = layout.newKey();
-            this.mutableValues[0] = new ValueHolder<>(layout.newValue());
-        }
+        this.cache.init(exactMatch ? 1 : maxReadAhead);
         this.ended = false;
         this.pos = 0;
         this.keyCount = 0;
-        this.concurrentWriteHappened = false;
         this.currentNodeGeneration = 0;
         this.nodeType = 0;
-        this.successor = 0;
-        this.successorGeneration = 0;
+        this.successor = PointerWithGeneration.EMPTY;
         this.isInternal = false;
-        this.pointerId = 0;
-        this.pointerGeneration = 0;
-        this.prevSiblingId = 0;
-        this.prevSiblingGeneration = 0;
+        this.nextSibling = PointerWithGeneration.EMPTY;
+        this.prevSibling = PointerWithGeneration.EMPTY;
+        return this;
+    }
 
-        try {
-            traverseDownToCorrectLevel();
-        } catch (Throwable e) {
-            exceptionDecorator.accept(e);
-            closeAllSilently(this);
-            throw e;
-        }
+    @VisibleForTesting
+    SeekCursor<KEY, VALUE> withMonitor(Monitor monitor) {
+        this.monitor = monitor;
         return this;
     }
 
@@ -543,274 +477,300 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
      * @throws IOException on {@link PageCursor} error.
      */
     private void traverseDownToCorrectLevel() throws IOException {
+        traverseToTargetLevel(searchLevel);
+        cache.clear();
+    }
+
+    private void traverseToTargetLevel(int searchLevel) throws IOException {
         int currentReadLevel = 0;
-        int completedReadLevel = -1;
-        do {
-            // Read
-            int searchResult = Integer.MIN_VALUE;
-            boolean lookingForChild = true;
-            do {
-                try {
-                    // Where we are
-                    if (!readHeader()) {
-                        continue;
-                    }
-
-                    searchResult = KeySearch.search(
-                            cursor,
-                            isInternal ? internalNode : leafNode,
-                            fromInclusive,
-                            mutableKeys[0],
-                            keyCount,
-                            cursorContext);
-                    lookingForChild = isInternal && currentReadLevel < searchLevel;
-                    pos = positionOf(searchResult, lookingForChild);
-
-                    if (lookingForChild) {
-                        pointerId = internalNode.childAt(
-                                cursor, pos, stableGeneration, unstableGeneration, generationKeeper);
-                        pointerGeneration = generationKeeper.generation;
-                    }
-                } catch (Exception e) {
-                    cursor.setCursorException(e.getMessage());
+        while (true) {
+            try {
+                var childPointer = readHeaderAndSearchForChild();
+                // some checks
+                if (endedUpOnUnWrongNode()) {
+                    throw new TreeNodeOutOfBoundsException(cursor.getCurrentPageId(), "ended up on wrong node");
                 }
-            } while (cursor.shouldRetry());
-            checkOutOfBounds(cursor);
-            cursor.checkAndClearCursorException();
+                sanityCheck();
+                if (goToSuccessor()) {
+                    continue;
+                }
+                monitorReadLevel(isInternal, currentReadLevel, keyCount);
 
-            // Act
-            if (!endedUpOnExpectedNode()) {
+                if (!isInternal || currentReadLevel == searchLevel) {
+                    // reached bottom or target level
+                    break;
+                }
+
+                // move down
+                goTo(childPointer.pointer(), childPointer.generation(), GBPPointerType.CHILD, false);
+                currentReadLevel++;
+            } catch (TreeNodeOutOfBoundsException e) {
                 prepareToStartFromRoot();
-                // Set isInternal to true and reset read levels to make sure we loop back up
                 isInternal = true;
                 currentReadLevel = 0;
-                completedReadLevel = -1;
-                continue;
-            } else if (!saneRead()) {
-                throw new TreeInconsistencyException(
-                        "Read inconsistent tree node %d%n"
-                                + "  nodeType:%d%n  currentNodeGeneration:%d%n  successor:%d%n  successorGeneration:%d%n"
-                                + "  isInternal:%b%n  keyCount:%d%n  searchResult:%d%n  pos:%d%n"
-                                + "  childId:%d%n  childIdGeneration:%d",
-                        cursor.getCurrentPageId(),
-                        nodeType,
-                        currentNodeGeneration,
-                        successor,
-                        successorGeneration,
-                        isInternal,
-                        keyCount,
-                        searchResult,
-                        pos,
-                        pointerId,
-                        pointerGeneration);
             }
+        }
+    }
 
-            if (goToSuccessor()) {
-                continue;
-            }
-
-            completedReadLevel = currentReadLevel;
-            if (lookingForChild) {
-                monitor.internalNode(completedReadLevel, keyCount);
-                goTo(pointerId, pointerGeneration, GBPPointerType.CHILD, false);
-                currentReadLevel++;
-            }
-        } while (completedReadLevel < currentReadLevel /* There is still another level to read */
-                && completedReadLevel < searchLevel /* The last completed read was not yet at our target level */);
-        if (isInternal) {
-            monitor.internalNode(completedReadLevel, keyCount);
+    private void monitorReadLevel(boolean internal, int readLevel, int keyCount) {
+        if (internal) {
+            monitor.internalNode(readLevel, keyCount);
         } else {
-            monitor.leafNode(completedReadLevel, keyCount);
+            monitor.leafNode(readLevel, keyCount);
         }
+    }
 
-        // We've now come to the first relevant leaf, initialize the state for the coming leaf scan
-        pos -= stride;
-        if (!seekForward) {
-            // The tree traversal is best effort when seeking backwards
-            // need to trigger search for key in next
-            concurrentWriteHappened = true;
+    private void sanityCheck() {
+        if (!keyCountIsSane(keyCount)) {
+            throw new TreeInconsistencyException(
+                    "Read inconsistent tree node %d%n"
+                            + "  nodeType:%d%n  currentNodeGeneration:%d%n  successor:%d%n  successorGeneration:%d%n"
+                            + "  isInternal:%b%n  keyCount:%d%n  pos:%d%n"
+                            + "  childId:%d%n  childIdGeneration:%d",
+                    cursor.getCurrentPageId(),
+                    nodeType,
+                    currentNodeGeneration,
+                    successor.pointer(),
+                    successor.generation(),
+                    isInternal,
+                    keyCount,
+                    pos,
+                    nextSibling.pointer(),
+                    nextSibling.generation());
         }
-        cachedLength = 0;
+    }
+
+    private PointerWithGeneration readHeaderAndSearchForChild() throws IOException {
+        PointerWithGeneration result = null;
+        do {
+            try {
+                if (!readHeader()) {
+                    continue;
+                }
+                if (isInternal) {
+                    int searchResult =
+                            KeySearch.search(cursor, internalNode, fromInclusive, tempKey, keyCount, cursorContext);
+                    int childPos = KeySearch.childPositionOf(searchResult);
+                    result = internalNode.childWithGenerationAt(cursor, childPos, stableGeneration, unstableGeneration);
+                }
+            } catch (Exception e) {
+                cursor.setCursorException(e.getMessage());
+            }
+        } while (cursor.shouldRetry());
+        checkOutOfBounds(cursor);
+        cursor.checkAndClearCursorException();
+        return result;
+    }
+
+    private boolean advance() throws IOException {
+        initialTraverseDownIfNeeded();
+
+        // on the first call to next we set concurrentWriteHappened flag to true in order to trigger binary search
+        // in the leaf on subsequent calls first will be false, or ended will be true
+        boolean concurrentWriteHappened = first;
+        while (!ended) {
+            pos += stride;
+
+            // There are two main tracks in this loop:
+            // - (SLOW) no keys/values have been read and will therefore need to be read from the cursor.
+            //   Reading from the cursor means there are a lot of things around the actual keys and values
+            //   that need to be check to validate the read. This is expensive to do since there's so much
+            //   to validate. This is why keys/values are read in batches of N entries. The validations
+            //   are made only once per batch instead of once per key/value.
+            // - (FAST) there are keys/values read and validated and ready to simply be returned to the user.
+
+            if (cache.hasNext()) {
+                // FAST, key/value is readily available
+                concurrentWriteHappened = cursor.shouldRetry();
+                if (!concurrentWriteHappened) {
+                    cache.next();
+                    if (resultOnTrack && isValueVisible(cache.currentValue())) {
+                        return true;
+                    }
+                    if (insidePrevKey(cache.currentKey())) {
+                        first = false;
+                        resultOnTrack = true;
+                        if (isValueVisible(cache.currentValue())) {
+                            return true;
+                        }
+                    } else {
+                        // key is before prevKey or fromIncluded which happens when we read through leaf split when
+                        // following sibling pointer. this is fine
+                        if (first) {
+                            // preserve old logic setting concurrentWriteHappened when haven't seen the first valid
+                            // key yet
+                            // though it is overwritten on the next iteration _if cache is not empty_
+                            // it means that if we haven't seen the first element yet and read full cache of values
+                            // that are before fromInclude (due to splits) we check all those cache entries first,
+                            // and only after that trigger binary search
+                            concurrentWriteHappened = true;
+                        }
+                    }
+                    continue;
+                }
+            }
+            // SLOW, next batch of keys/values needs to be read
+            if (resultOnTrack) {
+                layout.copyKey(cache.currentKey(), prevKey);
+            }
+            concurrentWriteHappened = !readAndValidateNextKeyValueBatch(concurrentWriteHappened);
+            if (concurrentWriteHappened) {
+                // Concurrent changes
+                cache.clear();
+                continue;
+            }
+
+            if (!seekForward && pos >= keyCount) {
+                if (goTo(prevSibling.pointer(), prevSibling.generation(), GBPPointerType.RIGHT_SIBLING, true)) {
+                    concurrentWriteHappened = true;
+                }
+                // Continue in the read loop above so that we can continue reading from previous sibling
+                // or on next position
+                continue;
+            }
+
+            if (seekForward && pos >= keyCount || !seekForward && pos < 0) {
+                switch (goToNextSibling()) {
+                    case STOP -> {}
+                    case RETRY_READ -> {
+                        concurrentWriteHappened = true;
+                        continue;
+                    }
+                    case FOLLOW -> {
+                        continue;
+                    }
+                }
+            }
+            // at this point we identified pos to return and probably filled read-ahead cache from that position
+            // next iteration should return entry at that pos using cache, so move pos back to prepare for it
+            pos -= stride;
+
+            // wasn't able to fill cache or move to sibling, that's it
+            ended = cache.empty();
+        }
+        return false;
     }
 
     @Override
     public boolean next() throws IOException {
         try {
-            while (!ended) {
-                pos += stride;
-
-                // There are two main tracks in this loop:
-                // - (SLOW) no keys/values have been read and will therefore need to be read from the cursor.
-                //   Reading from the cursor means there are a lot of things around the actual keys and values
-                //   that need to be check to validate the read. This is expensive to do since there's so much
-                //   to validate. This is why keys/values are read in batches of N entries. The validations
-                //   are made only once per batch instead of once per key/value.
-                // - (FAST) there are keys/values read and validated and ready to simply be returned to the user.
-
-                if (cachedIndex + 1 < cachedLength
-                        && !(concurrentWriteHappened = cursor.shouldRetry())) { // FAST, key/value is readily available
-                    cachedIndex++;
-                    if (resultOnTrack && isValueDefined()) {
-                        return true;
-                    }
-                    if (isResultKey()) {
-                        resultOnTrack = true;
-                        return true;
-                    }
-                    continue;
-                } else { // SLOW, next batch of keys/values needs to be read
-                    if (resultOnTrack) {
-                        layout.copyKey(mutableKeys[cachedIndex], prevKey);
-                    }
-                    if (!readAndValidateNextKeyValueBatch()) {
-                        // Concurrent changes
-                        cachedLength = 0;
-                        continue;
-                    }
-
-                    // Below, the cached key/value at slot [0] will be used
-                    if (!seekForward && pos >= keyCount) {
-                        goTo(prevSiblingId, prevSiblingGeneration, GBPPointerType.RIGHT_SIBLING, true);
-                        // Continue in the read loop above so that we can continue reading from previous sibling
-                        // or on next position
-                        continue;
-                    }
-
-                    if ((seekForward && pos >= keyCount) || (!seekForward && pos <= 0 && !insidePrevKey(cachedIndex))) {
-                        if (goToNextSibling()) {
-                            continue; // in the read loop above so that we can continue reading from next sibling
-                        }
-                    } else if (0 <= pos && pos < keyCount && insideEndRange(exactMatch, 0)) {
-                        if (isResultKey()) {
-                            resultOnTrack = true;
-                            return true; // which marks this read a hit that user can see
-                        }
-                        continue;
-                    }
+            while (true) {
+                try {
+                    return advance();
+                } catch (TreeNodeOutOfBoundsException e) {
+                    prepareToStartFromRoot();
+                    traverseDownToCorrectLevel();
                 }
-
-                // We've come too far and so this means the end of the result set
-                ended = true;
-                return false;
             }
         } catch (Throwable e) {
             exceptionDecorator.accept(e);
             throw e;
         }
-        return false;
     }
 
-    private boolean readAndValidateNextKeyValueBatch() throws IOException {
-        int searchResult = Integer.MIN_VALUE;
-        //noinspection AssignmentUsedAsCondition
+    private void initialTraverseDownIfNeeded() throws IOException {
+        if (first && !ended) {
+            traverseDownToCorrectLevel();
+        }
+    }
+
+    private boolean readAndValidateNextKeyValueBatch(boolean writeHappened) throws IOException {
+        boolean retry = writeHappened;
         do {
             try {
-                cachedIndex = 0;
-                cachedLength = 0;
+                cache.clear();
                 resultOnTrack = false;
 
-                // Where we are
-                if (concurrentWriteHappened || forceReadHeader || !seekForward) {
+                if (retry || forceReadHeader || !seekForward) {
                     if (!readHeader() || (isInternal && searchLevel == LEAF_LEVEL)) {
+                        retry = true;
                         continue;
                     }
                 }
 
                 if (verifyExpectedFirstAfterGoToNext) {
-                    pos = seekForward ? 0 : keyCount - 1;
+                    assert !seekForward;
+                    pos = keyCount - 1;
                     (isInternal ? internalNode : leafNode).keyAt(cursor, firstKeyInNode, pos, cursorContext);
                 }
 
-                if (concurrentWriteHappened) {
+                boolean fillCache = true;
+                if (retry) {
                     // Keys could have been moved so we need to make sure we are not missing any keys by
                     // moving position back until we find previously returned key
                     KEY key = first ? fromInclusive : prevKey;
 
-                    searchResult = KeySearch.search(
-                            cursor, isInternal ? internalNode : leafNode, key, mutableKeys[0], keyCount, cursorContext);
+                    int searchResult = KeySearch.search(
+                            cursor, isInternal ? internalNode : leafNode, key, tempKey, keyCount, cursorContext);
 
-                    pos = positionOf(searchResult, false);
-
-                    if (!seekForward && pos >= keyCount) {
-                        // We may need to go to previous sibling to find correct place to start seeking from
-                        prevSiblingId = readPrevSibling();
-                        prevSiblingGeneration = generationKeeper.generation;
+                    pos = selectPosition(searchResult, first, seekForward, keyCount);
+                    if (exactMatch && !KeySearch.isHit(searchResult)) {
+                        fillCache = false;
                     }
                 }
-
-                // Next result
-                if ((seekForward && pos >= keyCount) || (!seekForward && pos <= 0)) {
-                    // Read right sibling
-                    pointerId = readNextSibling();
-                    pointerGeneration = generationKeeper.generation;
-                }
-                for (int readPos = pos;
-                        cachedLength < mutableKeys.length && 0 <= readPos && readPos < keyCount;
-                        readPos += stride) {
-                    // Read the next value in this leaf
-                    if (mutableKeys[cachedLength] == null) {
-                        // Lazy instantiation of key/value
-                        mutableKeys[cachedLength] = layout.newKey();
-                        mutableValues[cachedLength] = new ValueHolder<>(layout.newValue());
-                    }
-                    if (!isInternal) {
-                        leafNode.keyValueAt(
-                                cursor, mutableKeys[cachedLength], mutableValues[cachedLength], readPos, cursorContext);
-                    } else {
-                        internalNode.keyAt(cursor, mutableKeys[cachedLength], readPos, cursorContext);
-                    }
-
-                    if (insideEndRange(exactMatch, cachedLength)) {
-                        // This seems to be a result that should be part of our result set
-                        if (cachedLength > 0 /*no need to check "inside prev" for consecutive keys*/
-                                || insidePrevKey(cachedLength)) {
-                            cachedLength++;
-                        }
-                    } else {
-                        // OK so we read too far, abort this ahead-reading
-                        break;
-                    }
+                if (fillCache) {
+                    cache.fill(pos);
                 }
             } catch (Exception e) {
-                cursor.setCursorException(e.getMessage());
+                String message =
+                        e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+                cursor.setCursorException(message, e);
             }
-        } while (concurrentWriteHappened = cursor.shouldRetry());
+            retry = true;
+        } while (cursor.shouldRetry());
         checkOutOfBoundsAndClosed();
         cursor.checkAndClearCursorException();
 
-        // Act
-        if (!endedUpOnExpectedNode() || (isInternal && searchLevel == LEAF_LEVEL)) {
+        if (endedUpOnUnWrongNode() || (isInternal && searchLevel == LEAF_LEVEL)) {
             // This node has been reused for something else than a tree node. Restart seek from root.
-            prepareToStartFromRoot();
-            traverseDownToCorrectLevel();
-            return false;
-        } else if (!saneRead()) {
-            throw new TreeInconsistencyException(
-                    "Read inconsistent tree node %d%n"
-                            + "  nodeType:%d%n  currentNodeGeneration:%d%n  successor:%d%n  successorGeneration:%d%n"
-                            + "  keyCount:%d%n  searchResult:%d%n  pos:%d%n"
-                            + "  rightSibling:%d%n  rightSiblingGeneration:%d",
-                    cursor.getCurrentPageId(),
-                    nodeType,
-                    currentNodeGeneration,
-                    successor,
-                    successorGeneration,
-                    keyCount,
-                    searchResult,
-                    pos,
-                    pointerId,
-                    pointerGeneration);
+            throw new TreeNodeOutOfBoundsException(cursor.getCurrentPageId(), "ended up on wrong node");
         }
+        sanityCheck();
 
         if (!verifyFirstKeyInNodeIsExpectedAfterGoTo()) {
             return false;
         }
 
+        //noinspection RedundantIfStatement
         if (goToSuccessor()) {
             return false;
         }
 
         return true;
+    }
+
+    /**
+     * Binary search returns position of the element if it is hit, or position where that element would be inserted if no hit
+     * This gives us different rules on selecting next position to return depending on direction of seek, or if hit should be included.
+     * And there is special case when result equals keyCount.
+     */
+    private int selectPosition(int searchResult, boolean inclusive, boolean seekForward, int keyCount) {
+        int position = KeySearch.positionOf(searchResult);
+        boolean hit = KeySearch.isHit(searchResult);
+        if (seekForward) {
+            // found exact match but need to skip it
+            if (hit && !inclusive) {
+                return position + 1;
+            }
+            return position;
+        }
+        // when seeking backwards there are few options:
+        // - no exact match - move left to get correct element
+        // - exact match, but not inclusive - need to skip element
+        // - special case, position == keyCount, this is no exact match, but we don't move left
+        //      in this case we could've come here after traversal from root and there is no match in tree at all,
+        //      or maybe there were concurrent updates since traversal and split/rebalance moved target element
+        //      to the right sibling.
+        //      we return keyCount here which triggers jump back to the right sibling, and subsequent move
+        //      to the left sibling (this node) sets {@link #verifyExpectedFirstAfterGoToNext} which updates pos to
+        //      "keyCount - 1"
+        if (position == keyCount) {
+            return position;
+        }
+        if (!hit || !inclusive) {
+            return position - 1;
+        }
+        return position;
     }
 
     /**
@@ -828,42 +788,37 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
     }
 
     /**
-     * @return whether or not the read key ({@link #mutableKeys}) is "before" the end of the key range
+     * @return whether or not the key is "before" the end of the key range
      * ({@link #toExclusive}) of this seek.
      */
-    private boolean insideEndRange(boolean exactMatch, int cachedIndex) {
+    private boolean insideEndRange(boolean exactMatch, KEY key) {
+        int compare = layout.compare(key, toExclusive);
         if (exactMatch) {
-            return seekForward
-                    ? layout.compare(mutableKeys[cachedIndex], toExclusive) <= 0
-                    : layout.compare(mutableKeys[cachedIndex], toExclusive) >= 0;
+            return seekForward ? compare <= 0 : compare >= 0;
         } else {
-            return seekForward
-                    ? layout.compare(mutableKeys[cachedIndex], toExclusive) < 0
-                    : layout.compare(mutableKeys[cachedIndex], toExclusive) > 0;
+            return seekForward ? compare < 0 : compare > 0;
         }
     }
 
     /**
-     * @return whether or not the read key ({@link #mutableKeys}) is "after" the start of the key range
+     * @return whether or not the key is "after" the start of the key range
      * ({@link #fromInclusive}) of this seek.
      */
-    private boolean insideStartRange(int cachedIndex) {
-        return seekForward
-                ? layout.compare(mutableKeys[cachedIndex], fromInclusive) >= 0
-                : layout.compare(mutableKeys[cachedIndex], fromInclusive) <= 0;
+    private boolean insideStartRange(KEY key) {
+        int compare = layout.compare(key, fromInclusive);
+        return seekForward ? compare >= 0 : compare <= 0;
     }
 
     /**
-     * @return whether or not the read key ({@link #mutableKeys}) is "after" the last returned key of this seek
+     * @return whether or not the key is "after" the last returned key of this seek
      * ({@link #prevKey}), or if no result has been returned the start of the key range ({@link #fromInclusive}).
      */
-    private boolean insidePrevKey(int cachedIndex) {
+    private boolean insidePrevKey(KEY key) {
         if (first) {
-            return insideStartRange(cachedIndex);
+            return insideStartRange(key);
         }
-        return seekForward
-                ? layout.compare(mutableKeys[cachedIndex], prevKey) > 0
-                : layout.compare(mutableKeys[cachedIndex], prevKey) < 0;
+        int compare = layout.compare(key, prevKey);
+        return seekForward ? compare > 0 : compare < 0;
     }
 
     /**
@@ -884,12 +839,10 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
      */
     private boolean goTo(long pointerId, long pointerGeneration, String type, boolean allowNoNode) throws IOException {
         if (pointerCheckingWithGenerationCatchup(pointerId, allowNoNode, type)) {
-            concurrentWriteHappened = true;
             return true;
         } else if (!allowNoNode || TreeNodeUtil.isNode(pointerId)) {
             TreeNodeUtil.goTo(cursor, type, pointerId);
             lastFollowedPointerGeneration = pointerGeneration;
-            concurrentWriteHappened = true;
             return true;
         }
         return false;
@@ -899,7 +852,7 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
      * Calls {@link #goTo(long, long, String, boolean)} with successor fields.
      */
     private boolean goToSuccessor() throws IOException {
-        return goTo(successor, successorGeneration, GBPPointerType.SUCCESSOR, true);
+        return goTo(successor.pointer(), successor.generation(), GBPPointerType.SUCCESSOR, true);
     }
 
     /**
@@ -909,7 +862,6 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
     private boolean verifyFirstKeyInNodeIsExpectedAfterGoTo() {
         boolean result = true;
         if (verifyExpectedFirstAfterGoToNext && layout.compare(firstKeyInNode, expectedFirstAfterGoToNext) != 0) {
-            concurrentWriteHappened = true;
             result = false;
         }
         verifyExpectedFirstAfterGoToNext = false;
@@ -919,26 +871,19 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
     /**
      * @return the read previous sibling, depending on the direction this seek is going.
      */
-    private long readPrevSibling() {
+    private PointerWithGeneration readPrevSibling() {
         return seekForward
-                ? TreeNodeUtil.leftSibling(cursor, stableGeneration, unstableGeneration, generationKeeper)
-                : TreeNodeUtil.rightSibling(cursor, stableGeneration, unstableGeneration, generationKeeper);
+                ? TreeNodeUtil.leftSibling(cursor, stableGeneration, unstableGeneration)
+                : TreeNodeUtil.rightSibling(cursor, stableGeneration, unstableGeneration);
     }
 
     /**
      * @return the read next sibling, depending on the direction this seek is going.
      */
-    private long readNextSibling() {
+    private PointerWithGeneration readNextSibling() {
         return seekForward
-                ? TreeNodeUtil.rightSibling(cursor, stableGeneration, unstableGeneration, generationKeeper)
-                : TreeNodeUtil.leftSibling(cursor, stableGeneration, unstableGeneration, generationKeeper);
-    }
-
-    private static int positionOf(int searchResult, boolean lookingForChildPosition) {
-        if (lookingForChildPosition) {
-            return KeySearch.childPositionOf(searchResult);
-        }
-        return KeySearch.positionOf(searchResult);
+                ? TreeNodeUtil.rightSibling(cursor, stableGeneration, unstableGeneration)
+                : TreeNodeUtil.leftSibling(cursor, stableGeneration, unstableGeneration);
     }
 
     /**
@@ -956,19 +901,26 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
         isInternal = TreeNodeUtil.isInternal(cursor);
         keyCount = TreeNodeUtil.keyCount(cursor);
         currentNodeGeneration = TreeNodeUtil.generation(cursor);
-        successor = TreeNodeUtil.successor(cursor, stableGeneration, unstableGeneration, generationKeeper);
-        successorGeneration = generationKeeper.generation;
+        successor = TreeNodeUtil.successor(cursor, stableGeneration, unstableGeneration);
+        prevSibling = readPrevSibling();
+        nextSibling = readNextSibling();
 
         forceReadHeader = false;
         return keyCountIsSane(keyCount);
     }
 
-    private boolean endedUpOnExpectedNode() {
-        return nodeType == TreeNodeUtil.NODE_TYPE_TREE_NODE && verifyNodeGenerationInvariants();
+    private boolean endedUpOnUnWrongNode() {
+        return nodeType != TreeNodeUtil.NODE_TYPE_TREE_NODE || !verifyNodeGenerationInvariants();
+    }
+
+    private enum NextSiblingResult {
+        STOP,
+        FOLLOW,
+        RETRY_READ
     }
 
     /**
-     * Moves {@link PageCursor} to next sibling (read before this call into {@link #pointerId}).
+     * Moves {@link PageCursor} to next sibling (read before this call into {@link #nextSibling}).
      * Also, on backwards seek, calls {@link #scoutNextSibling()} to be able to verify consistent read on
      * new sibling even on concurrent writes.
      * <p>
@@ -978,47 +930,49 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
      * @return {@code true} if we should read more after this call, otherwise {@code false} to mark the end.
      * @throws IOException on {@link PageCursor} error.
      */
-    private boolean goToNextSibling() throws IOException {
+    private NextSiblingResult goToNextSibling() throws IOException {
         if (pointerCheckingWithGenerationCatchup(
-                pointerId, true, seekForward ? GBPPointerType.RIGHT_SIBLING : GBPPointerType.LEFT_SIBLING)) {
+                nextSibling.pointer(),
+                true,
+                seekForward ? GBPPointerType.RIGHT_SIBLING : GBPPointerType.LEFT_SIBLING)) {
             // Reading sibling pointer resulted in a bad read, but generation had changed
             // (a checkpoint has occurred since we started this cursor) so the generation fields in this
             // cursor are now updated with the latest, so let's try that read again.
-            concurrentWriteHappened = true;
-            return true;
-        } else if (TreeNodeUtil.isNode(pointerId)) {
+            return NextSiblingResult.RETRY_READ;
+        } else if (TreeNodeUtil.isNode(nextSibling.pointer())) {
+            monitor.sibling();
+            var result = NextSiblingResult.FOLLOW;
             if (seekForward) {
                 // TODO: Check if rightSibling is within expected range before calling next.
                 // TODO: Possibly by getting highest expected from IdProvider
-                TreeNodeUtil.goTo(cursor, "sibling", pointerId);
-                lastFollowedPointerGeneration = pointerGeneration;
+                TreeNodeUtil.goTo(cursor, "sibling", nextSibling.pointer());
+                lastFollowedPointerGeneration = nextSibling.generation();
                 if (first) {
                     // Have not yet found first hit among leaves.
                     // First hit can be several leaves to the right.
                     // Continue to use binary search in right leaf
-                    concurrentWriteHappened = true;
+                    result = NextSiblingResult.RETRY_READ;
                 } else {
                     // It is likely that first key in right sibling is a next hit.
                     // Continue using scan
                     forceReadHeader = true;
                     pos = -1;
                 }
-                return true;
             } else {
                 // Need to scout next sibling because we are seeking backwards
                 if (scoutNextSibling()) {
-                    TreeNodeUtil.goTo(cursor, "sibling", pointerId);
+                    TreeNodeUtil.goTo(cursor, "sibling", nextSibling.pointer());
                     verifyExpectedFirstAfterGoToNext = true;
-                    lastFollowedPointerGeneration = pointerGeneration;
+                    lastFollowedPointerGeneration = nextSibling.generation();
                 } else {
-                    concurrentWriteHappened = true;
+                    result = NextSiblingResult.RETRY_READ;
                 }
-                return true;
             }
+            return result;
         }
 
         // The current node is exhausted and it had no sibling to read more from.
-        return false;
+        return NextSiblingResult.STOP;
     }
 
     /**
@@ -1027,7 +981,7 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
      * The first key read here will be matched after actually moving the main {@link PageCursor} to
      * the next sibling.
      * <p>
-     * May only be called if {@link #pointerId} points to next sibling.
+     * May only be called if {@link #nextSibling} points to next sibling.
      *
      * @return {@code true} if first key in next sibling was read successfully, otherwise {@code false},
      * which means that caller should retry most recent read.
@@ -1037,7 +991,8 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
         assert !seekForward; // only happens when we go backward
         assert !isInternal; // only happens when we go through leafs
 
-        try (PageCursor scout = this.cursor.openLinkedCursor(GenerationSafePointerPair.pointer(pointerId))) {
+        try (PageCursor scout =
+                this.cursor.openLinkedCursor(GenerationSafePointerPair.pointer(nextSibling.pointer()))) {
             scout.next();
 
             if (TreeNodeUtil.nodeType(scout) != TreeNodeUtil.NODE_TYPE_TREE_NODE) {
@@ -1084,42 +1039,11 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
     }
 
     /**
-     * @return whether or not the read {@link #mutableKeys} is one that should be included in the result.
-     * If this method returns {@code true} then {@link #next()} will return {@code true}.
-     * Returns {@code false} if this happened to be a bad read in the middle of a split or merge or so.
-     */
-    private boolean isResultKey() {
-        if (!insideStartRange(cachedIndex)) {
-            // Key is outside start range, possibly because page reuse
-            concurrentWriteHappened = true;
-            return false;
-        } else if (!first && !insidePrevKey(cachedIndex)) {
-            // We've come across a bad read in the middle of a split
-            // This is outlined in InternalTreeLogic, skip this value (it's fine)
-            return false;
-        }
-
-        // key found, but value is undefined, skip it
-        if (!isValueDefined()) {
-            return false;
-        }
-        // A hit, it's within the range we search for
-        if (first) {
-            // Setting first to false include an additional check for coming potential
-            // hits so that we cannot go backwards in our result. Going backwards can
-            // happen when reading through concurrent splits or similar and is a benign
-            // temporary observed state.
-            first = false;
-        }
-        return true;
-    }
-
-    /**
      * @return true if key-value pair at current cachedIndex should be visible by users of the seeker.
      * When at internal node, there are no values and all keys should be visible.
      */
-    private boolean isValueDefined() {
-        return isInternal || mutableValues[cachedIndex].defined;
+    private boolean isValueVisible(ValueHolder<VALUE> value) {
+        return isInternal || !value.deleted;
     }
 
     /**
@@ -1137,10 +1061,6 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
         return keyCount >= 0 && keyCount <= maxKeyCount;
     }
 
-    private boolean saneRead() {
-        return keyCountIsSane(keyCount);
-    }
-
     /**
      * Perform a generation catchup, updates current root and update range to start from
      * previously returned key. Should be followed by a call to {@link #traverseDownToCorrectLevel()}
@@ -1151,32 +1071,39 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
      * @throws IOException on {@link PageCursor}.
      */
     private void prepareToStartFromRoot() throws IOException {
-        generationCatchup();
-        Root root = rootCatchup.catchupFrom(cursor.getCurrentPageId(), cursorContext);
-        lastFollowedPointerGeneration = root.goTo(cursor);
-        if (!first) {
-            layout.copyKey(prevKey, fromInclusive);
-        }
+        while (true) {
+            try {
+                monitor.restartFromRoot();
+                generationCatchup();
+                Root root = rootCatchup.catchupFrom(cursor.getCurrentPageId(), cursorContext);
+                lastFollowedPointerGeneration = root.goTo(cursor);
+                if (!first) {
+                    fromInclusive = layout.copyKey(prevKey);
+                }
 
-        // Reset mutable state
-        cachedIndex = 0;
-        cachedLength = 0;
-        resultOnTrack = false;
-        pos = 0;
-        keyCount = 0;
-        concurrentWriteHappened = false;
-        verifyExpectedFirstAfterGoToNext = false;
-        currentNodeGeneration = 0;
-        expectedCurrentNodeGeneration = 0;
-        nodeType = 0;
-        successor = 0;
-        successorGeneration = 0;
-        isInternal = false;
-        pointerId = 0;
-        pointerGeneration = 0;
-        prevSiblingId = 0;
-        prevSiblingGeneration = 0;
-        forceReadHeader = false;
+                // Reset mutable state
+                cache.clear();
+                resultOnTrack = false;
+                pos = 0;
+                keyCount = 0;
+                verifyExpectedFirstAfterGoToNext = false;
+                currentNodeGeneration = 0;
+                expectedCurrentNodeGeneration = 0;
+                nodeType = 0;
+                successor = PointerWithGeneration.EMPTY;
+                isInternal = false;
+                nextSibling = PointerWithGeneration.EMPTY;
+                prevSibling = PointerWithGeneration.EMPTY;
+                forceReadHeader = false;
+                break;
+            } catch (TreeNodeOutOfBoundsException e) {
+                // If benign: in between getting the root and navigating to it there was a compaction
+                //            and the root moved to a lower region of the file
+                // If malignant: there's a pointer in the tree that points to a tree node that is outside
+                //               the boundaries of the file. If this happens, the rootCatchup has a trip counter
+                //               which will prevent an endless loop here.
+            }
+        }
     }
 
     /**
@@ -1198,7 +1125,8 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
             }
             lastFollowedPointerGeneration = 0;
             expectedCurrentNodeGeneration = currentNodeGeneration;
-        } else if (currentNodeGeneration != expectedCurrentNodeGeneration) {
+        } else //noinspection RedundantIfStatement
+        if (currentNodeGeneration != expectedCurrentNodeGeneration) {
             // We've read more than once from this node and between reads the node generation has changed.
             // This means the node has been reused.
             return false;
@@ -1256,7 +1184,7 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
     @Override
     public KEY key() {
         assertHasResult();
-        return mutableKeys[cachedIndex];
+        return cache.currentKey();
     }
 
     /**
@@ -1266,8 +1194,9 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
     @Override
     public VALUE value() {
         assertHasResult();
-        assert mutableValues[cachedIndex].defined;
-        return mutableValues[cachedIndex].value;
+        var value = cache.currentValue();
+        assert !value.deleted;
+        return value.value;
     }
 
     @Override
@@ -1292,17 +1221,96 @@ class SeekCursor<KEY, VALUE> implements Seeker<KEY, VALUE> {
     public void reinitializeToNewRange(KEY fromInclusive, KEY toExclusive) {
         if (!ended) {
             try {
+                //noinspection resource
                 initialize(
                         rootInitializer,
                         rootCatchup,
                         fromInclusive,
                         this.toExclusive,
-                        mutableKeys.length,
+                        cache.size(),
                         searchLevel,
                         monitor);
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
             }
+        }
+    }
+
+    private class Cache {
+        private KEY[] keys;
+        private ValueHolder<VALUE>[] values;
+        private int index;
+        private int length;
+
+        @SuppressWarnings("unchecked")
+        private void init(int batchSize) {
+            if (keys == null || batchSize > keys.length) {
+                keys = (KEY[]) new Object[batchSize];
+                values = new ValueHolder[batchSize];
+            }
+            clear();
+        }
+
+        private void fill(int fromPos) throws IOException {
+            int cacheIndex = 0;
+            for (int readPos = fromPos;
+                    cacheIndex < keys.length && 0 <= readPos && readPos < keyCount;
+                    readPos += stride) {
+                // Read the next value in this leaf
+                initSlot(cacheIndex);
+                readIntoSlot(cacheIndex, readPos);
+
+                if (!insideEndRange(exactMatch, keys[cacheIndex])) {
+                    // OK so we read too far, abort this ahead-reading
+                    break;
+                }
+                cacheIndex++;
+            }
+            this.length = cacheIndex;
+        }
+
+        private void readIntoSlot(int index, int readPos) throws IOException {
+            if (isInternal) {
+                internalNode.keyAt(cursor, keys[index], readPos, cursorContext);
+            } else {
+                leafNode.keyValueAt(cursor, keys[index], values[index], readPos, cursorContext);
+            }
+        }
+
+        private void initSlot(int cacheIndex) {
+            if (keys[cacheIndex] == null) {
+                keys[cacheIndex] = layout.newKey();
+                values[cacheIndex] = new ValueHolder<>(layout.newValue());
+            }
+        }
+
+        private ValueHolder<VALUE> currentValue() {
+            return values[index];
+        }
+
+        private KEY currentKey() {
+            return keys[index];
+        }
+
+        private boolean hasNext() {
+            return index + 1 < length;
+        }
+
+        private void next() {
+            index++;
+        }
+
+        private void clear() {
+            index = -1;
+            length = 0;
+        }
+
+        private int size() {
+            return keys.length;
+        }
+
+        private boolean empty() {
+            return length == 0;
         }
     }
 }

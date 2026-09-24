@@ -20,11 +20,13 @@
 package org.neo4j.values.utils;
 
 import static java.time.temporal.ChronoUnit.DAYS;
+import static org.neo4j.internal.helpers.TimeUtil.zoneOffsetOfTotalSeconds;
 
 import java.time.OffsetTime;
 import java.time.ZoneOffset;
 
 public final class TemporalUtil {
+    public static final int NANOS_PER_MILLISECOND = 1_000_000;
     public static final long NANOS_PER_SECOND = 1_000_000_000L;
     public static final long AVG_NANOS_PER_MONTH = 2_629_746_000_000_000L;
 
@@ -35,7 +37,7 @@ public final class TemporalUtil {
 
     static OffsetTime truncateOffsetToMinutes(OffsetTime value) {
         int offsetMinutes = value.getOffset().getTotalSeconds() / 60;
-        ZoneOffset truncatedOffset = ZoneOffset.ofTotalSeconds(offsetMinutes * 60);
+        ZoneOffset truncatedOffset = zoneOffsetOfTotalSeconds(offsetMinutes * 60);
         return value.withOffsetSameInstant(truncatedOffset);
     }
 

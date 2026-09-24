@@ -32,14 +32,14 @@ import org.neo4j.io.layout.Neo4jLayout;
 import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.ZippedStore;
 import org.neo4j.kernel.ZippedStoreCommunity;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.Neo4jLayoutExtension;
 import org.neo4j.test.utils.TestDirectory;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
 
 @Neo4jLayoutExtension
 public class CheckpointMigrationIT {
@@ -62,8 +62,7 @@ public class CheckpointMigrationIT {
     void checkpointDatabaseWithLegacyKernelVersion(ZippedStore zippedStore) throws IOException {
         Path homeDir = layout.homeDirectory();
         zippedStore.unzip(homeDir);
-        DatabaseManagementService dbms = new TestDatabaseManagementServiceBuilder(homeDir).build();
-        try {
+        try (DatabaseManagementService dbms = new TestDatabaseManagementServiceBuilder(homeDir).build(); ) {
             GraphDatabaseAPI database = (GraphDatabaseAPI) dbms.database(GraphDatabaseSettings.DEFAULT_DATABASE_NAME);
             forceCheckpoint(database);
 
@@ -73,8 +72,6 @@ public class CheckpointMigrationIT {
                     .findLatestCheckpoint()
                     .orElseThrow();
             assertEquals(KernelVersion.V5_0, latestCheckpoint.kernelVersion());
-        } finally {
-            dbms.shutdown();
         }
     }
 

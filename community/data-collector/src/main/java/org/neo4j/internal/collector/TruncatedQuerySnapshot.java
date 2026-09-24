@@ -19,7 +19,12 @@
  */
 package org.neo4j.internal.collector;
 
+import static org.neo4j.memory.HeapEstimator.OBJECT_HEADER_BYTES;
+import static org.neo4j.memory.HeapEstimator.OBJECT_REFERENCE_BYTES;
+import static org.neo4j.memory.HeapEstimator.alignObjectSize;
+
 import java.util.function.Supplier;
+import org.neo4j.cypher.internal.CypherVersion;
 import org.neo4j.graphdb.ExecutionPlanDescription;
 import org.neo4j.kernel.database.NamedDatabaseId;
 import org.neo4j.memory.HeapEstimator;
@@ -37,7 +42,9 @@ import org.neo4j.values.storable.NumberValue;
 import org.neo4j.values.storable.PointValue;
 import org.neo4j.values.storable.TextValue;
 import org.neo4j.values.storable.TimeValue;
+import org.neo4j.values.storable.UUIDValue;
 import org.neo4j.values.storable.Values;
+import org.neo4j.values.storable.VectorValue;
 import org.neo4j.values.virtual.MapValue;
 import org.neo4j.values.virtual.MapValueBuilder;
 import org.neo4j.values.virtual.NodeValue;
@@ -53,6 +60,14 @@ import org.neo4j.values.virtual.VirtualValues;
  * to avoid hogging lot's of memory that will be long-lived and likely tenured.
  */
 public class TruncatedQuerySnapshot {
+    private static final ValueTruncater VALUE_TRUNCATER = new ValueTruncater();
+    private static final int MAX_TEXT_PARAMETER_LENGTH = 100;
+    private static final int MAX_PARAMETER_KEY_LENGTH = 1000;
+    // capturing supplier with one field
+    private static final long SUPPLIER_SIZE = alignObjectSize(OBJECT_HEADER_BYTES + OBJECT_REFERENCE_BYTES);
+    private static final long SHALLOW_SIZE =
+            HeapEstimator.shallowSizeOfInstance(TruncatedQuerySnapshot.class) + SUPPLIER_SIZE;
+
     final NamedDatabaseId databaseId;
     final int fullQueryTextHash;
     final String queryText;
@@ -62,9 +77,7 @@ public class TruncatedQuerySnapshot {
     final long compilationTimeMicros;
     final long startTimestampMillis;
     final long estimatedHeap;
-
-    static final long SHALLOW_SIZE = HeapEstimator.shallowSizeOfInstance(TruncatedQuerySnapshot.class)
-            + HeapEstimator.shallowSizeOfInstance(Supplier.class);
+    final CypherVersion queryLanguage;
 
     public TruncatedQuerySnapshot(
             NamedDatabaseId databaseId,
@@ -74,7 +87,8 @@ public class TruncatedQuerySnapshot {
             long elapsedTimeMicros,
             long compilationTimeMicros,
             long startTimestampMillis,
-            int maxQueryTextLength) {
+            int maxQueryTextLength,
+            CypherVersion queryLanguage) {
         this.databaseId = databaseId;
         this.fullQueryTextHash = fullQueryText.hashCode();
         this.queryText = truncateQueryText(fullQueryText, maxQueryTextLength);
@@ -85,6 +99,17 @@ public class TruncatedQuerySnapshot {
         this.startTimestampMillis = startTimestampMillis;
         this.estimatedHeap =
                 SHALLOW_SIZE + HeapEstimator.sizeOf(this.queryText) + this.queryParameters.estimatedHeapUsage();
+        this.queryLanguage = queryLanguage;
+    }
+
+    @VisibleForTesting
+    public long estimatedHeap() {
+        return estimatedHeap;
+    }
+
+    @VisibleForTesting
+    public MapValue queryParameters() {
+        return queryParameters;
     }
 
     private static String truncateQueryText(String queryText, int maxLength) {
@@ -105,20 +130,6 @@ public class TruncatedQuerySnapshot {
         });
 
         return mapValueBuilder.build();
-    }
-
-    private static final ValueTruncater VALUE_TRUNCATER = new ValueTruncater();
-    private static final int MAX_TEXT_PARAMETER_LENGTH = 100;
-    private static final int MAX_PARAMETER_KEY_LENGTH = 1000;
-
-    @VisibleForTesting
-    public long estimatedHeap() {
-        return estimatedHeap;
-    }
-
-    @VisibleForTesting
-    public MapValue queryParameters() {
-        return queryParameters;
     }
 
     static class ValueTruncater implements ValueMapper<AnyValue> {
@@ -212,6 +223,16 @@ public class TruncatedQuerySnapshot {
 
         @Override
         public AnyValue mapPoint(PointValue value) {
+            return value;
+        }
+
+        @Override
+        public AnyValue mapVector(VectorValue value) {
+            return Values.stringValue("§VECTOR[" + value.dimensions() + "]");
+        }
+
+        @Override
+        public AnyValue mapUUID(UUIDValue value) {
             return value;
         }
     }

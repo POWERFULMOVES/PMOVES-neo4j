@@ -22,7 +22,7 @@ package org.neo4j.kernel.impl.newapi.parallel;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
-import static org.neo4j.internal.kernel.api.security.AccessMode.Static.FULL;
+import static org.neo4j.internal.kernel.api.security.StaticAccessMode.FULL;
 
 import java.time.LocalDate;
 import java.time.ZonedDateTime;
@@ -45,6 +45,7 @@ import org.neo4j.internal.kernel.api.procs.QualifiedName;
 import org.neo4j.internal.kernel.api.procs.UserAggregationReducer;
 import org.neo4j.internal.kernel.api.security.AccessMode;
 import org.neo4j.internal.kernel.api.security.SecurityContext;
+import org.neo4j.internal.kernel.api.security.StaticAccessMode;
 import org.neo4j.kernel.api.ExecutionContext;
 import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.api.QueryLanguage;
@@ -268,7 +269,7 @@ class ExecutionContextFunctionIT {
             AnyValue result = invokeUserFunction(executionContext, "accessMode");
             assertThat(result)
                     .isEqualTo(Values.stringValue(
-                            new OverriddenAccessMode(originalAccessMode, AccessMode.Static.READ).name()));
+                            new OverriddenAccessMode(originalAccessMode, StaticAccessMode.READ).name()));
 
             // ... and restored to FULL again after the call.
             assertThat(executionContext.securityContext().mode()).isEqualTo(FULL);
@@ -282,7 +283,7 @@ class ExecutionContextFunctionIT {
                 ExecutionContext executionContext = createExecutionContext(transaction)) {
             try {
                 var handle = executionContext.procedures().functionGet(getName("plus"), QueryLanguage.CYPHER_5);
-                var procContext = procedureCtx(handle.id());
+                var procContext = procedureCtx(handle.id(), QueryLanguage.CYPHER_5);
 
                 transaction.rollback();
                 assertThatThrownBy(() -> executionContext
@@ -349,7 +350,7 @@ class ExecutionContextFunctionIT {
     void testBuiltInFunction() throws ProcedureException {
         doWithExecutionContext(executionContext -> {
             var handle = executionContext.procedures().functionGet(new QualifiedName("date"), QueryLanguage.CYPHER_5);
-            var procContext = procedureCtx(handle.id());
+            var procContext = procedureCtx(handle.id(), QueryLanguage.CYPHER_5);
 
             AnyValue result = executionContext
                     .procedures()
@@ -365,7 +366,7 @@ class ExecutionContextFunctionIT {
             var handle = executionContext
                     .procedures()
                     .functionGet(new QualifiedName("datetime", "realtime"), QueryLanguage.CYPHER_5);
-            var procContext = procedureCtx(handle.id());
+            var procContext = procedureCtx(handle.id(), QueryLanguage.CYPHER_5);
 
             AnyValue result =
                     executionContext.procedures().builtInFunctionCall(handle.id(), new AnyValue[0], procContext);
@@ -382,7 +383,7 @@ class ExecutionContextFunctionIT {
             var handle = executionContext
                     .procedures()
                     .functionGet(new QualifiedName("datetime", "transaction"), QueryLanguage.CYPHER_5);
-            var procContext = procedureCtx(handle.id());
+            var procContext = procedureCtx(handle.id(), QueryLanguage.CYPHER_5);
 
             AnyValue result =
                     executionContext.procedures().builtInFunctionCall(handle.id(), new AnyValue[0], procContext);
@@ -398,7 +399,7 @@ class ExecutionContextFunctionIT {
             var handle = executionContext
                     .procedures()
                     .functionGet(new QualifiedName("datetime", "statement"), QueryLanguage.CYPHER_5);
-            var procContext = procedureCtx(handle.id());
+            var procContext = procedureCtx(handle.id(), QueryLanguage.CYPHER_5);
 
             AnyValue result =
                     executionContext.procedures().builtInFunctionCall(handle.id(), new AnyValue[0], procContext);
@@ -413,7 +414,7 @@ class ExecutionContextFunctionIT {
         doWithExecutionContext((ktx, executionContext) -> {
             var handle =
                     executionContext.procedures().functionGet(new QualifiedName("datetime"), QueryLanguage.CYPHER_5);
-            var procContext = procedureCtx(handle.id());
+            var procContext = procedureCtx(handle.id(), QueryLanguage.CYPHER_5);
 
             AnyValue result =
                     executionContext.procedures().builtInFunctionCall(handle.id(), new AnyValue[0], procContext);
@@ -456,7 +457,7 @@ class ExecutionContextFunctionIT {
     private AnyValue invokeUserFunction(ExecutionContext executionContext, String name, AnyValue... args)
             throws ProcedureException {
         var handle = executionContext.procedures().functionGet(getName(name), QueryLanguage.CYPHER_5);
-        var procContext = procedureCtx(handle.id());
+        var procContext = procedureCtx(handle.id(), QueryLanguage.CYPHER_5);
 
         return executionContext.procedures().functionCall(handle.id(), args, procContext);
     }
@@ -496,8 +497,9 @@ class ExecutionContextFunctionIT {
                 throws ProcedureException;
     }
 
-    private ProcedureCallContext procedureCtx(int id) {
-        return new ProcedureCallContext(id, new String[0], false, "", false, RUNTIME_USED, EmptyMemoryTracker.INSTANCE);
+    private ProcedureCallContext procedureCtx(int id, QueryLanguage queryLanguage) {
+        return new ProcedureCallContext(
+                id, new String[0], false, "", false, RUNTIME_USED, EmptyMemoryTracker.INSTANCE, queryLanguage);
     }
 
     public static class BasicTestFunctions {

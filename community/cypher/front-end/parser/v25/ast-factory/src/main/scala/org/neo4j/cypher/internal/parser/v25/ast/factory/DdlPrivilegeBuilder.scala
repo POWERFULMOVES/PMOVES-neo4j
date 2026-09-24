@@ -24,6 +24,7 @@ import org.neo4j.cypher.internal.ast.AccessDatabaseAction
 import org.neo4j.cypher.internal.ast.ActionResource
 import org.neo4j.cypher.internal.ast.ActionResourceBase
 import org.neo4j.cypher.internal.ast.AllAliasManagementActions
+import org.neo4j.cypher.internal.ast.AllAuthRuleActions
 import org.neo4j.cypher.internal.ast.AllConstraintActions
 import org.neo4j.cypher.internal.ast.AllDatabaseAction
 import org.neo4j.cypher.internal.ast.AllDatabaseManagementActions
@@ -38,16 +39,21 @@ import org.neo4j.cypher.internal.ast.AllPrivilegeActions
 import org.neo4j.cypher.internal.ast.AllPropertyResource
 import org.neo4j.cypher.internal.ast.AllQualifier
 import org.neo4j.cypher.internal.ast.AllRoleActions
+import org.neo4j.cypher.internal.ast.AllSecretManagementActions
 import org.neo4j.cypher.internal.ast.AllTokenActions
 import org.neo4j.cypher.internal.ast.AllTransactionActions
 import org.neo4j.cypher.internal.ast.AllUserActions
+import org.neo4j.cypher.internal.ast.AllUserMetadataActions
 import org.neo4j.cypher.internal.ast.AlterAliasAction
+import org.neo4j.cypher.internal.ast.AlterAuthRuleAction
+import org.neo4j.cypher.internal.ast.AlterCompositeDatabaseAction
 import org.neo4j.cypher.internal.ast.AlterDatabaseAction
 import org.neo4j.cypher.internal.ast.AlterUserAction
 import org.neo4j.cypher.internal.ast.AssignPrivilegeAction
 import org.neo4j.cypher.internal.ast.AssignRoleAction
 import org.neo4j.cypher.internal.ast.CompositeDatabaseManagementActions
 import org.neo4j.cypher.internal.ast.CreateAliasAction
+import org.neo4j.cypher.internal.ast.CreateAuthRuleAction
 import org.neo4j.cypher.internal.ast.CreateCompositeDatabaseAction
 import org.neo4j.cypher.internal.ast.CreateConstraintAction
 import org.neo4j.cypher.internal.ast.CreateDatabaseAction
@@ -59,6 +65,7 @@ import org.neo4j.cypher.internal.ast.CreateRelationshipTypeAction
 import org.neo4j.cypher.internal.ast.CreateRoleAction
 import org.neo4j.cypher.internal.ast.CreateUserAction
 import org.neo4j.cypher.internal.ast.DatabaseAction
+import org.neo4j.cypher.internal.ast.DatabaseAndDbmsAction
 import org.neo4j.cypher.internal.ast.DatabasePrivilege
 import org.neo4j.cypher.internal.ast.DatabasePrivilegeQualifier
 import org.neo4j.cypher.internal.ast.DatabaseScope
@@ -67,6 +74,7 @@ import org.neo4j.cypher.internal.ast.DbmsPrivilege
 import org.neo4j.cypher.internal.ast.DeleteElementAction
 import org.neo4j.cypher.internal.ast.DenyPrivilege
 import org.neo4j.cypher.internal.ast.DropAliasAction
+import org.neo4j.cypher.internal.ast.DropAuthRuleAction
 import org.neo4j.cypher.internal.ast.DropCompositeDatabaseAction
 import org.neo4j.cypher.internal.ast.DropConstraintAction
 import org.neo4j.cypher.internal.ast.DropDatabaseAction
@@ -83,6 +91,7 @@ import org.neo4j.cypher.internal.ast.ExecuteProcedureAction
 import org.neo4j.cypher.internal.ast.FileResource
 import org.neo4j.cypher.internal.ast.FunctionQualifier
 import org.neo4j.cypher.internal.ast.GrantPrivilege
+import org.neo4j.cypher.internal.ast.GrantRolesToAuthRules
 import org.neo4j.cypher.internal.ast.GrantRolesToUsers
 import org.neo4j.cypher.internal.ast.GraphPrivilege
 import org.neo4j.cypher.internal.ast.GraphPrivilegeQualifier
@@ -105,42 +114,55 @@ import org.neo4j.cypher.internal.ast.MatchAction
 import org.neo4j.cypher.internal.ast.MergeAdminAction
 import org.neo4j.cypher.internal.ast.NamedDatabasesScope
 import org.neo4j.cypher.internal.ast.NamedGraphsScope
+import org.neo4j.cypher.internal.ast.Node
 import org.neo4j.cypher.internal.ast.PatternQualifier
 import org.neo4j.cypher.internal.ast.PrivilegeQualifier
 import org.neo4j.cypher.internal.ast.PrivilegeType
 import org.neo4j.cypher.internal.ast.ProcedureQualifier
 import org.neo4j.cypher.internal.ast.PropertiesResource
 import org.neo4j.cypher.internal.ast.ReadAction
+import org.neo4j.cypher.internal.ast.ReadSecretsAction
+import org.neo4j.cypher.internal.ast.Relationship
 import org.neo4j.cypher.internal.ast.RelationshipAllQualifier
 import org.neo4j.cypher.internal.ast.RelationshipQualifier
 import org.neo4j.cypher.internal.ast.RemoveLabelAction
 import org.neo4j.cypher.internal.ast.RemovePrivilegeAction
 import org.neo4j.cypher.internal.ast.RemoveRoleAction
+import org.neo4j.cypher.internal.ast.RenameAuthRuleAction
 import org.neo4j.cypher.internal.ast.RenameRoleAction
 import org.neo4j.cypher.internal.ast.RenameUserAction
 import org.neo4j.cypher.internal.ast.RevokeBothType
 import org.neo4j.cypher.internal.ast.RevokeDenyType
 import org.neo4j.cypher.internal.ast.RevokeGrantType
 import org.neo4j.cypher.internal.ast.RevokePrivilege
+import org.neo4j.cypher.internal.ast.RevokeRolesFromAuthRules
 import org.neo4j.cypher.internal.ast.RevokeRolesFromUsers
+import org.neo4j.cypher.internal.ast.SecretAllQualifier
+import org.neo4j.cypher.internal.ast.SecretQualifier
 import org.neo4j.cypher.internal.ast.ServerManagementAction
 import org.neo4j.cypher.internal.ast.SetAuthAction
 import org.neo4j.cypher.internal.ast.SetDatabaseAccessAction
+import org.neo4j.cypher.internal.ast.SetDatabaseDefaultLanguageAction
 import org.neo4j.cypher.internal.ast.SetLabelAction
 import org.neo4j.cypher.internal.ast.SetPasswordsAction
 import org.neo4j.cypher.internal.ast.SetPropertyAction
 import org.neo4j.cypher.internal.ast.SetUserHomeDatabaseAction
+import org.neo4j.cypher.internal.ast.SetUserMetadataAction
 import org.neo4j.cypher.internal.ast.SetUserStatusAction
 import org.neo4j.cypher.internal.ast.SettingQualifier
 import org.neo4j.cypher.internal.ast.ShowAliasAction
+import org.neo4j.cypher.internal.ast.ShowAuthRuleAction
 import org.neo4j.cypher.internal.ast.ShowConstraintAction
 import org.neo4j.cypher.internal.ast.ShowIndexAction
 import org.neo4j.cypher.internal.ast.ShowPrivilegeAction
 import org.neo4j.cypher.internal.ast.ShowRoleAction
+import org.neo4j.cypher.internal.ast.ShowSecretsAction
 import org.neo4j.cypher.internal.ast.ShowServerAction
 import org.neo4j.cypher.internal.ast.ShowSettingAction
 import org.neo4j.cypher.internal.ast.ShowTransactionAction
 import org.neo4j.cypher.internal.ast.ShowUserAction
+import org.neo4j.cypher.internal.ast.ShowUserCredentialsAction
+import org.neo4j.cypher.internal.ast.ShowUserMetadataAction
 import org.neo4j.cypher.internal.ast.StartDatabaseAction
 import org.neo4j.cypher.internal.ast.StopDatabaseAction
 import org.neo4j.cypher.internal.ast.TerminateTransactionAction
@@ -148,8 +170,8 @@ import org.neo4j.cypher.internal.ast.TraverseAction
 import org.neo4j.cypher.internal.ast.UserAllQualifier
 import org.neo4j.cypher.internal.ast.UserQualifier
 import org.neo4j.cypher.internal.ast.WriteAction
+import org.neo4j.cypher.internal.ast.WriteSecretsAction
 import org.neo4j.cypher.internal.expressions.Expression
-import org.neo4j.cypher.internal.expressions.Parameter
 import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.parser.ast.util.Util.astOpt
 import org.neo4j.cypher.internal.parser.ast.util.Util.astSeq
@@ -159,6 +181,11 @@ import org.neo4j.cypher.internal.parser.ast.util.Util.nodeChild
 import org.neo4j.cypher.internal.parser.ast.util.Util.pos
 import org.neo4j.cypher.internal.parser.v25.Cypher25Parser
 import org.neo4j.cypher.internal.parser.v25.Cypher25ParserListener
+import org.neo4j.cypher.internal.parser.v25.ast.factory.DdlPrivilegeBuilder.ElementGraphToken
+import org.neo4j.cypher.internal.parser.v25.ast.factory.DdlPrivilegeBuilder.GraphToken
+import org.neo4j.cypher.internal.parser.v25.ast.factory.DdlPrivilegeBuilder.NodeGraphToken
+import org.neo4j.cypher.internal.parser.v25.ast.factory.DdlPrivilegeBuilder.RelGraphToken
+import org.neo4j.cypher.internal.parser.v25.ast.factory.DdlPrivilegeBuilder.UsernamesOrAuthRuleNames
 import org.neo4j.cypher.internal.util.InputPosition
 
 import scala.collection.immutable.ArraySeq
@@ -172,12 +199,15 @@ trait DdlPrivilegeBuilder extends Cypher25ParserListener {
     ctx.ast = if (ctx.privilege() != null) {
       val (privilegeType, resource, qualifier) =
         ctx.privilege().ast[(PrivilegeType, Option[ActionResource], List[PrivilegeQualifier])]
-      val roleNames = ctx.roleNames.ast[ArraySeq[Expression]]()
-      GrantPrivilege(privilegeType, ctx.IMMUTABLE() != null, resource, qualifier, roleNames)(p)
+      GrantPrivilege(privilegeType, ctx.IMMUTABLE() != null, resource, qualifier, ctx.roleNames.ast())(p)
     } else {
-      val (rolenames, usernames) =
-        ctx.grantRole().ast[(Seq[Expression], Seq[Expression])]()
-      GrantRolesToUsers(rolenames, usernames)(p)
+      val (rolenames, usernamesOrAutRuleNames) =
+        ctx.grantRole().ast[(Seq[Expression], UsernamesOrAuthRuleNames)]()
+
+      usernamesOrAutRuleNames match {
+        case UsernamesOrAuthRuleNames.UserNames(names)     => GrantRolesToUsers(rolenames, names)(p)
+        case UsernamesOrAuthRuleNames.AuthRuleNames(names) => GrantRolesToAuthRules(rolenames, names)(p)
+      }
     }
   }
 
@@ -187,8 +217,7 @@ trait DdlPrivilegeBuilder extends Cypher25ParserListener {
     val p = pos(ctx)
     val (privilegeType, resource, qualifier) =
       ctx.privilege().ast[(PrivilegeType, Option[ActionResource], List[PrivilegeQualifier])]
-    val roleNames = ctx.roleNames.ast[ArraySeq[Expression]]()
-    ctx.ast = DenyPrivilege(privilegeType, ctx.IMMUTABLE() != null, resource, qualifier, roleNames)(p)
+    ctx.ast = DenyPrivilege(privilegeType, ctx.IMMUTABLE() != null, resource, qualifier, ctx.roleNames.ast())(p)
   }
 
   final override def exitRevokeCommand(
@@ -198,16 +227,18 @@ trait DdlPrivilegeBuilder extends Cypher25ParserListener {
     ctx.ast = if (ctx.privilege() != null) {
       val (privilegeType, resource, qualifier) =
         ctx.privilege().ast[(PrivilegeType, Option[ActionResource], List[PrivilegeQualifier])]
-      val roleNames = ctx.roleNames.ast[ArraySeq[Expression]]()
       val revokeType =
         if (ctx.DENY() != null) RevokeDenyType()(pos(ctx.DENY()))
         else if (ctx.GRANT() != null) RevokeGrantType()(pos(ctx.GRANT()))
         else RevokeBothType()(p)
-      RevokePrivilege(privilegeType, ctx.IMMUTABLE() != null, resource, qualifier, roleNames, revokeType)(p)
+      RevokePrivilege(privilegeType, ctx.IMMUTABLE() != null, resource, qualifier, ctx.roleNames.ast(), revokeType)(p)
     } else {
-      val (rolenames, usernames) =
-        ctx.revokeRole().ast[(Seq[Expression], Seq[Expression])]()
-      RevokeRolesFromUsers(rolenames, usernames)(p)
+      val (rolenames, usernamesOrAutRuleNames) =
+        ctx.revokeRole().ast[(Seq[Expression], UsernamesOrAuthRuleNames)]()
+      usernamesOrAutRuleNames match {
+        case UsernamesOrAuthRuleNames.UserNames(names)     => RevokeRolesFromUsers(rolenames, names)(p)
+        case UsernamesOrAuthRuleNames.AuthRuleNames(names) => RevokeRolesFromAuthRules(rolenames, names)(p)
+      }
     }
   }
 
@@ -217,8 +248,8 @@ trait DdlPrivilegeBuilder extends Cypher25ParserListener {
     ctx: Cypher25Parser.GrantRoleContext
   ): Unit = {
     ctx.ast = (
-      ctx.roleNames.ast[Seq[Expression]](),
-      ctx.userNames.ast[Seq[Expression]]()
+      ctx.roleNames.ast(),
+      ctx.usersOrAuthRule.ast()
     )
   }
 
@@ -226,9 +257,24 @@ trait DdlPrivilegeBuilder extends Cypher25ParserListener {
     ctx: Cypher25Parser.RevokeRoleContext
   ): Unit = {
     ctx.ast = (
-      ctx.roleNames.ast[Seq[Either[String, Parameter]]](),
-      ctx.userNames.ast[Seq[Either[String, Parameter]]]()
+      ctx.roleNames.ast(),
+      ctx.usersOrAuthRule.ast()
     )
+  }
+
+  // Auth rule
+
+  def exitAuthRuleKeywords(ctx: Cypher25Parser.AuthRuleKeywordsContext): Unit = {}
+
+  def exitAuthRuleNames(ctx: Cypher25Parser.AuthRuleNamesContext): Unit = {
+    ctx.ast = ctx.symbolicNameOrStringParameterList().ast()
+  }
+
+  def exitUsersOrAuthRule(ctx: Cypher25Parser.UsersOrAuthRuleContext): Unit = {
+    ctx.ast =
+      if (ctx.authRuleKeywords() != null)
+        UsernamesOrAuthRuleNames.AuthRuleNames(ctx.authRuleNames().ast())
+      else UsernamesOrAuthRuleNames.UserNames(ctx.userNames().ast())
   }
 
   // Privilege command contexts
@@ -303,6 +349,7 @@ trait DdlPrivilegeBuilder extends Cypher25ParserListener {
     val isCreate = ctx.parent.getRuleIndex == Cypher25Parser.RULE_createPrivilege
     ctx.ast = nodeChild(ctx, 0).getSymbol.getType match {
       case Cypher25Parser.ALIAS     => if (isCreate) CreateAliasAction else DropAliasAction
+      case Cypher25Parser.AUTH      => if (isCreate) CreateAuthRuleAction else DropAuthRuleAction
       case Cypher25Parser.COMPOSITE => if (isCreate) CreateCompositeDatabaseAction else DropCompositeDatabaseAction
       case Cypher25Parser.DATABASE  => if (isCreate) CreateDatabaseAction else DropDatabaseAction
       case Cypher25Parser.ROLE      => if (isCreate) CreateRoleAction else DropRoleAction
@@ -321,9 +368,14 @@ trait DdlPrivilegeBuilder extends Cypher25ParserListener {
         case c: TerminalNode =>
           c.getSymbol.getType match {
             case Cypher25Parser.ACCESS => withQualifier(AccessDatabaseAction)
-            case Cypher25Parser.NAME   => withQualifier(AllTokenActions)
-            case Cypher25Parser.START  => withQualifier(StartDatabaseAction)
-            case Cypher25Parser.STOP   => withQualifier(StopDatabaseAction)
+            case Cypher25Parser.ALTER => nodeChild(ctx, 1).getSymbol.getType match {
+                case Cypher25Parser.COMPOSITE => withQualifier(AlterCompositeDatabaseAction(false))
+                case Cypher25Parser.DATABASE  => withQualifier(AlterDatabaseAction(false))
+                case _                        => throw new IllegalStateException()
+              }
+            case Cypher25Parser.NAME  => withQualifier(AllTokenActions)
+            case Cypher25Parser.START => withQualifier(StartDatabaseAction)
+            case Cypher25Parser.STOP  => withQualifier(StopDatabaseAction)
             case Cypher25Parser.TERMINATE =>
               (
                 TerminateTransactionAction,
@@ -362,10 +414,12 @@ trait DdlPrivilegeBuilder extends Cypher25ParserListener {
         case c: TerminalNode => c.getSymbol.getType match {
             case Cypher25Parser.ALIAS => withQualifier(AllAliasManagementActions)
             case Cypher25Parser.ALTER => nodeChild(ctx, 1).getSymbol.getType match {
-                case Cypher25Parser.ALIAS    => withQualifier(AlterAliasAction)
-                case Cypher25Parser.DATABASE => withQualifier(AlterDatabaseAction)
-                case Cypher25Parser.USER     => withQualifier(AlterUserAction)
-                case _                       => throw new IllegalStateException()
+                case Cypher25Parser.ALIAS     => withQualifier(AlterAliasAction)
+                case Cypher25Parser.COMPOSITE => withQualifier(AlterCompositeDatabaseAction(false))
+                case Cypher25Parser.DATABASE  => withQualifier(AlterDatabaseAction(false))
+                case Cypher25Parser.USER      => withQualifier(AlterUserAction)
+                case Cypher25Parser.AUTH      => withQualifier(AlterAuthRuleAction)
+                case _                        => throw new IllegalStateException()
               }
             case Cypher25Parser.ASSIGN => nodeChild(ctx, 1).getSymbol.getType match {
                 case Cypher25Parser.PRIVILEGE => withQualifier(AssignPrivilegeAction)
@@ -386,16 +440,35 @@ trait DdlPrivilegeBuilder extends Cypher25ParserListener {
             case Cypher25Parser.RENAME => nodeChild(ctx, 1).getSymbol.getType match {
                 case Cypher25Parser.ROLE => withQualifier(RenameRoleAction)
                 case Cypher25Parser.USER => withQualifier(RenameUserAction)
+                case Cypher25Parser.AUTH => withQualifier(RenameAuthRuleAction)
                 case _                   => throw new IllegalStateException()
               }
             case Cypher25Parser.ROLE   => withQualifier(AllRoleActions)
             case Cypher25Parser.SERVER => withQualifier(ServerManagementAction)
-            case Cypher25Parser.USER   => withQualifier(AllUserActions)
-            case _                     => throw new IllegalStateException()
+            case Cypher25Parser.USER =>
+              if (ctx.METADATA() != null) withQualifier(AllUserMetadataActions)
+              else withQualifier(AllUserActions)
+            case Cypher25Parser.AUTH    => withQualifier(AllAuthRuleActions)
+            case Cypher25Parser.READ    => ctx.secretQualifier().ast()
+            case Cypher25Parser.WRITE   => withQualifier(WriteSecretsAction)
+            case Cypher25Parser.SECRETS => withQualifier(AllSecretManagementActions)
+            case _                      => throw new IllegalStateException()
           }
         case _ => throw new IllegalStateException()
       }
-    ctx.ast = (DbmsPrivilege(action)(pos(ctx)), None, qualifier)
+    ctx.ast = action match {
+      case a: DbmsAction            => (DbmsPrivilege(a)(pos(ctx)), None, qualifier)
+      case a: DatabaseAndDbmsAction => (DatabasePrivilege(a, AllDatabasesScope()(pos(ctx)))(pos(ctx)), None, qualifier)
+      case _                        => throw new IllegalStateException()
+    }
+  }
+
+  override def exitSecretQualifier(ctx: Cypher25Parser.SecretQualifierContext): Unit = {
+    ctx.ast = if (ctx.TIMES() != null) {
+      (ReadSecretsAction, List(SecretAllQualifier()(InputPosition.NONE)))
+    } else {
+      (ReadSecretsAction, List(SecretQualifier(ctx.stringOrParameterExpression().ast())(pos(ctx))))
+    }
   }
 
   override def exitDbmsPrivilegeExecute(ctx: Cypher25Parser.DbmsPrivilegeExecuteContext): Unit = {
@@ -452,25 +525,10 @@ trait DdlPrivilegeBuilder extends Cypher25ParserListener {
     val (action, resource) = {
       if (ctx.DELETE() != null) {
         (DeleteElementAction, None)
-      } else (MergeAdminAction, ctx.propertiesResource().ast[Option[PropertiesResource]]())
-    }
-    val scope = ctx.graphScope().ast[GraphScope]()
-    val qualifier = ctx.graphQualifier().ast[List[GraphPrivilegeQualifier]]()
-    ctx.ast = (
-      GraphPrivilege(action, scope)(pos(ctx)),
-      resource,
-      qualifier
-    )
-  }
-
-  final override def exitQualifiedGraphPrivilegesWithProperty(
-    ctx: Cypher25Parser.QualifiedGraphPrivilegesWithPropertyContext
-  ): Unit = {
-    val (action, resource) = {
-      if (ctx.TRAVERSE() != null) {
+      } else if (ctx.TRAVERSE() != null) {
         (TraverseAction, None)
       } else {
-        val action = if (ctx.READ != null) ReadAction else MatchAction
+        val action = if (ctx.MERGE != null) MergeAdminAction else if (ctx.READ != null) ReadAction else MatchAction
         (action, ctx.propertiesResource().ast[Option[PropertiesResource]]())
       }
     }
@@ -504,11 +562,16 @@ trait DdlPrivilegeBuilder extends Cypher25ParserListener {
       val (action, qualifier): (DbmsAction, List[PrivilegeQualifier]) = ctx.getChild(1) match {
         case t: TerminalNode => t.getSymbol.getType match {
             case Cypher25Parser.ALIAS                           => withQualifier(ShowAliasAction)
+            case Cypher25Parser.AUTH                            => withQualifier(ShowAuthRuleAction)
             case Cypher25Parser.PRIVILEGE                       => withQualifier(ShowPrivilegeAction)
             case Cypher25Parser.ROLE                            => withQualifier(ShowRoleAction)
             case Cypher25Parser.SERVER | Cypher25Parser.SERVERS => withQualifier(ShowServerAction)
-            case Cypher25Parser.USER                            => withQualifier(ShowUserAction)
-            case _                                              => throw new IllegalStateException()
+            case Cypher25Parser.USER =>
+              if (ctx.METADATA() != null) withQualifier(ShowUserMetadataAction)
+              else if (ctx.CREDENTIALS() != null) withQualifier(ShowUserCredentialsAction)
+              else withQualifier(ShowUserAction)
+            case Cypher25Parser.SECRETS => withQualifier(ShowSecretsAction)
+            case _                      => throw new IllegalStateException()
           }
         case r: RuleNode if r.getRuleContext.getRuleIndex == Cypher25Parser.RULE_settingToken =>
           (ShowSettingAction, ctx.settingQualifier().ast[List[SettingQualifier]]())
@@ -523,12 +586,51 @@ trait DdlPrivilegeBuilder extends Cypher25ParserListener {
   ): Unit = {
     val p = pos(ctx)
     ctx.ast = if (ctx.DBMS() != null) {
-      val action = if (ctx.passwordToken() != null) SetPasswordsAction
-      else if (ctx.STATUS() != null) SetUserStatusAction
-      else if (ctx.HOME() != null) SetUserHomeDatabaseAction
-      else if (ctx.AUTH() != null) SetAuthAction
-      else SetDatabaseAccessAction
-      allQualifier(DbmsPrivilege(action)(p), None)
+      val action = ctx.getChild(1) match {
+        case t: TerminalNode => t.getSymbol.getType match {
+            case Cypher25Parser.USER => nodeChild(ctx, 2).getSymbol.getType match {
+                case Cypher25Parser.STATUS   => SetUserStatusAction
+                case Cypher25Parser.HOME     => SetUserHomeDatabaseAction
+                case Cypher25Parser.METADATA => SetUserMetadataAction
+                case _                       => throw new IllegalStateException()
+              }
+            case Cypher25Parser.DATABASE => nodeChild(ctx, 2).getSymbol.getType match {
+                case Cypher25Parser.ACCESS  => SetDatabaseAccessAction(false)
+                case Cypher25Parser.DEFAULT => SetDatabaseDefaultLanguageAction(false)
+                case _                      => throw new IllegalStateException()
+              }
+            case Cypher25Parser.AUTH => SetAuthAction
+            case _                   => throw new IllegalStateException()
+          }
+        case r: RuleNode if r.getRuleContext.getRuleIndex == Cypher25Parser.RULE_passwordToken =>
+          SetPasswordsAction
+        case _ => throw new IllegalStateException()
+      }
+      action match {
+        case a: DbmsAction            => allQualifier(DbmsPrivilege(a)(p), None)
+        case a: DatabaseAndDbmsAction => allDbQualifier(DatabasePrivilege(a, AllDatabasesScope()(p))(p), None)
+        case _                        => throw new IllegalStateException()
+      }
+    } else if (ctx.databaseScope() != null) {
+      if (ctx.DEFAULT() != null && ctx.LANGUAGE() != null) {
+        (
+          DatabasePrivilege(
+            SetDatabaseDefaultLanguageAction(false),
+            ctx.databaseScope().ast[DatabaseScope]
+          )(pos(ctx.databaseScope())),
+          None,
+          withQualifier(SetDatabaseDefaultLanguageAction(false))._2
+        )
+      } else if (ctx.DATABASE() != null) {
+        (
+          DatabasePrivilege(
+            SetDatabaseAccessAction(false),
+            ctx.databaseScope().ast[DatabaseScope]
+          )(pos(ctx.databaseScope())),
+          None,
+          withQualifier(SetDatabaseAccessAction(false))._2
+        )
+      } else throw new IllegalStateException()
     } else {
       val scope = ctx.graphScope().ast[GraphScope]()
       if (ctx.LABEL() != null) {
@@ -659,17 +761,25 @@ trait DdlPrivilegeBuilder extends Cypher25ParserListener {
       }
     } else if (ctx.FOR() != null) {
       val variable = astOpt[Variable](ctx.variable())
+      val isRel = ctx.LBRACKET() != null
       val qualifiers = if (!ctx.symbolicNameString().isEmpty) {
-        astSeq[String](ctx.symbolicNameString()).map(a => LabelQualifier(a)(pos(ctx))).toList
-      } else List(LabelAllQualifier()(pos(ctx)))
-      List(PatternQualifier(qualifiers, variable, astOpt[Expression](ctx.expression(), ctx.map.ast[Expression]())))
+        astSeq[String](ctx.symbolicNameString())
+          .map(a =>
+            if (isRel) RelationshipQualifier(a)(pos(ctx))
+            else LabelQualifier(a)(pos(ctx))
+          ).toList
+      } else List(
+        if (isRel) RelationshipAllQualifier()(pos(ctx))
+        else LabelAllQualifier()(pos(ctx))
+      )
+      List(PatternQualifier(
+        qualifiers,
+        variable,
+        astOpt[Expression](ctx.expression(), ctx.map.ast[Expression]()),
+        if (isRel) Relationship else Node
+      ))
     } else List(ElementsAllQualifier()(pos(ctx)))
   }
-
-  sealed private trait GraphToken
-  final private case object RelGraphToken extends GraphToken
-  final private case object NodeGraphToken extends GraphToken
-  final private case object ElementGraphToken extends GraphToken
 
   override def exitGraphQualifierToken(ctx: Cypher25Parser.GraphQualifierTokenContext): Unit = {
     ctx.ast = ctxChild(ctx, 0) match {
@@ -729,11 +839,11 @@ trait DdlPrivilegeBuilder extends Cypher25ParserListener {
   }
 
   override def exitRoleNames(ctx: Cypher25Parser.RoleNamesContext): Unit = {
-    ctx.ast = ctx.symbolicNameOrStringParameterList().ast[ArraySeq[Expression]]()
+    ctx.ast = ctx.symbolicNameOrStringParameterList().ast()
   }
 
   override def exitUserNames(ctx: Cypher25Parser.UserNamesContext): Unit = {
-    ctx.ast = ctx.symbolicNameOrStringParameterList().ast[ArraySeq[Expression]]()
+    ctx.ast = ctx.symbolicNameOrStringParameterList().ast()
   }
 
   // SCOPE CONTEXTS
@@ -785,6 +895,7 @@ trait DdlPrivilegeBuilder extends Cypher25ParserListener {
   override def exitIndexToken(ctx: Cypher25Parser.IndexTokenContext): Unit = { ctx.ast = CreateIndexAction }
   override def exitNodeToken(ctx: Cypher25Parser.NodeTokenContext): Unit = {}
   override def exitPasswordToken(ctx: Cypher25Parser.PasswordTokenContext): Unit = {}
+  override def exitSecretToken(ctx: Cypher25Parser.SecretTokenContext): Unit = {}
   override def exitPrivilegeToken(ctx: Cypher25Parser.PrivilegeTokenContext): Unit = {}
   override def exitProcedureToken(ctx: Cypher25Parser.ProcedureTokenContext): Unit = {}
   override def exitRelToken(ctx: Cypher25Parser.RelTokenContext): Unit = {}
@@ -796,8 +907,23 @@ trait DdlPrivilegeBuilder extends Cypher25ParserListener {
   override def exitSettingToken(ctx: Cypher25Parser.SettingTokenContext): Unit = {}
   override def exitPrimaryToken(ctx: Cypher25Parser.PrimaryTokenContext): Unit = {}
   override def exitSecondaryToken(ctx: Cypher25Parser.SecondaryTokenContext): Unit = {}
+  override def exitReplicaToken(ctx: Cypher25Parser.ReplicaTokenContext): Unit = {}
   override def exitSecondsToken(ctx: Cypher25Parser.SecondsTokenContext): Unit = {}
   override def exitGroupToken(ctx: Cypher25Parser.GroupTokenContext): Unit = {}
   override def exitPathToken(ctx: Cypher25Parser.PathTokenContext): Unit = {}
 
+}
+
+object DdlPrivilegeBuilder {
+  sealed private trait GraphToken
+  private case object RelGraphToken extends GraphToken
+  private case object NodeGraphToken extends GraphToken
+  private case object ElementGraphToken extends GraphToken
+
+  sealed private trait UsernamesOrAuthRuleNames
+
+  private object UsernamesOrAuthRuleNames {
+    case class UserNames(names: Seq[Expression]) extends UsernamesOrAuthRuleNames
+    case class AuthRuleNames(names: Seq[Expression]) extends UsernamesOrAuthRuleNames
+  }
 }

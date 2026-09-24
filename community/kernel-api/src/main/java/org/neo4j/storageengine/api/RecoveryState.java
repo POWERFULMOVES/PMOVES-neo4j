@@ -31,5 +31,5 @@ public enum RecoveryState {
     /**
      * Storage files are not in a recoverable state.
      */
-    UNRECOVERABLE;
+    UNRECOVERABLE
 }

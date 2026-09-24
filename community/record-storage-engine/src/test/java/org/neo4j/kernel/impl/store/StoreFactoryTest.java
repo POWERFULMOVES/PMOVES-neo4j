@@ -19,22 +19,16 @@
  */
 package org.neo4j.kernel.impl.store;
 
-import static java.nio.file.StandardOpenOption.DELETE_ON_CLOSE;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.eclipse.collections.api.factory.Sets.immutable;
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.neo4j.configuration.Config.defaults;
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
+import static org.neo4j.io.layout.DatabaseFile.ID_FILE_SUFFIX;
 import static org.neo4j.io.pagecache.context.CursorContextFactory.NULL_CONTEXT_FACTORY;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
 import static org.neo4j.kernel.impl.store.format.RecordFormatSelector.selectForStoreOrConfigForNewDbs;
 
-import java.io.IOException;
-import java.nio.file.OpenOption;
 import java.nio.file.Path;
-import org.eclipse.collections.api.set.ImmutableSet;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -47,8 +41,8 @@ import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.store.format.RecordFormats;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.logging.InternalLogProvider;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.test.extension.EphemeralNeo4jLayoutExtension;
@@ -81,14 +75,10 @@ class StoreFactoryTest {
     }
 
     private StoreFactory storeFactory(Config config, CursorContextFactory contextFactory) {
-        return storeFactory(config, contextFactory, immutable.empty(), false);
+        return storeFactory(config, contextFactory, false);
     }
 
-    private StoreFactory storeFactory(
-            Config config,
-            CursorContextFactory contextFactory,
-            ImmutableSet<OpenOption> openOptions,
-            boolean readOnly) {
+    private StoreFactory storeFactory(Config config, CursorContextFactory contextFactory, boolean readOnly) {
         InternalLogProvider logProvider = NullLogProvider.getInstance();
         RecordFormats recordFormats = selectForStoreOrConfigForNewDbs(
                 config, databaseLayout, fileSystem, pageCache, logProvider, contextFactory);
@@ -103,8 +93,7 @@ class StoreFactoryTest {
                 logProvider,
                 contextFactory,
                 readOnly,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
-                openOptions);
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
     }
 
     @AfterEach
@@ -127,35 +116,17 @@ class StoreFactoryTest {
     @Test
     void shouldThrowWhenOpeningNonExistingNeoStores() {
         assertThrows(StoreNotFoundException.class, () -> {
-            try (NeoStores neoStores = storeFactory(defaults(), NULL_CONTEXT_FACTORY, immutable.empty(), true)
-                    .openAllNeoStores()) {
+            try (NeoStores neoStores =
+                    storeFactory(defaults(), NULL_CONTEXT_FACTORY, true).openAllNeoStores()) {
                 neoStores.getMetaDataStore();
             }
         });
     }
 
     @Test
-    void shouldDelegateDeletionOptionToStores() throws IOException {
-        // GIVEN
-        StoreFactory storeFactory = storeFactory(
-                defaults(),
-                new CursorContextFactory(PageCacheTracer.NULL, EMPTY_CONTEXT_SUPPLIER),
-                immutable.of(DELETE_ON_CLOSE),
-                false);
-
-        // WHEN
-        neoStores = storeFactory.openAllNeoStores();
-        assertTrue(fileSystem.listFiles(databaseLayout.databaseDirectory()).length >= StoreType.STORE_TYPES.length);
-
-        // THEN
-        neoStores.close();
-        assertEquals(0, fileSystem.listFiles(databaseLayout.databaseDirectory()).length);
-    }
-
-    @Test
     void shouldHandleStoreConsistingOfOneEmptyFile() throws Exception {
         StoreFactory storeFactory = storeFactory(defaults());
-        fileSystem.write(databaseLayout.file("neostore.nodestore.db.labels"));
+        fileSystem.write(databaseLayout.file("neostore.nodestore.db.labels").baseSegment());
         storeFactory.openAllNeoStores().close();
     }
 
@@ -164,7 +135,8 @@ class StoreFactoryTest {
         StoreFactory storeFactory = storeFactory(defaults());
         storeFactory.openAllNeoStores().close();
         for (Path f : fileSystem.listFiles(databaseLayout.databaseDirectory())) {
-            if (!f.getFileName().toString().endsWith(".id") && !f.equals(databaseLayout.metadataStore())) {
+            if (!f.getFileName().toString().endsWith(ID_FILE_SUFFIX)
+                    && !f.equals(databaseLayout.metadataStore().baseSegment())) {
                 fileSystem.truncate(f, 0);
             }
         }

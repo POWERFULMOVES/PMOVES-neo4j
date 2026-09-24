@@ -163,11 +163,13 @@ public final class Preconditions {
      * Ensures that {@code array} is not empty
      * @param array array to check
      * @param <T> type of elements in the array
+     * @return the provided array if was not null or empty
      */
-    public static <T> void requireNonEmpty(T[] array) {
+    public static <T> T[] requireNonEmpty(T[] array) {
         if (array == null || array.length == 0) {
             throw new IllegalArgumentException("Expected non empty array, got " + Arrays.toString(array));
         }
+        return array;
     }
 
     /**
@@ -242,6 +244,14 @@ public final class Preconditions {
         if (value < lowInclusive || value >= highExclusive) {
             throw new IllegalArgumentException(String.format(
                     "Expected int value between %d (inclusive) and %d (exclusive), got %d.",
+                    lowInclusive, highExclusive, value));
+        }
+    }
+
+    public static void requireBetween(long value, long lowInclusive, long highExclusive) {
+        if (value < lowInclusive || value >= highExclusive) {
+            throw new IllegalArgumentException(String.format(
+                    "Expected long value between %d (inclusive) and %d (exclusive), got %d.",
                     lowInclusive, highExclusive, value));
         }
     }

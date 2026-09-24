@@ -20,31 +20,34 @@
 package org.neo4j.exceptions;
 
 import static java.lang.String.format;
+import static org.neo4j.gqlstatus.GqlHelper.getGql22G03_22N27;
+import static org.neo4j.gqlstatus.GqlHelper.getGql42N51;
+import static org.neo4j.gqlstatus.PrivilegeGqlCodeEntity.entityAlreadyExists;
+import static org.neo4j.gqlstatus.PrivilegeGqlCodeEntity.entityNotFound;
 
 import java.time.temporal.ChronoUnit;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
+import java.util.Set;
+import java.util.StringJoiner;
+import java.util.stream.Collectors;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
 import org.neo4j.gqlstatus.GqlHelper;
 import org.neo4j.gqlstatus.GqlParams;
 import org.neo4j.gqlstatus.GqlStatusInfoCodes;
+import org.neo4j.gqlstatus.PrivilegeGqlCodeEntity;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.messages.MessageUtil;
+import org.neo4j.util.CalledFromGeneratedCode;
 
 public class InvalidArgumentException extends Neo4jException {
-    @Deprecated
-    public InvalidArgumentException(String message, Throwable cause) {
-        super(message, cause);
-    }
 
     public InvalidArgumentException(ErrorGqlStatusObject gqlStatusObject, String message, Throwable cause) {
         super(gqlStatusObject, message, cause);
-    }
-
-    @Deprecated
-    public InvalidArgumentException(String message) {
-        super(message);
     }
 
     public InvalidArgumentException(ErrorGqlStatusObject gqlStatusObject, String message) {
@@ -56,6 +59,109 @@ public class InvalidArgumentException extends Neo4jException {
         return Status.Statement.ArgumentError;
     }
 
+    public static InvalidArgumentException invalidFunctionArgument(String functionName, String message) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N38)
+                .withParam(GqlParams.StringParam.value, functionName)
+                .build();
+        return new InvalidArgumentException(gql, message);
+    }
+
+    public static InvalidArgumentException internalError(String msgTitle, String message) {
+        var gql = GqlHelper.get50N00(msgTitle, message);
+        return new InvalidArgumentException(gql, message);
+    }
+
+    public static InvalidArgumentException internalError(String msgTitle, String message, Throwable cause) {
+        var gql = GqlHelper.get50N00(msgTitle, message);
+        return new InvalidArgumentException(gql, message, cause);
+    }
+
+    public static InvalidArgumentException cannotImpersonateUser(String userToImpersonate) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42NFF)
+                .build();
+        return new InvalidArgumentException(
+                gql, String.format("%s '%s'.", "Cannot impersonate user", userToImpersonate));
+    }
+
+    public static InvalidArgumentException cannotImpersonateFromAnAlreadyImpersonatedContext() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42NFF)
+                .build();
+        return new InvalidArgumentException(gql, "Cannot impersonate a user from an already impersonated context");
+    }
+
+    public static InvalidArgumentException unsupportedInCommunity(String feature) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N27)
+                .withParam(GqlParams.StringParam.feat, feature)
+                .withParam(GqlParams.StringParam.edition, "community edition")
+                .build();
+        return new InvalidArgumentException(gql, "%s is not supported in community edition.".formatted(feature));
+    }
+
+    public static InvalidArgumentException cdcUnexpectedFieldException(
+            List<String> unexpected, List<String> expected, String context) {
+        var expectedString = expected.stream().sorted().collect(Collectors.joining("', '", "'", "'"));
+        var unexpectedString = unexpected.stream().sorted().collect(Collectors.joining("', '", "'", "'"));
+        var legacyMessage =
+                "Unexpected field(s) [%s], expected one of [%s].".formatted(unexpectedString, expectedString);
+
+        var sortedExpected = expected.stream().sorted().toList();
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N04)
+                .withParam(GqlParams.StringParam.input, unexpected.getFirst())
+                .withParam(GqlParams.StringParam.context, context)
+                .withParam(GqlParams.ListParam.inputList, sortedExpected)
+                .build();
+        return new InvalidArgumentException(gql, legacyMessage);
+    }
+
+    public static InvalidArgumentException cdcUnexpectedValueException(
+            String key, String found, List<String> expected) {
+        var expectedString = expected.stream().sorted().collect(Collectors.joining("', '", "'", "'"));
+        var legacyMessage =
+                "Unexpected value '%s' for field '%s', expected one of [%s].".formatted(found, key, expectedString);
+
+        var sortedExpected = expected.stream().sorted().toList();
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N04)
+                .withParam(GqlParams.StringParam.input, found)
+                .withParam(GqlParams.StringParam.context, "field '%s'".formatted(key))
+                .withParam(GqlParams.ListParam.inputList, sortedExpected)
+                .build();
+        return new InvalidArgumentException(gql, legacyMessage);
+    }
+
+    public static InvalidArgumentException cdcWrongTypeException(Object obj, String in, Class<?> expected) {
+        String foundType =
+                Optional.ofNullable(obj).map(o -> o.getClass().getSimpleName()).orElse("null");
+        String value = Optional.ofNullable(obj).map(Object::toString).orElse("");
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N01)
+                .withParam(GqlParams.StringParam.value, value)
+                .withParam(GqlParams.ListParam.valueTypeList, List.of(expected.getSimpleName()))
+                .withParam(GqlParams.StringParam.valueType, foundType)
+                .build();
+        String legacyMessage = "Wrong type '%s'('%s') in '%s', expected '%s'."
+                .formatted(foundType, value, in, expected.getSimpleName());
+
+        return new InvalidArgumentException(gql, legacyMessage);
+    }
+
+    public static InvalidArgumentException cdcMissingFieldException(String key, String context) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N55)
+                .withParam(GqlParams.StringParam.mapKey, key)
+                .withParam(GqlParams.StringParam.field, context)
+                .build();
+        return new InvalidArgumentException(gql, "Missing field '%s'.".formatted(key));
+    }
+
+    public static InvalidArgumentException cdcUnexpectedSelectorType(String found, String expected, String in) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N67)
+                .withParam(GqlParams.StringParam.selectorType1, found)
+                .withParam(GqlParams.StringParam.input, in)
+                .withParam(GqlParams.StringParam.selectorType2, expected)
+                .build();
+        throw new InvalidArgumentException(
+                gql,
+                "Unexpected selector type '%s' at %s, expected selector to be a %s".formatted(found, in, expected));
+    }
+
     public static InvalidArgumentException unknownNormalForm(String normalForm) {
         var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42001)
                 .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N49)
@@ -63,6 +169,38 @@ public class InvalidArgumentException extends Neo4jException {
                         .build())
                 .build();
         return new InvalidArgumentException(gql, "Unknown normal form. Valid values are: NFC, NFD, NFKC, NFKD.");
+    }
+
+    public static InvalidArgumentException unknownTrimSpecification(String trimSpecification) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42001)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42NAP)
+                        .withParam(GqlParams.StringParam.input, trimSpecification)
+                        .build())
+                .build();
+        return new InvalidArgumentException(
+                gql, "Unknown trim specification. Valid values are: LEADING, TRAILING, BOTH.");
+    }
+
+    public static InvalidArgumentException invalidPatternCharacter(String type) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42001)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42I65)
+                        .withParam(GqlParams.StringParam.valueType, type)
+                        .build())
+                .build();
+        return new InvalidArgumentException(
+                gql,
+                String.format(
+                        "An invalid character is used in the pattern. Verify that all characters are supported by `%s`.",
+                        type));
+    }
+
+    public static InvalidArgumentException patternParsingFailed() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42001)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42I66)
+                        .build())
+                .build();
+        return new InvalidArgumentException(
+                gql, "Pattern parsing failed. Make sure that an even number of escapes are used in the pattern.");
     }
 
     public static InvalidArgumentException incompleteSpatialValue(
@@ -85,26 +223,39 @@ public class InvalidArgumentException extends Neo4jException {
     }
 
     public static InvalidArgumentException timezoneAndOffsetMismatch(
-            String zoneName, String offset, List<String> validOffsets, String matcherGroup) {
-        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22003)
-                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N04)
-                        .withParam(GqlParams.StringParam.input, zoneName)
-                        .withParam(GqlParams.StringParam.context, String.valueOf(offset))
-                        .withParam(GqlParams.ListParam.inputList, validOffsets)
-                        .build())
-                .build();
+            String context, String offset, List<String> validOffsets, String matcherGroup) {
+        ErrorGqlStatusObject gql;
+        if (validOffsets.isEmpty()) {
+            // This is an indication that the provided time and timezone combination is invalid
+            gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22003)
+                    .withParam(GqlParams.StringParam.value, String.valueOf(offset))
+                    .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N05)
+                            .withParam(GqlParams.StringParam.input, String.valueOf(offset))
+                            .withParam(GqlParams.StringParam.context, context)
+                            .build())
+                    .build();
+        } else {
+            gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22003)
+                    .withParam(GqlParams.StringParam.value, String.valueOf(offset))
+                    .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N04)
+                            .withParam(GqlParams.StringParam.input, String.valueOf(offset))
+                            .withParam(GqlParams.StringParam.context, context)
+                            .withParam(GqlParams.ListParam.inputList, validOffsets)
+                            .build())
+                    .build();
+        }
         return new InvalidArgumentException(gql, "Timezone and offset do not match: " + matcherGroup);
     }
 
-    public static InvalidArgumentException temporalSelectionConflict(String fieldName, String component) {
+    public static InvalidArgumentException temporalSelectionConflict(String temporal1, String temporal2) {
         var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22007)
                 .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N14)
-                        .withParam(GqlParams.StringParam.temporal, fieldName)
-                        .withParam(GqlParams.StringParam.component, component)
+                        .withParam(GqlParams.StringParam.temporal1, temporal1)
+                        .withParam(GqlParams.StringParam.temporal2, temporal2)
                         .build())
                 .build();
-        throw new InvalidArgumentException(
-                gql, String.format("%s cannot be selected together with %s.", fieldName, component));
+        return new InvalidArgumentException(
+                gql, String.format("%s cannot be selected together with %s.", temporal1, temporal2));
     }
 
     public static InvalidArgumentException invalidCoordinateNames() {
@@ -209,21 +360,71 @@ public class InvalidArgumentException extends Neo4jException {
                         alias));
     }
 
+    public static InvalidArgumentException defaultLanguageForConstituentAliases() {
+        var gql = GqlHelper.getGql42001_42N14_WithoutPosition("DEFAULT LANGUAGE", "constituent aliases");
+        return new InvalidArgumentException(gql, GqlHelper.getCompleteMessage(gql));
+    }
+
+    public static InvalidArgumentException defaultLanguageForLocalAliases() {
+        var gql = GqlHelper.getGql42001_42N14_WithoutPosition("DEFAULT LANGUAGE", "local aliases");
+        return new InvalidArgumentException(gql, GqlHelper.getCompleteMessage(gql));
+    }
+
     public static InvalidArgumentException renameEntityNotFound(
-            ErrorGqlStatusObject gql, String entity, String fromName, String toName) {
-        return new InvalidArgumentException(
-                gql,
-                String.format("Failed to rename the specified %s '%s' to ", entity, fromName)
-                        + String.format("'%s': The %s '%s' does not exist.", toName, entity, fromName));
+            PrivilegeGqlCodeEntity entity, String fromName, String toName, String fromParamName) {
+        var action = "rename the specified %s '%s' to '%s'"
+                .formatted(entity.description.toLowerCase(Locale.ROOT), fromName, toName);
+        return failedActionEntityNotFound2(action, entity, fromName, fromParamName);
     }
 
     public static InvalidArgumentException renameEntityAlreadyExists(
-            ErrorGqlStatusObject gql, String entity, String fromName, String toName, Throwable cause) {
+            PrivilegeGqlCodeEntity entity, String fromName, String toName) {
+        var action = "rename the specified %s '%s' to '%s'"
+                .formatted(entity.description.toLowerCase(Locale.ROOT), fromName, toName);
+        return failedActionEntityAlreadyExists2(action, entity, toName);
+    }
+
+    public static InvalidArgumentException createEntityAlreadyExists(PrivilegeGqlCodeEntity entity, String name) {
+        var action = "create the specified %s '%s'".formatted(entity.description.toLowerCase(Locale.ROOT), name);
+        return failedActionEntityAlreadyExists(action, entity, name);
+    }
+
+    public static InvalidArgumentException failedActionEntityNotFound(
+            String action, PrivilegeGqlCodeEntity entity, String name, String paramName) {
+        return failedActionEntityNotFound(action, entity, name, paramName, null);
+    }
+
+    public static InvalidArgumentException failedActionEntityNotFound(
+            String action, PrivilegeGqlCodeEntity entity, String name, String paramName, String command) {
+        // e.g. Failed to <delete the specified role 'myRole'>: <Role> does not exist.
         return new InvalidArgumentException(
-                gql,
-                String.format("Failed to rename the specified %s '%s' to ", entity.toLowerCase(Locale.ROOT), fromName)
-                        + String.format("'%s': %s '%s' already exists.", toName, entity, toName),
-                cause);
+                entityNotFound(entity, name, paramName, command),
+                "Failed to %s: %s does not exist.".formatted(action, entity.description));
+    }
+
+    public static InvalidArgumentException failedActionEntityNotFound2(
+            String action, PrivilegeGqlCodeEntity entity, String name, String paramName) {
+        // e.g. Failed to <rename the role 'oldName' to 'newName'>: The <role> '<oldName>' does not exist.
+        return new InvalidArgumentException(
+                entityNotFound(entity, name, paramName),
+                "Failed to %s: The %s '%s' does not exist."
+                        .formatted(action, entity.description.toLowerCase(Locale.ROOT), name));
+    }
+
+    public static InvalidArgumentException failedActionEntityAlreadyExists(
+            String action, PrivilegeGqlCodeEntity entity, String name) {
+        // e.g. Failed to <create the specified user 'neo4j'>: <User> already exists.
+        return new InvalidArgumentException(
+                entityAlreadyExists(entity, name),
+                "Failed to %s: %s already exists.".formatted(action, entity.description));
+    }
+
+    public static InvalidArgumentException failedActionEntityAlreadyExists2(
+            String action, PrivilegeGqlCodeEntity entity, String name) {
+        // e.g. Failed to <rename the role 'oldName' to 'newName'>: <Role> '<newName>' already exists.
+        return new InvalidArgumentException(
+                entityAlreadyExists(entity, name),
+                "Failed to %s: %s '%s' already exists.".formatted(action, entity.description, name));
     }
 
     public static InvalidArgumentException oldPasswordEqualsNew(String user, Boolean onSelf) {
@@ -255,6 +456,13 @@ public class InvalidArgumentException extends Neo4jException {
                 gql, String.format("A password must be at least %s characters.", minLength));
     }
 
+    public static InvalidArgumentException invalidCredentialsDuringAlterPassword(String user) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42NFF)
+                .build();
+        return new InvalidArgumentException(
+                gql, "User '%s' failed to alter their own password: Invalid principal or credentials.".formatted(user));
+    }
+
     public static InvalidArgumentException parameterizedDbWildcards(String syntax, String messageStart) {
         var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N86)
                 .withParam(GqlParams.StringParam.syntax, syntax)
@@ -273,6 +481,39 @@ public class InvalidArgumentException extends Neo4jException {
         return new InvalidArgumentException(gql, legacyMessage);
     }
 
+    public static InvalidArgumentException providedStringEmpty(String capitalizedField) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NB6)
+                .withParam(GqlParams.StringParam.item, capitalizedField)
+                .build();
+        return new InvalidArgumentException(
+                gql, String.format("The provided %s is empty.", capitalizedField.toLowerCase(Locale.ROOT)));
+    }
+
+    public static InvalidArgumentException providedStringEmpty(String capitalizedField, String legacyField) {
+        // Only here to provide the legacy message for "The provided Alias is empty.".
+        // Use providedStringEmpty(String capitalizedField) instead.
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NB6)
+                .withParam(GqlParams.StringParam.item, capitalizedField)
+                .build();
+        return new InvalidArgumentException(
+                gql, String.format("The provided %s is empty.", legacyField.toLowerCase(Locale.ROOT)));
+    }
+
+    public static InvalidArgumentException providedPasswordEmpty() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NB6)
+                .withParam(GqlParams.StringParam.item, "Password")
+                .build();
+        return new InvalidArgumentException(gql, "A password cannot be empty.");
+    }
+
+    public static InvalidArgumentException notAllowedToBeEmptyString(String item) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NB6)
+                .withParam(GqlParams.StringParam.item, item)
+                .build();
+        return new InvalidArgumentException(
+                gql, "Invalid input. %s is not allowed to be an empty string.".formatted(item));
+    }
+
     public static InvalidArgumentException couldNotGetPassword() {
         var msg = "Could not get password name field from password expression.";
         var gql = GqlHelper.get50N00(InvalidArgumentException.class.getSimpleName(), msg);
@@ -285,18 +526,75 @@ public class InvalidArgumentException extends Neo4jException {
         return new InvalidArgumentException(gql, msg);
     }
 
-    public static InvalidArgumentException alterMissingUser(String username) {
-        var gql = GqlHelper.getGql42002_42N09(username);
-        return new InvalidArgumentException(
-                gql, String.format("Failed to alter the specified user '%s': User does not exist.", username));
+    public static InvalidArgumentException alterMissingUser(String username, String paramName) {
+        return failedActionEntityNotFound(
+                "alter the specified user '%s'".formatted(username), PrivilegeGqlCodeEntity.USER, username, paramName);
     }
 
-    public static InvalidArgumentException roleMissingUser(String role, String username, Throwable cause) {
-        var gql = GqlHelper.getGql42002_42N09(username);
-        return new InvalidArgumentException(
-                gql,
-                String.format("Failed to grant role '%s' to user '%s': User does not exist.", role, username),
-                cause);
+    public static InvalidArgumentException alterMissingAuthRule(String authRule, String paramName) {
+        return failedActionEntityNotFound(
+                "alter the specified auth rule '%s'".formatted(authRule),
+                PrivilegeGqlCodeEntity.AUTHRULE,
+                authRule,
+                paramName);
+    }
+
+    public static InvalidArgumentException roleMissingUser(
+            String role, String username, String paramName, String command) {
+        return failedActionEntityNotFound(
+                "grant role '%s' to user '%s'".formatted(role, username),
+                PrivilegeGqlCodeEntity.USER,
+                username,
+                paramName,
+                command);
+    }
+
+    public static InvalidArgumentException grantRoleToAuthRuleMissingAuthRule(
+            String role, String username, String paramName, String command) {
+        return failedActionEntityNotFound(
+                "grant role '%s' to auth rule '%s'".formatted(role, username),
+                PrivilegeGqlCodeEntity.AUTHRULE,
+                username,
+                paramName,
+                command);
+    }
+
+    public static InvalidArgumentException invalidCommandMissingUser(
+            String command, String username, String parameterName) {
+        var gql = GqlHelper.get42N09_userNotFound(command, username, parameterName);
+        return new InvalidArgumentException(gql, GqlHelper.getCompleteMessage(gql));
+    }
+
+    public static InvalidArgumentException invalidCommandMissingAuthRule(
+            String command, String username, String parameterName) {
+        var gql = GqlHelper.get42NAD_authRuleNotFound(command, username, parameterName);
+        return new InvalidArgumentException(gql, GqlHelper.getCompleteMessage(gql));
+    }
+
+    public static InvalidArgumentException invalidCommandMissingRole(
+            String command, String role, String parameterName) {
+        var gql = GqlHelper.get42N10_roleNotFound(command, role, parameterName);
+        return new InvalidArgumentException(gql, GqlHelper.getCompleteMessage(gql));
+    }
+
+    public static InvalidArgumentException invalidCommandMissingRoleWithLegacyMessage(
+            String msg, String command, String role, String parameterName) {
+        var gql = GqlHelper.get42N10_roleNotFound(command, role, parameterName);
+        return new InvalidArgumentException(gql, msg);
+    }
+
+    public static InvalidArgumentException invalidCommandDatabaseDoesNotExists(
+            String command, String dbname, String parameterName) {
+        var gql = GqlHelper.get42N00_databaseNotFound(command, dbname, parameterName);
+        return new InvalidArgumentException(gql, GqlHelper.getCompleteMessage(gql));
+    }
+
+    public static InvalidArgumentException invalidCommandParameterizedDatabaseNameDoesNotSupportWildcards(
+            String command) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N86)
+                .withParam(GqlParams.StringParam.syntax, command)
+                .build();
+        return new InvalidArgumentException(gql, GqlHelper.getCompleteMessage(gql));
     }
 
     public static InvalidArgumentException compositeAlias(String operationType, String alias, String dbName) {
@@ -345,6 +643,7 @@ public class InvalidArgumentException extends Neo4jException {
     public static InvalidArgumentException topologyOutOfRange(
             String serverType, int constrainedServers, String allocationType, int desiredAllocations) {
         var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22003)
+                .withParam(GqlParams.StringParam.value, String.valueOf(constrainedServers))
                 .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N56)
                         .withParam(GqlParams.StringParam.serverType, serverType)
                         .withParam(GqlParams.NumberParam.count1, constrainedServers)
@@ -374,15 +673,49 @@ public class InvalidArgumentException extends Neo4jException {
                         formattedServerType, constrainedServers, formattedAllocationType, desiredAllocations));
     }
 
-    public static InvalidArgumentException notAValidCidrIp(String wrongIp, String legacyMessage, Throwable cause) {
-        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N05)
-                .withParam(GqlParams.StringParam.input, wrongIp)
-                .withParam(GqlParams.StringParam.context, "CIDR IP")
-                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N88)
-                        .withParam(GqlParams.StringParam.input, wrongIp)
+    public static InvalidArgumentException fieldNotAvailableOnPoint(
+            String fieldName, String point, Boolean isCartesian) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22000)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N58)
+                        .withParam(GqlParams.StringParam.component, fieldName)
+                        .withParam(GqlParams.StringParam.value, point)
                         .build())
                 .build();
-        return new InvalidArgumentException(gql, legacyMessage, cause);
+        String cartesian = isCartesian ? "cartesian " : "";
+        return new InvalidArgumentException(
+                gql, String.format("Field: %s is not available on %spoint: %s", fieldName, cartesian, point));
+    }
+
+    public static InvalidArgumentException notAValidCidrIp(
+            String wrongIp,
+            Boolean cypher5,
+            String legacyErrorMessage,
+            String command,
+            Throwable cause,
+            String paramName) {
+        var gqlBuilder = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N05)
+                .withParam(GqlParams.StringParam.input, wrongIp)
+                .withParam(GqlParams.StringParam.context, GqlParams.StringParam.cmd.process(command));
+
+        var invalidParamCause = paramName == null
+                ? null
+                : ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N51)
+                        .withParam(GqlParams.StringParam.param, paramName);
+
+        var invalidCidrCause = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N88)
+                .withParam(GqlParams.StringParam.input, wrongIp)
+                .build();
+
+        if (invalidParamCause != null) {
+            gqlBuilder.withCause(invalidParamCause.withCause(invalidCidrCause).build());
+        } else {
+            gqlBuilder.withCause(invalidCidrCause);
+        }
+
+        var gql = gqlBuilder.build();
+        String message = cypher5 ? legacyErrorMessage : gql.getMessage();
+
+        return new InvalidArgumentException(gql, message, cause);
     }
 
     public static InvalidArgumentException mustSpecifyField(String mustAssign) {
@@ -400,11 +733,37 @@ public class InvalidArgumentException extends Neo4jException {
         var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22007)
                 .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N27)
                         .withParam(GqlParams.StringParam.input, prettyValue)
-                        .withParam(GqlParams.StringParam.variable, "timezone")
+                        .withParam(GqlParams.StringParam.context, "timezone")
                         .withParam(GqlParams.ListParam.valueTypeList, List.of("STRING"))
+                        .withParam(GqlParams.StringParam.hint, "")
                         .build())
                 .build();
         return new InvalidArgumentException(gql, String.format("Cannot assign %s to field %s", value, field));
+    }
+
+    public static InvalidArgumentException invalidIndexConfig(String key, List<String> expected) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22G03)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N27)
+                        .withParam(GqlParams.StringParam.input, key)
+                        .withParam(GqlParams.StringParam.context, "index setting")
+                        .withParam(GqlParams.ListParam.valueTypeList, expected)
+                        .withParam(GqlParams.StringParam.hint, "")
+                        .build())
+                .build();
+        return new InvalidArgumentException(
+                gql, String.format("Invalid index config key '%s', it was not recognized as an index setting.", key));
+    }
+
+    public static InvalidArgumentException noSuchFullTextAnalyzer(String analyzerName, List<String> expected) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22G03)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N27)
+                        .withParam(GqlParams.StringParam.input, analyzerName)
+                        .withParam(GqlParams.StringParam.context, "analyzer name")
+                        .withParam(GqlParams.ListParam.valueTypeList, expected)
+                        .withParam(GqlParams.StringParam.hint, "")
+                        .build())
+                .build();
+        return new InvalidArgumentException(gql, "No such full-text analyzer: '" + analyzerName + "'.");
     }
 
     public static InvalidArgumentException cannotAssignPointField(
@@ -412,8 +771,9 @@ public class InvalidArgumentException extends Neo4jException {
         var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22G03)
                 .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N27)
                         .withParam(GqlParams.StringParam.input, prettyValue)
-                        .withParam(GqlParams.StringParam.variable, "coordinate " + field.toLowerCase(Locale.ROOT))
+                        .withParam(GqlParams.StringParam.context, "coordinate " + field.toLowerCase(Locale.ROOT))
                         .withParam(GqlParams.ListParam.valueTypeList, expectedTypes)
+                        .withParam(GqlParams.StringParam.hint, "")
                         .build())
                 .build();
         return new InvalidArgumentException(gql, String.format("Cannot assign %s to field %s", value, field));
@@ -468,8 +828,20 @@ public class InvalidArgumentException extends Neo4jException {
         return new InvalidArgumentException(gql, "Invalid nanosecond: " + value);
     }
 
+    public static InvalidArgumentException invalidArgument(String msg, Throwable t) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22000)
+                .build();
+        throw new InvalidArgumentException(gql, msg, t);
+    }
+
+    public static InvalidArgumentException argumentOutOfRange(
+            String fun, String arg, long lower, long upper, long value) {
+        var gql = GqlHelper.getGql22N38_22N03(fun, arg, "INTEGER", lower, upper, value);
+        return new InvalidArgumentException(gql, String.format("Function argument to '%s()' is out of range", fun));
+    }
+
     public static InvalidArgumentException zeroStepRange() {
-        var gql = GqlHelper.getGql22N38_22N03("range", "step", "INTEGER", 1, Long.MAX_VALUE, String.valueOf(0));
+        var gql = GqlHelper.getGql22N38_22N03("range", "step", "INTEGER", 1, Long.MAX_VALUE, 0);
         return new InvalidArgumentException(gql, "Step argument to 'range()' cannot be zero");
     }
 
@@ -508,11 +880,10 @@ public class InvalidArgumentException extends Neo4jException {
                 gql = GqlHelper.getGql22007_22N03("seconds", "INTEGER", 0, 60, value);
             }
             default -> {
-                msg = unit.name().toLowerCase() + "out of range: " + value;
-                gql = GqlHelper.getGql22007_22N03(unit.name().toLowerCase(), "INTEGER", -1, -1, value);
+                msg = unit.name().toLowerCase(Locale.ROOT) + "out of range: " + value;
+                gql = GqlHelper.getGql22007_22N03(unit.name().toLowerCase(Locale.ROOT), "INTEGER", -1, -1, value);
             }
         }
-        ;
         return new InvalidArgumentException(gql, msg);
     }
 
@@ -579,9 +950,30 @@ public class InvalidArgumentException extends Neo4jException {
         return new InvalidArgumentException(gql, String.format("Cannot construct %s from: %s", temporal, got));
     }
 
+    public static InvalidArgumentException durationBetweenNonTemporalValues(
+            String value, List<String> valueTypeList, String valueType) {
+        var gql = GqlHelper.getGql22007_22N01(value, valueTypeList, valueType);
+        return new InvalidArgumentException(gql, "Can only compute durations between TemporalValues.");
+    }
+
+    public static InvalidArgumentException emptyBuilderState() {
+        var gql = GqlHelper.getGql22007_22N12("null");
+        return new InvalidArgumentException(gql, "Builder state empty");
+    }
+
     public static InvalidArgumentException needIntegerOrFloat(String gotPretty, String gotType) {
         var gql = GqlHelper.getGql22G03_22N01(gotPretty, List.of("INTEGER", "FLOAT"), gotType);
         return new InvalidArgumentException(gql, "Factor must be either integer of floating point number.");
+    }
+
+    public static InvalidArgumentException invalidCRSForGeographic(String crs) {
+        var gql = GqlHelper.getGql22000_22N21(crs);
+        return new InvalidArgumentException(
+                gql,
+                String.format(
+                        "Geographic points does not support coordinate reference system: %s."
+                                + "This is set either in the csv header or the actual data column",
+                        crs));
     }
 
     public static InvalidArgumentException inputContainsInvalidCharacters(
@@ -600,5 +992,528 @@ public class InvalidArgumentException extends Neo4jException {
     public static InvalidArgumentException failedConvertFunction(String function, Throwable cause) {
         var gql = GqlHelper.getGql22000_22N11(function);
         return new InvalidArgumentException(gql, cause.getMessage(), cause);
+    }
+
+    public static InvalidArgumentException incompleteAllocationPicking() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N57)
+                .withParam(GqlParams.StringParam.msg, "incomplete")
+                .build();
+        return new InvalidArgumentException(gql, "Unexpected error while picking allocations - incomplete.");
+    }
+
+    public static InvalidArgumentException primaryExceededAllocationPicking() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N57)
+                .withParam(GqlParams.StringParam.msg, "primary exceeded")
+                .build();
+        return new InvalidArgumentException(gql, "Unexpected error while picking allocations - primary exceeded.");
+    }
+
+    public static InvalidArgumentException secondaryExceededAllocationPicking() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N57)
+                .withParam(GqlParams.StringParam.msg, "secondary exceeded")
+                .build();
+        return new InvalidArgumentException(gql, "Unexpected error while picking allocations - secondary exceeded.");
+    }
+
+    public static InvalidArgumentException resourceExhaustion(long desiredAllocations, long allocations) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N66)
+                .build();
+        return new InvalidArgumentException(
+                gql,
+                "Desired number of allocations is '" + desiredAllocations + "', but only '"
+                        + (desiredAllocations - allocations)
+                        + "' possible servers found - some servers may be constrained.");
+    }
+
+    public static InvalidArgumentException cannotChangeDefaultDb(String oldDatabaseName) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N02)
+                .withParam(GqlParams.StringParam.proc, "dbms.setDefaultDatabase")
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N12)
+                        .withParam(GqlParams.StringParam.db, oldDatabaseName)
+                        .build())
+                .build();
+        return new InvalidArgumentException(
+                gql, String.format("The old default database '%s' is still running.", oldDatabaseName));
+    }
+
+    public static InvalidArgumentException newDefaultDbDoesNotExist(String databaseName) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N16)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N13)
+                        .withParam(GqlParams.StringParam.db, databaseName)
+                        .build())
+                .build();
+        return new InvalidArgumentException(
+                gql, String.format("New default database '%s' does not exist.", databaseName));
+    }
+
+    public static InvalidArgumentException systemCannotBeDefaultDb() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N16)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N14)
+                        .build())
+                .build();
+        return new InvalidArgumentException(gql, "System database cannot be set as default.");
+    }
+
+    public static InvalidArgumentException nullArgumentNotAllowed() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N16)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22004)
+                        .build())
+                .build();
+        return new InvalidArgumentException(gql, "Null argument not allowed.");
+    }
+
+    public static InvalidArgumentException cannotDeallocateServers(
+            Collection<String> servers, boolean withCauseMessage, Throwable e) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N41)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N43)
+                        .withParam(
+                                GqlParams.ListParam.serverList, servers.stream().toList())
+                        .build())
+                .withParam(GqlParams.StringParam.msg, topologyDetailMessage(withCauseMessage, e))
+                .build();
+
+        String serversString = servers.stream().collect(Collectors.joining(",", "'", "'"));
+        var operation = "Could not deallocate server(s) " + serversString + ".";
+        return createTopologyException(gql, operation, withCauseMessage, e);
+    }
+
+    public static InvalidArgumentException cannotDropServer(String server, boolean withCauseMessage, Throwable e) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N41)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N44)
+                        .withParam(GqlParams.StringParam.server, server)
+                        .build())
+                .withParam(GqlParams.StringParam.msg, topologyDetailMessage(withCauseMessage, e))
+                .build();
+        var operation = "Could not drop server '" + server + "'.";
+        return createTopologyException(gql, operation, withCauseMessage, e);
+    }
+
+    public static InvalidArgumentException cannotCordonServer(String server, boolean withCauseMessage, Throwable e) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N41)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N45)
+                        .withParam(GqlParams.StringParam.server, server)
+                        .build())
+                .withParam(GqlParams.StringParam.msg, topologyDetailMessage(withCauseMessage, e))
+                .build();
+        var operation = "Could not cordon server '" + server + "'.";
+        return createTopologyException(gql, operation, withCauseMessage, e);
+    }
+
+    public static InvalidArgumentException cannotAlterServer(String server, boolean withCauseMessage, Throwable e) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N41)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N46)
+                        .withParam(GqlParams.StringParam.server, server)
+                        .build())
+                .withParam(GqlParams.StringParam.msg, topologyDetailMessage(withCauseMessage, e))
+                .build();
+        var operation = "Could not alter server '" + server + "'.";
+        return createTopologyException(gql, operation, withCauseMessage, e);
+    }
+
+    public static InvalidArgumentException cannotRenameServer(String server, boolean withCauseMessage, Throwable e) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N41)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N47)
+                        .withParam(GqlParams.StringParam.server, server)
+                        .build())
+                .withParam(GqlParams.StringParam.msg, topologyDetailMessage(withCauseMessage, e))
+                .build();
+        var operation = "Could not rename server '" + server + "'.";
+        return createTopologyException(gql, operation, withCauseMessage, e);
+    }
+
+    public static InvalidArgumentException cannotEnableServer(String server, boolean withCauseMessage, Throwable e) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N41)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N48)
+                        .withParam(GqlParams.StringParam.server, server)
+                        .build())
+                .withParam(GqlParams.StringParam.msg, topologyDetailMessage(withCauseMessage, e))
+                .build();
+        var operation = "Could not enable server '" + server + "'.";
+        return createTopologyException(gql, operation, withCauseMessage, e);
+    }
+
+    public static InvalidArgumentException cannotAlterDatabase(
+            String databaseName, boolean withCauseMessage, Throwable e) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N41)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N49)
+                        .withParam(GqlParams.StringParam.db, databaseName)
+                        .build())
+                .withParam(GqlParams.StringParam.msg, topologyDetailMessage(withCauseMessage, e))
+                .build();
+        var operation = "Could not alter database '" + databaseName + "'.";
+        return createTopologyException(gql, operation, withCauseMessage, e);
+    }
+
+    public static InvalidArgumentException cannotRecreateDatabase(
+            String databaseName, boolean withCauseMessage, Throwable e) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N41)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N50)
+                        .withParam(GqlParams.StringParam.db, databaseName)
+                        .build())
+                .withParam(GqlParams.StringParam.msg, topologyDetailMessage(withCauseMessage, e))
+                .build();
+        var operation = "Could not recreate database '" + databaseName + "'.";
+        return createTopologyException(gql, operation, withCauseMessage, e);
+    }
+
+    public static InvalidArgumentException cannotCreateDatabase(
+            String databaseName, boolean withCauseMessage, Throwable e) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N41)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N51)
+                        .withParam(GqlParams.StringParam.db, databaseName)
+                        .build())
+                .withParam(GqlParams.StringParam.msg, topologyDetailMessage(withCauseMessage, e))
+                .build();
+        var operation = "Could not create database '" + databaseName + "'.";
+        return createTopologyException(gql, operation, withCauseMessage, e);
+    }
+
+    public static InvalidArgumentException cannotReallocate(boolean withCauseMessage, Throwable e) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N41)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N54)
+                        .withParam(GqlParams.StringParam.msg, topologyDetailMessage(withCauseMessage, e))
+                        .build())
+                .withParam(GqlParams.StringParam.msg, topologyDetailMessage(withCauseMessage, e))
+                .build();
+        var operation = "Could not calculate reallocation for databases.";
+        return createTopologyException(gql, operation, withCauseMessage, e);
+    }
+
+    @CalledFromGeneratedCode
+    public static InvalidArgumentException entityShouldBeNodeOrRel(String entity, String resolvedEntity) {
+        var gql = getGql22G03_22N27(resolvedEntity, entity, List.of("NODE", "RELATIONSHIP"));
+        return new InvalidArgumentException(
+                gql,
+                String.format(
+                        "The expression %s should have been a node or a relationship, but got %s",
+                        entity, resolvedEntity));
+    }
+
+    public static InvalidArgumentException impersonationNotSupportedWithAuthDisabled() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N30)
+                .withParam(GqlParams.StringParam.item, "Impersonation")
+                .withParam(GqlParams.StringParam.context, "a database with auth disabled")
+                .build();
+        return new InvalidArgumentException(gql, "Impersonation is not supported with auth disabled.");
+    }
+
+    public static InvalidArgumentException impersonationNotSupportedWithNativeAuthDisabled() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N30)
+                .withParam(GqlParams.StringParam.item, "Impersonation")
+                .withParam(GqlParams.StringParam.context, "a database with native auth disabled")
+                .build();
+        return new InvalidArgumentException(gql, "Cannot impersonate with native authorization disabled.");
+    }
+
+    public static InvalidArgumentException unsupportedWhenNotNative() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N30)
+                .withParam(GqlParams.StringParam.item, "Changing username")
+                .withParam(GqlParams.StringParam.context, "when using an authentication provider apart from native")
+                .build();
+        return new InvalidArgumentException(
+                gql,
+                "Changing username is not supported when using an authentication or authentication provider apart from native.");
+    }
+
+    public static InvalidArgumentException unsupportedWithoutSetting(
+            String concept, String settingScope, String settingName, String settingValue) {
+        var context = String.format("%s without configuration setting: %s=%s", settingScope, settingName, settingValue);
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N30)
+                .withParam(GqlParams.StringParam.item, concept)
+                .withParam(GqlParams.StringParam.context, context)
+                .build();
+        return new InvalidArgumentException(gql, concept + " is not supported in " + context);
+    }
+
+    public static InvalidArgumentException unsupportedOperation(String operation, String context) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N31)
+                .withParam(GqlParams.StringParam.feat, operation)
+                .withParam(GqlParams.StringParam.context, context)
+                .build();
+        return new InvalidArgumentException(gql, operation + " is not supported in " + context);
+    }
+
+    public static InvalidArgumentException pbacNotSupportedWithSPD() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N71)
+                .withParam(
+                        GqlParams.StringParam.feat,
+                        "Property Based Access Control for MATCH and TRAVERSE privilege actions")
+                .build();
+        return new InvalidArgumentException(
+                gql,
+                "Property Based Access Control for MATCH and TRAVERSE privilege actions is not supported on a Sharded Database.");
+    }
+
+    public static InvalidArgumentException invalidGraphName(String graphName) {
+        var msg = String.format(
+                "Failed to parse `%s` as a graph name. Graph name parts that contain unsupported characters for unescaped identifiers require backtick escaping. Graph name parts with special characters may require additional escaping of those characters.\"",
+                graphName);
+        var gql = GqlHelper.get50N22(graphName);
+        return new InvalidArgumentException(gql, msg);
+    }
+
+    public static InvalidArgumentException invalidOptionTypeForAlterUser(String parameter, String actualType) {
+        var gql = getGql42N51(
+                parameter,
+                getGql22G03_22N27(
+                        actualType, GqlParams.StringParam.cmd.process("ALTER USER"), List.of("BOOLEAN", "STRING")));
+
+        return new InvalidArgumentException(
+                gql,
+                String.format(
+                        "Invalid option type for ALTER USER, expected PasswordExpression, Boolean, String or Parameter but got: %s",
+                        actualType));
+    }
+
+    public static InvalidArgumentException incorrectTypeForAllocationHint(String input, String hint, String type) {
+        var legacyMessage = String.format(
+                "Incorrect value type provided for allocation hint '%s'. Expected an Integer but found a %s.",
+                hint, type);
+        var gql = getGql22G03_22N27(input, hint, List.of("INTEGER"));
+        return new InvalidArgumentException(gql, legacyMessage);
+    }
+
+    public static InvalidArgumentException invalidAllocationHintKey(String invalidKey, Set<String> validKeys) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NA9)
+                .withParam(GqlParams.StringParam.mapKey, invalidKey)
+                .withParam(GqlParams.ListParam.mapKeyList, validKeys.stream().toList())
+                .build();
+
+        var validKeysString = validKeys.stream().collect(Collectors.joining(", ", "'", "'"));
+        return new InvalidArgumentException(
+                gql,
+                String.format(
+                        "The key %s is not a recognised allocation hint key! Valid hint keys are: %s",
+                        invalidKey, validKeysString));
+    }
+
+    public static InvalidArgumentException atLeastOneTemporalUnitRequired() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22007)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N30)
+                        .build())
+                .build();
+        return new InvalidArgumentException(gql, "At least one temporal unit must be specified.");
+    }
+
+    public static InvalidArgumentException cannotProcessTemporal(String input, Throwable e) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22007)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N11)
+                        .withParam(GqlParams.StringParam.input, input)
+                        .build())
+                .build();
+        return new InvalidArgumentException(gql, e.getMessage(), e);
+    }
+
+    public static InvalidArgumentException queryContainsIllegalName(String name) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42001)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N51)
+                        .withParam(GqlParams.StringParam.param, name)
+                        .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N15)
+                                .withParam(GqlParams.StringParam.syntax, name)
+                                .build())
+                        .build())
+                .build();
+        return new InvalidArgumentException(
+                gql, "The query contains a parameter with an illegal name: '%s'".formatted(name));
+    }
+
+    public static InvalidArgumentException invalidPrefixSystem(String entity, String name) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42001)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N15)
+                        .withParam(GqlParams.StringParam.syntax, "system")
+                        .build())
+                .build();
+        throw new InvalidArgumentException(
+                gql, "%s '%s' is invalid, due to the prefix 'system'.".formatted(entity, name));
+    }
+
+    public static InvalidArgumentException failedActionReservedRole(String action, String role) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42001)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N15)
+                        .withParam(GqlParams.StringParam.syntax, role)
+                        .build())
+                .build();
+        return new InvalidArgumentException(gql, "Failed to %s: '%s' is a reserved role.".formatted(action, role));
+    }
+
+    public static InvalidArgumentException providerIdCombinationAlreadyInUseCreate(String username) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N95)
+                .build();
+        return new InvalidArgumentException(
+                gql,
+                "Failed to create the specified user '%s': The combination of provider and id is already in use."
+                        .formatted(username));
+    }
+
+    public static InvalidArgumentException providerIdCombinationAlreadyInUseAlter(String username) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N95)
+                .build();
+        return new InvalidArgumentException(
+                gql,
+                "Failed to alter the specified user '%s': The combination of provider and id is already in use."
+                        .formatted(username));
+    }
+
+    public static InvalidArgumentException atLeastOneAuthProviderRequired() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N96)
+                .build();
+        return new InvalidArgumentException(
+                gql,
+                "User has no auth provider. Add at least one auth provider for the user or consider suspending them.");
+    }
+
+    public static InvalidArgumentException createRelationshipMissingNode(String relName, String nodeName) {
+        var gql = GqlHelper.getGql22G03_22N01("NULL", List.of("NODE"), "NULL");
+        return new InvalidArgumentException(
+                gql,
+                String.format(
+                        "Failed to create relationship `%s`, node `%s` is missing. If you prefer to simply ignore rows "
+                                + "where a relationship node is missing, set 'dbms.cypher.lenient_create_relationship = true' in neo4j.conf",
+                        relName, nodeName));
+    }
+
+    public static InvalidArgumentException invalidValueInHistogramFromConfig(
+            String fieldKey, String fieldValue, List<String> expected) {
+        var legacyMessage = "Invalid input '%s' for %s. Expected %s.".formatted(fieldValue, fieldKey, expected);
+
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N04)
+                .withParam(GqlParams.StringParam.input, fieldValue)
+                .withParam(GqlParams.StringParam.context, fieldKey)
+                .withParam(GqlParams.ListParam.inputList, expected)
+                .build();
+        return new InvalidArgumentException(gql, legacyMessage);
+    }
+
+    private static String topologyDetailMessage(boolean withCauseMessage, Throwable e) {
+        return withCauseMessage && e.getMessage() != null && !e.getMessage().isBlank()
+                ? e.getMessage()
+                : "Internal error";
+    }
+
+    private static InvalidArgumentException createTopologyException(
+            ErrorGqlStatusObject gql, String operation, boolean withCauseMessage, Throwable e) {
+        if (withCauseMessage && e.getMessage() != null && !e.getMessage().isBlank()) {
+            return new InvalidArgumentException(gql, operation + " " + e.getMessage());
+        }
+        return new InvalidArgumentException(gql, operation, e);
+    }
+
+    public static InvalidArgumentException invalidVectorDimensions(
+            int minDimensions, int maxDimensions, int givenDimensions) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NBE)
+                .withParam(GqlParams.NumberParam.count1, minDimensions)
+                .withParam(GqlParams.NumberParam.count2, maxDimensions)
+                .withParam(GqlParams.NumberParam.count3, givenDimensions)
+                .build();
+        return new InvalidArgumentException(gql, gql.getMessage());
+    }
+
+    public static InvalidArgumentException propertyValueTooBig(
+            String typeDescription, long maxBytes, String propertyValue) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NBF)
+                .withParam(GqlParams.StringParam.typeDescription, typeDescription)
+                .withParam(GqlParams.NumberParam.bytes, maxBytes)
+                .withParam(GqlParams.StringParam.value, propertyValue)
+                .build();
+        return new InvalidArgumentException(gql, gql.getMessage());
+    }
+
+    public static InvalidArgumentException invalidVectorCoordinate(float[] coordinates) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NBG)
+                .withParam(GqlParams.StringParam.value, Arrays.toString(coordinates))
+                .build();
+        return new InvalidArgumentException(gql, gql.getMessage());
+    }
+
+    public static InvalidArgumentException invalidVectorCoordinate(double[] coordinates) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NBG)
+                .withParam(GqlParams.StringParam.value, Arrays.toString(coordinates))
+                .build();
+        return new InvalidArgumentException(gql, gql.getMessage());
+    }
+
+    public static InvalidArgumentException invalidVectorCoordinate(String msg, String got) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NBG)
+                .withParam(GqlParams.StringParam.value, got)
+                .build();
+        return new InvalidArgumentException(gql, msg);
+    }
+
+    public static InvalidArgumentException listTooLarge(long size, long maxSize) {
+        var gql = GqlHelper.getGql22003_22N03("list size", "INTEGER", 0, maxSize, String.valueOf(size));
+        return new InvalidArgumentException(
+                gql,
+                String.format(
+                        "Cannot populate list values larger than %d elements. Requested size: %d", maxSize, size));
+    }
+
+    public static InvalidArgumentException invalidType(
+            String context, String value, String expectedType, String actualType) {
+        var gql = GqlHelper.getGql22G03_22N01(value, List.of(expectedType), actualType);
+        return new InvalidArgumentException(
+                gql, String.format("Wrong type for %s. Expected %s, got %s", context, expectedType, actualType));
+    }
+
+    public static InvalidArgumentException invalidType(String value, String actualType, List<String> expectedTypes) {
+        var gql = GqlHelper.getGql22G03_22N01(value, expectedTypes, actualType);
+        return new InvalidArgumentException(gql, gql.toString());
+    }
+
+    public static InvalidArgumentException missingInput(String context, String... expected) {
+        return missingInput(context, Arrays.asList(expected));
+    }
+
+    public static InvalidArgumentException missingInput(String context, List<String> expected) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N06)
+                .withParam(GqlParams.ListParam.inputList, expected)
+                .build();
+        var joiner = new StringJoiner(", ", "[", "]");
+        expected.forEach(joiner::add);
+        return new InvalidArgumentException(
+                gql, "%s is expected to have been set. Expected %s".formatted(context, joiner.toString()));
+    }
+
+    public static InvalidArgumentException expectedString(String msg, String gotPretty, String gotCypherType) {
+        var gql = GqlHelper.getGql22G03_22N01(gotPretty, List.of("STRING"), gotCypherType);
+        return new InvalidArgumentException(gql, msg);
+    }
+
+    public static InvalidArgumentException outOfRange(
+            String component, String value, String valueType, String min, String max) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22G03)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N03)
+                        .withParam(GqlParams.StringParam.component, component)
+                        .withParam(GqlParams.StringParam.valueType, valueType)
+                        .withParam(GqlParams.StringParam.lower, min)
+                        .withParam(GqlParams.StringParam.upper, max)
+                        .withParam(GqlParams.StringParam.value, String.valueOf(value))
+                        .build())
+                .build();
+        return new InvalidArgumentException(
+                gql, "'%s' must be between %s and %s inclusively".formatted(component, min, max));
+    }
+
+    public static InvalidArgumentException invalidIndexInput(String input, String context, String msg) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N05)
+                .withParam(GqlParams.StringParam.input, input)
+                .withParam(GqlParams.StringParam.context, context)
+                .build();
+        return new InvalidArgumentException(gql, msg);
+    }
+
+    public static InvalidArgumentException wrongIndexType(
+            String indexName, String expectedIndexType, String actualIndexType) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NCG)
+                .withParam(GqlParams.StringParam.idx, indexName)
+                .withParam(GqlParams.StringParam.idxType1, expectedIndexType)
+                .withParam(GqlParams.StringParam.idxType2, actualIndexType)
+                .build();
+        return new InvalidArgumentException(gql, gql.getMessage());
+    }
+
+    public static InvalidArgumentException integerNonNullOutOfBounds(
+            String legacyMst, String component, Number lower, Number upper, String input) {
+        var gql = GqlHelper.getGql22003_22N03(component, "INTEGER NOT NULL", lower, upper, input);
+        return new InvalidArgumentException(gql, legacyMst);
     }
 }

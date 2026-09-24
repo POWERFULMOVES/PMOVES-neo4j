@@ -35,10 +35,13 @@ import org.neo4j.cypher.internal.compiler.planner.logical.Metrics.CostModel
 import org.neo4j.cypher.internal.compiler.planner.logical.Metrics.LabelInfo
 import org.neo4j.cypher.internal.compiler.planner.logical.Metrics.QueryGraphSolverInput
 import org.neo4j.cypher.internal.compiler.planner.logical.cardinality.assumeIndependence.LabelInferenceStrategy
+import org.neo4j.cypher.internal.compiler.planner.logical.idp.IDPLogger
 import org.neo4j.cypher.internal.compiler.planner.logical.limit.LimitSelectivityConfig
+import org.neo4j.cypher.internal.compiler.planner.logical.schema.GraphSchemaOptimizations
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.CostComparisonListener
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.LogicalPlanProducer
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.IndexCompatiblePredicatesProviderContext
+import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.ir.SinglePlannerQuery
 import org.neo4j.cypher.internal.logical.plans.CachedProperties
@@ -46,9 +49,9 @@ import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 import org.neo4j.cypher.internal.logical.plans.ordering.DefaultProvidedOrderFactory
 import org.neo4j.cypher.internal.logical.plans.ordering.ParallelExecutionProvidedOrderFactory
 import org.neo4j.cypher.internal.logical.plans.ordering.ProvidedOrderFactory
-import org.neo4j.cypher.internal.macros.AssertMacros
+import org.neo4j.cypher.internal.macros.AssertMacros3
+import org.neo4j.cypher.internal.notification.InternalNotificationLogger
 import org.neo4j.cypher.internal.options.CypherDebugOptions
-import org.neo4j.cypher.internal.options.CypherEagerAnalyzerOption
 import org.neo4j.cypher.internal.options.CypherPlanVarExpandInto
 import org.neo4j.cypher.internal.planner.spi.GraphStatistics
 import org.neo4j.cypher.internal.planner.spi.PlanContext
@@ -56,7 +59,6 @@ import org.neo4j.cypher.internal.planner.spi.PlanningAttributes
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.Solveds
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.cypher.internal.util.CancellationChecker
-import org.neo4j.cypher.internal.util.InternalNotificationLogger
 import org.neo4j.cypher.internal.util.attribution.IdGen
 
 object LogicalPlanningContext {
@@ -98,7 +100,11 @@ object LogicalPlanningContext {
     semanticTable: SemanticTable,
     costComparisonListener: CostComparisonListener,
     readOnly: Boolean,
-    labelInferenceStrategy: LabelInferenceStrategy
+    labelInferenceStrategy: LabelInferenceStrategy,
+    expressionEvaluator: ExpressionEvaluator,
+    idpLogger: IDPLogger = IDPLogger.NoLogging,
+    graphSchemaOptimizations: GraphSchemaOptimizations = GraphSchemaOptimizations.Disabled,
+    planningStepsLogger: PlanningStepsLogger = PlanningStepsLogger.NoLogging
   )
 
   /**
@@ -119,6 +125,26 @@ object LogicalPlanningContext {
    * @param errorIfShortestPathHasCommonNodesAtRuntime a setting to fail if the start and the end node is the same for shortestPaths, at runtime.
    * @param legacyCsvQuoteEscaping a setting to configure quoting in LOAD CSV
    * @param csvBufferSize the buffer size for LOAD CSV
+   * @param planningIntersectionScansEnabled a setting whether intersection scans should be planned.
+   *                                         Relevant for caching.
+   * @param planningSubtractionScansEnabled a setting whether subtraction scans should be planned.
+   *                                         Relevant for caching.
+   * @param statefulShortestPlanningRewriteQuantifiersAbove a setting that controls the threshold for planning quantifiers in stateful shortest path planning as predicates instead of NFA transitions.
+   *                                                        Relevant for caching.
+   * @param planVarExpandInto a setting what strategy to apply to planning VarExpand(Into) as opposed to VarExpand(All).
+   *                          Relevant for caching.
+   * @param remoteBatchPropertiesStrategy a strategy object that encapsulates whether to plan RemoteBatchProperties operators.
+   *                                      Relevant for caching.
+   * @param dynamicLabelScansEnabled a setting whether dynamic label scans should be planned.
+   *                                 Relevant for caching.
+   * @param dynamicLabelIndexUseEnabled a setting whether indexes should be used to plan queries with dynamic labels.
+   *                                    Relevant for caching.
+   * @param existsWithImplicitLimitEnabled plan EXISTS {} subquery as if it had LIMIT 1
+   *                                       Relevant for caching.
+   * @param selectorCandidatesMaximum a setting what maximum number of candidates for which we consider all possibilities
+   *                                  Relevant for caching.
+   * @param planningMergeJoinEnabled Controls planing of merge join.
+   *                                 Relevant for caching.
    */
   case class Settings(
     executionModel: ExecutionModel,
@@ -136,13 +162,18 @@ object LogicalPlanningContext {
       GraphDatabaseInternalSettings.planning_intersection_scans_enabled.defaultValue(),
     planningSubtractionScansEnabled: Boolean =
       GraphDatabaseInternalSettings.planning_subtraction_scans_enabled.defaultValue(),
-    eagerAnalyzer: CypherEagerAnalyzerOption = CypherEagerAnalyzerOption.default,
     statefulShortestPlanningRewriteQuantifiersAbove: Int =
       GraphDatabaseInternalSettings.stateful_shortest_planning_rewrite_quantifiers_above.defaultValue(),
     planVarExpandInto: CypherPlanVarExpandInto = CypherPlanVarExpandInto.default,
     remoteBatchPropertiesStrategy: RemoteBatchingStrategy = RemoteBatchingStrategy.defaultValue(),
-    cachePropertiesForEntitiesWithFilter: Boolean =
-      GraphDatabaseInternalSettings.push_predicates_into_remote_batch_properties.defaultValue()
+    shardOperatorPushdownStrategy: ShardOperatorPushdownStrategy = ShardOperatorPushdownStrategy.defaultValue(),
+    dynamicLabelScansEnabled: Boolean = GraphDatabaseInternalSettings.cypher_enable_dynamic_label_scan.defaultValue(),
+    dynamicLabelIndexUseEnabled: Boolean =
+      GraphDatabaseInternalSettings.cypher_enable_dynamic_label_index_use.defaultValue(),
+    existsWithImplicitLimitEnabled: Boolean =
+      GraphDatabaseInternalSettings.planning_exists_with_implicit_limit_enabled.defaultValue(),
+    selectorCandidatesMaximum: Int = GraphDatabaseInternalSettings.planning_selector_candidates_maximum.defaultValue(),
+    planningMergeJoinEnabled: Boolean = GraphDatabaseInternalSettings.planning_merge_join_enabled.defaultValue()
   ) {
 
     private def cacheKey(): Seq[Any] = this match {
@@ -160,11 +191,15 @@ object LogicalPlanningContext {
           csvBufferSize: Int,
           planningIntersectionScansEnabled: Boolean,
           planningSubtractionScansEnabled: Boolean,
-          eagerAnalyzer: CypherEagerAnalyzerOption,
           statefulShortestPlanningRewriteQuantifiersAbove: Int,
           planVarExpandInto: CypherPlanVarExpandInto,
           remoteBatchPropertiesStrategy: RemoteBatchingStrategy,
-          cachePropertiesForEntitiesWithFilter: Boolean
+          shardOperatorPushdownStrategy: ShardOperatorPushdownStrategy,
+          dynamicLabelScansEnabled: Boolean,
+          dynamicLabelIndexUseEnabled: Boolean,
+          existsWithImplicitLimitEnabled: Boolean,
+          selectorCandidatesMaximum: Int,
+          planningMergeJoinEnabled: Boolean
         ) =>
         val builder = Seq.newBuilder[Any]
 
@@ -194,9 +229,6 @@ object LogicalPlanningContext {
         if (GraphDatabaseInternalSettings.planning_subtraction_scans_enabled.dynamic())
           builder.addOne(planningSubtractionScansEnabled)
 
-        if (GraphDatabaseInternalSettings.cypher_eager_analysis_implementation.dynamic())
-          builder.addOne(eagerAnalyzer)
-
         if (GraphDatabaseInternalSettings.stateful_shortest_planning_rewrite_quantifiers_above.dynamic())
           builder.addOne(statefulShortestPlanningRewriteQuantifiersAbove)
 
@@ -206,17 +238,37 @@ object LogicalPlanningContext {
         if (GraphDatabaseInternalSettings.cypher_remote_batch_properties_implementation.dynamic())
           builder.addOne(remoteBatchPropertiesStrategy)
 
-        if (GraphDatabaseInternalSettings.push_predicates_into_remote_batch_properties.dynamic())
-          builder.addOne(cachePropertiesForEntitiesWithFilter)
+        if (GraphDatabaseInternalSettings.push_operators_into_remote_batch_properties.dynamic())
+          builder.addOne(shardOperatorPushdownStrategy)
+
+        if (GraphDatabaseInternalSettings.cypher_enable_dynamic_label_scan.dynamic())
+          builder.addOne(dynamicLabelScansEnabled)
+
+        if (GraphDatabaseInternalSettings.cypher_enable_dynamic_label_index_use.dynamic())
+          builder.addOne(dynamicLabelIndexUseEnabled)
+
+        if (GraphDatabaseInternalSettings.planning_exists_with_implicit_limit_enabled.dynamic())
+          builder.addOne(existsWithImplicitLimitEnabled)
+
+        if (GraphDatabaseInternalSettings.planning_selector_candidates_maximum.dynamic())
+          builder.addOne(selectorCandidatesMaximum)
+
+        if (GraphDatabaseInternalSettings.planning_merge_join_enabled.dynamic())
+          builder.addOne(planningMergeJoinEnabled)
+
         builder.result()
     }
 
     // Note: We currently have no infrastructure to include fields from these settings in the cache key from this place.
     //  If we ever have cache-key-relevant things here, we must either include them through some other place (e.g. QueryOptions),
     // or build the necessary infrastructure.
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(
       cacheKey().isEmpty
     )
+  }
+
+  object PlannerState {
+    case class EnclosingSubquery(importedVariables: Set[LogicalVariable], isExistsSubquery: Boolean)
   }
 
   /**
@@ -227,7 +279,7 @@ object LogicalPlanningContext {
    * @param input extracted information from the query, relevant to the QueryGraphSolver.
    * @param outerPlan When planning tails, this gives contextual information about the plan of the so-far solved
    *                                     query graphs, which will be connected with an Apply with the tail-query graph plan.
-   * @param isInSubquery whether we are currently planning a subquery
+   * @param maybeEnclosingSubquery whether we are currently planning a subquery
    * @param indexCompatiblePredicatesProviderContext extracted information from the query, relevant to the index planning.
    * @param accessedProperties All properties that are referenced (in the head planner query)
    *                           Used to break potential ties between index leaf plans
@@ -238,17 +290,21 @@ object LogicalPlanningContext {
    *                           Thus not relevant for caching.
    * @param previouslyCachedProperties properties that have already been fetched by previous horizons.
    *                                   This is useful in the RHS of apply's, optionalMatch, etc so that the rhs doesn't try to fetch properties again.
+   * @param overlappingMulticomponentPredicates When planning multiple components, contains predicates that have
+   *                                            dependencies on the currently planned component and one or more other
+   *                                            components. Such predicates might be partially solved.
    */
   case class PlannerState(
     input: QueryGraphSolverInput = QueryGraphSolverInput.empty,
     outerPlan: Option[LogicalPlan] = None,
-    maybeImportedSubqueryVariables: Option[Set[LogicalVariable]] = None,
+    maybeEnclosingSubquery: Option[PlannerState.EnclosingSubquery] = None,
     indexCompatiblePredicatesProviderContext: IndexCompatiblePredicatesProviderContext =
       IndexCompatiblePredicatesProviderContext.default,
     accessedProperties: Set[PropertyAccess] = Set.empty,
     contextualPropertyAccess: ContextualPropertyAccess = ContextualPropertyAccess.empty,
     config: QueryPlannerConfiguration = QueryPlannerConfiguration.default,
-    previouslyCachedProperties: CachedProperties = CachedProperties.empty
+    previouslyCachedProperties: CachedProperties = CachedProperties.empty,
+    overlappingMulticomponentPredicates: Set[Expression] = Set.empty
   ) {
 
     val accessedAndAggregatingProperties: Set[PropertyAccess] =
@@ -279,8 +335,8 @@ object LogicalPlanningContext {
       copy(outerPlan = Some(outerPlan))
     }
 
-    def forSubquery(importedVariables: Set[LogicalVariable]): PlannerState = {
-      copy(maybeImportedSubqueryVariables = Some(importedVariables))
+    def forSubquery(importedVariables: Set[LogicalVariable], isExistsSubquery: Boolean): PlannerState = {
+      copy(maybeEnclosingSubquery = Some(PlannerState.EnclosingSubquery(importedVariables, isExistsSubquery)))
     }
 
     def withActivePlanner(planner: PlannerType): PlannerState =
@@ -304,10 +360,13 @@ object LogicalPlanningContext {
       copy(previouslyCachedProperties = cachedProperties)
 
     def isInSubquery: Boolean =
-      maybeImportedSubqueryVariables.nonEmpty
+      maybeEnclosingSubquery.nonEmpty
 
     def importedSubqueryVariables: Set[LogicalVariable] =
-      maybeImportedSubqueryVariables.getOrElse(Set.empty)
+      maybeEnclosingSubquery.fold(Set.empty[LogicalVariable])(_.importedVariables)
+
+    def withOverlappingMulticomponentPredicates(predicates: Set[Expression]): PlannerState =
+      copy(overlappingMulticomponentPredicates = predicates)
   }
 
 }

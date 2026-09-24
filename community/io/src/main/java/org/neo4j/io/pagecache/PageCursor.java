@@ -387,6 +387,10 @@ public abstract class PageCursor implements AutoCloseable {
      */
     public abstract void setCursorException(String message);
 
+    public void setCursorException(String message, Throwable cause) {
+        setCursorException(message);
+    }
+
     /**
      * Unconditionally clear any error condition that has been set on this or any linked cursor, without throwing an
      * exception.
@@ -437,4 +441,12 @@ public abstract class PageCursor implements AutoCloseable {
      * @return the byte order used to read and write.
      */
     public abstract ByteOrder getByteOrder();
+
+    /**
+     * @return {@code true} if this cursor includes changes from the current transaction.
+     * This method can return {@code false} only in multiversion mode.
+     */
+    public boolean includesChangesFromThisTransaction() {
+        return true;
+    }
 }

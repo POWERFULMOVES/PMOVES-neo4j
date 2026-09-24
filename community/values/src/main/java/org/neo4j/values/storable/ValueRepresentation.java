@@ -24,7 +24,10 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetTime;
 import java.time.ZonedDateTime;
+import java.util.Locale;
+import java.util.UUID;
 import org.neo4j.exceptions.CypherTypeException;
+import org.neo4j.exceptions.InternalException;
 import org.neo4j.values.AnyValue;
 import org.neo4j.values.SequenceValue;
 
@@ -60,23 +63,23 @@ public enum ValueRepresentation {
     INT8_ARRAY(ValueGroup.NUMBER_ARRAY, false),
     FLOAT64_ARRAY(ValueGroup.NUMBER_ARRAY, false),
     FLOAT32_ARRAY(ValueGroup.NUMBER_ARRAY, false),
+    VECTOR_ARRAY(ValueGroup.VECTOR_ARRAY, false),
+    UUID_ARRAY(ValueGroup.UUID_ARRAY, false),
     GEOMETRY(ValueGroup.GEOMETRY, true) {
         @Override
         public ArrayValue arrayOf(SequenceValue values) {
             PointValue[] points = new PointValue[values.intSize()];
-            int i = 0;
             PointValue first = null;
+            int i = 0;
             for (AnyValue value : values) {
-                PointValue current = getOrFail(value, PointValue.class);
+                PointValue current = getOrFail(value, PointValue.class, values, i);
                 if (first == null) {
                     first = current;
                 } else {
                     if (!first.getCoordinateReferenceSystem().equals(current.getCoordinateReferenceSystem())) {
-                        throw new CypherTypeException(
-                                "Collections containing point values with different CRS can not be stored in properties.");
+                        throw CypherTypeException.collectionDifferentCRSPoints(String.valueOf(value));
                     } else if (first.coordinate().length != current.coordinate().length) {
-                        throw new CypherTypeException(
-                                "Collections containing point values with different dimensions can not be stored in properties.");
+                        throw CypherTypeException.collectionDifferentDimPoints(String.valueOf(value));
                     }
                 }
                 points[i++] = current;
@@ -90,7 +93,7 @@ public enum ValueRepresentation {
             ZonedDateTime[] temporals = new ZonedDateTime[values.intSize()];
             int i = 0;
             for (AnyValue value : values) {
-                temporals[i++] = (getOrFail(value, DateTimeValue.class)).temporal();
+                temporals[i++] = (getOrFail(value, DateTimeValue.class, values, i)).temporal();
             }
             return Values.dateTimeArray(temporals);
         }
@@ -101,7 +104,8 @@ public enum ValueRepresentation {
             LocalDateTime[] temporals = new LocalDateTime[values.intSize()];
             int i = 0;
             for (AnyValue value : values) {
-                temporals[i++] = getOrFail(value, LocalDateTimeValue.class).temporal();
+                temporals[i++] =
+                        getOrFail(value, LocalDateTimeValue.class, values, i).temporal();
             }
             return Values.localDateTimeArray(temporals);
         }
@@ -112,7 +116,7 @@ public enum ValueRepresentation {
             LocalDate[] temporals = new LocalDate[values.intSize()];
             int i = 0;
             for (AnyValue value : values) {
-                temporals[i++] = getOrFail(value, DateValue.class).temporal();
+                temporals[i++] = getOrFail(value, DateValue.class, values, i).temporal();
             }
             return Values.dateArray(temporals);
         }
@@ -153,10 +157,10 @@ public enum ValueRepresentation {
     UTF16_TEXT(ValueGroup.TEXT, true) {
         @Override
         public ArrayValue arrayOf(SequenceValue values) {
-            String[] strings = new String[values.intSize()];
+            StringValue[] strings = new StringValue[values.intSize()];
             int i = 0;
             for (AnyValue value : values) {
-                strings[i++] = ((TextValue) value).stringValue();
+                strings[i++] = ((TextValue) value).asStringValue();
             }
             return Values.stringArray(strings);
         }
@@ -172,10 +176,10 @@ public enum ValueRepresentation {
     UTF8_TEXT(ValueGroup.TEXT, true) {
         @Override
         public ArrayValue arrayOf(SequenceValue values) {
-            String[] strings = new String[values.intSize()];
+            StringValue[] strings = new StringValue[values.intSize()];
             int i = 0;
             for (AnyValue value : values) {
-                strings[i++] = ((TextValue) value).stringValue();
+                strings[i++] = ((TextValue) value).asStringValue();
             }
             return Values.stringArray(strings);
         }
@@ -206,7 +210,7 @@ public enum ValueRepresentation {
             long[] longs = new long[values.intSize()];
             int i = 0;
             for (AnyValue value : values) {
-                longs[i++] = getOrFail(value, NumberValue.class).longValue();
+                longs[i++] = getOrFail(value, NumberValue.class, values, i).longValue();
             }
             return Values.longArray(longs);
         }
@@ -226,7 +230,7 @@ public enum ValueRepresentation {
             int[] ints = new int[values.intSize()];
             int i = 0;
             for (AnyValue value : values) {
-                ints[i++] = getOrFail(value, IntegralValue.class).intValue();
+                ints[i++] = getOrFail(value, IntegralValue.class, values, i).intValue();
             }
             return Values.intArray(ints);
         }
@@ -247,7 +251,7 @@ public enum ValueRepresentation {
             short[] shorts = new short[values.intSize()];
             int i = 0;
             for (AnyValue value : values) {
-                shorts[i++] = getOrFail(value, IntegralValue.class).shortValue();
+                shorts[i++] = getOrFail(value, IntegralValue.class, values, i).shortValue();
             }
             return Values.shortArray(shorts);
         }
@@ -271,7 +275,7 @@ public enum ValueRepresentation {
             byte[] bytes = new byte[values.intSize()];
             int i = 0;
             for (AnyValue value : values) {
-                bytes[i++] = getOrFail(value, ByteValue.class).value();
+                bytes[i++] = getOrFail(value, ByteValue.class, values, i).value();
             }
             return Values.byteArray(bytes);
         }
@@ -314,7 +318,7 @@ public enum ValueRepresentation {
             float[] floats = new float[values.intSize()];
             int i = 0;
             for (AnyValue value : values) {
-                NumberValue asNumberValue = getOrFail(value, NumberValue.class);
+                NumberValue asNumberValue = getOrFail(value, NumberValue.class, values, i);
                 if (asNumberValue instanceof FloatValue) {
                     floats[i] = ((FloatValue) asNumberValue).value();
                 } else {
@@ -332,6 +336,106 @@ public enum ValueRepresentation {
                 case INT32, INT64, FLOAT64 -> FLOAT64;
                 default -> ValueRepresentation.UNKNOWN;
             };
+        }
+    },
+    INT8_VECTOR(ValueGroup.INT8_VECTOR, true) {
+        @Override
+        public ArrayValue arrayOf(SequenceValue values) {
+            return Values.vectorArray(values);
+        }
+
+        @Override
+        ValueRepresentation coerceMismatch(ValueRepresentation other) {
+            return coerceVectorArrayMismatch(this, other);
+        }
+    },
+    INT16_VECTOR(ValueGroup.INT16_VECTOR, true) {
+        @Override
+        public ArrayValue arrayOf(SequenceValue values) {
+            return Values.vectorArray(values);
+        }
+
+        @Override
+        ValueRepresentation coerceMismatch(ValueRepresentation other) {
+            return coerceVectorArrayMismatch(this, other);
+        }
+    },
+    INT32_VECTOR(ValueGroup.INT32_VECTOR, true) {
+        @Override
+        public ArrayValue arrayOf(SequenceValue values) {
+            return Values.vectorArray(values);
+        }
+
+        @Override
+        ValueRepresentation coerceMismatch(ValueRepresentation other) {
+            return coerceVectorArrayMismatch(this, other);
+        }
+    },
+    INT64_VECTOR(ValueGroup.INT64_VECTOR, true) {
+        @Override
+        public ArrayValue arrayOf(SequenceValue values) {
+            return Values.vectorArray(values);
+        }
+
+        @Override
+        ValueRepresentation coerceMismatch(ValueRepresentation other) {
+            return coerceVectorArrayMismatch(this, other);
+        }
+    },
+    FLOAT16_VECTOR(ValueGroup.FLOAT16_VECTOR, true) {
+        @Override
+        public ArrayValue arrayOf(SequenceValue values) {
+            return Values.vectorArray(values);
+        }
+
+        @Override
+        ValueRepresentation coerceMismatch(ValueRepresentation other) {
+            return coerceVectorArrayMismatch(this, other);
+        }
+    },
+    BFLOAT16_VECTOR(ValueGroup.BFLOAT16_VECTOR, true) {
+        @Override
+        public ArrayValue arrayOf(SequenceValue values) {
+            return Values.vectorArray(values);
+        }
+
+        @Override
+        ValueRepresentation coerceMismatch(ValueRepresentation other) {
+            return coerceVectorArrayMismatch(this, other);
+        }
+    },
+    FLOAT32_VECTOR(ValueGroup.FLOAT32_VECTOR, true) {
+        @Override
+        public ArrayValue arrayOf(SequenceValue values) {
+            return Values.vectorArray(values);
+        }
+
+        @Override
+        ValueRepresentation coerceMismatch(ValueRepresentation other) {
+            return coerceVectorArrayMismatch(this, other);
+        }
+    },
+    FLOAT64_VECTOR(ValueGroup.FLOAT64_VECTOR, true) {
+        @Override
+        public ArrayValue arrayOf(SequenceValue values) {
+            return Values.vectorArray(values);
+        }
+
+        @Override
+        ValueRepresentation coerceMismatch(ValueRepresentation other) {
+            return coerceVectorArrayMismatch(this, other);
+        }
+    },
+    UUID(ValueGroup.UUID, true) {
+        @Override
+        public ArrayValue arrayOf(SequenceValue values) {
+            UUID[] uuids = new UUID[values.intSize()];
+            int i = 0;
+            for (AnyValue value : values) {
+                UUIDValue asUidValue = getOrFail(value, UUIDValue.class, values, i);
+                uuids[i++] = asUidValue.asObjectCopy();
+            }
+            return Values.uuidArray(uuids);
         }
     },
     NO_VALUE(ValueGroup.NO_VALUE, false);
@@ -352,6 +456,55 @@ public enum ValueRepresentation {
         return group;
     }
 
+    private static String safeListPrettyPrint(AnyValue given) {
+        if (given == null || given == Values.NO_VALUE) {
+            return "NULL";
+        } else if (given instanceof Value value) {
+            return value.prettyPrint();
+        } else if (given instanceof SequenceValue inner && inner.isEmpty()) {
+            return "[]";
+        } else if (given instanceof SequenceValue inner) {
+            return serializeList(inner, inner.value(0));
+        } else {
+            return String.valueOf(given);
+        }
+    }
+
+    public static String serializeList(SequenceValue sequence, AnyValue badValue) {
+        // only print the first three items
+        if (sequence == null || sequence == Values.NO_VALUE) {
+            return "NULL";
+        } else if (sequence.intSize() == 0) {
+            return "[]";
+        }
+        int badIdx;
+        int size = sequence.intSize();
+        for (badIdx = 0; badIdx < size; badIdx++) {
+            if (sequence.value(badIdx).equals(badValue)) {
+                break;
+            }
+        }
+
+        StringBuilder builder = new StringBuilder("[");
+        if (badIdx - 1 > 0) {
+            builder.append("..., ");
+        }
+        if (badIdx - 1 >= 0) {
+            builder.append(safeListPrettyPrint(sequence.value(badIdx - 1)));
+            builder.append(", ");
+        }
+        builder.append(safeListPrettyPrint(sequence.value(badIdx)));
+        if (badIdx + 1 < size) {
+            builder.append(", ");
+            builder.append(safeListPrettyPrint(sequence.value(badIdx + 1)));
+        }
+        if (badIdx + 2 < size) {
+            builder.append(", ...");
+        }
+        builder.append("]");
+        return builder.toString();
+    }
+
     /**
      * Creates an array of the corresponding type.
      *
@@ -364,32 +517,48 @@ public enum ValueRepresentation {
     public ArrayValue arrayOf(SequenceValue values) {
         // NOTE: coming here means that we know we'll fail, just a matter of finding an appropriate error message.
         AnyValue prev = null;
+
         for (AnyValue value : values) {
             if (value == Values.NO_VALUE) {
-                throw new CypherTypeException("Collections containing null values can not be stored in properties.");
+                // Null cannot be stored as a property
+                throw CypherTypeException.propertyWithNullInCollection(serializeList(values, value));
             } else if (value instanceof SequenceValue) {
-                throw new CypherTypeException("Collections containing collections can not be stored in properties.");
-            } else if (prev != null
-                    && prev.valueRepresentation().valueGroup()
-                            != (value.valueRepresentation().valueGroup())) {
-                throw new CypherTypeException(
-                        "Neo4j only supports a subset of Cypher types for storage as singleton or array properties. "
-                                + "Please refer to section cypher/syntax/values of the manual for more details.");
+                // Nested lists cannot be stored as a property
+                throw CypherTypeException.propertyWithCollectionInCollection(serializeList(values, value));
+            } else if (prev != null && !sameValueGroup(prev, value)) {
+                // Mixed type lists cannot be stored as a property
+                throw CypherTypeException.genericPropertyError(String.valueOf(value));
             } else if (!value.valueRepresentation().canCreateArrayOfValueGroup()) {
+                // Type which is not supported to be stored in lists in properties e.g. vector or map
                 if (value instanceof Value v)
                     throw CypherTypeException.expectedPrimitivePropertyValue(
-                            String.valueOf(v), v.prettyPrint(), v.getTypeName().toUpperCase(), true);
+                            String.valueOf(v), v.prettify(), v.getTypeName().toUpperCase(Locale.ROOT), true);
                 else
                     throw CypherTypeException.expectedPrimitivePropertyValue(
                             String.valueOf(value),
                             String.valueOf(value),
-                            value.getTypeName().toUpperCase(),
+                            value.getTypeName().toUpperCase(Locale.ROOT),
                             true);
             }
             prev = value;
         }
 
-        throw failureOld(); // TODO: figure out what gql to use with SequenceValue here
+        // If we come here canCreateArrayOf=true, meaning this method should have been overridden
+        throw InternalException.internalError(
+                ValueRepresentation.class.getName(),
+                String.format(
+                        "The value representation corresponding to %s has canCreateArrayOf=true, but is missing an implementation of arrayOf()",
+                        prev.getTypeName()));
+    }
+
+    private boolean sameValueGroup(AnyValue prev, AnyValue value) {
+        if (prev.valueRepresentation().valueGroup().category() == ValueCategory.VECTOR
+                && value.valueRepresentation().valueGroup().category() == ValueCategory.VECTOR) {
+            // special-case for vector arrays where items can be of different vector types.
+            return true;
+        }
+        return prev.valueRepresentation().valueGroup()
+                == value.valueRepresentation().valueGroup();
     }
 
     /**
@@ -403,32 +572,53 @@ public enum ValueRepresentation {
         } else if (valueGroup() == ValueGroup.ANYTHING) {
             return other;
         } else {
-            return ValueRepresentation.UNKNOWN;
+            return coerceMismatch(other);
         }
     }
 
-    private static <T> T getOrFail(AnyValue value, Class<T> type) {
+    /**
+     * Invoked when trying to coerce two values whose {@link ValueGroup} differ AND where none of the types
+     * is {@link ValueGroup#ANYTHING}.
+     * @param other the {@link ValueRepresentation} of the value to coerce and that mismatched on {@link ValueGroup}.
+     * @return the coerced {@link ValueRepresentation} from _this_ representation and {@code other} where
+     * the {@link ValueGroup} differ.
+     */
+    ValueRepresentation coerceMismatch(ValueRepresentation other) {
+        return UNKNOWN;
+    }
+
+    private static ValueRepresentation coerceVectorArrayMismatch(ValueRepresentation first, ValueRepresentation other) {
+        if (first.valueGroup().category() == ValueCategory.VECTOR
+                && other.valueGroup().category() == ValueCategory.VECTOR) {
+            return first;
+        }
+        return UNKNOWN;
+    }
+
+    private static <T> T getOrFail(AnyValue value, Class<T> type, SequenceValue values, int getIdx) {
         if (type.isAssignableFrom(value.getClass())) {
             return type.cast(value);
         } else if (value == Values.NO_VALUE) {
-            throw new CypherTypeException("Collections containing null values can not be stored in properties.");
+            throw CypherTypeException.propertyWithNullInCollection(serializeList(values, value));
         } else if (value instanceof SequenceValue) {
-            throw new CypherTypeException("Collections containing collections can not be stored in properties.");
+            throw CypherTypeException.propertyWithCollectionInCollection(serializeList(values, value));
         } else {
             throw failure(value);
         }
     }
 
-    private static CypherTypeException failureOld() {
-        throw new CypherTypeException("Property values can only be of primitive types or arrays thereof");
-    }
-
     private static CypherTypeException failure(AnyValue got) {
         if (got instanceof Value v)
             throw CypherTypeException.expectedPrimitivePropertyValue(
-                    String.valueOf(v), v.prettyPrint(), v.getTypeName().toUpperCase(), false);
+                    java.lang.String.valueOf(v),
+                    v.prettyPrint(),
+                    v.getTypeName().toUpperCase(Locale.ROOT),
+                    false);
         else
             throw CypherTypeException.expectedPrimitivePropertyValue(
-                    String.valueOf(got), String.valueOf(got), got.getTypeName().toUpperCase(), false);
+                    java.lang.String.valueOf(got),
+                    java.lang.String.valueOf(got),
+                    got.getTypeName().toUpperCase(Locale.ROOT),
+                    false);
     }
 }

@@ -41,6 +41,8 @@ import scala.collection.immutable
 import scala.jdk.CollectionConverters.IterableHasAsScala
 import scala.jdk.CollectionConverters.MapHasAsScala
 
+object LoadCsvTestBase
+
 abstract class LoadCsvTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
@@ -409,9 +411,7 @@ trait LoadCsvWithCallInTransactions[CONTEXT <: RuntimeContext] {
       .argument()
       .build(readOnly = false)
 
-    val executablePlan = buildPlan(logicalQuery, runtime)
-
-    val runtimeResult = execute(executablePlan, readOnly = false, implicitTx = true)
+    val runtimeResult = execute(logicalQuery, implicitTx = true)
 
     // then
     runtimeResult should beColumns("n")
@@ -440,9 +440,7 @@ trait LoadCsvWithCallInTransactions[CONTEXT <: RuntimeContext] {
       .argument()
       .build(readOnly = false)
 
-    val executablePlan = buildPlan(logicalQuery, runtime)
-
-    val runtimeResult = execute(executablePlan, readOnly = false, implicitTx = true)
+    val runtimeResult = execute(logicalQuery, implicitTx = true)
 
     // then
     runtimeResult should beColumns("count")
@@ -516,7 +514,7 @@ trait LoadCsvWithCallInTransactionsAndMerge[CONTEXT <: RuntimeContext] {
 
     val setupResult = givenGraph {
       val setupPlan = buildPlan(setupQuery, runtime)
-      val setupResult = execute(setupPlan, readOnly = false)
+      val setupResult = execute(setupPlan)
       consume(setupResult)
       setupResult
     }
@@ -556,9 +554,7 @@ trait LoadCsvWithCallInTransactionsAndMerge[CONTEXT <: RuntimeContext] {
       .argument()
       .build(readOnly = false)
 
-    val executablePlan = buildPlan(logicalQuery, runtime)
-
-    val runtimeResult = execute(executablePlan, readOnly = false, implicitTx = true)
+    val runtimeResult = execute(logicalQuery, implicitTx = true)
 
     // then
     runtimeResult should beColumns("r")

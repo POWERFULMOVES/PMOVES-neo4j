@@ -21,10 +21,12 @@ package org.neo4j.cypher.internal.runtime.spec.matcher
 
 import org.neo4j.cypher.internal.RuntimeContext
 import org.neo4j.cypher.internal.logical.plans.Prober
+import org.neo4j.cypher.internal.notification.InternalNotification
 import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.runtime.spec._
-import org.neo4j.cypher.internal.util.InternalNotification
+import org.neo4j.cypher.result.QueryProfile
 import org.neo4j.graphdb.QueryStatistics
+import org.neo4j.kernel.api.query.ExtendedQueryStatistics
 import org.neo4j.kernel.impl.util.ValueUtils
 import org.neo4j.lock.LockType
 import org.neo4j.lock.ResourceType
@@ -34,16 +36,17 @@ import org.scalactic.Equality
 import org.scalactic.TolerantNumerics
 import org.scalatest.matchers.MatchResult
 import org.scalatest.matchers.Matcher
-import org.scalatest.matchers.should.Matchers
 
 import java.util
 import java.util.concurrent.atomic.AtomicInteger
 
+import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
+import scala.collection.mutable.Map
 import scala.jdk.CollectionConverters.ListHasAsScala
 
 trait RuntimeResultMatchers[CONTEXT <: RuntimeContext] {
-  self: Matchers =>
+  self: RuntimeSpecSuiteTestSuite =>
 
   protected def runtimeTestSupport: RuntimeTestSupport[CONTEXT]
 
@@ -123,6 +126,7 @@ trait RuntimeResultMatchers[CONTEXT <: RuntimeContext] {
 
     private var maybeLocks: Option[LockMatcher] = None
     private var maybeNotifications: Option[NotificationsMatcher] = None
+    private var maybeIndexProfilesMatcher: Option[IndexProfilesMatcher] = None
 
     def withNoUpdates(): RuntimeResultMatcher = withStatistics()
 
@@ -220,6 +224,26 @@ trait RuntimeResultMatchers[CONTEXT <: RuntimeContext] {
       this
     }
 
+    def usingIndexes(operatorId: Int, indexNames: String*): RuntimeResultMatcher = {
+      this.withIndexProfile(operatorId, IndexProfilesMatcher.allOf(indexNames: _*))
+    }
+
+    def usingAnyIndexes(operatorId: Int, indexNames: String*): RuntimeResultMatcher = {
+      this.withIndexProfile(operatorId, IndexProfilesMatcher.anyOf(indexNames: _*))
+    }
+
+    def notUsingIndexes(operatorId: Int, indexNames: String*): RuntimeResultMatcher = {
+      this.withIndexProfile(operatorId, IndexProfilesMatcher.not(IndexProfilesMatcher.anyOf(indexNames: _*)))
+    }
+
+    def withIndexProfile(operatorId: Int, profileMatcher: IndexProfilesMatcher.MatchOption): RuntimeResultMatcher = {
+      if (this.maybeIndexProfilesMatcher.isEmpty) {
+        this.maybeIndexProfilesMatcher = Some(new IndexProfilesMatcher())
+      }
+      this.maybeIndexProfilesMatcher.get.addOne(operatorId, profileMatcher)
+      this
+    }
+
     override def apply(left: RecordingRuntimeResult): MatchResult = {
       val columns = left.runtimeResult.fieldNames().toIndexedSeq
       if (columns != expectedColumns) {
@@ -247,6 +271,11 @@ trait RuntimeResultMatchers[CONTEXT <: RuntimeContext] {
           .orElse {
             maybeNotifications
               .map(_.apply(left.notifications))
+              .filter(_.matches == false)
+          }
+          .orElse {
+            maybeIndexProfilesMatcher
+              .map(_.apply(left.runtimeResult.queryProfile()))
               .filter(_.matches == false)
           }
           .getOrElse {
@@ -350,21 +379,21 @@ trait RuntimeResultMatchers[CONTEXT <: RuntimeContext] {
 
       def transactionsStatsDoNotMatch: Option[MatchResult] = {
         left match {
-          case qs: org.neo4j.cypher.internal.runtime.ExtendedQueryStatistics =>
+          case qs: ExtendedQueryStatistics =>
             // FIXME: we currently do not account for the outermost transaction because that is out of cypher's control
-            if (matchFailed(transactionsCommitted, qs.getTransactionsCommitted + 1)) {
+            if (matchFailed(transactionsCommitted, qs.getTransactionsCommitted.toInt + 1)) {
               Some(MatchResult(
                 matches = false,
                 s"expected transactionsCommitted=${transactionsCommitted.get} but was ${qs.getTransactionsCommitted + 1}",
                 ""
               ))
-            } else if (matchFailed(transactionsStarted, qs.getTransactionsStarted + 1)) {
+            } else if (matchFailed(transactionsStarted, qs.getTransactionsStarted.toInt + 1)) {
               Some(MatchResult(
                 matches = false,
                 s"expected transactionsStarted=${transactionsStarted.get} but was ${qs.getTransactionsStarted + 1}",
                 ""
               ))
-            } else if (matchFailed(transactionsRolledBack, qs.getTransactionsRolledBack)) {
+            } else if (matchFailed(transactionsRolledBack, qs.getTransactionsRolledBack.toInt)) {
               Some(MatchResult(
                 matches = false,
                 s"expected transactionsRolledBack=${transactionsRolledBack.get} but was ${qs.getTransactionsRolledBack}",
@@ -424,8 +453,6 @@ trait RuntimeResultMatchers[CONTEXT <: RuntimeContext] {
     }
   }
 
-  case class DiffItem(missingRow: ListValue, fromA: Boolean)
-
   def failProbe(failAfterRowCount: Int, fail: String => Throwable = msg => new RuntimeException(msg)): Prober.Probe =
     new Prober.Probe {
       val c = new AtomicInteger(0)
@@ -452,4 +479,69 @@ trait RuntimeResultMatchers[CONTEXT <: RuntimeContext] {
         }
       }
     }
+}
+
+// The declarations below are not nested in the trait above because the Scala 2.13 TASTy reader
+// cannot resolve objects (including synthetic companions) nested in a Scala 3 trait.
+case class DiffItem(missingRow: ListValue, fromA: Boolean)
+
+class IndexProfilesMatcher extends Matcher[QueryProfile] {
+  private lazy val matchers: mutable.Map[Int, IndexProfilesMatcher.MatchOption] = mutable.Map()
+
+  def addOne(operatorId: Int, profileMatcher: IndexProfilesMatcher.MatchOption): Unit = {
+    matchers.updateWith(operatorId) {
+      case Some(value) =>
+        Some(IndexProfilesMatcher.All(Seq(value, profileMatcher)))
+      case None =>
+        Some(profileMatcher)
+    }
+  }
+
+  def indexProfilesMatch(
+    matchers: Map[Int, IndexProfilesMatcher.MatchOption],
+    actual: Map[Int, Seq[String]]
+  ): Boolean = {
+    matchers.keySet == actual.keySet &&
+    matchers.forall { case (id, matcher) =>
+      matcher.doesMatch(actual(id))
+    }
+  }
+
+  override def apply(left: QueryProfile): MatchResult = {
+    val actualIndexesUsed = matchers.map {
+      case (id: Int, _) =>
+        id -> left.operatorProfile(id).indexesUsed().map(_.getName).toSeq
+    }
+    MatchResult(
+      matches = indexProfilesMatch(matchers, actualIndexesUsed),
+      rawFailureMessage = s"expected to use indexes $matchers but found $actualIndexesUsed",
+      rawNegatedFailureMessage = ""
+    )
+  }
+}
+
+object IndexProfilesMatcher {
+  def anyOf(indexNames: String*): IndexProfilesMatcher.MatchOption = Any(indexNames.map(Unary(_)))
+  def allOf(indexNames: String*): IndexProfilesMatcher.MatchOption = All(indexNames.map(Unary(_)))
+  def not(matcher: IndexProfilesMatcher.MatchOption): IndexProfilesMatcher.MatchOption = Not(matcher)
+
+  sealed trait MatchOption {
+    def doesMatch(targets: Seq[String]): Boolean
+  }
+
+  case class Unary(name: String) extends MatchOption {
+    override def doesMatch(targets: Seq[String]): Boolean = targets.contains(name)
+  }
+
+  case class Any(anyMatches: Seq[MatchOption]) extends MatchOption {
+    override def doesMatch(targets: Seq[String]): Boolean = anyMatches.exists(_.doesMatch(targets))
+  }
+
+  case class All(allMatches: Seq[MatchOption]) extends MatchOption {
+    override def doesMatch(targets: Seq[String]): Boolean = allMatches.forall(_.doesMatch(targets))
+  }
+
+  case class Not(negativeMatch: MatchOption) extends MatchOption {
+    override def doesMatch(targets: Seq[String]): Boolean = !negativeMatch.doesMatch(targets)
+  }
 }

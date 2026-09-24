@@ -23,6 +23,7 @@ import org.neo4j.common.TokenNameLookup;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
+import org.neo4j.gqlstatus.GqlParams;
 import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.kernel.api.exceptions.Status;
@@ -30,42 +31,63 @@ import org.neo4j.kernel.api.exceptions.Status;
 public class IndexNotFoundKernelException extends KernelException {
     private final IndexDescriptor index;
 
-    public IndexNotFoundKernelException(String msg) {
-        super(Status.Schema.IndexNotFound, msg);
-        this.index = null;
-    }
-
-    private IndexNotFoundKernelException(ErrorGqlStatusObject gqlStatusObject, String msg) {
-        super(gqlStatusObject, Status.Schema.IndexNotFound, msg);
-        this.index = null;
-    }
-
-    public IndexNotFoundKernelException(String msg, IndexDescriptor index) {
-        super(Status.Schema.IndexNotFound, msg);
-        this.index = index;
-    }
-
     private IndexNotFoundKernelException(ErrorGqlStatusObject gqlStatusObject, String msg, IndexDescriptor index) {
         super(gqlStatusObject, Status.Schema.IndexNotFound, msg);
         this.index = index;
     }
 
-    public static IndexNotFoundKernelException indexIsStillPopulating(String indexPopulationJobDescription) {
-        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N63)
+    public static IndexNotFoundKernelException indexIsStillPopulating(
+            String indexPopulationJobDescription, String indexName) {
+        ErrorGqlStatusObject gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N63)
+                .withParam(GqlParams.StringParam.idx, indexName)
                 .build();
-        return new IndexNotFoundKernelException(gql, "Index is still populating: " + indexPopulationJobDescription);
+        return new IndexNotFoundKernelException(
+                gql, "Index is still populating: " + indexPopulationJobDescription, null);
     }
 
     public static IndexNotFoundKernelException indexIsStillPopulating(IndexDescriptor descriptor) {
-        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N63)
+        ErrorGqlStatusObject gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N63)
+                .withParam(GqlParams.StringParam.idx, descriptor.getName())
                 .build();
-        return new IndexNotFoundKernelException(gql, descriptor + " is still populating");
+        return new IndexNotFoundKernelException(gql, descriptor + " is still populating", descriptor);
     }
 
     public static IndexNotFoundKernelException indexDroppedWhileSampling() {
-        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N64)
+        ErrorGqlStatusObject gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N64)
                 .build();
-        return new IndexNotFoundKernelException(gql, "Index dropped while sampling.");
+        return new IndexNotFoundKernelException(gql, "Index dropped while sampling.", null);
+    }
+
+    // KNL-054 (also KNL-049, which has to accept a slight change in "legacy" error message)
+    public static IndexNotFoundKernelException indexNotFound(IndexDescriptor index) {
+        ErrorGqlStatusObject gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N69)
+                .withParam(GqlParams.StringParam.idxDescrOrName, index.getName())
+                .build();
+        return new IndexNotFoundKernelException(gql, "Index does not exist: " + index.getName(), index);
+    }
+
+    public static IndexNotFoundKernelException indexNotFound(String name) {
+        ErrorGqlStatusObject gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N69)
+                .withParam(GqlParams.StringParam.idxDescrOrName, name)
+                .build();
+        return new IndexNotFoundKernelException(gql, "Index does not exist: " + name, IndexDescriptor.NO_INDEX);
+    }
+
+    // KNL-053
+    public static IndexNotFoundKernelException indexNotFound() {
+        ErrorGqlStatusObject gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N69)
+                // No index description or name available
+                .build();
+        return new IndexNotFoundKernelException(gql, "No index was found", null);
+    }
+
+    // KNL-055
+    public static IndexNotFoundKernelException indexDroppedInThisTransaction(IndexDescriptor index) {
+        ErrorGqlStatusObject gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_25N12)
+                .withParam(GqlParams.StringParam.idx, index.getName())
+                .build();
+        return new IndexNotFoundKernelException(
+                gql, "Index has been dropped in this transaction: " + index.getName(), index);
     }
 
     @Override

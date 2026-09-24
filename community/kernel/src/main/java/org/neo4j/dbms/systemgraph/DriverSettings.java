@@ -21,8 +21,10 @@ package org.neo4j.dbms.systemgraph;
 
 import java.time.Duration;
 import java.time.temporal.ChronoUnit;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import org.neo4j.logging.Level;
 import org.neo4j.values.storable.DurationValue;
 
@@ -34,11 +36,12 @@ public final class DriverSettings {
         CONNECTION_POOL_ACQUISITION_TIMEOUT,
         CONNECTION_POOL_IDLE_TEST,
         CONNECTION_POOL_MAX_SIZE,
-        LOGGING_LEVEL;
+        LOGGING_LEVEL,
+        TRACE_LOGGING_ENABLED;
 
         @Override
         public String toString() {
-            return name().toLowerCase();
+            return name().toLowerCase(Locale.ROOT);
         }
     }
 
@@ -49,6 +52,7 @@ public final class DriverSettings {
     private final Duration connectionPoolIdleTest;
     private final Integer connectionPoolMaxSize;
     private final Level loggingLevel;
+    private final Boolean traceLoggingEnabled;
     private final String sslPolicy;
 
     private DriverSettings(
@@ -59,6 +63,7 @@ public final class DriverSettings {
             Duration connectionPoolIdleTest,
             Integer connectionPoolMaxSize,
             Level loggingLevel,
+            Boolean traceLoggingEnabled,
             String sslPolicy) {
         this.sslEnforced = sslEnforced;
         this.connectionTimeout = connectionTimeout;
@@ -67,6 +72,7 @@ public final class DriverSettings {
         this.connectionPoolIdleTest = connectionPoolIdleTest;
         this.connectionPoolMaxSize = connectionPoolMaxSize;
         this.loggingLevel = loggingLevel;
+        this.traceLoggingEnabled = traceLoggingEnabled;
         this.sslPolicy = sslPolicy;
     }
 
@@ -94,12 +100,16 @@ public final class DriverSettings {
         return Optional.ofNullable(connectionPoolIdleTest);
     }
 
-    public Optional<Integer> connectionPoolMaxSize() {
-        return Optional.ofNullable(connectionPoolMaxSize);
+    public OptionalInt connectionPoolMaxSize() {
+        return connectionPoolMaxSize == null ? OptionalInt.empty() : OptionalInt.of(connectionPoolMaxSize);
     }
 
     public Optional<Level> loggingLevel() {
         return Optional.ofNullable(loggingLevel);
+    }
+
+    public Optional<Boolean> traceLoggingEnabled() {
+        return Optional.ofNullable(traceLoggingEnabled);
     }
 
     public Optional<String> sslPolicy() {
@@ -122,6 +132,7 @@ public final class DriverSettings {
                 && Objects.equals(connectionPoolIdleTest, that.connectionPoolIdleTest)
                 && Objects.equals(connectionPoolMaxSize, that.connectionPoolMaxSize)
                 && loggingLevel == that.loggingLevel
+                && Objects.equals(traceLoggingEnabled, that.traceLoggingEnabled)
                 && Objects.equals(sslPolicy, that.sslPolicy);
     }
 
@@ -134,6 +145,7 @@ public final class DriverSettings {
                 connectionPoolAcquisitionTimeout,
                 connectionPoolIdleTest,
                 connectionPoolMaxSize,
+                traceLoggingEnabled,
                 loggingLevel);
     }
 
@@ -145,6 +157,7 @@ public final class DriverSettings {
         private Duration connectionPoolIdleTest;
         private Integer connectionPoolMaxSize;
         private Level loggingLevel;
+        private Boolean traceLoggingEnabled;
         private String sslPolicy;
 
         private Builder() {}
@@ -187,6 +200,11 @@ public final class DriverSettings {
             return this;
         }
 
+        Builder withTraceLoggingEnabled(Boolean traceLoggingEnabled) {
+            this.traceLoggingEnabled = traceLoggingEnabled;
+            return this;
+        }
+
         Builder withSSLPolicy(String sslPolicy) {
             this.sslPolicy = sslPolicy;
             return this;
@@ -201,6 +219,7 @@ public final class DriverSettings {
                     connectionPoolIdleTest,
                     connectionPoolMaxSize,
                     loggingLevel,
+                    traceLoggingEnabled,
                     sslPolicy);
         }
 

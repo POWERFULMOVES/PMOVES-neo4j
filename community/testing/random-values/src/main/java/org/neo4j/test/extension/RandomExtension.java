@@ -36,6 +36,7 @@ import org.junit.jupiter.api.extension.LifecycleMethodExecutionExceptionHandler;
 import org.junit.jupiter.api.extension.TestExecutionExceptionHandler;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.RandomSupport.Seed;
+import org.neo4j.test.extension.timeout.TimeoutGuardExtension;
 import org.neo4j.values.storable.RandomValues;
 import org.opentest4j.AssertionFailedError;
 import org.opentest4j.TestAbortedException;
@@ -48,14 +49,15 @@ public class RandomExtension extends StatefulFieldExtension<RandomSupport>
                 LifecycleMethodExecutionExceptionHandler {
     public static final String RANDOM = "random";
     public static final Namespace RANDOM_NAMESPACE = Namespace.create(RANDOM);
+    private static final String JUNIT4_ASSUMPTION_EXCEPTION = "org.junit.AssumptionViolatedException";
 
     private final RandomValues.Configuration config;
 
     public RandomExtension() {
-        this(new RandomValues.Default());
+        this(RandomValues.DEFAULT_CONFIGURATION);
     }
 
-    public RandomExtension(RandomValues.Default config) {
+    public RandomExtension(RandomValues.Configuration config) {
         this.config = config;
     }
 
@@ -120,9 +122,19 @@ public class RandomExtension extends StatefulFieldExtension<RandomSupport>
         handleException(context, t);
     }
 
+    @Override
+    public void handleBeforeAllMethodExecutionException(ExtensionContext context, Throwable t) {
+        handleException(context, t);
+    }
+
     private void handleException(ExtensionContext context, Throwable t) {
-        if (t instanceof TestAbortedException) {
-            return;
+        // Junit5
+        if (t instanceof TestAbortedException aborted) {
+            throw aborted;
+        }
+        // Hacky Junit4 compat
+        if (t.getClass().getCanonicalName().equals(JUNIT4_ASSUMPTION_EXCEPTION)) {
+            throw (RuntimeException) t;
         }
 
         var random = getStoredValue(context);
@@ -143,6 +155,11 @@ public class RandomExtension extends StatefulFieldExtension<RandomSupport>
         Optional<Seed> optionalSeed = getAnnotatedSeed(extensionContext);
         Long seed = optionalSeed.map(Seed::value).orElse(System.currentTimeMillis());
         getStoredValue(extensionContext).setSeed(seed);
+
+        // capture the random seed - even when the test doesn't timeout gracefully and is killed by guard
+        extensionContext
+                .getStore(TimeoutGuardExtension.TIMEOUT_NAMESPACE)
+                .put(TimeoutGuardExtension.TIMEOUT_MESSAGE, "Random seed used was %d".formatted(seed));
     }
 
     private static void validateAnnotationType(ExtensionContext extensionContext, TestInstance.Lifecycle lifecycle) {

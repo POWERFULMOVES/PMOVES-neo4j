@@ -32,35 +32,46 @@ import org.neo4j.cypher.internal.runtime.QueryContext
 import org.neo4j.cypher.internal.runtime.QueryStatistics
 import org.neo4j.cypher.internal.runtime.RelationshipOperations
 import org.neo4j.cypher.internal.runtime.interpreted.CountingQueryContext.Counter
+import org.neo4j.cypher.internal.runtime.interpreted.CountingQueryContext.LongCounter
+import org.neo4j.internal.kernel.api.MutatingEntityCursor
 import org.neo4j.internal.kernel.api.NodeCursor
+import org.neo4j.internal.kernel.api.PropertyCursor
 import org.neo4j.internal.kernel.api.RelationshipScanCursor
+import org.neo4j.internal.kernel.api.RelationshipTraversalCursor
 import org.neo4j.internal.schema.ConstraintDescriptor
+import org.neo4j.internal.schema.EndpointType
 import org.neo4j.internal.schema.IndexConfig
 import org.neo4j.internal.schema.IndexDescriptor
 import org.neo4j.internal.schema.IndexProviderDescriptor
-import org.neo4j.internal.schema.constraints.PropertyTypeSet
+import org.neo4j.internal.schema.SchemaCommand.ConstraintCommand
+import org.neo4j.internal.schema.SchemaDescriptor
 import org.neo4j.values.storable.Value
 import org.neo4j.values.virtual.VirtualNodeValue
 import org.neo4j.values.virtual.VirtualRelationshipValue
 
-class UpdateCountingQueryContext(inner: QueryContext) extends DelegatingQueryContext(inner) with CountingQueryContext {
+import scala.collection.immutable.ArraySeq
 
-  private val nodesCreated = new Counter
-  private val relationshipsCreated = new Counter
-  private val propertiesSet = new Counter
-  private val nodesDeleted = new Counter
-  private val relationshipsDeleted = new Counter
-  private val labelsAdded = new Counter
-  private val labelsRemoved = new Counter
+class UpdateCountingQueryContext(inner: QueryContext) extends DelegatingQueryContext(inner) with CountingQueryContext {
+  private val nodesCreated = new LongCounter
+  private val relationshipsCreated = new LongCounter
+  private val propertiesSet = new LongCounter
+  private val nodesDeleted = new LongCounter
+  private val relationshipsDeleted = new LongCounter
+  private val labelsAdded = new LongCounter
+  private val labelsRemoved = new LongCounter
   private val indexesAdded = new Counter
   private val indexesRemoved = new Counter
-  private val uniqueConstraintsAdded = new Counter
-  private val relUniqueConstraintsAdded = new Counter
-  private val propertyExistenceConstraintsAdded = new Counter
+  private val nodePropUniquenessConstraintsAdded = new Counter
+  private val relPropUniquenessConstraintsAdded = new Counter
+  private val nodePropertyExistenceConstraintsAdded = new Counter
+  private val relPropertyExistenceConstraintsAdded = new Counter
   private val nodePropertyTypeConstraintsAdded = new Counter
   private val relPropertyTypeConstraintsAdded = new Counter
-  private val nodekeyConstraintsAdded = new Counter
-  private val relkeyConstraintsAdded = new Counter
+  private val nodeKeyConstraintsAdded = new Counter
+  private val relKeyConstraintsAdded = new Counter
+  private val nodeLabelExistenceConstraintsAdded = new Counter
+  private val relSourceLabelConstraintsAdded = new Counter
+  private val relTargetLabelConstraintsAdded = new Counter
   private val constraintsRemoved = new Counter
 
   def getTrackedStatistics: QueryStatistics = QueryStatistics(
@@ -73,13 +84,17 @@ class UpdateCountingQueryContext(inner: QueryContext) extends DelegatingQueryCon
     relationshipsDeleted = relationshipsDeleted.count,
     indexesAdded = indexesAdded.count,
     indexesRemoved = indexesRemoved.count,
-    uniqueConstraintsAdded = uniqueConstraintsAdded.count,
-    relUniqueConstraintsAdded = relUniqueConstraintsAdded.count,
-    existenceConstraintsAdded = propertyExistenceConstraintsAdded.count,
+    nodePropUniquenessConstraintsAdded = nodePropUniquenessConstraintsAdded.count,
+    relPropUniquenessConstraintsAdded = relPropUniquenessConstraintsAdded.count,
+    nodePropExistenceConstraintsAdded = nodePropertyExistenceConstraintsAdded.count,
+    relPropExistenceConstraintsAdded = relPropertyExistenceConstraintsAdded.count,
     nodePropTypeConstraintsAdded = nodePropertyTypeConstraintsAdded.count,
     relPropTypeConstraintsAdded = relPropertyTypeConstraintsAdded.count,
-    nodekeyConstraintsAdded = nodekeyConstraintsAdded.count,
-    relkeyConstraintsAdded = relkeyConstraintsAdded.count,
+    nodekeyConstraintsAdded = nodeKeyConstraintsAdded.count,
+    relkeyConstraintsAdded = relKeyConstraintsAdded.count,
+    nodeLabelExistenceConstraintsAdded = nodeLabelExistenceConstraintsAdded.count,
+    relSourceLabelConstraintsAdded = relSourceLabelConstraintsAdded.count,
+    relTargetLabelConstraintsAdded = relTargetLabelConstraintsAdded.count,
     constraintsRemoved = constraintsRemoved.count
   )
 
@@ -93,15 +108,26 @@ class UpdateCountingQueryContext(inner: QueryContext) extends DelegatingQueryCon
     relationshipsDeleted.increase(statistics.relationshipsDeleted)
     indexesAdded.increase(statistics.indexesAdded)
     indexesRemoved.increase(statistics.indexesRemoved)
-    uniqueConstraintsAdded.increase(statistics.uniqueConstraintsAdded)
-    relUniqueConstraintsAdded.increase(statistics.relUniqueConstraintsAdded)
-    propertyExistenceConstraintsAdded.increase(statistics.existenceConstraintsAdded)
+    nodePropUniquenessConstraintsAdded.increase(statistics.nodePropUniquenessConstraintsAdded)
+    relPropUniquenessConstraintsAdded.increase(statistics.relPropUniquenessConstraintsAdded)
+    nodePropertyExistenceConstraintsAdded.increase(statistics.nodePropExistenceConstraintsAdded)
+    relPropertyExistenceConstraintsAdded.increase(statistics.relPropExistenceConstraintsAdded)
     nodePropertyTypeConstraintsAdded.increase(statistics.nodePropTypeConstraintsAdded)
     relPropertyTypeConstraintsAdded.increase(statistics.relPropTypeConstraintsAdded)
-    nodekeyConstraintsAdded.increase(statistics.nodekeyConstraintsAdded)
-    relkeyConstraintsAdded.increase(statistics.relkeyConstraintsAdded)
+    nodeKeyConstraintsAdded.increase(statistics.nodekeyConstraintsAdded)
+    relKeyConstraintsAdded.increase(statistics.relkeyConstraintsAdded)
+    nodeLabelExistenceConstraintsAdded.increase(statistics.nodeLabelExistenceConstraintsAdded)
+    relSourceLabelConstraintsAdded.increase(statistics.relSourceLabelConstraintsAdded)
+    relTargetLabelConstraintsAdded.increase(statistics.relTargetLabelConstraintsAdded)
     constraintsRemoved.increase(statistics.constraintsRemoved)
     inner.addStatistics(statistics)
+  }
+
+  override def onMutation(nodes: Int, relationships: Int, labels: Int, properties: Int): Unit = {
+    nodesCreated.increase(nodes)
+    relationshipsCreated.increase(relationships)
+    labelsAdded.increase(labels)
+    propertiesSet.increase(properties)
   }
 
   override def createNodeId(labels: Array[Int]): Long = {
@@ -126,6 +152,30 @@ class UpdateCountingQueryContext(inner: QueryContext) extends DelegatingQueryCon
   override def createRelationshipId(start: Long, end: Long, relType: Int): Long = {
     relationshipsCreated.increase()
     inner.createRelationshipId(start, end, relType)
+  }
+
+  override def mergeInto(
+    nodeCursor: NodeCursor,
+    traversalCursor: RelationshipTraversalCursor,
+    propertyCursor: PropertyCursor,
+    source: Long,
+    relType: Int,
+    direction: SemanticDirection,
+    target: Long,
+    onMatch: IntObjectMap[Value],
+    onCreate: IntObjectMap[Value]
+  ): MutatingEntityCursor = {
+    inner.mergeInto(
+      nodeCursor,
+      traversalCursor,
+      propertyCursor,
+      source,
+      relType,
+      direction,
+      target,
+      onMatch,
+      onCreate
+    )
   }
 
   override def removeLabelsFromNode(node: Long, labelIds: Iterator[Int]): Int = {
@@ -195,14 +245,23 @@ class UpdateCountingQueryContext(inner: QueryContext) extends DelegatingQueryCon
   }
 
   override def addVectorIndexRule(
-    entityId: Int,
+    entityIds: List[Int],
     entityType: EntityType,
     propertyKeyIds: Seq[Int],
+    additionalPropertyKeyIds: Seq[Int],
     name: Option[String],
     provider: Option[IndexProviderDescriptor],
     indexConfig: IndexConfig
   ): IndexDescriptor = {
-    val result = inner.addVectorIndexRule(entityId, entityType, propertyKeyIds, name, provider, indexConfig)
+    val result = inner.addVectorIndexRule(
+      entityIds,
+      entityType,
+      propertyKeyIds,
+      additionalPropertyKeyIds,
+      name,
+      provider,
+      indexConfig
+    )
     indexesAdded.increase()
     result
   }
@@ -234,82 +293,26 @@ class UpdateCountingQueryContext(inner: QueryContext) extends DelegatingQueryCon
     inner.constraintExists(matchFn, entityId, properties: _*)
   }
 
-  override def createNodeKeyConstraint(
-    labelId: Int,
-    propertyKeyIds: Seq[Int],
-    name: Option[String],
-    provider: Option[IndexProviderDescriptor]
-  ): Unit = {
-    inner.createNodeKeyConstraint(labelId, propertyKeyIds, name, provider)
-    nodekeyConstraintsAdded.increase()
+  override def createConstraint(constraint: ConstraintCommand.Create): Unit = {
+    inner.createConstraint(constraint)
+    constraint match {
+      case _: ConstraintCommand.Create.NodeKey                  => nodeKeyConstraintsAdded.increase()
+      case _: ConstraintCommand.Create.RelationshipKey          => relKeyConstraintsAdded.increase()
+      case _: ConstraintCommand.Create.NodeUniqueness           => nodePropUniquenessConstraintsAdded.increase()
+      case _: ConstraintCommand.Create.RelationshipUniqueness   => relPropUniquenessConstraintsAdded.increase()
+      case _: ConstraintCommand.Create.NodeExistence            => nodePropertyExistenceConstraintsAdded.increase()
+      case _: ConstraintCommand.Create.RelationshipExistence    => relPropertyExistenceConstraintsAdded.increase()
+      case _: ConstraintCommand.Create.NodePropertyType         => nodePropertyTypeConstraintsAdded.increase()
+      case _: ConstraintCommand.Create.RelationshipPropertyType => relPropertyTypeConstraintsAdded.increase()
+      case _: ConstraintCommand.Create.NodeLabelExistence       => nodeLabelExistenceConstraintsAdded.increase()
+      case c: ConstraintCommand.Create.RelationshipEndpointLabel =>
+        if (c.endpointType() == EndpointType.START) relSourceLabelConstraintsAdded.increase()
+        if (c.endpointType() == EndpointType.END) relTargetLabelConstraintsAdded.increase()
+    }
   }
 
-  override def createRelationshipKeyConstraint(
-    relTypeId: Int,
-    propertyKeyIds: Seq[Int],
-    name: Option[String],
-    provider: Option[IndexProviderDescriptor]
-  ): Unit = {
-    inner.createRelationshipKeyConstraint(relTypeId, propertyKeyIds, name, provider)
-    relkeyConstraintsAdded.increase()
-  }
-
-  override def createNodeUniqueConstraint(
-    labelId: Int,
-    propertyKeyIds: Seq[Int],
-    name: Option[String],
-    provider: Option[IndexProviderDescriptor]
-  ): Unit = {
-    inner.createNodeUniqueConstraint(labelId, propertyKeyIds, name, provider)
-    uniqueConstraintsAdded.increase()
-  }
-
-  override def createRelationshipUniqueConstraint(
-    relTypeId: Int,
-    propertyKeyIds: Seq[Int],
-    name: Option[String],
-    provider: Option[IndexProviderDescriptor]
-  ): Unit = {
-    inner.createRelationshipUniqueConstraint(relTypeId, propertyKeyIds, name, provider)
-    relUniqueConstraintsAdded.increase()
-  }
-
-  override def createNodePropertyExistenceConstraint(labelId: Int, propertyKeyId: Int, name: Option[String]): Unit = {
-    inner.createNodePropertyExistenceConstraint(labelId, propertyKeyId, name)
-    propertyExistenceConstraintsAdded.increase()
-  }
-
-  override def createRelationshipPropertyExistenceConstraint(
-    relTypeId: Int,
-    propertyKeyId: Int,
-    name: Option[String]
-  ): Unit = {
-    inner.createRelationshipPropertyExistenceConstraint(relTypeId, propertyKeyId, name)
-    propertyExistenceConstraintsAdded.increase()
-  }
-
-  override def createNodePropertyTypeConstraint(
-    labelId: Int,
-    propertyKeyId: Int,
-    propertyTypes: PropertyTypeSet,
-    name: Option[String]
-  ): Unit = {
-    inner.createNodePropertyTypeConstraint(labelId, propertyKeyId, propertyTypes, name)
-    nodePropertyTypeConstraintsAdded.increase()
-  }
-
-  override def createRelationshipPropertyTypeConstraint(
-    relTypeId: Int,
-    propertyKeyId: Int,
-    propertyTypes: PropertyTypeSet,
-    name: Option[String]
-  ): Unit = {
-    inner.createRelationshipPropertyTypeConstraint(relTypeId, propertyKeyId, propertyTypes, name)
-    relPropertyTypeConstraintsAdded.increase()
-  }
-
-  override def dropNamedConstraint(name: String): Unit = {
-    inner.dropNamedConstraint(name)
+  override def dropNamedConstraint(name: String, allowDependent: Boolean): Unit = {
+    inner.dropNamedConstraint(name, allowDependent)
     constraintsRemoved.increase()
   }
 
@@ -324,7 +327,14 @@ class UpdateCountingQueryContext(inner: QueryContext) extends DelegatingQueryCon
 
   override def getAllConstraints(): Map[ConstraintDescriptor, ConstraintInfo] = inner.getAllConstraints()
 
-  override def nodeGetDegree(node: Long, dir: SemanticDirection, nodeCursor: NodeCursor): Int =
+  override def getGeneratedNameForConstraint(
+    forNode: Boolean,
+    entityId: Int,
+    propertyIds: ArraySeq[Int],
+    descriptor: SchemaDescriptor => ConstraintDescriptor
+  ): String = inner.getGeneratedNameForConstraint(forNode, entityId, propertyIds, descriptor)
+
+  override def nodeGetDegree(node: Long, dir: SemanticDirection, nodeCursor: NodeCursor): Long =
     super.nodeGetDegree(node, dir, nodeCursor)
 
   override def detachDeleteNode(node: Long): Int = {
@@ -337,7 +347,7 @@ class UpdateCountingQueryContext(inner: QueryContext) extends DelegatingQueryCon
   override def contextWithNewTransaction(): UpdateCountingQueryContext =
     new UpdateCountingQueryContext(inner.contextWithNewTransaction())
 
-  private class CountingOps[T, CURSOR](inner: Operations[T, CURSOR], deletes: Counter)
+  private class CountingOps[T, CURSOR](inner: Operations[T, CURSOR], deletes: LongCounter)
       extends DelegatingOperations[T, CURSOR](inner) {
 
     override def delete(id: Long): Boolean = {

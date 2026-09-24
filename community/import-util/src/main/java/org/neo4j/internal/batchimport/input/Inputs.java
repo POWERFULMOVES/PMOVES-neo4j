@@ -23,25 +23,19 @@ import org.neo4j.batchimport.api.input.PropertySizeCalculator;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.values.storable.Value;
-import org.neo4j.values.storable.Values;
 
 public class Inputs {
     private Inputs() {}
 
-    public static int calculatePropertySize(
+    public static long calculatePropertySize(
             InputEntity entity,
             PropertySizeCalculator valueSizeCalculator,
             CursorContext cursorContext,
             MemoryTracker memoryTracker) {
-        int size = 0;
-        int propertyCount = entity.propertyCount();
-        if (propertyCount > 0) {
-            Value[] values = new Value[propertyCount];
-            for (int i = 0; i < propertyCount; i++) {
-                Object propertyValue = entity.propertyValue(i);
-                values[i] = propertyValue instanceof Value ? (Value) propertyValue : Values.of(propertyValue);
-            }
-            size += valueSizeCalculator.calculateSize(values, cursorContext, memoryTracker);
+        long size = 0;
+        var values = entity.propertiesAsValueMap().values();
+        if (!values.isEmpty()) {
+            size += valueSizeCalculator.calculateSize(values.toArray(Value[]::new), cursorContext, memoryTracker);
         }
         return size;
     }

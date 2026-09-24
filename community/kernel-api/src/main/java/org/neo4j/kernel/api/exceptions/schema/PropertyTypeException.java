@@ -20,6 +20,7 @@
 package org.neo4j.kernel.api.exceptions.schema;
 
 import static java.lang.String.format;
+import static org.neo4j.internal.kernel.api.exceptions.schema.ConstraintValidationException.Phase.VALIDATION;
 import static org.neo4j.internal.kernel.api.exceptions.schema.ConstraintValidationException.Phase.VERIFICATION;
 
 import org.neo4j.common.EntityType;
@@ -41,24 +42,7 @@ public class PropertyTypeException extends ConstraintValidationException {
 
     private final Phase phase;
 
-    public PropertyTypeException(
-            TypeConstraintDescriptor descriptor,
-            Phase phase,
-            long entityId,
-            TokenNameLookup tokenNameLookup,
-            Value value) {
-        super(
-                descriptor,
-                phase,
-                format(descriptor.schema().entityType() == EntityType.NODE ? "Node(%s)" : "Relationship(%s)", entityId),
-                tokenNameLookup);
-        this.entityId = entityId;
-        this.descriptor = descriptor;
-        this.value = value;
-        this.phase = phase;
-    }
-
-    public PropertyTypeException(
+    private PropertyTypeException(
             ErrorGqlStatusObject gqlStatusObject,
             TypeConstraintDescriptor descriptor,
             Phase phase,
@@ -78,10 +62,26 @@ public class PropertyTypeException extends ConstraintValidationException {
         this.phase = phase;
     }
 
+    // KNL-058 and KNL-059
     public static PropertyTypeException propertyTypeVerificationFailed(
             TypeConstraintDescriptor descriptor, long entityId, TokenNameLookup tokenNameLookup, Value value) {
-        final var schema = descriptor.schema();
-        final boolean isNode = schema.entityType() == EntityType.NODE;
+        return getPropertyTypeException(descriptor, entityId, tokenNameLookup, value, VERIFICATION);
+    }
+
+    // KNL-060 and KNL-061
+    public static PropertyTypeException propertyTypeValidationFailed(
+            TypeConstraintDescriptor descriptor, long entityId, TokenNameLookup tokenNameLookup, Value value) {
+        return getPropertyTypeException(descriptor, entityId, tokenNameLookup, value, VALIDATION);
+    }
+
+    private static PropertyTypeException getPropertyTypeException(
+            TypeConstraintDescriptor descriptor,
+            long entityId,
+            TokenNameLookup tokenNameLookup,
+            Value value,
+            Phase phase) {
+        SchemaDescriptor schema = descriptor.schema();
+        boolean isNode = schema.entityType() == EntityType.NODE;
         ErrorGqlStatusObject gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N78)
                 .withParam(GqlParams.StringParam.entityType, isNode ? "NODE" : "RELATIONSHIP")
                 .withParam(GqlParams.NumberParam.entityId, entityId)
@@ -96,7 +96,7 @@ public class PropertyTypeException extends ConstraintValidationException {
                         GqlParams.StringParam.valueType,
                         descriptor.propertyType().userDescription())
                 .build();
-        return new PropertyTypeException(gql, descriptor, VERIFICATION, entityId, tokenNameLookup, value);
+        return new PropertyTypeException(gql, descriptor, phase, entityId, tokenNameLookup, value);
     }
 
     @Override
@@ -111,21 +111,23 @@ public class PropertyTypeException extends ConstraintValidationException {
         String propertyKey = tokenNameLookup.propertyKeyGetName(schema.getPropertyId());
 
         return switch (phase) {
-            case VERIFICATION -> format(
-                    "%s(%s) property `%s` is of type `%s`.",
-                    entityString,
-                    entityId,
-                    propertyKey,
-                    TypeRepresentation.infer(value).userDescription());
-            case VALIDATION -> format(
-                    "%s(%s) with %s `%s` required the property `%s` to be of type `%s`, but was of type `%s`.",
-                    entityString,
-                    entityId,
-                    entityTokenType,
-                    entityToken,
-                    propertyKey,
-                    descriptor.propertyType().userDescription(),
-                    TypeRepresentation.infer(value).userDescription());
+            case VERIFICATION ->
+                format(
+                        "%s(%s) property `%s` is of type `%s`.",
+                        entityString,
+                        entityId,
+                        propertyKey,
+                        TypeRepresentation.infer(value).userDescription());
+            case VALIDATION ->
+                format(
+                        "%s(%s) with %s `%s` required the property `%s` to be of type `%s`, but was of type `%s`.",
+                        entityString,
+                        entityId,
+                        entityTokenType,
+                        entityToken,
+                        propertyKey,
+                        descriptor.propertyType().userDescription(),
+                        TypeRepresentation.infer(value).userDescription());
         };
     }
 }

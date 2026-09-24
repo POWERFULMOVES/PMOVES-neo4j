@@ -19,40 +19,51 @@
  */
 package org.neo4j.kernel.api.impl.schema.vector;
 
+import static org.neo4j.kernel.api.impl.schema.vector.VectorIndexConfigUtils.DEFAULT_SEARCH_EXPANSION_FACTOR;
 import static org.neo4j.kernel.api.impl.schema.vector.VectorIndexConfigUtils.DIMENSIONS;
 import static org.neo4j.kernel.api.impl.schema.vector.VectorIndexConfigUtils.HNSW_EF_CONSTRUCTION;
 import static org.neo4j.kernel.api.impl.schema.vector.VectorIndexConfigUtils.HNSW_M;
-import static org.neo4j.kernel.api.impl.schema.vector.VectorIndexConfigUtils.QUANTIZATION_ENABLED;
+import static org.neo4j.kernel.api.impl.schema.vector.VectorIndexConfigUtils.QUANTIZATION_TYPE;
 import static org.neo4j.kernel.api.impl.schema.vector.VectorIndexConfigUtils.SIMILARITY_FUNCTION;
 
+import java.util.Collections;
 import java.util.Objects;
 import java.util.OptionalInt;
-import org.eclipse.collections.api.map.sorted.ImmutableSortedMap;
-import org.eclipse.collections.api.set.sorted.ImmutableSortedSet;
+import java.util.Set;
 import org.neo4j.graphdb.schema.IndexSetting;
-import org.neo4j.internal.schema.IndexConfig;
-import org.neo4j.internal.schema.IndexConfigValidationWrapper;
+import org.neo4j.internal.helpers.collection.Iterables;
+import org.neo4j.internal.schema.IndexSettingRecord.Valid;
+import org.neo4j.internal.schema.TypedIndexConfig;
 import org.neo4j.kernel.api.vector.VectorSimilarityFunction;
 
-public class VectorIndexConfig extends IndexConfigValidationWrapper {
+public class VectorIndexConfig extends TypedIndexConfig {
+    public static final VectorIndexConfig EMPTY = new VectorIndexConfig();
+
     private final VectorIndexVersion version;
     private final OptionalInt dimensions;
     private final VectorSimilarityFunction similarityFunction;
-    private final boolean quantizationEnabled;
+    private final double defaultSearchExpansionFactor;
+    private final VectorQuantizationType quantization;
     private final HnswConfig hnswConfig;
 
-    VectorIndexConfig(
-            VectorIndexVersion version,
-            IndexConfig config,
-            ImmutableSortedMap<IndexSetting, Object> settings,
-            ImmutableSortedSet<String> validSettingNames,
-            ImmutableSortedSet<String> possibleValidSettingNames) {
-        super(version.descriptor(), config, settings, validSettingNames, possibleValidSettingNames);
+    VectorIndexConfig(VectorIndexVersion version, Set<IndexSetting> acceptedSettings, Iterable<Valid> records) {
+        super(version.descriptor(), acceptedSettings, records);
         this.version = version;
         this.dimensions = get(DIMENSIONS);
         this.similarityFunction = get(SIMILARITY_FUNCTION);
-        this.quantizationEnabled = get(QUANTIZATION_ENABLED);
+        this.defaultSearchExpansionFactor = get(DEFAULT_SEARCH_EXPANSION_FACTOR);
+        this.quantization = get(QUANTIZATION_TYPE);
         this.hnswConfig = new HnswConfig(get(HNSW_M), get(HNSW_EF_CONSTRUCTION));
+    }
+
+    private VectorIndexConfig() {
+        super(VectorIndexVersion.UNKNOWN.descriptor(), Collections.emptySet(), Iterables.empty());
+        this.version = VectorIndexVersion.UNKNOWN;
+        this.dimensions = OptionalInt.empty();
+        this.similarityFunction = null;
+        this.defaultSearchExpansionFactor = 0.0;
+        this.quantization = VectorQuantizationType.NONE;
+        this.hnswConfig = HnswConfig.DUMMY;
     }
 
     public VectorIndexVersion version() {
@@ -63,12 +74,24 @@ public class VectorIndexConfig extends IndexConfigValidationWrapper {
         return dimensions;
     }
 
+    public int maxDimensions() {
+        return dimensions.orElseGet(version::maxDimensions);
+    }
+
     public VectorSimilarityFunction similarityFunction() {
         return similarityFunction;
     }
 
+    public double defaultSearchExpansionFactor() {
+        return defaultSearchExpansionFactor;
+    }
+
     public boolean quantizationEnabled() {
-        return quantizationEnabled;
+        return quantization != VectorQuantizationType.NONE;
+    }
+
+    public VectorQuantizationType quantization() {
+        return quantization;
     }
 
     public HnswConfig hnsw() {
@@ -77,24 +100,36 @@ public class VectorIndexConfig extends IndexConfigValidationWrapper {
 
     @Override
     public int hashCode() {
-        return Objects.hash(dimensions, similarityFunction, quantizationEnabled, hnswConfig);
+        return Objects.hash(dimensions, similarityFunction, defaultSearchExpansionFactor, quantization, hnswConfig);
     }
 
     @Override
-    public boolean equals(Object o) {
-        if (this == o) {
+    public boolean equals(Object obj) {
+        if (this == obj) {
             return true;
         }
-        if (!(o instanceof VectorIndexConfig that)) {
+        if (!(obj instanceof VectorIndexConfig that)) {
             return false;
         }
         return Objects.equals(this.dimensions, that.dimensions)
                 && Objects.equals(this.similarityFunction, that.similarityFunction)
-                && this.quantizationEnabled == that.quantizationEnabled
+                && this.defaultSearchExpansionFactor == that.defaultSearchExpansionFactor
+                && this.quantization == that.quantization
                 && Objects.equals(this.hnswConfig, that.hnswConfig);
     }
 
     public record HnswConfig(int M, int efConstruction) {
         public static final HnswConfig DUMMY = new HnswConfig(16, 100);
+    }
+
+    @Override
+    public String toString() {
+        return getClass().getSimpleName()
+                + "[version=" + version
+                + ", dimensions=" + dimensions
+                + ", similarityFunction=" + similarityFunction
+                + ", defaultSearchExpansionFactor=" + defaultSearchExpansionFactor
+                + ", quantization=" + quantization
+                + ", hnswConfig=" + hnswConfig + ']';
     }
 }

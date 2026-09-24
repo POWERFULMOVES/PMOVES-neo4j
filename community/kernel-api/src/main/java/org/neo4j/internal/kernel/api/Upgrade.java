@@ -20,10 +20,11 @@
 package org.neo4j.internal.kernel.api;
 
 import org.neo4j.kernel.KernelVersion;
+import org.neo4j.wal.entry.LogFormat;
 
 public interface Upgrade {
 
     void upgradeKernel(KernelUpgrade kernelUpgrade);
 
-    record KernelUpgrade(KernelVersion from, KernelVersion to) {}
+    record KernelUpgrade(KernelVersion from, KernelVersion to, LogFormat logFormatTo) {}
 }

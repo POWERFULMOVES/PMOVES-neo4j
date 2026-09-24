@@ -30,8 +30,8 @@ import java.util.Map;
 import org.neo4j.bolt.dbapi.BoltGraphDatabaseManagementServiceSPI;
 import org.neo4j.bolt.dbapi.BoltGraphDatabaseServiceSPI;
 import org.neo4j.bolt.dbapi.BoltTransaction;
-import org.neo4j.bolt.protocol.common.message.AccessMode;
-import org.neo4j.bolt.protocol.common.message.request.connection.RoutingContext;
+import org.neo4j.boltmessages.AccessMode;
+import org.neo4j.boltmessages.request.connection.RoutingContext;
 import org.neo4j.collection.Dependencies;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseInternalSettings;
@@ -42,10 +42,11 @@ import org.neo4j.cypher.internal.cache.ExecutorBasedCaffeineCacheFactory;
 import org.neo4j.cypher.internal.compiler.CypherParsing;
 import org.neo4j.cypher.internal.compiler.CypherParsingConfig;
 import org.neo4j.cypher.internal.config.CypherConfiguration;
-import org.neo4j.cypher.internal.frontend.phases.InternalSyntaxUsageStats;
+import org.neo4j.cypher.internal.frontend.phases.InternalUsageStats;
 import org.neo4j.dbms.api.DatabaseManagementService;
 import org.neo4j.dbms.database.DatabaseContext;
 import org.neo4j.dbms.database.DatabaseContextProvider;
+import org.neo4j.dbms.systemgraph.DefaultQueryLanguageLookup;
 import org.neo4j.exceptions.InvalidSemanticsException;
 import org.neo4j.fabric.bookmark.LocalGraphTransactionIdTracker;
 import org.neo4j.fabric.bootstrap.CommonQueryRouterBootstrap;
@@ -125,13 +126,13 @@ public class CommunityQueryRouterBootstrap extends CommonQueryRouterBootstrap {
                     RoutingContext routingContext,
                     QueryExecutionConfiguration queryExecutionConfiguration) {
                 // If a piece of code tries to use this in Community edition, it means a bug
-                throw new InvalidSemanticsException("Composite database is not supported in Community Edition");
+                throw InvalidSemanticsException.compositeUnsupportedInCommunity();
             }
 
             @Override
             public DatabaseReference getDatabaseReference() {
                 // If a piece of code tries to use this in Community edition, it means a bug
-                throw new InvalidSemanticsException("Composite database is not supported in Community Edition");
+                throw InvalidSemanticsException.compositeUnsupportedInCommunity();
             }
         };
     }
@@ -156,12 +157,13 @@ public class CommunityQueryRouterBootstrap extends CommonQueryRouterBootstrap {
         var cacheFactory = new ExecutorBasedCaffeineCacheFactory(
                 job -> monitoredExecutor.execute(systemJob("Query plan cache maintenance"), job));
         var targetCache = new ProcessedQueryInfoCache(
-                cacheFactory, cypherConfig.queryCacheSize(), monitors.newMonitor(CacheTracer.class, MONITOR_TAG));
+                cacheFactory,
+                cypherConfig.queryCacheSize(),
+                cypherConfig.useParameterSizeHint(),
+                monitors.newMonitor(CacheTracer.class, MONITOR_TAG));
         var preParser = new PreParser(cypherConfig);
         var parsing = new CypherParsing(
-                null,
-                CypherParsingConfig.fromCypherConfiguration(cypherConfig),
-                resolve(InternalSyntaxUsageStats.class));
+                null, CypherParsingConfig.fromCypherConfiguration(cypherConfig), resolve(InternalUsageStats.class));
         DefaultDatabaseReferenceResolver databaseReferenceResolver =
                 new DefaultDatabaseReferenceResolver(databaseReferenceRepo);
         var databaseManager = (DatabaseContextProvider<DatabaseContext>) resolve(DatabaseContextProvider.class);
@@ -180,13 +182,12 @@ public class CommunityQueryRouterBootstrap extends CommonQueryRouterBootstrap {
         registerWithLifecycle(new TransactionMonitorScheduler(txMonitor, jobScheduler, transactionCheckInterval, null));
         var routerTxManager = new RouterTransactionManager(txMonitor, config);
         dependencies.satisfyDependency(routerTxManager);
-        TransactionManager compositeTxManager = null;
-        if (dependencies.containsDependency(TransactionManager.class)) {
-            compositeTxManager = dependencies.resolveDependency(TransactionManager.class);
-        }
+        var compositeTxManager =
+                dependencies.resolveOptionalDependency(TransactionManager.class).orElse(null);
         var transactionLookup = new TransactionLookup(routerTxManager, compositeTxManager);
         dependencies.satisfyDependency(transactionLookup);
         var queryRouterLog = getLogService().getInternalLog(QueryRouter.class);
+        final var defaultQueryLanguageLookup = resolve(DefaultQueryLanguageLookup.class);
 
         var queryRouter = new QueryRouterImpl(
                 config,
@@ -203,7 +204,8 @@ public class CommunityQueryRouterBootstrap extends CommonQueryRouterBootstrap {
                 monitors.newMonitor(QueryRoutingMonitor.class),
                 routerTxManager,
                 securityLog,
-                queryRouterLog);
+                queryRouterLog,
+                defaultQueryLanguageLookup);
         dependencies.satisfyDependency(queryRouter);
         return new QueryRouterBoltSpi.DatabaseManagementService(
                 queryRouter, databaseReferenceResolver, getCompositeDatabaseStack(), useQueryRouterForCompositeQueries);

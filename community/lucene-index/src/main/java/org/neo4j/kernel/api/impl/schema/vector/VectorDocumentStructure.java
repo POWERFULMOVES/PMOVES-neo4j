@@ -19,40 +19,31 @@
  */
 package org.neo4j.kernel.api.impl.schema.vector;
 
-import static org.apache.lucene.document.Field.Store.NO;
+import org.neo4j.values.storable.ValueGroup;
 
-import org.apache.lucene.document.Document;
-import org.apache.lucene.document.KnnFloatVectorField;
-import org.apache.lucene.document.NumericDocValuesField;
-import org.apache.lucene.document.StringField;
-import org.apache.lucene.index.Term;
-import org.neo4j.kernel.api.impl.schema.vector.VectorSimilarityFunctions.LuceneVectorSimilarityFunction;
-import org.neo4j.kernel.api.vector.VectorCandidate;
+public abstract class VectorDocumentStructure {
 
-abstract class VectorDocumentStructure {
-    static final String ENTITY_ID_KEY = "id";
+    public abstract String vectorValueKeyFor(int dimensions);
 
-    static Term newTermForChangeOrRemove(long id) {
-        return new Term(ENTITY_ID_KEY, Long.toString(id));
-    }
+    public abstract String booleanValueKeyFor(int propertyIndex);
 
-    abstract String vectorValueKeyFor(int dimensions);
+    public abstract String integralValueKeyFor(int propertyIndex);
 
-    Document createLuceneDocument(
-            long id, VectorCandidate candidate, LuceneVectorSimilarityFunction similarityFunction) {
-        final var vector = similarityFunction.maybeToValidVector(candidate);
-        if (vector == null) {
-            return null;
-        }
+    public abstract String floatingValueKeyFor(int propertyIndex);
 
-        final var document = new Document();
-        final var idField = new StringField(ENTITY_ID_KEY, Long.toString(id), NO);
-        final var idValueField = new NumericDocValuesField(ENTITY_ID_KEY, id);
-        final var valueField =
-                new KnnFloatVectorField(vectorValueKeyFor(vector.length), vector, similarityFunction.toLucene());
-        document.add(idField);
-        document.add(idValueField);
-        document.add(valueField);
-        return document;
-    }
+    public abstract String textValueKeyFor(int propertyIndex);
+
+    public abstract String temporalValueKeyFor(int propertyIndex, ValueGroup group);
+
+    public abstract String zoneOffsetValueKeyFor(int propertyIndex, ValueGroup group);
+
+    public abstract String zoneIdValueKeyFor(int propertyIndex, ValueGroup group);
+
+    public abstract String durationNanosValueKeyFor(int propertyIndex);
+
+    public abstract String durationSecondsValueKeyFor(int propertyIndex);
+
+    public abstract String durationDaysValueKeyFor(int propertyIndex);
+
+    public abstract String durationMonthsValueKeyFor(int propertyIndex);
 }

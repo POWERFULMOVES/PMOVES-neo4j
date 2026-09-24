@@ -40,7 +40,7 @@ import org.neo4j.bolt.test.wire.selector.FilteredBoltWireSelector;
  */
 @Documented
 @TestTemplate
-@Target(ElementType.METHOD)
 @Retention(RetentionPolicy.RUNTIME)
 @SelectWire(FilteredBoltWireSelector.class)
+@Target({ElementType.ANNOTATION_TYPE, ElementType.METHOD})
 public @interface ProtocolTest {}

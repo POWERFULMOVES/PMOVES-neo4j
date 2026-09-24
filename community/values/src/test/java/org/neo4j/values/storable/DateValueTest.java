@@ -21,29 +21,34 @@ package org.neo4j.values.storable;
 
 import static java.lang.String.format;
 import static java.util.Collections.singletonList;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.neo4j.values.storable.DateValue.date;
+import static org.neo4j.values.storable.DateValue.epochDateRaw;
 import static org.neo4j.values.storable.DateValue.ordinalDate;
 import static org.neo4j.values.storable.DateValue.parse;
+import static org.neo4j.values.storable.DateValue.parsePattern;
 import static org.neo4j.values.storable.DateValue.quarterDate;
 import static org.neo4j.values.storable.DateValue.weekDate;
+import static org.neo4j.values.storable.Values.stringValue;
 import static org.neo4j.values.utils.AnyValueTestUtil.assertEqual;
 import static org.neo4j.values.utils.AnyValueTestUtil.assertNotEqual;
 
-import java.time.DayOfWeek;
 import java.time.LocalDate;
-import java.time.temporal.IsoFields;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.neo4j.exceptions.ArithmeticException;
 import org.neo4j.exceptions.InvalidArgumentException;
 import org.neo4j.exceptions.TemporalParseException;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
 import org.neo4j.gqlstatus.GqlParams;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 
 class DateValueTest {
     @Test
@@ -136,37 +141,22 @@ class DateValueTest {
     }
 
     @Test
-    void shouldEnforceStrictWeekRanges() {
-        LocalDate localDate = weekDate(2017, 52, 7).temporal();
-        assertEquals(DayOfWeek.SUNDAY, localDate.getDayOfWeek(), "Sunday is the seventh day of the week.");
-        assertEquals(52, localDate.get(IsoFields.WEEK_OF_WEEK_BASED_YEAR));
-        assertEquals(localDate, date(2017, 12, 31).temporal());
-        InvalidArgumentException expected = assertThrows(
-                InvalidArgumentException.class, () -> weekDate(2017, 53, 1), "2017 does not have 53 weeks.");
-        assertEquals("Year 2017 does not contain 53 weeks.", expected.getMessage());
-        assertEquals(date(2016, 1, 1), weekDate(2015, 53, 5));
-    }
-
-    @Test
-    void shouldEnforceStrictQuarterRanges() {
-        assertEquals(date(2017, 3, 31), quarterDate(2017, 1, 90));
-        assertThrows(InvalidArgumentException.class, () -> quarterDate(2017, 1, 0));
-        assertThrows(InvalidArgumentException.class, () -> quarterDate(2017, 2, 0));
-        assertThrows(InvalidArgumentException.class, () -> quarterDate(2017, 3, 0));
-        assertThrows(InvalidArgumentException.class, () -> quarterDate(2017, 4, 0));
-        assertThrows(InvalidArgumentException.class, () -> quarterDate(2017, 4, 93));
-        assertThrows(InvalidArgumentException.class, () -> quarterDate(2017, 3, 93));
-        assertThrows(InvalidArgumentException.class, () -> quarterDate(2017, 2, 92));
-        assertThrows(InvalidArgumentException.class, () -> quarterDate(2017, 1, 92));
-        assertThrows(InvalidArgumentException.class, () -> quarterDate(2017, 1, 91));
-        assertEquals(date(2016, 3, 31), quarterDate(2016, 1, 91));
-        assertThrows(InvalidArgumentException.class, () -> quarterDate(2016, 1, 92));
-    }
-
-    @Test
     void shouldNotParseInvalidDates() {
         assertCannotParse("2015W54"); // no year should have more than 53 weeks (2015 had 53 weeks)
         assertThrows(InvalidArgumentException.class, () -> parse("2017W53")); // 2017 only has 52 weeks
+    }
+
+    @Test
+    void shouldFailOnInvalidRawValue() {
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> epochDateRaw(31556889864403200L))
+                .isInstanceOf(InvalidArgumentException.class)
+                .hasMessage("Invalid value for EpochDay (valid values -365243219162 - 365241780471): 31556889864403200")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22007)
+                .hasStatusDescription("error: data exception - invalid date, time, or datetime format")
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N11)
+                .hasStatusDescription(
+                        "error: data exception - invalid argument. Invalid argument: cannot process 'epochDay'.");
     }
 
     @Test
@@ -199,6 +189,20 @@ class DateValueTest {
     }
 
     @Test
+    void shouldFailOnOverflowWhenAddingDurationToDates() {
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(
+                        () -> DateValue.MAX_VALUE.add(DurationValue.duration(0, 1, 0, 0)))
+                .isInstanceOf(ArithmeticException.class)
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22003)
+                .hasStatusDescription(
+                        "error: data exception - numeric value out of range. The numeric value +999999999-12-31 + P1D is outside the required range.")
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N28)
+                .hasStatusDescription(
+                        "error: data exception - overflow error. The result of the operation '+' has caused an overflow.");
+    }
+
+    @Test
     void shouldReuseInstanceInArithmetics() {
         final DateValue date = date(2018, 2, 1);
         assertSame(date, date.add(DurationValue.duration(0, 0, 0, 0)));
@@ -214,6 +218,20 @@ class DateValueTest {
     }
 
     @Test
+    void shouldFailOnOverflowWhenSubtractionDurationFromDates() {
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(
+                        () -> DateValue.MIN_VALUE.sub(DurationValue.duration(0, 1, 0, 0)))
+                .isInstanceOf(ArithmeticException.class)
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22003)
+                .hasStatusDescription(
+                        "error: data exception - numeric value out of range. The numeric value -999999999-01-01 - P1D is outside the required range.")
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N28)
+                .hasStatusDescription(
+                        "error: data exception - overflow error. The result of the operation '-' has caused an overflow.");
+    }
+
+    @Test
     void shouldEqualItself() {
         assertEqual(date(2018, 1, 31), date(2018, 1, 31));
     }
@@ -223,20 +241,35 @@ class DateValueTest {
         assertNotEqual(date(2018, 1, 31), date(2018, 1, 30));
     }
 
+    @Test
+    void shouldParsePatternWithLiteral() {
+        assertEquals(date(2024, 6, 27), parsePattern(stringValue("2024-06-27"), stringValue("yyyy-MM-dd")));
+        assertEquals(date(2024, 6, 27), parsePattern(stringValue("2024-06-27 CEST"), stringValue("yyyy-MM-dd 'CEST'")));
+    }
+
+    @Test
+    void shouldNotParsePatternWhenLiteralDoesNotMatchInput() {
+        assertThrows(
+                TemporalParseException.class, () -> parsePattern(stringValue("2024_06_27"), stringValue("yyyy-MM-dd")));
+        assertThrows(
+                TemporalParseException.class,
+                () -> parsePattern(stringValue("2024-06-27 UTC"), stringValue("yyyy-MM-dd 'CEST'")));
+        assertThrows(
+                TemporalParseException.class,
+                () -> parsePattern(stringValue("2024-06-27"), stringValue("yyyy-MM-dd 'CEST'")));
+    }
+
     private static void assertCannotParse(String text) {
         assertThrows(TemporalParseException.class, () -> parse(text), format("'%s' parsed to value", text));
     }
 
     private static void assertCorrectGqlDescr(String text, String expectedCauseGqlStatusDescription) {
-        var e = assertThrows(Exception.class, () -> parse(text));
-        try {
-            parse(text);
-        } catch (Exception ex) {
+        assertThatThrownBy(() -> parse(text)).isInstanceOf(Exception.class).satisfies(e -> {
             if (e instanceof ErrorGqlStatusObject gso && gso.cause().isPresent()) {
                 assertEquals(gso.cause().get().statusDescription(), expectedCauseGqlStatusDescription);
             } else {
                 fail("Expected exception to have a gql-code with cause");
             }
-        }
+        });
     }
 }

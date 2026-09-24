@@ -18,7 +18,6 @@ package org.neo4j.cypher.internal.frontend.phases
 
 import org.neo4j.cypher.internal.ast.Match
 import org.neo4j.cypher.internal.ast.Where
-import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
 import org.neo4j.cypher.internal.expressions.Ands
 import org.neo4j.cypher.internal.expressions.AnonymousPatternPart
 import org.neo4j.cypher.internal.expressions.Expression
@@ -28,13 +27,14 @@ import org.neo4j.cypher.internal.expressions.ParenthesizedPath
 import org.neo4j.cypher.internal.expressions.Pattern
 import org.neo4j.cypher.internal.expressions.PatternElement
 import org.neo4j.cypher.internal.expressions.PatternPart.SelectiveSelector
-import org.neo4j.cypher.internal.expressions.PatternPartWithSelector
+import org.neo4j.cypher.internal.expressions.PrefixedPatternPart
+import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerConfig
 import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerFactory
 import org.neo4j.cypher.internal.rewriting.conditions.AndRewrittenToAnds
 import org.neo4j.cypher.internal.rewriting.conditions.SemanticInfoAvailable
-import org.neo4j.cypher.internal.rewriting.rewriters.QuantifiedPathPatternNodeInsertRewriter
-import org.neo4j.cypher.internal.rewriting.rewriters.normalizePredicates
-import org.neo4j.cypher.internal.rewriting.rewriters.unwrapParenthesizedPath
+import org.neo4j.cypher.internal.rewriting.rewriters.astRewriters.NormalizePredicates
+import org.neo4j.cypher.internal.rewriting.rewriters.astRewriters.QuantifiedPathPatternNodeInsertRewriter
+import org.neo4j.cypher.internal.rewriting.rewriters.astRewriters.UnwrapParenthesizedPath
 import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.StepSequencer
 import org.neo4j.cypher.internal.util.StepSequencer.DefaultPostCondition
@@ -42,7 +42,7 @@ import org.neo4j.cypher.internal.util.collection.immutable.ListSet
 import org.neo4j.cypher.internal.util.topDown
 
 /**
- * Moves predicates from inside a PatternPartWithSelector into the surrounding Match clause,
+ * Moves predicates from inside a PrefixedPatternPart into the surrounding Match clause,
  * if the predicate only depends on arguments and boundary nodes.
  */
 case object MoveBoundaryNodePredicates extends StatementRewriter
@@ -51,11 +51,11 @@ case object MoveBoundaryNodePredicates extends StatementRewriter
     with PlanPipelineTransformerFactory {
 
   override def preConditions: Set[StepSequencer.Condition] = Set(
-    normalizePredicates.completed,
+    NormalizePredicates.completed,
     AndRewrittenToAnds,
     QuantifiedPathPatternNodeInsertRewriter.completed,
     CopyQuantifiedPathPatternPredicatesToJuxtaposedNodes.completed,
-    unwrapParenthesizedPath.completed,
+    UnwrapParenthesizedPath.completed,
     // This will potentially change the dependencies of some predicates
     ShortestPathVariableDeduplicator.completed
   )
@@ -63,15 +63,14 @@ case object MoveBoundaryNodePredicates extends StatementRewriter
   override def invalidatedConditions: Set[StepSequencer.Condition] = SemanticInfoAvailable
 
   private val rewriter: Rewriter = topDown(Rewriter.lift {
-    case matchClause @ Match(_, _, pattern @ Pattern.ForMatch(parts), _, where) =>
+    case matchClause @ Match(_, _, pattern @ Pattern.ForMatch(parts), _, where, _) =>
       val (newParts, extractedPredicates) = parts.map {
-        case patternPart @ PatternPartWithSelector(_: SelectiveSelector, part) =>
+        case patternPart @ PrefixedPatternPart(_: SelectiveSelector, _, part) =>
           val (newElement: PatternElement, extractedPredicates: ListSet[Expression]) = part.element match {
             case pp @ ParenthesizedPath(part, Some(where)) =>
-              val element = part.element
-              val boundaryNodes = PatternElement.boundaryNodes(element)
-              val variablesInPattern = parts.flatMap(_.allVariables).toSet
-              val disallowedDependencies = variablesInPattern -- boundaryNodes
+              // The strict interior variables are not visible outside the path pattern.
+              // Therefore, they cannot be moved.
+              val disallowedDependencies = part.strictInteriorVariables
 
               val (extractedPredicates, notExtractedPredicates) = extractPredicates(where, disallowedDependencies)
               val newElement = notExtractedPredicates match {
@@ -119,8 +118,6 @@ case object MoveBoundaryNodePredicates extends StatementRewriter
 
   override def instance(from: BaseState, context: BaseContext): Rewriter = rewriter
 
-  override def getTransformer(
-    pushdownPropertyReads: Boolean,
-    semanticFeatures: Seq[SemanticFeature]
-  ): Transformer[_ <: BaseContext, _ <: BaseState, BaseState] = this
+  override def getTransformer(planPipelineConfig: PlanPipelineTransformerConfig)
+    : Transformer[_ <: BaseContext, _ <: BaseState, BaseState] = this
 }

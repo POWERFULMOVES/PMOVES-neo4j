@@ -23,7 +23,10 @@ import static java.util.Collections.singletonList;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.neo4j.values.storable.LocalTimeValue.localTime;
+import static org.neo4j.values.storable.LocalTimeValue.localTimeRaw;
 import static org.neo4j.values.storable.LocalTimeValue.parse;
+import static org.neo4j.values.storable.LocalTimeValue.parsePattern;
+import static org.neo4j.values.storable.Values.stringValue;
 import static org.neo4j.values.utils.AnyValueTestUtil.assertEqual;
 import static org.neo4j.values.utils.AnyValueTestUtil.assertNotEqual;
 
@@ -31,7 +34,10 @@ import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.neo4j.exceptions.InvalidArgumentException;
 import org.neo4j.exceptions.TemporalParseException;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 
 class LocalTimeValueTest {
     @Test
@@ -77,6 +83,19 @@ class LocalTimeValueTest {
     }
 
     @Test
+    void shouldFailOnInvalidRawValue() {
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> localTimeRaw(-2))
+                .isInstanceOf(InvalidArgumentException.class)
+                .hasMessage("Invalid value for NanoOfDay (valid values 0 - 86399999999999): -2")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22007)
+                .hasStatusDescription("error: data exception - invalid date, time, or datetime format")
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N11)
+                .hasStatusDescription(
+                        "error: data exception - invalid argument. Invalid argument: cannot process 'nanoOfDay'.");
+    }
+
+    @Test
     void shouldWriteLocalTime() {
         // given
         for (LocalTimeValue value : new LocalTimeValue[] {
@@ -109,5 +128,21 @@ class LocalTimeValueTest {
     @Test
     void shouldNotEqualOther() {
         assertNotEqual(localTime(10, 52, 5, 6), localTime(10, 52, 5, 7));
+    }
+
+    @Test
+    void shouldParsePatternWithLiteral() {
+        assertEquals(localTime(14, 30, 0, 0), parsePattern(stringValue("14:30"), stringValue("HH:mm")));
+        assertEquals(localTime(14, 30, 0, 0), parsePattern(stringValue("14:30 CEST"), stringValue("HH:mm 'CEST'")));
+    }
+
+    @Test
+    void shouldNotParsePatternWhenLiteralDoesNotMatchInput() {
+        assertThrows(TemporalParseException.class, () -> parsePattern(stringValue("14.30"), stringValue("HH:mm")));
+        assertThrows(
+                TemporalParseException.class,
+                () -> parsePattern(stringValue("14:30 UTC"), stringValue("HH:mm 'CEST'")));
+        assertThrows(
+                TemporalParseException.class, () -> parsePattern(stringValue("14:30"), stringValue("HH:mm 'CEST'")));
     }
 }

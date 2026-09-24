@@ -24,12 +24,12 @@ import static org.neo4j.io.IOUtils.closeAllSilently;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.function.Predicate;
-import org.neo4j.internal.kernel.api.CloseListener;
 import org.neo4j.internal.kernel.api.KernelReadTracer;
 import org.neo4j.internal.kernel.api.NodeCursor;
 import org.neo4j.internal.kernel.api.PropertyCursor;
 import org.neo4j.internal.kernel.api.RelationshipTraversalCursor;
 import org.neo4j.internal.kernel.api.TokenSet;
+import org.neo4j.lang.CloseListener;
 import org.neo4j.storageengine.api.Degrees;
 import org.neo4j.storageengine.api.PropertySelection;
 import org.neo4j.storageengine.api.Reference;
@@ -54,6 +54,10 @@ public class FilteringNodeCursorWrapper implements NodeCursor {
         this.delegate = delegate;
         this.filter = filter;
         this.resources = resources;
+    }
+
+    public NodeCursor internalNodeCursor() {
+        return delegate;
     }
 
     @Override
@@ -88,13 +92,13 @@ public class FilteringNodeCursorWrapper implements NodeCursor {
     }
 
     @Override
-    public void setToken(int token) {
-        delegate.setToken(token);
+    public void setTrackingHandle(int handle) {
+        delegate.setTrackingHandle(handle);
     }
 
     @Override
-    public int getToken() {
-        return delegate.getToken();
+    public int getTrackingHandle() {
+        return delegate.getTrackingHandle();
     }
 
     @Override
@@ -184,12 +188,12 @@ public class FilteringNodeCursorWrapper implements NodeCursor {
     }
 
     @Override
-    public int degree(RelationshipSelection selection) {
+    public long degree(RelationshipSelection selection) {
         return delegate.degree(selection);
     }
 
     @Override
-    public int degreeWithMax(int maxDegree, RelationshipSelection selection) {
+    public long degreeWithMax(long maxDegree, RelationshipSelection selection) {
         return delegate.degreeWithMax(maxDegree, selection);
     }
 }

@@ -19,13 +19,15 @@
  */
 package org.neo4j.cypher.internal.compiler.planner.logical
 
+import org.neo4j.cypher.internal.ast.IrHint
+import org.neo4j.cypher.internal.ast.UsingScanHint
 import org.neo4j.cypher.internal.compiler.planner.logical.ordering.InterestingOrderConfig
-import org.neo4j.cypher.internal.compiler.planner.logical.steps.BestPlans
-import org.neo4j.cypher.internal.expressions.LogicalVariable
+import org.neo4j.cypher.internal.expressions.LabelName
+import org.neo4j.cypher.internal.expressions.LabelOrRelTypeName
+import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.ir.QueryGraph
-import org.neo4j.cypher.internal.ir.SinglePlannerQuery
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
-import org.neo4j.cypher.internal.macros.AssertMacros
+import org.neo4j.cypher.internal.util.collection.immutable.ListSet
 
 trait PlanSelector {
 
@@ -37,59 +39,33 @@ trait PlanSelector {
   ): LogicalPlan
 }
 
-trait PlanTransformer {
-  def apply(plan: LogicalPlan, query: SinglePlannerQuery, context: LogicalPlanningContext): LogicalPlan
-}
-
 trait CandidateSelector extends ProjectingSelector[LogicalPlan]
 
-trait LeafPlanner {
+object LabelScanLeafPlanner {
 
-  def apply(
-    queryGraph: QueryGraph,
-    interestingOrderConfig: InterestingOrderConfig,
-    context: LogicalPlanningContext
-  ): Set[LogicalPlan]
-}
-
-/**
- * Finds the best sorted and unsorted plan for every unique set of available symbols.
- */
-trait LeafPlanFinder {
-
-  def apply(
-    config: QueryPlannerConfiguration,
-    queryGraph: QueryGraph,
-    interestingOrderConfig: InterestingOrderConfig,
-    context: LogicalPlanningContext
-  ): Map[Set[LogicalVariable], BestPlans]
-
-  def apply(
-    leafPlanCandidates: Set[LogicalPlan],
-    config: QueryPlannerConfiguration,
-    queryGraph: QueryGraph,
-    interestingOrderConfig: InterestingOrderConfig,
-    context: LogicalPlanningContext
-  ): Map[Set[LogicalVariable], BestPlans]
-}
-
-sealed trait LeafPlanRestrictions {
-  def symbolsThatShouldOnlyUseIndexSeekLeafPlanners: Set[LogicalVariable]
-}
-
-object LeafPlanRestrictions {
-
-  case object NoRestrictions extends LeafPlanRestrictions {
-    override def symbolsThatShouldOnlyUseIndexSeekLeafPlanners: Set[LogicalVariable] = Set.empty
-  }
+  case class HintsAndHintedLabels(
+    fulfilledHints: ListSet[UsingScanHint],
+    hintedLabels: ListSet[LabelName]
+  )
 
   /**
-   * For `variable`, only plan IndexSeek, IndexContainsScan and IndexEndsWithScan.
+   * Find all the hints that are fulfilled by a scan on the given variable and prune away the implied labels, unless they are hinted upon.
+   *
+   * @param hints    the hints present in the query graph
+   * @param variable the variable to check for hints
+   * @param labels   the labels to prune
    */
-  case class OnlyIndexSeekPlansFor(variable: LogicalVariable, dependencies: Set[LogicalVariable])
-      extends LeafPlanRestrictions {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(dependencies.nonEmpty, "Dependencies must not be empty")
-    override def symbolsThatShouldOnlyUseIndexSeekLeafPlanners: Set[LogicalVariable] = Set(variable)
+  def getHintsAndHintedLabels(
+    hints: ListSet[IrHint],
+    variable: Variable,
+    labels: Iterable[LabelName]
+  ): HintsAndHintedLabels = {
+    hints.collect {
+      case hint @ UsingScanHint(`variable`, LabelOrRelTypeName(name))
+        if labels.exists(_.name == name) =>
+        (hint, labels.filter(_.name == name))
+    }.unzip match {
+      case (scanHints, hintedLabels) => HintsAndHintedLabels(scanHints, hintedLabels.flatten)
+    }
   }
-
 }

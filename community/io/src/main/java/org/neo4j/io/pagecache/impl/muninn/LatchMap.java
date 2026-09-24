@@ -19,11 +19,15 @@
  */
 package org.neo4j.io.pagecache.impl.muninn;
 
+import static java.lang.invoke.MethodHandles.lookup;
 import static org.neo4j.internal.helpers.VarHandleUtils.arrayElementVarHandle;
+import static org.neo4j.internal.helpers.VarHandleUtils.getVarHandle;
 import static org.neo4j.util.Preconditions.requirePowerOfTwo;
 
 import java.lang.invoke.VarHandle;
+import java.util.concurrent.locks.LockSupport;
 import org.neo4j.util.FeatureToggles;
+import org.neo4j.util.VisibleForTesting;
 import org.neo4j.util.concurrent.BinaryLatch;
 
 /**
@@ -50,29 +54,20 @@ final class LatchMap {
     }
 
     static final int DEFAULT_FAULT_LOCK_STRIPING = 1024;
-    static final int faultLockStriping =
+    static final int FAULT_LOCK_STRIPING =
             FeatureToggles.getInteger(LatchMap.class, "faultLockStriping", DEFAULT_FAULT_LOCK_STRIPING);
 
     private final Latch[] latches;
     private static final VarHandle LATCHES_ARRAY = arrayElementVarHandle(Latch[].class);
     private final long faultLockMask;
 
+    private volatile boolean closed;
+    private static final VarHandle CLOSED_FLAG_HANDLE = getVarHandle(lookup(), "closed");
+
     LatchMap(int size) {
         requirePowerOfTwo(size);
         latches = new Latch[size];
         faultLockMask = size - 1;
-    }
-
-    private void releaseLatch(int index) {
-        LATCHES_ARRAY.setVolatile(latches, index, (Latch) null);
-    }
-
-    private boolean tryInsertLatch(int index, Latch latch) {
-        return LATCHES_ARRAY.compareAndSet(latches, index, (Latch) null, latch);
-    }
-
-    private Latch getLatch(int index) {
-        return (Latch) LATCHES_ARRAY.getVolatile(latches, index);
     }
 
     /**
@@ -85,6 +80,9 @@ final class LatchMap {
      * atomically uninstalled.
      */
     Latch takeOrAwaitLatch(long identifier) {
+        if (isClosed()) {
+            return null;
+        }
         int index = index(identifier);
         Latch latch = getLatch(index);
         while (latch == null) {
@@ -94,18 +92,65 @@ final class LatchMap {
             }
             latch = getLatch(index);
         }
+        // check closed again to make sure we are not observing latch that was inserted by close
+        if (isClosed()) {
+            return null;
+        }
         latch.await();
         return null;
     }
 
+    // prevent any more latches to be acquired
+
+    void close() {
+        setClosed();
+
+        for (int index = 0; index < latches.length; index++) {
+            var latch = new Latch(this, index);
+            while (!tryInsertLatch(index, latch)) {
+                LockSupport.parkNanos(100);
+            }
+        }
+    }
+
+    private boolean isClosed() {
+        return (boolean) CLOSED_FLAG_HANDLE.getAcquire(this);
+    }
+
+    private void setClosed() {
+        CLOSED_FLAG_HANDLE.setRelease(this, true);
+    }
+
     /**
-     * Size of the LatchMap
+     * Returns the maximum number of latches that can be taken simutaneously avoiding deadlocks starting from the given identifier and up to the given count.
      */
-    int size() {
-        return latches.length;
+    int maxContinuousLatches(long identifier, int count) {
+        return Math.min(count, latches.length - index(identifier));
+    }
+
+    @VisibleForTesting
+    boolean isEmpty() {
+        for (Latch latch : latches) {
+            if (latch != null) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private int index(long identifier) {
         return (int) (identifier & faultLockMask);
+    }
+
+    private void releaseLatch(int index) {
+        LATCHES_ARRAY.setVolatile(latches, index, (Latch) null);
+    }
+
+    private boolean tryInsertLatch(int index, Latch latch) {
+        return LATCHES_ARRAY.compareAndSet(latches, index, (Latch) null, latch);
+    }
+
+    private Latch getLatch(int index) {
+        return (Latch) LATCHES_ARRAY.getVolatile(latches, index);
     }
 }

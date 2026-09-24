@@ -20,10 +20,13 @@
 package org.neo4j.kernel.recovery;
 
 import static java.lang.Integer.max;
+import static java.lang.Math.min;
 import static org.neo4j.util.Preconditions.checkState;
 
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -33,9 +36,9 @@ import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.kernel.impl.api.CompleteTransaction;
 import org.neo4j.kernel.impl.transaction.CommittedCommandBatchRepresentation;
-import org.neo4j.lock.LockGroup;
 import org.neo4j.lock.LockService;
 import org.neo4j.lock.ReentrantLockService;
+import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.StorageEngine;
 import org.neo4j.storageengine.api.TransactionApplicationMode;
 
@@ -49,6 +52,7 @@ final class ParallelRecoveryVisitor implements RecoveryApplier {
     private final ExecutorService appliers;
     private final AtomicReference<Throwable> failure = new AtomicReference<>();
     private final int stride;
+    private final Semaphore coordination;
 
     ParallelRecoveryVisitor(
             StorageEngine storageEngine,
@@ -60,7 +64,7 @@ final class ParallelRecoveryVisitor implements RecoveryApplier {
                 mode,
                 contextFactory,
                 tracerTag,
-                max(1, Runtime.getRuntime().availableProcessors() - 1));
+                max(1, min(Runtime.getRuntime().availableProcessors() - 1, 16)));
     }
 
     ParallelRecoveryVisitor(
@@ -81,6 +85,7 @@ final class ParallelRecoveryVisitor implements RecoveryApplier {
                 new LinkedBlockingQueue<>(numAppliers),
                 new ThreadPoolExecutor.CallerRunsPolicy());
         this.stride = mode.isReverseStep() ? -1 : 1;
+        this.coordination = new Semaphore(numAppliers);
     }
 
     @Override
@@ -93,14 +98,16 @@ final class ParallelRecoveryVisitor implements RecoveryApplier {
 
         // TODO Also consider the memory usage of all active commandBatch instances and apply back-pressure if
         // surpassing it
-        appliers.submit(() -> {
+        appliers.submit(coordinate(() -> {
             long txId = commandBatch.txId();
             while (prevLockedTxId.get() != txId - stride) {
-                Thread.onSpinWait();
+                for (int i = 0; i < 100_000 && prevLockedTxId.get() != txId - stride; i++) {
+                    Thread.onSpinWait();
+                }
                 checkFailure();
             }
-            try (LockGroup locks = new LockGroup()) {
-                storageEngine.lockRecoveryCommands(commandBatch.commandBatch(), lockService, locks, mode);
+            try (var locks = lockService.newClient()) {
+                storageEngine.lockRecoveryCommands(commandBatch.commandBatch(), locks, mode);
                 boolean myTurn = prevLockedTxId.compareAndSet(txId - stride, txId);
                 checkState(
                         myTurn,
@@ -111,8 +118,36 @@ final class ParallelRecoveryVisitor implements RecoveryApplier {
                 failure.compareAndSet(null, e);
             }
             return null;
-        });
+        }));
         return false;
+    }
+
+    /**
+     * The {@link ThreadPoolExecutor} {@link java.util.concurrent.RejectedExecutionHandler} doesn't quite support
+     * blocking on submitting, even though the underlying queue is blocking, so this task coordination
+     * adds that. Why is it needed? Because we don't want the thread that does the queuing (i.e. reconciler thread)
+     * to do any of the actual work. This is because this work may be slow due to:
+     * <ul>
+     *     <li>contending for locks that are needed to apply the transaction</li>
+     *     <li>potentially applying a large or otherwise slow transaction</li>
+     * </ul>
+     * Every time this thread ends up doing any of those (or both) it will block any further queueing to the
+     * other threads, effectively reducing parallelism down to 1 during this time. The more frequently this happens the
+     * less parallelism parallel recovery gets as a whole.
+     *
+     * @param task the actual task to coordinate.
+     * @return the task, with added coordination to it.
+     * @throws InterruptedException on coordination noticing interruption.
+     */
+    private Callable<Void> coordinate(Callable<Void> task) throws InterruptedException {
+        coordination.acquire();
+        return () -> {
+            try {
+                return task.call();
+            } finally {
+                coordination.release();
+            }
+        };
     }
 
     private void checkFailure() throws Exception {
@@ -127,7 +162,10 @@ final class ParallelRecoveryVisitor implements RecoveryApplier {
         try (CursorContext cursorContext = contextFactory.create(tracerTag);
                 var storeCursors = storageEngine.createStorageCursors(cursorContext)) {
             var tx = new CompleteTransaction(transaction, cursorContext, storeCursors);
-            storageEngine.apply(tx, mode);
+            var versionContext = cursorContext.getVersionContext();
+            versionContext.initWrite(tx.transactionId());
+            versionContext.initChunkId(transaction.commandBatch().chunkId());
+            storageEngine.apply(tx, mode, EmptyMemoryTracker.INSTANCE);
         }
     }
 

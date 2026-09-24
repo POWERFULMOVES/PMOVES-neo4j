@@ -33,6 +33,10 @@ object SemanticFeature {
     override def name: String = "show setting"
   }
 
+  case object OidcCredentialForwarding extends SemanticFeature with FeatureToString {
+    override def name: String = "OIDC credential forwarding"
+  }
+
   case object MultipleGraphs extends SemanticFeature with FeatureToString {
     override def name: String = "multiple graphs"
   }
@@ -53,16 +57,74 @@ object SemanticFeature {
     override def name: String = "USE single graph selector"
   }
 
-  case object MatchModes extends SemanticFeature with FeatureToString {
-    override def name: String = "Match modes"
+  case object ExperimentalCypherVersions extends SemanticFeature with FeatureToString {
+    override def name: String = "experimental cypher versions"
   }
 
-  case object ComposableCommands extends SemanticFeature with FeatureToString {
-    override def name: String = "composable commands"
+  case object RelationshipPropertyValueAccessRules extends SemanticFeature with FeatureToString {
+    override def name: String = "Property value access rules on relationships"
   }
 
-  case object GraphTypes extends SemanticFeature with FeatureToString {
-    override def name: String = "`GRAPH TYPE` schema management"
+  case object VectorSearchWithComplexPattern extends SemanticFeature with FeatureToString {
+    override def name: String = "vector search with complex pattern"
+  }
+
+  case object GroupByClause extends SemanticFeature with FeatureToString {
+    override def name: String = "Group By clause"
+  }
+
+  case object LocalCallables extends SemanticFeature with FeatureToString {
+    override def name: String = "local callables"
+  }
+
+  case object ScopeQueries extends SemanticFeature with FeatureToString {
+    override def name: String = "scope queries"
+  }
+
+  case object EnableParsingOfObfuscatedLiterals extends SemanticFeature with FeatureToString {
+    override def name: String = "enable parsing of obfuscated literals"
+  }
+
+  case object DisableTypeCheckingInSemanticAnalysis extends SemanticFeature with FeatureToString {
+    override def name: String = "disable type checking in semantic analysis"
+  }
+
+  /**
+   * Normally, it's not allowed to mix old and new label expression syntax within a clause.
+   * The implementation of this check has had bugs in the past, can be inconvenient for users
+   * and is not necessary for any functionality.
+   * This semantic feature exists to have a workaround of future bugs in semantic analysis.
+   * Note, even with this feature enabled, it's still not allowed to mix syntax within a single expression.
+   */
+  case object AllowClauseWithMixedLabelSyntax extends SemanticFeature with FeatureToString {
+    override def name: String = "Allow mixing old and new label expression syntax in clauses"
+  }
+
+  case object AttributeBasedAccessControl extends SemanticFeature with FeatureToString {
+    override def name: String = "Attribute based access control"
+  }
+
+  /**
+   * Allows `USING EXPAND ...` to force expand direction and order
+   */
+  case object ExpandHints extends SemanticFeature with FeatureToString {
+    override def name: String = "Expand hints"
+  }
+
+  case object UserTags extends SemanticFeature with FeatureToString {
+    override def name: String = "User tags"
+  }
+
+  case object ValueInListProperty extends SemanticFeature with FeatureToString {
+    override def name: String = "access rules checking for a value in a list property"
+  }
+
+  case object UserTagsInPropertyRules extends SemanticFeature with FeatureToString {
+    override def name: String = "user tags in property-based access control rules"
+  }
+
+  case object SecretManager extends SemanticFeature with FeatureToString {
+    override def name: String = "secret manager"
   }
 
   private val allSemanticFeatures = Set(
@@ -71,9 +133,22 @@ object SemanticFeature {
     UseAsMultipleGraphsSelector,
     UseAsSingleGraphSelector,
     ShowSetting,
-    MatchModes,
-    ComposableCommands,
-    GraphTypes
+    OidcCredentialForwarding,
+    ExperimentalCypherVersions,
+    RelationshipPropertyValueAccessRules,
+    VectorSearchWithComplexPattern,
+    LocalCallables,
+    ScopeQueries,
+    EnableParsingOfObfuscatedLiterals,
+    DisableTypeCheckingInSemanticAnalysis,
+    AllowClauseWithMixedLabelSyntax,
+    AttributeBasedAccessControl,
+    ExpandHints,
+    UserTags,
+    GroupByClause,
+    ValueInListProperty,
+    UserTagsInPropertyRules,
+    SecretManager
   )
 
   def fromString(str: String): SemanticFeature =

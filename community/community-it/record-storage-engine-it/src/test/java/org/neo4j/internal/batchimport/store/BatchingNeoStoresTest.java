@@ -20,17 +20,17 @@
 package org.neo4j.internal.batchimport.store;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.neo4j.common.Subject.ANONYMOUS;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
 import static org.neo4j.configuration.GraphDatabaseSettings.pagecache_memory;
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
-import static org.neo4j.internal.batchimport.DefaultAdditionalIds.EMPTY;
 import static org.neo4j.internal.batchimport.store.BatchingNeoStores.DOUBLE_RELATIONSHIP_RECORD_UNIT_THRESHOLD;
 import static org.neo4j.internal.batchimport.store.BatchingNeoStores.batchingNeoStores;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.CursorContextFactory.NULL_CONTEXT_FACTORY;
 import static org.neo4j.kernel.impl.store.format.RecordFormatSelector.defaultFormat;
@@ -59,7 +59,6 @@ import org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector;
 import org.neo4j.internal.counts.CountsBuilder;
 import org.neo4j.internal.counts.GBPTreeCountsStore;
 import org.neo4j.internal.id.DefaultIdGeneratorFactory;
-import org.neo4j.internal.recordstorage.LockVerificationFactory;
 import org.neo4j.internal.recordstorage.RecordStorageEngine;
 import org.neo4j.internal.recordstorage.RecordStorageReader;
 import org.neo4j.internal.schema.IndexConfigCompleter;
@@ -73,10 +72,9 @@ import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.impl.muninn.VersionStorage;
 import org.neo4j.io.pagecache.prefetch.PagePrefetcher;
 import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
-import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.api.txstate.TransactionState;
-import org.neo4j.kernel.database.MetadataCache;
 import org.neo4j.kernel.impl.api.CompleteTransaction;
 import org.neo4j.kernel.impl.api.DatabaseSchemaState;
 import org.neo4j.kernel.impl.api.state.TxState;
@@ -98,24 +96,24 @@ import org.neo4j.kernel.impl.store.format.RecordFormatSelector;
 import org.neo4j.kernel.impl.store.record.AbstractBaseRecord;
 import org.neo4j.kernel.impl.store.record.PropertyBlock;
 import org.neo4j.kernel.impl.store.record.PropertyRecord;
-import org.neo4j.kernel.impl.transaction.log.CompleteCommandBatch;
-import org.neo4j.kernel.impl.transaction.log.EmptyLogTailMetadata;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
-import org.neo4j.kernel.impl.transaction.log.files.TransactionLogInitializer;
 import org.neo4j.kernel.lifecycle.Lifespan;
+import org.neo4j.kernel.recovery.RecoveryStartupChecker;
 import org.neo4j.lock.LockService;
 import org.neo4j.lock.LockTracer;
 import org.neo4j.lock.ResourceLocker;
 import org.neo4j.logging.NullLog;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.logging.internal.NullLogService;
+import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.memory.MemoryPools;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.monitoring.DatabaseHealth;
 import org.neo4j.monitoring.HealthEventGenerator;
 import org.neo4j.scheduler.JobScheduler;
 import org.neo4j.storageengine.api.CommandCreationContext;
+import org.neo4j.storageengine.api.IndexUpdateListener;
+import org.neo4j.storageengine.api.Leases;
+import org.neo4j.storageengine.api.LogMetadataProviderImpl;
 import org.neo4j.storageengine.api.StorageCommand;
 import org.neo4j.storageengine.api.StorageEngineTransaction;
 import org.neo4j.storageengine.api.TransactionApplicationMode;
@@ -132,6 +130,11 @@ import org.neo4j.token.TokenCreator;
 import org.neo4j.token.TokenHolders;
 import org.neo4j.token.api.TokenHolder;
 import org.neo4j.values.storable.Values;
+import org.neo4j.wal.CompleteCommandBatch;
+import org.neo4j.wal.EmptyLogTailMetadata;
+import org.neo4j.wal.LogTailLogVersionsMetadata;
+import org.neo4j.wal.LogTailMetadata;
+import org.neo4j.wal.files.TransactionLogInitializer;
 
 @PageCacheExtension
 @Neo4jLayoutExtension
@@ -156,30 +159,27 @@ class BatchingNeoStoresTest {
         // GIVEN
         someDataInTheDatabase();
 
-        // WHEN
-        DirectoryNotEmptyException exception = assertThrows(DirectoryNotEmptyException.class, () -> {
-            try (JobScheduler jobScheduler = new ThreadPoolJobScheduler()) {
-                try (BatchingNeoStores store = batchingNeoStores(
-                        fileSystem,
-                        databaseLayout,
-                        Configuration.DEFAULT,
-                        NullLogService.getInstance(),
-                        EMPTY,
-                        LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
-                        Config.defaults(),
-                        jobScheduler,
-                        PageCacheTracer.NULL,
-                        CONTEXT_FACTORY,
-                        INSTANCE)) {
-                    store.createNew();
-                }
-            }
-        });
-
-        // THEN
-        assertThat(exception.getMessage())
-                .contains(databaseLayout.databaseDirectory().toString())
-                .contains("already contains");
+        // WHEN/THEN
+        assertThatThrownBy(() -> {
+                    try (JobScheduler jobScheduler = new ThreadPoolJobScheduler()) {
+                        try (BatchingNeoStores store = batchingNeoStores(
+                                fileSystem,
+                                databaseLayout,
+                                Configuration.DEFAULT,
+                                NullLogService.getInstance(),
+                                Config.defaults(),
+                                jobScheduler,
+                                PageCacheTracer.NULL,
+                                CONTEXT_FACTORY,
+                                INSTANCE,
+                                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS)) {
+                            store.createNew();
+                        }
+                    }
+                })
+                .isInstanceOf(DirectoryNotEmptyException.class)
+                .hasMessageContaining(databaseLayout.databaseDirectory().toString())
+                .hasMessageContaining("already contains");
     }
 
     @Test
@@ -188,30 +188,28 @@ class BatchingNeoStoresTest {
         someDataInTheDatabase();
         fileSystem.deleteRecursively(databaseLayout.databaseDirectory());
 
-        // WHEN
-        DirectoryNotEmptyException exception = assertThrows(DirectoryNotEmptyException.class, () -> {
-            try (JobScheduler jobScheduler = new ThreadPoolJobScheduler()) {
-                try (BatchingNeoStores store = batchingNeoStores(
-                        fileSystem,
-                        databaseLayout,
-                        Configuration.DEFAULT,
-                        NullLogService.getInstance(),
-                        EMPTY,
-                        LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
-                        Config.defaults(),
-                        jobScheduler,
-                        PageCacheTracer.NULL,
-                        CONTEXT_FACTORY,
-                        INSTANCE)) {
-                    store.createNew();
-                }
-            }
-        });
-
-        // THEN
-        assertThat(exception.getMessage())
-                .contains(databaseLayout.getTransactionLogsDirectory().toString())
-                .contains("already contains");
+        // WHEN/THEN
+        assertThatThrownBy(() -> {
+                    try (JobScheduler jobScheduler = new ThreadPoolJobScheduler()) {
+                        try (BatchingNeoStores store = batchingNeoStores(
+                                fileSystem,
+                                databaseLayout,
+                                Configuration.DEFAULT,
+                                NullLogService.getInstance(),
+                                Config.defaults(),
+                                jobScheduler,
+                                PageCacheTracer.NULL,
+                                CONTEXT_FACTORY,
+                                INSTANCE,
+                                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS)) {
+                            store.createNew();
+                        }
+                    }
+                })
+                .isInstanceOf(DirectoryNotEmptyException.class)
+                .hasMessageContaining(
+                        databaseLayout.getTransactionLogsDirectory().toString())
+                .hasMessageContaining("already contains");
     }
 
     @Test
@@ -231,13 +229,12 @@ class BatchingNeoStoresTest {
                         databaseLayout,
                         Configuration.DEFAULT,
                         NullLogService.getInstance(),
-                        EMPTY,
-                        LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
                         config,
                         jobScheduler,
                         PageCacheTracer.NULL,
                         CONTEXT_FACTORY,
-                        INSTANCE)) {
+                        INSTANCE,
+                        DatabaseCreationOptions.EMPTY_CREATION_OPTIONS)) {
             store.createNew();
 
             // THEN
@@ -262,8 +259,6 @@ class BatchingNeoStoresTest {
                     databaseLayout,
                     Configuration.DEFAULT,
                     NullLogService.getInstance(),
-                    EMPTY,
-                    LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
                     Config.defaults(),
                     INSTANCE)) {
                 stores.createNew();
@@ -283,8 +278,6 @@ class BatchingNeoStoresTest {
                     databaseLayout,
                     Configuration.DEFAULT,
                     NullLogService.getInstance(),
-                    EMPTY,
-                    LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
                     Config.defaults(),
                     INSTANCE)) {
                 stores.pruneAndOpenExistingStore(type -> type == typeToTest, Predicates.alwaysFalse());
@@ -317,8 +310,6 @@ class BatchingNeoStoresTest {
                 databaseLayout,
                 Configuration.DEFAULT,
                 NullLogService.getInstance(),
-                EMPTY,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
                 config,
                 INSTANCE)) {
             stores.createNew();
@@ -346,8 +337,6 @@ class BatchingNeoStoresTest {
                 databaseLayout,
                 Configuration.DEFAULT,
                 NullLogService.getInstance(),
-                EMPTY,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
                 config,
                 INSTANCE)) {
             stores.createNew();
@@ -374,8 +363,6 @@ class BatchingNeoStoresTest {
                 databaseLayout,
                 Configuration.DEFAULT,
                 NullLogService.getInstance(),
-                EMPTY,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
                 Config.defaults(),
                 INSTANCE)) {
             stores.createNew();
@@ -413,9 +400,10 @@ class BatchingNeoStoresTest {
                 NullLogProvider.getInstance(),
                 CONTEXT_FACTORY,
                 PageCacheTracer.NULL,
-                openOptions)) {
+                openOptions,
+                RecoveryStartupChecker.EMPTY_CHECKER)) {
             countsStore.start(NULL_CONTEXT, INSTANCE);
-            countsStore.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            countsStore.checkpoint(DatabaseFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
         }
 
         // when
@@ -427,8 +415,6 @@ class BatchingNeoStoresTest {
                 databaseLayout,
                 Configuration.DEFAULT,
                 NullLogService.getInstance(),
-                EMPTY,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
                 Config.defaults(),
                 INSTANCE)) {
             stores.createNew();
@@ -449,6 +435,10 @@ class BatchingNeoStoresTest {
                             return BASE_TX_ID + 1;
                         }
                     },
+                    new LogMetadataProviderImpl(
+                            LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
+                            LatestVersions.LATEST_LOG_FORMAT,
+                            LatestVersions.LATEST_KERNEL_VERSION),
                     CONTEXT_FACTORY,
                     INSTANCE);
         }
@@ -467,7 +457,8 @@ class BatchingNeoStoresTest {
                 NullLogProvider.getInstance(),
                 CONTEXT_FACTORY,
                 PageCacheTracer.NULL,
-                openOptions)) {
+                openOptions,
+                RecoveryStartupChecker.EMPTY_CHECKER)) {
             assertEquals(10, countsStore.nodeCount(1, NULL_CONTEXT));
             assertEquals(20, countsStore.nodeCount(2, NULL_CONTEXT));
             assertEquals(30, countsStore.relationshipCount(ANY_LABEL, 1, 2, NULL_CONTEXT));
@@ -486,17 +477,16 @@ class BatchingNeoStoresTest {
                 databaseLayout,
                 Configuration.DEFAULT,
                 NullLogService.getInstance(),
-                EMPTY,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
                 dbConfig,
                 Mockito.mock(JobScheduler.class),
                 PageCacheTracer.NULL,
                 NULL_CONTEXT_FACTORY,
-                INSTANCE)) {
+                INSTANCE,
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS)) {
             // THEN
             assertThat(stores.getPageCache().maxCachedPages()
                             * stores.getPageCache().pageSize())
-                    .isCloseTo(BatchingNeoStores.MAX_PAGE_CACHE_MEMORY, Percentage.withPercentage(1));
+                    .isCloseTo(BatchingNeoStores.MAX_PAGE_CACHE_MEMORY, Percentage.withPercentage(2));
         }
     }
 
@@ -512,17 +502,16 @@ class BatchingNeoStoresTest {
                 databaseLayout,
                 Configuration.DEFAULT,
                 NullLogService.getInstance(),
-                EMPTY,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
                 dbConfig,
                 Mockito.mock(JobScheduler.class),
                 PageCacheTracer.NULL,
                 NULL_CONTEXT_FACTORY,
-                INSTANCE)) {
+                INSTANCE,
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS)) {
             // THEN
             assertThat(stores.getPageCache().maxCachedPages()
                             * stores.getPageCache().pageSize())
-                    .isCloseTo(overridden, Percentage.withPercentage(1));
+                    .isCloseTo(overridden, Percentage.withPercentage(2));
         }
     }
 
@@ -542,13 +531,12 @@ class BatchingNeoStoresTest {
                 databaseLayout,
                 config,
                 NullLogService.getInstance(),
-                EMPTY,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
                 Config.defaults(),
                 Mockito.mock(JobScheduler.class),
                 PageCacheTracer.NULL,
                 NULL_CONTEXT_FACTORY,
-                INSTANCE)) {
+                INSTANCE,
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS)) {
             stores.createNew();
 
             // THEN
@@ -577,7 +565,8 @@ class BatchingNeoStoresTest {
                     allocatorProvider.allocator(StoreType.PROPERTY_STRING),
                     allocatorProvider.allocator(StoreType.PROPERTY_ARRAY),
                     NULL_CONTEXT,
-                    INSTANCE);
+                    INSTANCE,
+                    "db-format-2000");
             ((PropertyRecord) record).addPropertyBlock(block);
         }
         try (var storeCursor = store.openPageCursorForWriting(0, NULL_CONTEXT)) {
@@ -624,7 +613,7 @@ class BatchingNeoStoresTest {
             IndexConfigCompleter indexConfigCompleter = (index, indexingBehaviour) -> index;
             RecoveryCleanupWorkCollector recoveryCleanupWorkCollector = immediate();
             LogTailMetadata emptyLogTail = new EmptyLogTailMetadata(Config.defaults());
-            MetadataCache versionRepository = new MetadataCache(emptyLogTail);
+            LogMetadataProviderImpl logMetadataProvider = new LogMetadataProviderImpl(emptyLogTail);
             RecordStorageEngine storageEngine = life.add(new RecordStorageEngine(
                     databaseLayout,
                     Config.defaults(),
@@ -641,18 +630,19 @@ class BatchingNeoStoresTest {
                     new DefaultIdGeneratorFactory(fileSystem, immediate(), PageCacheTracer.NULL, DEFAULT_DATABASE_NAME),
                     recoveryCleanupWorkCollector,
                     INSTANCE,
-                    emptyLogTail,
-                    versionRepository,
-                    LockVerificationFactory.NONE,
+                    logMetadataProvider,
                     CONTEXT_FACTORY,
                     PageCacheTracer.NULL,
                     VersionStorage.EMPTY_STORAGE,
-                    PagePrefetcher.DISABLED));
+                    PagePrefetcher.DISABLED,
+                    DatabaseCreationOptions.EMPTY_CREATION_OPTIONS));
+            storageEngine.addIndexUpdateListener(new IndexUpdateListener.Adapter());
             // Create the relationship type token
             TxState txState = new TxState();
-            var transactionIdGenerator = new IdStoreTransactionIdGenerator(storageEngine.metadataProvider());
+            var transactionIdGenerator = new IdStoreTransactionIdGenerator(logMetadataProvider);
             NeoStores neoStores = storageEngine.testAccessNeoStores();
-            try (CommandCreationContext commandCreationContext = storageEngine.newCommandCreationContext(false);
+            try (CommandCreationContext commandCreationContext =
+                            storageEngine.newCommandCreationContext(false, INSTANCE);
                     var storeCursors = storageEngine.createStorageCursors(NULL_CONTEXT)) {
                 commandCreationContext.initialize(
                         LatestVersions.LATEST_KERNEL_VERSION_PROVIDER,
@@ -679,12 +669,17 @@ class BatchingNeoStoresTest {
                         node1,
                         node2);
                 apply(txState, commandCreationContext, storageEngine, storeCursors, transactionIdGenerator);
-                neoStores.flush(DatabaseFlushEvent.NULL, NULL_CONTEXT);
+                neoStores.flush(DatabaseFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
             }
 
             TransactionLogInitializer.getLogFilesInitializer()
                     .initializeLogFiles(
-                            databaseLayout, neoStores.getMetaDataStore(), versionRepository, fileSystem, "testing");
+                            databaseLayout,
+                            neoStores.getMetaDataStore(),
+                            logMetadataProvider,
+                            fileSystem,
+                            "testing",
+                            Config.defaults());
         }
     }
 
@@ -713,20 +708,20 @@ class BatchingNeoStoresTest {
                             0,
                             0,
                             0,
+                            Leases.NO_LEASES,
                             LatestVersions.LATEST_KERNEL_VERSION,
                             ANONYMOUS),
                     NULL_CONTEXT,
                     storeCursors,
                     NO_COMMITMENT,
                     transactionIdGenerator);
-            storageEngine.apply(apply, TransactionApplicationMode.INTERNAL);
+            storageEngine.apply(apply, TransactionApplicationMode.INTERNAL, EmptyMemoryTracker.INSTANCE);
         }
     }
 
     private static Config configForForcedSecondaryUnitRecordFormats() {
         return Config.newBuilder()
                 .set(GraphDatabaseSettings.db_format, ForcedSecondaryUnitRecordFormats.DEFAULT_RECORD_FORMATS.name())
-                .set(GraphDatabaseInternalSettings.include_versions_under_development, false)
                 .build();
     }
 

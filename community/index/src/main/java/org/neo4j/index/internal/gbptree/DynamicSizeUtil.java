@@ -292,6 +292,12 @@ public class DynamicSizeUtil {
         return (secondByte & FLAG_SECOND_BYTE_OFFLOAD) != 0;
     }
 
+    /**
+     * Gets the long representing the offload ID
+     * assumes the cursor is in position such that {@code cursor.getLong()} would read the offloadId
+     *
+     * @param cursor - cursor
+     */
     static long readOffloadId(PageCursor cursor) {
         return cursor.getLong();
     }
@@ -365,40 +371,44 @@ public class DynamicSizeUtil {
 
     /**
      * Given the offsets and sizes, moves bytes located at those offsets to the right boundary and updates offset array using posToOffsetFunction.
-     *
+     * <p>
      * This function does second and third steps of node defragmetation:
      * The goal is to compact all alive keys in the node by reusing the space occupied by dead keys.
-     *
+     * <p>
      * BEFORE
      * [8][X][1][3][X][2][X][7][5]
-     *
+     * <p>
      * AFTER
      * .........[8][1][3][2][7][5]
      * ^ Reclaimed space
-     *
+     * <p>
      * It works in 3 simple steps:
      * 1. collect all alive blocks with their sizes
      * 2. move all alive blocks to the rightmost position
      * 3. update offsets in offsets array
-     *
+     * <p>
      * See {@link DynamicSizeUtil#recordAliveBlocks} for the first step
      *
-     * @param cursor - cursor pointing to the node
-     * @param count - number of elements in offsets and sizes arrays
-     * @param offsets - offsets to move
-     * @param sizes - corresponding numbers of bytes at offsets
-     * @param rightBoundary - right boundary
+     * @param cursor              - cursor pointing to the node
+     * @param count               - number of elements in offsets and sizes arrays
+     * @param offsetCount
+     * @param offsets             - offsets to move
+     * @param sizes               - corresponding numbers of bytes at offsets
+     * @param rightBoundary       - right boundary
      * @param posToOffsetFunction - function to map position in offset array to offset
      */
     static void compactToRight(
             PageCursor cursor,
             int count,
+            int offsetCount,
             int[] offsets,
             int[] sizes,
             int rightBoundary,
             IntToIntFunction posToOffsetFunction) {
         var remappedOffsets = compactRight(cursor, count, offsets, sizes, rightBoundary);
-        remapOffsets(cursor, count, remappedOffsets, posToOffsetFunction);
+        if (!remappedOffsets.isEmpty()) {
+            remapOffsets(cursor, offsetCount, remappedOffsets, posToOffsetFunction);
+        }
     }
 
     private static void remapOffsets(
@@ -407,11 +417,11 @@ public class DynamicSizeUtil {
             int keyPosOffset = posToOffsetFunction.valueOf(pos);
             cursor.setOffset(keyPosOffset);
             int keyOffset = getUnsignedShort(cursor);
-            cursor.setOffset(keyPosOffset);
-            assert remappedOffsets.containsKey(keyOffset)
-                    : "missing mapping for offset " + keyOffset + " at pos " + pos + " key count " + keyCount
-                            + " all mappings " + remappedOffsets;
-            putUnsignedShort(cursor, remappedOffsets.get(keyOffset));
+            int remappedKeyOffset = remappedOffsets.getIfAbsent(keyOffset, keyOffset);
+            if (remappedKeyOffset != keyOffset) {
+                cursor.setOffset(keyPosOffset);
+                putUnsignedShort(cursor, remappedKeyOffset);
+            }
         }
     }
 
@@ -426,8 +436,8 @@ public class DynamicSizeUtil {
             targetOffset -= entrySize;
             if (sourceOffset != targetOffset) {
                 cursor.copyTo(sourceOffset, cursor, targetOffset, entrySize);
+                remappedOffsets.put(sourceOffset, targetOffset);
             }
-            remappedOffsets.put(sourceOffset, targetOffset);
         }
 
         // Update allocOffset¸
@@ -474,10 +484,19 @@ public class DynamicSizeUtil {
      * Inline key value size cap is calculated based of payload size and capped with max supported size of key for
      * inlined encoding.
      */
-    static int inlineKeyValueSizeCap(int payloadSize) {
+    static int inlineKeyValueSizeCapLeafNode(int payloadSize, int headerSize) {
         int totalOverhead = OFFSET_SIZE + MAX_SIZE_KEY_VALUE_SIZE;
         int capToFitNumberOfEntriesPerPage =
-                (payloadSize - HEADER_LENGTH_DYNAMIC) / LEAST_NUMBER_OF_ENTRIES_PER_PAGE - totalOverhead;
+                (payloadSize - headerSize) / LEAST_NUMBER_OF_ENTRIES_PER_PAGE - totalOverhead;
+        return Math.min(MAX_TWO_BYTE_KEY_SIZE, capToFitNumberOfEntriesPerPage);
+    }
+
+    static int inlineKeyValueSizeCapInternalNode(int payloadSize) {
+        int totalOverhead = (OFFSET_SIZE + MAX_SIZE_KEY_VALUE_SIZE + GenerationSafePointerPair.SIZE)
+                        * LEAST_NUMBER_OF_ENTRIES_PER_PAGE
+                + GenerationSafePointerPair.SIZE;
+        int capToFitNumberOfEntriesPerPage =
+                (payloadSize - HEADER_LENGTH_DYNAMIC - totalOverhead) / LEAST_NUMBER_OF_ENTRIES_PER_PAGE;
         return Math.min(MAX_TWO_BYTE_KEY_SIZE, capToFitNumberOfEntriesPerPage);
     }
 

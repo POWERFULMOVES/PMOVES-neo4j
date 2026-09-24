@@ -23,6 +23,7 @@ import java.io.IOException;
 import org.neo4j.configuration.Config;
 import org.neo4j.io.fs.ReadableChannel;
 import org.neo4j.kernel.KernelVersion;
+import org.neo4j.memory.MemoryTracker;
 import org.neo4j.storageengine.api.CommandReader;
 import org.neo4j.storageengine.api.CommandReaderFactory;
 import org.neo4j.storageengine.api.StorageCommand;
@@ -49,8 +50,9 @@ public class TestCommandReaderFactory implements CommandReaderFactory {
         private TestCommandReader() {}
 
         @Override
-        public StorageCommand read(ReadableChannel channel) throws IOException {
+        public StorageCommand read(ReadableChannel channel, MemoryTracker memoryTracker) throws IOException {
             int length = channel.getInt();
+            memoryTracker.allocateHeap(length);
             byte[] bytes = new byte[length];
             channel.get(bytes, length);
             return new TestCommand(bytes);

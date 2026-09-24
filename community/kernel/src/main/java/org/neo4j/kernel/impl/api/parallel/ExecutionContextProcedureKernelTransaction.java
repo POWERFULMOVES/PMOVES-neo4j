@@ -22,7 +22,9 @@ package org.neo4j.kernel.impl.api.parallel;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import org.neo4j.cypher.internal.DefaultQueryLanguageScope;
 import org.neo4j.exceptions.KernelException;
+import org.neo4j.graphdb.schema.Schema;
 import org.neo4j.internal.kernel.api.CursorFactory;
 import org.neo4j.internal.kernel.api.ExecutionStatistics;
 import org.neo4j.internal.kernel.api.Locks;
@@ -60,8 +62,11 @@ import org.neo4j.kernel.api.txstate.TransactionState;
 import org.neo4j.kernel.api.txstate.TxStateHolder;
 import org.neo4j.kernel.impl.api.ClockContext;
 import org.neo4j.kernel.impl.coreapi.InternalTransaction;
+import org.neo4j.kernel.impl.coreapi.schema.SchemaImpl;
+import org.neo4j.memory.HeapEstimatorCacheConfig;
 import org.neo4j.memory.MemoryTracker;
-import org.neo4j.storageengine.api.StorageEngineCostCharacteristics;
+import org.neo4j.monitoring.ExceptionHandlerService;
+import org.neo4j.storageengine.api.StorageEngineCharacteristics;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 
 public class ExecutionContextProcedureKernelTransaction implements KernelTransaction, TxStateHolder {
@@ -80,7 +85,7 @@ public class ExecutionContextProcedureKernelTransaction implements KernelTransac
     }
 
     @Override
-    public long commit(KernelTransactionMonitor kernelTransactionMonitor) throws TransactionFailureException {
+    public long commit(Monitor monitor) throws TransactionFailureException {
         throw new UnsupportedOperationException(
                 "Committing ongoing transaction inside of a procedure or a function is unsupported.");
     }
@@ -152,8 +157,8 @@ public class ExecutionContextProcedureKernelTransaction implements KernelTransac
     }
 
     @Override
-    public StorageEngineCostCharacteristics storageEngineCostCharacteristics() {
-        return ktx.storageEngineCostCharacteristics();
+    public StorageEngineCharacteristics storageEngineCharacteristics() {
+        return ktx.storageEngineCharacteristics();
     }
 
     @Override
@@ -370,12 +375,12 @@ public class ExecutionContextProcedureKernelTransaction implements KernelTransac
     }
 
     @Override
-    public ExecutionContext createExecutionContext() {
+    public ExecutionContext createExecutionContext(HeapEstimatorCacheConfig heapEstimatorCacheConfig) {
         throw failure("createExecutionContext");
     }
 
     @Override
-    public MemoryTracker createExecutionContextMemoryTracker() {
+    public MemoryTracker createExecutionContextMemoryTracker(HeapEstimatorCacheConfig heapEstimatorCacheConfig) {
         throw failure("createExecutionContextMemoryTracker");
     }
 
@@ -411,6 +416,21 @@ public class ExecutionContextProcedureKernelTransaction implements KernelTransac
     @Override
     public InnerTransactionHandler getInnerTransactionHandler() {
         throw failure("getInnerTransactionHandler");
+    }
+
+    @Override
+    public DefaultQueryLanguageScope defaultQueryLanguageScope() {
+        return ktx.defaultQueryLanguageScope();
+    }
+
+    @Override
+    public ExceptionHandlerService exceptionHandlerService() {
+        return ktx.exceptionHandlerService();
+    }
+
+    @Override
+    public Schema schema() {
+        return new SchemaImpl(this);
     }
 
     // Since TX object is reused, let's check if this is still the same TX

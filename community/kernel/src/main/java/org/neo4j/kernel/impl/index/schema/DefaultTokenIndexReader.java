@@ -67,11 +67,11 @@ public class DefaultTokenIndexReader implements TokenIndexReader {
             EntityRange range,
             CursorContext cursorContext) {
         try {
-            final int tokenId = query.tokenId();
-            final IndexOrder order = constraints.order();
+            int tokenId = query.tokenId();
+            IndexOrder order = constraints.order();
             Seeker<TokenScanKey, TokenScanValue> seeker = seekerForToken(range, tokenId, order, cursorContext);
             IndexProgressor progressor =
-                    new TokenScanValueIndexProgressor(seeker, client, order, range, idLayout, tokenId);
+                    TokenScanValueIndexProgressor.create(seeker, client, order, range, idLayout, tokenId);
             client.initializeQuery(progressor, tokenId, order);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -122,25 +122,25 @@ public class DefaultTokenIndexReader implements TokenIndexReader {
     public void close() {}
 
     private class NativePartitionedTokenScan implements PartitionedTokenScan {
-        private final EntityRange range = EntityRange.FULL;
+        private static final EntityRange range = EntityRange.FULL;
         private final List<TokenScanKey> partitionEdges;
         private final AtomicInteger nextFrom = new AtomicInteger();
 
         NativePartitionedTokenScan(int desiredNumberOfPartitions, CursorContext cursorContext, TokenPredicate query)
                 throws IOException {
             Preconditions.requirePositive(desiredNumberOfPartitions);
-            final var tokenId = query.tokenId();
-            final var fromInclusive = new TokenScanKey(tokenId, idLayout.rangeOf(range.fromInclusive()));
-            final var toExclusive = new TokenScanKey(tokenId, idLayout.rangeOf(range.toExclusive()) + 1);
+            int tokenId = query.tokenId();
+            TokenScanKey fromInclusive = new TokenScanKey(tokenId, idLayout.rangeOf(range.fromInclusive()));
+            TokenScanKey toExclusive = new TokenScanKey(tokenId, idLayout.rangeOf(range.toExclusive()) + 1);
             partitionEdges =
                     index.partitionedSeek(fromInclusive, toExclusive, desiredNumberOfPartitions, cursorContext);
         }
 
         NativePartitionedTokenScan(NativePartitionedTokenScan leadingPartition, TokenPredicate query) {
-            final var tokenId = query.tokenId();
-            final var leadingEdges = leadingPartition.partitionEdges;
+            int tokenId = query.tokenId();
+            List<TokenScanKey> leadingEdges = leadingPartition.partitionEdges;
             partitionEdges = new ArrayList<>(leadingEdges.size());
-            for (final var leadingEdge : leadingEdges) {
+            for (TokenScanKey leadingEdge : leadingEdges) {
                 partitionEdges.add(new TokenScanKey(tokenId, leadingEdge.idRange));
             }
         }
@@ -152,15 +152,15 @@ public class DefaultTokenIndexReader implements TokenIndexReader {
 
         @Override
         public IndexProgressor reservePartition(IndexProgressor.EntityTokenClient client, CursorContext cursorContext) {
-            final var from = nextFrom.getAndIncrement();
-            final var to = from + 1;
+            int from = nextFrom.getAndIncrement();
+            int to = from + 1;
             if (to >= partitionEdges.size()) {
                 return IndexProgressor.EMPTY;
             }
             try {
-                final var fromInclusive = partitionEdges.get(from);
-                final var toExclusive = partitionEdges.get(to);
-                return new TokenScanValueIndexProgressor(
+                TokenScanKey fromInclusive = copyKey(partitionEdges.get(from));
+                TokenScanKey toExclusive = copyKey(partitionEdges.get(to));
+                return TokenScanValueIndexProgressor.create(
                         index.seek(fromInclusive, toExclusive, cursorContext),
                         client,
                         IndexOrder.NONE,
@@ -170,6 +170,10 @@ public class DefaultTokenIndexReader implements TokenIndexReader {
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
             }
+        }
+
+        private static TokenScanKey copyKey(TokenScanKey key) {
+            return new TokenScanKey(key.tokenId, key.idRange);
         }
     }
 }

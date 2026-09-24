@@ -21,18 +21,28 @@ package org.neo4j.kernel.api.impl.schema;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.neo4j.internal.helpers.collection.Iterators.single;
-import static org.neo4j.kernel.api.impl.index.storage.DirectoryFactory.PERSISTENT;
 
 import java.io.IOException;
-import org.junit.jupiter.api.Test;
+import java.nio.file.Path;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.neo4j.configuration.Config;
 import org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker;
+import org.neo4j.graphdb.ResourceIterator;
 import org.neo4j.internal.schema.AllIndexProviderDescriptors;
+import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexPrototype;
 import org.neo4j.internal.schema.SchemaDescriptors;
 import org.neo4j.io.fs.FileSystemAbstraction;
+import org.neo4j.kernel.api.IndexFileSnapshotter;
+import org.neo4j.kernel.api.impl.index.DatabaseIndex;
 import org.neo4j.kernel.api.impl.index.LuceneMinimalIndexAccessor;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneContext;
+import org.neo4j.kernel.api.impl.index.storage.DirectoryFactory;
 import org.neo4j.kernel.api.impl.index.storage.PartitionedIndexStorage;
+import org.neo4j.kernel.api.impl.schema.text.TextIndexBuilder;
+import org.neo4j.kernel.api.index.ValueIndexReader;
+import org.neo4j.logging.NullLogProvider;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
@@ -45,48 +55,54 @@ class LuceneMinimalIndexAccessorTest {
     @Inject
     private TestDirectory directory;
 
-    @Test
-    void shouldSnapshotFailureFileOnFailedIndex() throws IOException {
-        var indexDescriptor = IndexPrototype.forSchema(
-                        SchemaDescriptors.forLabel(1, 2), AllIndexProviderDescriptors.TEXT_V2_DESCRIPTOR)
+    @ParameterizedTest
+    @EnumSource
+    void shouldSnapshotFailureFileOnFailedIndex(LuceneContext luceneContext) throws IOException {
+        IndexDescriptor indexDescriptor = IndexPrototype.forSchema(
+                        SchemaDescriptors.forLabel(1, 2), AllIndexProviderDescriptors.TEXT_V3_DESCRIPTOR)
                 .withName("failure")
                 .materialise(5);
-        var storage = new PartitionedIndexStorage(PERSISTENT, fs, directory.directory("root"));
+        PartitionedIndexStorage storage = new PartitionedIndexStorage(
+                luceneContext, DirectoryFactory.persistent(luceneContext), fs, directory.directory("root"));
 
-        var readOnlyChecker = DatabaseReadOnlyChecker.writable();
-        try (var index = TextIndexBuilder.create(indexDescriptor, readOnlyChecker, Config.defaults())
+        DatabaseReadOnlyChecker readOnlyChecker = DatabaseReadOnlyChecker.writable();
+        try (DatabaseIndex<ValueIndexReader> index = TextIndexBuilder.create(
+                        indexDescriptor, readOnlyChecker, Config.defaults(), NullLogProvider.getInstance())
                 .withIndexStorage(storage)
                 .withFileSystem(fs)
                 .build()) {
             index.create();
             index.markAsFailed("This is a failure");
-            var accessor = new LuceneMinimalIndexAccessor<>(indexDescriptor, index, false);
-            try (var snapshot = accessor.snapshotFiles()) {
-                var failureFile = single(snapshot);
+            IndexFileSnapshotter accessor = new LuceneMinimalIndexAccessor<>(indexDescriptor, index, false);
+            try (ResourceIterator<Path> snapshot = accessor.snapshotFiles()) {
+                Path failureFile = single(snapshot);
                 assertThat(failureFile.toString()).contains("failure");
             }
         }
     }
 
-    @Test
-    void shouldSnapshotIndexFileOnOnline() throws IOException {
-        var indexDescriptor = IndexPrototype.forSchema(
-                        SchemaDescriptors.forLabel(1, 2), AllIndexProviderDescriptors.TEXT_V2_DESCRIPTOR)
+    @ParameterizedTest
+    @EnumSource
+    void shouldSnapshotIndexFileOnOnline(LuceneContext luceneContext) throws IOException {
+        IndexDescriptor indexDescriptor = IndexPrototype.forSchema(
+                        SchemaDescriptors.forLabel(1, 2), AllIndexProviderDescriptors.TEXT_V3_DESCRIPTOR)
                 .withName("failure")
                 .materialise(5);
-        var storage = new PartitionedIndexStorage(PERSISTENT, fs, directory.directory("root"));
+        PartitionedIndexStorage storage = new PartitionedIndexStorage(
+                luceneContext, DirectoryFactory.persistent(luceneContext), fs, directory.directory("root"));
 
-        var readOnlyChecker = DatabaseReadOnlyChecker.writable();
-        try (var index = TextIndexBuilder.create(indexDescriptor, readOnlyChecker, Config.defaults())
+        DatabaseReadOnlyChecker readOnlyChecker = DatabaseReadOnlyChecker.writable();
+        try (DatabaseIndex<ValueIndexReader> index = TextIndexBuilder.create(
+                        indexDescriptor, readOnlyChecker, Config.defaults(), NullLogProvider.getInstance())
                 .withIndexStorage(storage)
                 .withFileSystem(fs)
                 .build()) {
             index.create();
             index.open();
-            var accessor = new LuceneMinimalIndexAccessor<>(indexDescriptor, index, false);
-            try (var snapshot = accessor.snapshotFiles()) {
+            IndexFileSnapshotter accessor = new LuceneMinimalIndexAccessor<>(indexDescriptor, index, false);
+            try (ResourceIterator<Path> snapshot = accessor.snapshotFiles()) {
                 while (snapshot.hasNext()) {
-                    var file = snapshot.next();
+                    Path file = snapshot.next();
                     assertThat(file.toString()).doesNotContain("failure");
                 }
             }

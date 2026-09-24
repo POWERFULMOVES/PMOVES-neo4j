@@ -20,19 +20,25 @@
 package org.neo4j.fabric.transaction;
 
 import static java.util.Collections.emptyMap;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Answers.RETURNS_MOCKS;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.neo4j.configuration.GraphDatabaseSettings.shutdown_transaction_end_timeout;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.neo4j.bolt.protocol.common.message.AccessMode;
-import org.neo4j.bolt.protocol.common.message.request.connection.RoutingContext;
+import org.neo4j.boltmessages.AccessMode;
+import org.neo4j.boltmessages.request.connection.RoutingContext;
 import org.neo4j.configuration.Config;
 import org.neo4j.fabric.bookmark.TransactionBookmarkManager;
 import org.neo4j.fabric.eval.CatalogManager;
@@ -48,9 +54,23 @@ import org.neo4j.kernel.database.DatabaseIdFactory;
 import org.neo4j.kernel.database.DatabaseReferenceImpl;
 import org.neo4j.kernel.database.NormalizedDatabaseName;
 import org.neo4j.kernel.impl.query.QueryExecutionConfiguration;
+import org.neo4j.scheduler.CallableExecutorService;
 import org.neo4j.time.Clocks;
+import org.neo4j.time.SystemNanoClock;
 
 class TransactionManagerTest {
+
+    private static ExecutorService executorService;
+
+    @BeforeAll
+    static void beforeAll() {
+        executorService = Executors.newVirtualThreadPerTaskExecutor();
+    }
+
+    @AfterAll
+    static void afterAll() {
+        executorService.shutdown();
+    }
 
     @Test
     void terminateNonLocalTransactionsOnStop() {
@@ -59,7 +79,7 @@ class TransactionManagerTest {
         when(localTransactionContext.isEmptyContext()).thenReturn(true);
 
         var fabricRemoteExecutor = mock(FabricRemoteExecutor.class);
-        when(fabricRemoteExecutor.startTransactionContext(any(), any(), any()))
+        when(fabricRemoteExecutor.startTransactionContext(any(), any(), any(), any()))
                 .thenReturn(localTransactionContext, remoteTransactionContext, localTransactionContext);
 
         var localExecutor = mock(FabricLocalExecutor.class, RETURNS_MOCKS);
@@ -81,7 +101,8 @@ class TransactionManagerTest {
                 config,
                 guard,
                 errorReporter,
-                globalProcedures);
+                globalProcedures,
+                new CallableExecutorService(executorService));
 
         // local tx
         var tx1 = transactionManager.begin(createTransactionInfo(), bookmarkManager);
@@ -95,10 +116,48 @@ class TransactionManagerTest {
         tx3.markForTermination(Status.Transaction.Outdated);
         transactionManager.stop();
 
-        assertTrue(tx1.isOpen());
-        assertFalse(tx2.isOpen());
-        assertFalse(tx3.isOpen());
-        assertTrue(tx4.isOpen());
+        assertThat(tx1.isOpen()).isTrue();
+        assertThat(tx2.isOpen()).isFalse();
+        assertThat(tx3.isOpen()).isFalse();
+        assertThat(tx4.isOpen()).isTrue();
+    }
+
+    @Test
+    void beginAuthorizesWithCurrentTime() {
+        var remoteTransactionContext = mock(FabricRemoteExecutor.RemoteTransactionContext.class);
+        var localTransactionContext = mock(FabricRemoteExecutor.RemoteTransactionContext.class);
+        when(localTransactionContext.isEmptyContext()).thenReturn(true);
+
+        var fabricRemoteExecutor = mock(FabricRemoteExecutor.class);
+        when(fabricRemoteExecutor.startTransactionContext(any(), any(), any(), any()))
+                .thenReturn(localTransactionContext, remoteTransactionContext, localTransactionContext);
+
+        var clock = mock(SystemNanoClock.class);
+        var now = 1234L;
+        when(clock.millis()).thenReturn(now);
+
+        var loginContext = mock(LoginContext.class);
+        var transactionInfo = mock(FabricTransactionInfo.class);
+        when(transactionInfo.getLoginContext()).thenReturn(loginContext);
+        DatabaseReferenceImpl databaseReference = mock(DatabaseReferenceImpl.class);
+        when(transactionInfo.getSessionDatabaseReference()).thenReturn(databaseReference);
+
+        var transactionManager = new TransactionManager(
+                fabricRemoteExecutor,
+                mock(FabricLocalExecutor.class, RETURNS_MOCKS),
+                mock(CatalogManager.class),
+                mock(FabricTransactionMonitor.class),
+                mock(AbstractSecurityLog.class),
+                clock,
+                Config.defaults(),
+                mock(AvailabilityGuard.class),
+                mock(ErrorReporter.class),
+                mock(GlobalProcedures.class),
+                new CallableExecutorService(executorService));
+
+        transactionManager.begin(transactionInfo, mock(TransactionBookmarkManager.class));
+        transactionManager.stop();
+        verify(loginContext).authorize(eq(LoginContext.IdLookup.EMPTY), eq(databaseReference), any(), eq(now));
     }
 
     private static FabricTransactionInfo createTransactionInfo() {
@@ -114,6 +173,7 @@ class TransactionManagerTest {
                 Duration.ZERO,
                 emptyMap(),
                 new RoutingContext(true, emptyMap()),
-                QueryExecutionConfiguration.DEFAULT_CONFIG);
+                QueryExecutionConfiguration.DEFAULT_CONFIG,
+                List.of());
     }
 }

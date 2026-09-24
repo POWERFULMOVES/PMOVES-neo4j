@@ -19,19 +19,31 @@ package org.neo4j.cypher.internal.util.symbols
 import org.neo4j.cypher.internal.util.ASTNode
 import org.neo4j.cypher.internal.util.InputPosition
 
+import scala.annotation.tailrec
+
 trait CypherType extends ASTNode {
   def parentType: CypherType
-  val isAbstract: Boolean = false
 
   // e.g BOOLEAN set(true, false, null) is nullable, BOOLEAN NOT NULL set(true, false) is not
   def isNullable: Boolean
+  def isNotNullContaining: Boolean = !isNullable
   def hasCypherParserSupport: Boolean = true
 
-  def hasValueRepresentation: Boolean = false
+  /**
+   * Checks if the CypherType could or could not be stored in a property.
+   */
+  def couldBeStoredInProperty: Boolean = false
+
+  /**
+   * Checks if the CypherType guarantees that it can be stored in a property.
+   */
+  def canBeStoredInProperty: Boolean = couldBeStoredInProperty
 
   def withIsNullable(isNullable: Boolean): CypherType
 
   def description: String = if (isNullable) toCypherTypeString else s"$toCypherTypeString NOT NULL"
+
+  override def toString: String = if (isNullable) toClassString else s"${toClassString}NotNull"
 
   def withPosition(position: InputPosition): CypherType
 
@@ -70,6 +82,7 @@ trait CypherType extends ASTNode {
 
   def parents: Seq[CypherType] = parents(Vector.empty)
 
+  @tailrec
   private def parents(accumulator: Seq[CypherType]): Seq[CypherType] =
     if (this.parentType == this)
       accumulator
@@ -82,7 +95,7 @@ trait CypherType extends ASTNode {
   supertype of, the class or interface represented by the
   specified {@code CypherType} parameter.
    */
-  def isAssignableFrom(other: CypherType): Boolean =
+  infix def isAssignableFrom(other: CypherType): Boolean =
     if (other == this)
       true
     else if (other.parentType == other)
@@ -92,22 +105,35 @@ trait CypherType extends ASTNode {
 
   def legacyIteratedType: CypherType = this
 
-  def leastUpperBound(other: CypherType): CypherType =
+  infix def leastUpperBound(other: CypherType): CypherType =
     if (this.isAssignableFrom(other)) this
     else if (other.isAssignableFrom(this)) other
     else parentType leastUpperBound other.parentType
 
-  def greatestLowerBound(other: CypherType): Option[CypherType] =
+  infix def greatestLowerBound(other: CypherType): Option[CypherType] =
     if (this.isAssignableFrom(other)) Some(other)
     else Some(this).filter(other.isAssignableFrom)
 
-  lazy val covariant: TypeSpec = TypeSpec.all constrain this
-  lazy val invariant: TypeSpec = TypeSpec.exact(this)
-  lazy val contravariant: TypeSpec = TypeSpec.all leastUpperBounds this
+  // `def` not `lazy val`: Scala 3 lazy vals use LazyVals$Waiting, which TeaVM (semantic-analysis-js) cannot transpile.
+  def covariant: TypeSpec = TypeSpec.all constrain this
+  def invariant: TypeSpec = TypeSpec.exact(this)
+  def contravariant: TypeSpec = TypeSpec.all leastUpperBounds this
 
   def rewrite(f: CypherType => CypherType): CypherType = f(this)
 
   def toCypherTypeString: String
+
+  def toClassString: String
+
+  inline def isNothing: Boolean = this match {
+    case _: NothingType => true
+    case _              => false
+  }
+
+  // for Scala 3 Option-less pattern matching
+  def isEmpty: Boolean = isNothing
+
+  def get: CypherType = this
 }
 
 object CypherType {
@@ -138,8 +164,9 @@ object CypherType {
       case ClosedDynamicUnionType(innerTypes) =>
         val updatedTypes = normalizeInnerTypes(innerTypes)
         ClosedDynamicUnionType(updatedTypes.toSet)(typeToNormalize.position).simplify
-      case lt: ListType          => lt.copy(normalizeTypes(lt.innerType))(lt.position)
-      case pt: PropertyValueType => ClosedDynamicUnionType(pt.expandToTypes.toSet)(pt.position)
+      case lt: ListType                 => lt.copy(normalizeTypes(lt.innerType))(lt.position)
+      case pt: PropertyValueType        => ClosedDynamicUnionType(pt.expandToTypes.toSet)(pt.position)
+      case pt: PropertyValueCypher5Type => ClosedDynamicUnionType(pt.expandToTypes.toSet)(pt.position)
       case numberType: NumberType => ClosedDynamicUnionType(Set(
           IntegerType(numberType.isNullable)(numberType.position),
           FloatType(numberType.isNullable)(numberType.position)
@@ -152,12 +179,13 @@ object CypherType {
   private def normalizeInnerTypes(innerTypes: Set[CypherType]): List[CypherType] = {
     var oldTypes = innerTypes.toList
     var updatedTypes = oldTypes
-
-    do {
+    var done = false
+    while (!done) {
       val newTypes = normalize(updatedTypes)
       oldTypes = updatedTypes
       updatedTypes = newTypes
-    } while (!oldTypes.equals(updatedTypes))
+      done = oldTypes.equals(updatedTypes)
+    }
 
     updatedTypes
   }
@@ -167,7 +195,8 @@ object CypherType {
   private def normalize(types: List[CypherType]) = {
     // Expand PropertyValueTypeName to all property types instead
     val expandedTypes: List[CypherType] = types.flatMap {
-      case propertyValueTypeName: PropertyValueType => propertyValueTypeName.expandToTypes
+      case propertyValueTypeName: PropertyValueType        => propertyValueTypeName.expandToTypes
+      case propertyValueTypeName: PropertyValueCypher5Type => propertyValueTypeName.expandToTypes
       case numberType: NumberType => List(
           IntegerType(numberType.isNullable)(numberType.position),
           FloatType(numberType.isNullable)(numberType.position)
@@ -206,6 +235,7 @@ object CypherType {
   private def allTypes(isNullable: Boolean): Set[CypherType] = Set(
     BooleanType(isNullable)(InputPosition.NONE),
     StringType(isNullable)(InputPosition.NONE),
+    UUIDType(isNullable)(InputPosition.NONE),
     IntegerType(isNullable)(InputPosition.NONE),
     FloatType(isNullable)(InputPosition.NONE),
     DateType(isNullable)(InputPosition.NONE),
@@ -228,6 +258,7 @@ object CypherType {
     (x: CypherType, y: CypherType) =>
       (x, y) match {
         case (lx: ListType, ly: ListType)                               => compareListTypes(lx, ly)
+        case (vx: VectorType, vy: VectorType)                           => compareVectorTypes(vx, vy)
         case (cux: ClosedDynamicUnionType, cuy: ClosedDynamicUnionType) =>
           // Sorting multiple closed dynamic unions
           compareInnerLists(cux.sortedInnerTypes, cuy.sortedInnerTypes)
@@ -236,11 +267,55 @@ object CypherType {
       }
   }
 
+  private def compareVectorTypes(x: VectorType, y: VectorType): Int = {
+    // Note: -1 means x comes before y, 0 means they are equal, 1 means y comes before x
+    (x, y) match {
+      // Both are super types, compare nullability
+      case (VectorType(None, None, isNullableX), VectorType(None, None, isNullableY)) =>
+        isNullableX.compare(isNullableY)
+
+      // Vector super type comes before any other vector
+      case (VectorType(_, _, _), VectorType(None, None, _)) => 1
+      case (VectorType(None, None, _), VectorType(_, _, _)) => -1
+
+      // One has a coordinate type defined, and the other does not
+      case (VectorType(None, _, _), VectorType(Some(_), _, _)) => 1
+      case (VectorType(Some(_), _, _), VectorType(None, _, _)) => -1
+
+      // Dimension only
+      case (VectorType(None, Some(dimenX), isNullableX), VectorType(None, Some(dimenY), isNullableY)) =>
+        val dimenCompare = dimenX.compare(dimenY)
+        if (dimenCompare == 0) isNullableX.compare(isNullableY)
+        else dimenCompare
+
+      // Vector with a coordinate type defined
+      case (
+          VectorType(Some(coordinateTypeX), maybeDimenX, isNullableX),
+          VectorType(Some(coordinateTypeY), maybeDimenY, isNullableY)
+        ) =>
+        val innerComparison = coordinateTypeX.sortOrder.compare(coordinateTypeY.sortOrder)
+        // If the types match, then order based on dimension, then nullability
+        if (innerComparison == 0) {
+          (maybeDimenX, maybeDimenY) match {
+            case (Some(dimenX), Some(dimenY)) if (dimenX == dimenY) => isNullableX.compare(isNullableY)
+            case (Some(dimenX), Some(dimenY))                       => dimenX.compare(dimenY)
+            case (Some(_), None)                                    => 1
+            case (None, Some(_))                                    => -1
+            case (None, None)                                       => isNullableX.compare(isNullableY)
+          }
+        } else {
+          innerComparison
+        }
+    }
+  }
+
   private def compareListTypes(x: ListType, y: ListType): Int = {
     val innerComparison = (x.innerType, y.innerType) match {
       case (hx: ListType, hy: ListType) => compareListTypes(hx, hy)
       case (hx: ClosedDynamicUnionType, hy: ClosedDynamicUnionType) =>
         compareInnerLists(hx.sortedInnerTypes, hy.sortedInnerTypes)
+      case (vx: VectorType, vy: VectorType) =>
+        compareVectorTypes(vx, vy)
       case _ => x.innerType.sortOrder.compare(y.innerType.sortOrder)
     }
 
@@ -271,6 +346,11 @@ object CypherType {
             ) =>
             compareInnerLists(lxDynamicUnion.sortedInnerTypes, lyDynamicUnion.sortedInnerTypes)
           case (
+              ListType(vx: VectorType, _),
+              ListType(vy: VectorType, _)
+            ) =>
+            compareVectorTypes(vx, vy)
+          case (
               ListType(lxListType: ListType, _),
               ListType(lyListType: ListType, _)
             ) =>
@@ -281,6 +361,8 @@ object CypherType {
             else innerTypeOrder
           case (cux: ClosedDynamicUnionType, cuy: ClosedDynamicUnionType) =>
             compareInnerLists(cux.sortedInnerTypes, cuy.sortedInnerTypes)
+          case (vx: VectorType, vy: VectorType) =>
+            compareVectorTypes(vx, vy)
           case _ => sortOrder
         }
 

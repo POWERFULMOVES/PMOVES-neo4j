@@ -1,30 +1,39 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
   <parent>
     <groupId>org.neo4j</groupId>
     <artifactId>parent</artifactId>
-    <version>5.26.0</version>
+    <version>2026.09.0</version>
     <relativePath>../../pom.xml</relativePath>
   </parent>
+  <groupId>org.neo4j.licensing-proxy</groupId>
+
+  <artifactId>zstd-proxy</artifactId>
+
+  <name>Zstandard</name>
+  <description>This pom file is a licensing stand-in for the native zstd library that our com.github.luben:zstd-jni pulls in.
+    Because zstd is a native library that is statically linked into zstd-jni, it does not have its own pom.xml file, and therefore cannot declare its own
+    licenses to our licensing plugin.
+    This module is here to solve this, by standing in for the native zstd library, and declaring its licenses.</description>
+  <url>https://github.com/facebook/zstd</url>
+
+  <licenses>
+    <license>
+      <name>BSD-3-Clause</name>
+      <url>https://opensource.org/licenses/BSD-3-clause</url>
+      <distribution>repo</distribution>
+    </license>
+    <license>
+      <name>GPL-2.0</name>
+      <url>https://opensource.org/licenses/GPL-2.0</url>
+      <distribution>manual</distribution>
+    </license>
+  </licenses>
 
   <properties>
     <moduleName>org.neo4j.zstd_proxy</moduleName>
   </properties>
-  <modelVersion>4.0.0</modelVersion>
-
-  <artifactId>zstd-proxy</artifactId>
-  <groupId>org.neo4j.licensing-proxy</groupId>
-
-  <name>Zstandard</name>
-  <description>
-    This pom file is a licensing stand-in for the native zstd library that our com.github.luben:zstd-jni pulls in.
-    Because zstd is a native library that is statically linked into zstd-jni, it does not have its own pom.xml file, and therefore cannot declare its own
-    licenses to our licensing plugin.
-    This module is here to solve this, by standing in for the native zstd library, and declaring its licenses.
-  </description>
-  <url>https://github.com/facebook/zstd</url>
 
   <dependencies>
     <dependency>
@@ -59,18 +68,5 @@
       </plugin>
     </plugins>
   </build>
-
-  <licenses>
-    <license>
-      <name>BSD-3-Clause</name>
-      <url>https://opensource.org/licenses/BSD-3-clause</url>
-      <distribution>repo</distribution>
-    </license>
-    <license>
-      <name>GPL-2.0</name>
-      <url>https://opensource.org/licenses/GPL-2.0</url>
-      <distribution>manual</distribution>
-    </license>
-  </licenses>
 
 </project>

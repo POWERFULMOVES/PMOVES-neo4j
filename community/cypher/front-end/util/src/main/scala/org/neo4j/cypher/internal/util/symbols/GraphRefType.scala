@@ -20,7 +20,7 @@ import org.neo4j.cypher.internal.util.InputPosition
 
 case class GraphRefType(isNullable: Boolean)(val position: InputPosition) extends CypherType {
   val parentType: CypherType = CTAny
-  override val toString = "Graph"
+  override val toClassString = "Graph"
   override val toCypherTypeString = "GRAPH"
 
   override def sortOrder: Int =
@@ -28,7 +28,7 @@ case class GraphRefType(isNullable: Boolean)(val position: InputPosition) extend
 
   override def hasCypherParserSupport: Boolean = false
 
-  override def hasValueRepresentation: Boolean = false
+  override def couldBeStoredInProperty: Boolean = false
 
   override def withIsNullable(isNullable: Boolean): CypherType = this.copy(isNullable = isNullable)(position)
 

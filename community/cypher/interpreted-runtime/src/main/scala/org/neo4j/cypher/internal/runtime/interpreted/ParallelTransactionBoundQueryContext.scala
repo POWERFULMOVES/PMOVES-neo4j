@@ -23,26 +23,31 @@ import org.eclipse.collections.api.map.primitive.IntObjectMap
 import org.eclipse.collections.api.set.primitive.IntSet
 import org.neo4j.common.EntityType
 import org.neo4j.cypher.internal.CypherVersion
+import org.neo4j.cypher.internal.expressions.SemanticDirection
 import org.neo4j.cypher.internal.runtime.ClosingLongIterator
 import org.neo4j.cypher.internal.runtime.NodeOperations
 import org.neo4j.cypher.internal.runtime.Operations
 import org.neo4j.cypher.internal.runtime.QueryContext
+import org.neo4j.cypher.internal.runtime.QueryRuntimeConfig
 import org.neo4j.cypher.internal.runtime.RelationshipOperations
 import org.neo4j.cypher.internal.runtime.ResourceManager
 import org.neo4j.cypher.internal.runtime.WriteQueryContext
-import org.neo4j.cypher.internal.runtime.debug.DebugSupport
+import org.neo4j.cypher.internal.runtime.debug.events.Debug
 import org.neo4j.cypher.internal.runtime.interpreted.ParallelTransactionBoundQueryContext.UnsupportedWriteQueryContext
 import org.neo4j.cypher.internal.runtime.interpreted.TransactionBoundQueryContext.IndexSearchMonitor
+import org.neo4j.cypher.internal.runtime.interpreted.debug.events.TransactionalContext
 import org.neo4j.dbms.database.DatabaseContext
 import org.neo4j.dbms.database.DatabaseContextProvider
+import org.neo4j.internal.kernel.api.MutatingEntityCursor
 import org.neo4j.internal.kernel.api.NodeCursor
 import org.neo4j.internal.kernel.api.PropertyCursor
 import org.neo4j.internal.kernel.api.RelationshipScanCursor
+import org.neo4j.internal.kernel.api.RelationshipTraversalCursor
 import org.neo4j.internal.schema.IndexConfig
 import org.neo4j.internal.schema.IndexDescriptor
 import org.neo4j.internal.schema.IndexProviderDescriptor
 import org.neo4j.internal.schema.IndexType
-import org.neo4j.internal.schema.constraints.PropertyTypeSet
+import org.neo4j.internal.schema.SchemaCommand.ConstraintCommand
 import org.neo4j.values.storable.Value
 import org.neo4j.values.virtual.VirtualNodeValue
 import org.neo4j.values.virtual.VirtualRelationshipValue
@@ -50,19 +55,14 @@ import org.neo4j.values.virtual.VirtualRelationshipValue
 sealed class ParallelTransactionBoundQueryContext(
   transactionalContext: TransactionalContextWrapper,
   resources: ResourceManager,
-  closeable: Option[AutoCloseable] = None
+  closeable: Option[AutoCloseable] = None,
+  queryConfig: QueryRuntimeConfig = QueryRuntimeConfig.DEFAULT
 )(implicit indexSearchMonitor: IndexSearchMonitor)
-    extends TransactionBoundReadQueryContext(transactionalContext, resources, closeable) with QueryContext
+    extends TransactionBoundReadQueryContext(transactionalContext, resources, closeable, queryConfig) with QueryContext
     with UnsupportedWriteQueryContext {
 
   override def close(): Unit = {
-    if (DebugSupport.DEBUG_TRANSACTIONAL_CONTEXT) {
-      DebugSupport.TRANSACTIONAL_CONTEXT.log(
-        "%s.close() thread=%s",
-        this.getClass.getSimpleName,
-        Thread.currentThread().getName
-      )
-    }
+    Debug.log(TransactionalContext.Close)
     try {
       super.close()
       resources.close()
@@ -79,6 +79,19 @@ object ParallelTransactionBoundQueryContext {
     override def relationshipWriteOps: RelationshipOperations = new UnsupportedRelationshipOperations
     override def createNodeId(labels: Array[Int]): Long = unsupported()
     override def createRelationshipId(start: Long, end: Long, relType: Int): Long = unsupported()
+
+    override def mergeInto(
+      nodeCursor: NodeCursor,
+      traversalCursor: RelationshipTraversalCursor,
+      propertyCursor: PropertyCursor,
+      source: Long,
+      relType: Int,
+      direction: SemanticDirection,
+      target: Long,
+      onMatch: IntObjectMap[Value],
+      onCreate: IntObjectMap[Value]
+    ): MutatingEntityCursor = unsupported()
+
     override def getOrCreateRelTypeId(relTypeName: String): Int = unsupported()
     override def getOrCreateLabelId(labelName: String): Int = unsupported()
     override def getOrCreateTypeId(relTypeName: String): Int = unsupported()
@@ -135,9 +148,10 @@ object ParallelTransactionBoundQueryContext {
     ): IndexDescriptor = unsupported()
 
     override def addVectorIndexRule(
-      entityId: Int,
+      entityIds: List[Int],
       entityType: EntityType,
       propertyKeyIds: Seq[Int],
+      additionalPropertyKeyIds: Seq[Int],
       name: Option[String],
       provider: Option[IndexProviderDescriptor],
       indexConfig: IndexConfig
@@ -145,58 +159,10 @@ object ParallelTransactionBoundQueryContext {
 
     override def dropIndexRule(name: String): Unit = unsupported()
 
-    override def createNodeKeyConstraint(
-      labelId: Int,
-      propertyKeyIds: Seq[Int],
-      name: Option[String],
-      provider: Option[IndexProviderDescriptor]
-    ): Unit = unsupported()
+    override def createConstraint(constraint: ConstraintCommand.Create): Unit = unsupported()
 
-    override def createRelationshipKeyConstraint(
-      relTypeId: Int,
-      propertyKeyIds: Seq[Int],
-      name: Option[String],
-      provider: Option[IndexProviderDescriptor]
-    ): Unit = unsupported()
+    override def dropNamedConstraint(name: String, allowDependent: Boolean): Unit = unsupported()
 
-    override def createNodeUniqueConstraint(
-      labelId: Int,
-      propertyKeyIds: Seq[Int],
-      name: Option[String],
-      provider: Option[IndexProviderDescriptor]
-    ): Unit = unsupported()
-
-    override def createRelationshipUniqueConstraint(
-      relTypeId: Int,
-      propertyKeyIds: Seq[Int],
-      name: Option[String],
-      provider: Option[IndexProviderDescriptor]
-    ): Unit = unsupported()
-
-    override def createNodePropertyExistenceConstraint(labelId: Int, propertyKeyId: Int, name: Option[String]): Unit =
-      unsupported()
-
-    override def createRelationshipPropertyExistenceConstraint(
-      relTypeId: Int,
-      propertyKeyId: Int,
-      name: Option[String]
-    ): Unit = unsupported()
-
-    override def createNodePropertyTypeConstraint(
-      labelId: Int,
-      propertyKeyId: Int,
-      propertyTypes: PropertyTypeSet,
-      name: Option[String]
-    ): Unit = unsupported()
-
-    override def createRelationshipPropertyTypeConstraint(
-      relTypeId: Int,
-      propertyKeyId: Int,
-      propertyTypes: PropertyTypeSet,
-      name: Option[String]
-    ): Unit = unsupported()
-
-    override def dropNamedConstraint(name: String): Unit = unsupported()
     override def detachDeleteNode(id: Long): Int = unsupported()
     override def assertSchemaWritesAllowed(): Unit = unsupported()
     override def getDatabaseContextProvider: DatabaseContextProvider[DatabaseContext] = unsupported()
@@ -262,7 +228,7 @@ object ParallelTransactionBoundQueryContext {
     ): Array[Int] = unsupported()
     override def getById(id: Long): T = unsupported()
     override def isDeletedInThisTx(id: Long): Boolean = unsupported()
-    override def all: ClosingLongIterator = unsupported()
+    override def all(includeChangesFromThisTransaction: Boolean): ClosingLongIterator = unsupported()
     override def acquireExclusiveLock(obj: Long): Unit = unsupported()
     override def releaseExclusiveLock(obj: Long): Unit = unsupported()
     override def entityExists(id: Long): Boolean = unsupported()

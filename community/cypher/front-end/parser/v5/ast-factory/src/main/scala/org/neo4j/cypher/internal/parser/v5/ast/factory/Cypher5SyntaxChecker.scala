@@ -20,8 +20,10 @@ import org.antlr.v4.runtime.ParserRuleContext
 import org.antlr.v4.runtime.Token
 import org.antlr.v4.runtime.tree.ErrorNode
 import org.antlr.v4.runtime.tree.TerminalNode
+import org.neo4j.cypher.internal.CypherVersion
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.EnableParsingOfObfuscatedLiterals
 import org.neo4j.cypher.internal.expressions.Expression
-import org.neo4j.cypher.internal.expressions.FunctionName
 import org.neo4j.cypher.internal.parser.AstRuleCtx
 import org.neo4j.cypher.internal.parser.ast.SyntaxChecker
 import org.neo4j.cypher.internal.parser.ast.util.Util.astSeq
@@ -31,7 +33,6 @@ import org.neo4j.cypher.internal.parser.ast.util.Util.nodeChild
 import org.neo4j.cypher.internal.parser.ast.util.Util.pos
 import org.neo4j.cypher.internal.parser.common.ast.factory.ASTExceptionFactory
 import org.neo4j.cypher.internal.parser.common.ast.factory.ConstraintType
-import org.neo4j.cypher.internal.parser.common.ast.factory.HintIndexType
 import org.neo4j.cypher.internal.parser.v5.Cypher5Parser
 import org.neo4j.cypher.internal.parser.v5.Cypher5Parser.ConstraintExistsContext
 import org.neo4j.cypher.internal.parser.v5.Cypher5Parser.ConstraintIsNotNullContext
@@ -45,6 +46,7 @@ import org.neo4j.cypher.internal.parser.v5.Cypher5Parser.SymbolicAliasNameOrPara
 import org.neo4j.cypher.internal.parser.v5.ast.factory.Cypher5SyntaxChecker.MAX_ALIAS_NAME_COMPONENTS
 import org.neo4j.cypher.internal.parser.v5.ast.factory.Cypher5SyntaxChecker.MAX_DATABASE_NAME_COMPONENTS
 import org.neo4j.cypher.internal.util.CypherExceptionFactory
+import org.neo4j.cypher.internal.util.FunctionName
 import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.symbols.ClosedDynamicUnionType
 import org.neo4j.gqlstatus.GqlHelper
@@ -53,7 +55,10 @@ import org.neo4j.internal.helpers.NameUtil
 import scala.collection.mutable
 import scala.jdk.CollectionConverters.ListHasAsScala
 
-final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) extends SyntaxChecker {
+final class Cypher5SyntaxChecker(
+  exceptionFactory: CypherExceptionFactory,
+  semanticFeatures: Seq[SemanticFeature]
+) extends SyntaxChecker {
   private[this] var _errors: Seq[Exception] = Seq.empty
 
   override def errors: Seq[Throwable] = _errors
@@ -95,6 +100,8 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
       case Cypher5Parser.RULE_symbolicAliasNameOrParameter     => checkSymbolicAliasNameOrParameter(cast(ctx))
       case Cypher5Parser.RULE_databaseScope                    => checkDatabaseScope(cast(ctx))
       case Cypher5Parser.RULE_graphScope                       => checkGraphScope(cast(ctx))
+      case Cypher5Parser.RULE_defaultLanguageSpecification     => checkDefaultLanguageSpecification(cast(ctx))
+      case Cypher5Parser.RULE_obfuscatedLiteral                => failOnObfuscatedLiteral(ctx)
       case _                                                   =>
     }
   }
@@ -113,18 +120,13 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
     description: String,
     isParam: Boolean
   ): Unit = {
-    if (isParam) {
-      _errors :+= exceptionFactory.syntaxException(
-        s"Duplicated $description parameters",
+    if (isParam)
+      _errors :+= exceptionFactory.duplicateClauseParameter(description, inputPosition(token))
+    else
+      _errors :+= exceptionFactory.duplicateClause(
+        description,
         inputPosition(token)
       )
-    } else {
-      _errors :+= exceptionFactory.syntaxException(
-        s"Duplicate $description clause",
-        inputPosition(token)
-      )
-
-    }
   }
 
   private def errorOnDuplicateCtx[T <: AstRuleCtx](
@@ -155,10 +157,7 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
         aliasName.symbolicAliasName() != null && aliasName.symbolicAliasName().symbolicNameString().size() > MAX_ALIAS_NAME_COMPONENTS
       ) {
         val start = aliasName.symbolicAliasName().symbolicNameString().get(0).getStart
-        _errors :+= exceptionFactory.syntaxException(
-          s"'.' is not a valid character in the remote alias name '${aliasName.getText}'. Remote alias names using '.' must be quoted with backticks e.g. `remote.alias`.",
-          inputPosition(start)
-        )
+        _errors :+= exceptionFactory.invalidCharacterForRemoteAlias(aliasName.getText, inputPosition(start))
       }
     }
   }
@@ -166,7 +165,8 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
   private def errorOnAliasNameContainingTooManyComponents(
     aliasesNames: Seq[SymbolicAliasNameOrParameterContext],
     maxComponents: Int,
-    errorTemplate: String
+    errorTemplate: String,
+    context: String
   ): Unit = {
     if (aliasesNames.nonEmpty) {
       val literalAliasNames = aliasesNames.filter(_.symbolicAliasName() != null)
@@ -179,16 +179,19 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
         }
         if (componentCount > maxComponents) {
           val start = aliasName.symbolicAliasName().symbolicNameString().get(0).getStart
-          _errors :+= exceptionFactory.syntaxException(
-            errorTemplate.formatted(
-              aliasName.symbolicAliasName().symbolicNameString().asScala.map {
-                case context if context.unescapedSymbolicNameString() != null =>
-                  context.unescapedSymbolicNameString().ast
-                case context if context.escapedSymbolicNameString() != null =>
-                  NameUtil.forceEscapeName(context.escapedSymbolicNameString().ast())
-                case _ => ""
-              }.mkString(".")
-            ),
+
+          val prettyName = aliasName.symbolicAliasName().symbolicNameString().asScala.map {
+            case name if name.unescapedSymbolicNameString() != null =>
+              name.unescapedSymbolicNameString().ast
+            case name if name.escapedSymbolicNameString() != null =>
+              NameUtil.forceEscapeName(name.escapedSymbolicNameString().ast())
+            case _ => ""
+          }.mkString(".")
+          _errors :+= exceptionFactory.invalidNameTooManyComponents(
+            errorTemplate,
+            context,
+            maxComponents,
+            prettyName,
             inputPosition(start)
           )
         }
@@ -205,7 +208,9 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
 
   private def checkCreateAlias(ctx: Cypher5Parser.CreateAliasContext): Unit = {
     if (ctx.stringOrParameter() != null) {
-      if (!(ctx.AT() == null && ctx.USER() == null && ctx.PASSWORD() == null && ctx.DRIVER() == null))
+      if (
+        !(ctx.AT() == null && ctx.USER() == null && ctx.PASSWORD() == null && ctx.DRIVER() == null && ctx.defaultLanguageSpecification().isEmpty)
+      )
         errorOnAliasNameContainingDots(java.util.List.of(
           ctx.aliasName().symbolicAliasNameOrParameter(),
           ctx.databaseName().symbolicAliasNameOrParameter()
@@ -219,9 +224,10 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
     val usernames = ctx.alterAliasUser()
     val passwords = ctx.alterAliasPassword()
     val driverSettings = ctx.alterAliasDriver()
+    val defaultLanguages = ctx.defaultLanguageSpecification()
 
     // Should only be checked in case of remote
-    if (hasUrl || !usernames.isEmpty || !passwords.isEmpty || !driverSettings.isEmpty)
+    if (hasUrl || !usernames.isEmpty || !passwords.isEmpty || !driverSettings.isEmpty || !defaultLanguages.isEmpty)
       errorOnAliasNameContainingDots(java.util.List.of(ctx.aliasName().symbolicAliasNameOrParameter()))
 
     errorOnDuplicateCtx(driverSettings, "DRIVER")
@@ -229,6 +235,7 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
     errorOnDuplicateCtx(passwords, "PASSWORD")
     errorOnDuplicateCtx(ctx.alterAliasProperties(), "PROPERTIES")
     errorOnDuplicateCtx(aliasTargets, "TARGET")
+    errorOnDuplicateCtx(defaultLanguages, "DEFAULT LANGUAGE")
   }
 
   private def checkSymbolicAliasNameOrParameter(ctx: Cypher5Parser.SymbolicAliasNameOrParameterContext): Unit = {
@@ -238,7 +245,8 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
         errorOnAliasNameContainingTooManyComponents(
           Seq(ctx),
           MAX_DATABASE_NAME_COMPONENTS,
-          "Invalid input `%s` for database name. Expected name to contain at most one component."
+          "Invalid input `%s` for database name. Expected name to contain at most one component.",
+          "database name"
         )
       case Cypher5Parser.RULE_createCompositeDatabase =>
       // Handled in semantic checks
@@ -247,7 +255,8 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
         errorOnAliasNameContainingTooManyComponents(
           Seq(ctx),
           MAX_ALIAS_NAME_COMPONENTS,
-          "Invalid input `%s` for name. Expected name to contain at most two components separated by `.`."
+          "Invalid input `%s` for name. Expected name to contain at most two components separated by `.`.",
+          "name"
         )
     }
   }
@@ -264,18 +273,24 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
 
   private def checkGraphScope(ctx: Cypher5Parser.GraphScopeContext): Unit = {
     if (ctx.DEFAULT() != null) {
+      val msg = "`ON DEFAULT GRAPH` is not supported. Use `ON HOME GRAPH` instead."
+      val position = inputPosition(ctx.DEFAULT().getSymbol)
       _errors :+= exceptionFactory.syntaxException(
-        "`ON DEFAULT GRAPH` is not supported. Use `ON HOME GRAPH` instead.",
-        inputPosition(ctx.DEFAULT().getSymbol)
+        GqlHelper.getGql42001_42I52(msg, position.offset, position.line, position.column),
+        msg,
+        position
       )
     }
   }
 
   private def checkDatabaseScope(ctx: Cypher5Parser.DatabaseScopeContext): Unit = {
     if (ctx.DEFAULT() != null) {
+      val msg = "`ON DEFAULT DATABASE` is not supported. Use `ON HOME DATABASE` instead."
+      val position = inputPosition(ctx.DEFAULT().getSymbol)
       _errors :+= exceptionFactory.syntaxException(
-        "`ON DEFAULT DATABASE` is not supported. Use `ON HOME DATABASE` instead.",
-        inputPosition(ctx.DEFAULT().getSymbol)
+        GqlHelper.getGql42001_42I52(msg, position.offset, position.line, position.column),
+        msg,
+        position
       )
     }
   }
@@ -309,13 +324,15 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
           else ("GRAPHS", c.GRAPHS().getSymbol)
         case c: Cypher5Parser.DBMSTargetContext =>
           ("DBMS", c.DBMS().getSymbol)
-        case _ => throw new IllegalStateException("Unexpected privilege all command")
+        case _ => throw exceptionFactory.internalError("Unexpected privilege all command", pos(ctx))
       }
       (privilege, target) match {
         case (Some(privilege), (target, symbol)) =>
           // This makes GRANT ALL DATABASE PRIVILEGES ON DATABASES * work
           if (!target.startsWith(privilege)) {
-            _errors :+= exceptionFactory.syntaxException(
+            _errors :+= exceptionFactory.invalidInputException(
+              target,
+              List(privilege),
               s"Invalid input '$target': expected \"$privilege\"",
               inputPosition(symbol)
             )
@@ -325,36 +342,30 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
     }
     privilegeTarget match {
       case c: Cypher5Parser.DefaultTargetContext if c.DEFAULT() != null =>
-        val target =
-          if (c.GRAPH() != null) "GRAPH" else "DATABASE"
+        val target = if (c.GRAPH() != null) "GRAPH" else "DATABASE"
+        val msg = s"`ON DEFAULT $target` is not supported. Use `ON HOME $target` instead."
+        val position = inputPosition(privilegeTarget.start)
         _errors :+= exceptionFactory.syntaxException(
-          s"`ON DEFAULT $target` is not supported. Use `ON HOME $target` instead.",
-          inputPosition(privilegeTarget.start)
+          GqlHelper.getGql42001_42I52(msg, position.offset, position.line, position.column),
+          msg,
+          position
         )
       case _ =>
     }
   }
 
-  private def checkGlobPart(ctx: Cypher5Parser.GlobPartContext): Unit = {
+  private def checkGlobPart(ctx: Cypher5Parser.GlobPartContext): Unit =
     if (ctx.DOT() == null) {
       ctx.parent.parent match {
         case r: GlobRecursiveContext if r.globPart().escapedSymbolicNameString() != null =>
-          addError()
+          _errors :+= exceptionFactory.invalidGlobEscaping(inputPosition(ctx.start))
 
         case r: GlobContext if r.escapedSymbolicNameString() != null =>
-          addError()
+          _errors :+= exceptionFactory.invalidGlobEscaping(inputPosition(ctx.start))
 
         case _ =>
       }
-
-      def addError(): Unit = {
-        _errors :+= exceptionFactory.syntaxException(
-          "Each part of the glob (a block of text up until a dot) must either be fully escaped or not escaped at all.",
-          inputPosition(ctx.start)
-        )
-      }
     }
-  }
 
   private def checkCreateConstraint(ctx: Cypher5Parser.CreateConstraintContext): Unit = {
     // Error messages for mixing old and new constraint syntax
@@ -380,15 +391,19 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
 
       if (containsFor && containsAssert) {
         // FOR ... ASSERT EXISTS ...
+        val position = inputPosition(assert.getSymbol)
         _errors :+= exceptionFactory.syntaxException(
+          GqlHelper.getGql42001_42I52(errorMessageForAssertExists, position.offset, position.line, position.column),
           errorMessageForAssertExists,
-          inputPosition(assert.getSymbol)
+          position
         )
       } else if (containsOn && containsAssert) {
         // ON ... ASSERT EXISTS ...
+        val position = inputPosition(ctx.ON().getSymbol)
         _errors :+= exceptionFactory.syntaxException(
+          GqlHelper.getGql42001_42I52(errorMessageOnAssertExists, position.offset, position.line, position.column),
           errorMessageOnAssertExists,
-          inputPosition(ctx.ON().getSymbol)
+          position
         )
       }
     }
@@ -401,21 +416,27 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
 
       if (containsOn && containsRequire) {
         // ON ... REQUIRE
+        val position = inputPosition(ctx.ON().getSymbol)
         _errors :+= exceptionFactory.syntaxException(
+          GqlHelper.getGql42001_42I52(errorMessageOnRequire, position.offset, position.line, position.column),
           errorMessageOnRequire,
-          inputPosition(ctx.ON().getSymbol)
+          position
         )
       } else if (containsFor && containsAssert) {
         // FOR ... ASSERT
+        val position = inputPosition(assert.getSymbol)
         _errors :+= exceptionFactory.syntaxException(
+          GqlHelper.getGql42001_42I52(errorMessageForAssert, position.offset, position.line, position.column),
           errorMessageForAssert,
-          inputPosition(assert.getSymbol)
+          position
         )
       } else if (containsOn && containsAssert) {
         // ON ... ASSERT
+        val position = inputPosition(ctx.ON().getSymbol)
         _errors :+= exceptionFactory.syntaxException(
+          GqlHelper.getGql42001_42I52(errorMessageOnAssert, position.offset, position.line, position.column),
           errorMessageOnAssert,
-          inputPosition(ctx.ON().getSymbol)
+          position
         )
       }
     }
@@ -467,11 +488,7 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
         checkForInvalidOthers(c.ASSERT(), c.REQUIRE())
       case c: ConstraintExistsContext =>
         checkForInvalidExistence(c.ASSERT())
-      case _ =>
-        _errors :+= exceptionFactory.syntaxException(
-          "Constraint type is not recognized",
-          inputPosition(ctx.constraintType().getStart)
-        )
+      case _ => throw exceptionFactory.internalError("Constraint type is not recognized", pos(ctx))
     }
   }
 
@@ -480,23 +497,23 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
       val secondProperty = ctx.property(1).start
       ctx.getParent.getParent match {
         case _: ConstraintExistsContext =>
-          _errors :+= exceptionFactory.syntaxException(
-            "Constraint type 'EXISTS' does not allow multiple properties",
+          _errors :+= exceptionFactory.unsupportedMultiplePropertiesInConstraint(
+            "EXISTS",
             inputPosition(secondProperty)
           )
         case _: ConstraintTypedContext =>
-          _errors :+= exceptionFactory.syntaxException(
-            "Constraint type 'IS TYPED' does not allow multiple properties",
+          _errors :+= exceptionFactory.unsupportedMultiplePropertiesInConstraint(
+            "IS TYPED",
             inputPosition(secondProperty)
           )
         case _: ConstraintIsNotNullContext =>
-          _errors :+= exceptionFactory.syntaxException(
-            "Constraint type 'IS NOT NULL' does not allow multiple properties",
+          _errors :+= exceptionFactory.unsupportedMultiplePropertiesInConstraint(
+            "IS NOT NULL",
             inputPosition(secondProperty)
           )
         case dropCtx: DropConstraintContext if dropCtx.EXISTS() != null =>
-          _errors :+= exceptionFactory.syntaxException(
-            "Constraint type 'EXISTS' does not allow multiple properties",
+          _errors :+= exceptionFactory.unsupportedMultiplePropertiesInConstraint(
+            "EXISTS",
             inputPosition(secondProperty)
           )
         case _ =>
@@ -529,50 +546,63 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
 
     val alwaysInvalidDropCommand = "Unsupported drop constraint command: Please delete the constraint by name instead"
     if (ctx.NULL() != null) {
+      val position = inputPosition(ctx.start)
       _errors :+= exceptionFactory.syntaxException(
+        GqlHelper.getGql42001_42I52(alwaysInvalidDropCommand, position.offset, position.line, position.column),
         alwaysInvalidDropCommand,
-        inputPosition(ctx.start)
+        position
       )
     }
 
-    val constraintName = ctx.symbolicNameOrStringParameter()
+    val constraintName = ctx.commandNameExpression()
     if (constraintName == null) {
       // old drop constraint by schema
       def invalidPreviouslyAllowedDropConstraint(constraintType: String) =
         s"$constraintType constraints cannot be dropped by schema, please drop by name instead: DROP CONSTRAINT constraint_name. The constraint name can be found using SHOW CONSTRAINTS."
 
+      val position = inputPosition(ctx.start)
       if (ctx.commandNodePattern() != null) {
         if (ctx.EXISTS() != null) {
+          val msg = invalidPreviouslyAllowedDropConstraint("Node property existence")
           _errors :+= exceptionFactory.syntaxException(
-            invalidPreviouslyAllowedDropConstraint("Node property existence"),
-            inputPosition(ctx.start)
+            GqlHelper.getGql42001_42I52(msg, position.offset, position.line, position.column),
+            msg,
+            position
           )
         } else if (ctx.UNIQUE() != null) {
+          val msg = invalidPreviouslyAllowedDropConstraint("Uniqueness")
           _errors :+= exceptionFactory.syntaxException(
-            invalidPreviouslyAllowedDropConstraint("Uniqueness"),
-            inputPosition(ctx.start)
+            GqlHelper.getGql42001_42I52(msg, position.offset, position.line, position.column),
+            msg,
+            position
           )
         } else if (ctx.KEY() != null) {
+          val msg = invalidPreviouslyAllowedDropConstraint("Node key")
           _errors :+= exceptionFactory.syntaxException(
-            invalidPreviouslyAllowedDropConstraint("Node key"),
-            inputPosition(ctx.start)
+            GqlHelper.getGql42001_42I52(msg, position.offset, position.line, position.column),
+            msg,
+            position
           )
         } else {
           _errors :+= exceptionFactory.syntaxException(
+            GqlHelper.getGql42001_42I52(alwaysInvalidDropCommand, position.offset, position.line, position.column),
             alwaysInvalidDropCommand,
-            inputPosition(ctx.start)
+            position
           )
         }
       } else {
         if (ctx.EXISTS() != null) {
+          val msg = invalidPreviouslyAllowedDropConstraint("Relationship property existence")
           _errors :+= exceptionFactory.syntaxException(
-            invalidPreviouslyAllowedDropConstraint("Relationship property existence"),
-            inputPosition(ctx.start)
+            GqlHelper.getGql42001_42I52(msg, position.offset, position.line, position.column),
+            msg,
+            position
           )
         } else {
           _errors :+= exceptionFactory.syntaxException(
+            GqlHelper.getGql42001_42I52(alwaysInvalidDropCommand, position.offset, position.line, position.column),
             alwaysInvalidDropCommand,
-            inputPosition(ctx.start)
+            position
           )
         }
       }
@@ -582,9 +612,13 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
   private def checkShowConstraint(ctx: Cypher5Parser.ShowConstraintCommandContext): Unit = {
     ctx match {
       case c: Cypher5Parser.ShowConstraintOldExistsContext =>
+        val msg =
+          "`SHOW CONSTRAINTS` no longer allows the `EXISTS` keyword, please use `EXIST` or `PROPERTY EXISTENCE` instead."
+        val position = inputPosition(c.EXISTS().getSymbol)
         _errors :+= exceptionFactory.syntaxException(
-          "`SHOW CONSTRAINTS` no longer allows the `EXISTS` keyword, please use `EXIST` or `PROPERTY EXISTENCE` instead.",
-          inputPosition(c.EXISTS().getSymbol)
+          GqlHelper.getGql42001_42I52(msg, position.offset, position.line, position.column),
+          msg,
+          position
         )
       case _ =>
     }
@@ -592,9 +626,12 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
 
   private def checkShowIndex(ctx: Cypher5Parser.ShowIndexCommandContext): Unit = {
     if (ctx.BTREE() != null) {
+      val msg = "Invalid index type b-tree, please omit the `BTREE` filter."
+      val position = inputPosition(ctx.BTREE().getSymbol)
       _errors :+= exceptionFactory.syntaxException(
-        "Invalid index type b-tree, please omit the `BTREE` filter.",
-        inputPosition(ctx.BTREE().getSymbol)
+        GqlHelper.getGql42001_42I52(msg, position.offset, position.line, position.column),
+        msg,
+        position
       )
     }
   }
@@ -615,10 +652,13 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
           ""
       }
 
+      val msg = s"""`$command` no longer allows the `BRIEF` and `VERBOSE` keywords,
+                   |please omit `BRIEF` and use `YIELD *` instead of `VERBOSE`.""".stripMargin
+      val position = inputPosition(posSymbol)
       _errors :+= exceptionFactory.syntaxException(
-        s"""`$command` no longer allows the `BRIEF` and `VERBOSE` keywords,
-           |please omit `BRIEF` and use `YIELD *` instead of `VERBOSE`.""".stripMargin,
-        inputPosition(posSymbol)
+        GqlHelper.getGql42001_42I52(msg, position.offset, position.line, position.column),
+        msg,
+        position
       )
     }
   }
@@ -635,10 +675,7 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
       var i = 0
       keyNames.foreach(k =>
         if (keySet.contains(k)) {
-          _errors :+= exceptionFactory.syntaxException(
-            s"Duplicate 'REMOVE OPTION $k' clause",
-            pos(ctx.symbolicNameString(i))
-          )
+          _errors :+= exceptionFactory.duplicateClause(s"'REMOVE OPTION $k'", pos(ctx.symbolicNameString(i)))
         } else {
           keySet.addOne(k)
           i += 1
@@ -648,16 +685,12 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
 
     if (!ctx.alterDatabaseOption().isEmpty) {
       val optionCtxs = astSeq[Map[String, Expression]](ctx.alterDatabaseOption())
-      // TODO odd why can m be null, shouldn't it fail before this.
       val keyNames = optionCtxs.flatMap(m => if (m != null) m.keys else Seq.empty)
       val keySet = mutable.Set.empty[String]
       var i = 0
       keyNames.foreach(k =>
         if (keySet.contains(k)) {
-          _errors :+= exceptionFactory.syntaxException(
-            s"Duplicate 'SET OPTION $k' clause",
-            pos(ctx.alterDatabaseOption(i))
-          )
+          _errors :+= exceptionFactory.duplicateClause(s"'SET OPTION $k'", pos(ctx.alterDatabaseOption(i)))
         } else {
           keySet.addOne(k)
           i += 1
@@ -679,9 +712,12 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
   private def checkPeriodicCommitQueryHintFailure(ctx: Cypher5Parser.PeriodicCommitQueryHintFailureContext): Unit = {
     val periodic = ctx.PERIODIC().getSymbol
 
+    val msg = "The PERIODIC COMMIT query hint is no longer supported. Please use CALL { ... } IN TRANSACTIONS instead."
+    val position = inputPosition(periodic)
     _errors :+= exceptionFactory.syntaxException(
-      "The PERIODIC COMMIT query hint is no longer supported. Please use CALL { ... } IN TRANSACTIONS instead.",
-      inputPosition(periodic)
+      GqlHelper.getGql42001_42I52(msg, position.offset, position.line, position.column),
+      msg,
+      position
     )
   }
 
@@ -694,15 +730,18 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
       if (replace != null && oldIndex != null) {
         val position = inputPosition(replace.getSymbol)
         _errors :+= exceptionFactory.syntaxException(
-          GqlHelper.getGql42001_42N14("OR REPLACE", "CREATE INDEX", position.line, position.column, position.offset),
+          GqlHelper.getGql42001_42N14("OR REPLACE", "CREATE INDEX", position.offset, position.line, position.column),
           "'REPLACE' is not allowed for this index syntax",
           position
         )
       }
       if (oldIndex != null) {
+        val msg = "Invalid create index syntax, use `CREATE INDEX FOR ...` instead."
+        val position = inputPosition(createIndex.ON().getSymbol)
         _errors :+= exceptionFactory.syntaxException(
-          "Invalid create index syntax, use `CREATE INDEX FOR ...` instead.",
-          inputPosition(createIndex.ON().getSymbol)
+          GqlHelper.getGql42001_42I52(msg, position.offset, position.line, position.column),
+          msg,
+          position
         )
       }
     }
@@ -717,55 +756,61 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
          CREATE LOOKUP INDEX FOR ()-[x]-() ON EACH EACH(x)
      */
     val relPattern = ctx.lookupIndexRelPattern()
-    if (functionName.getText.toUpperCase() == "EACH" && relPattern != null && relPattern.EACH() == null) {
-
-      _errors :+= exceptionFactory.syntaxException(
-        "Missing function name for the LOOKUP INDEX",
-        inputPosition(ctx.LPAREN().getSymbol)
-      )
-    }
+    if (functionName.getText.toUpperCase() == "EACH" && relPattern != null && relPattern.EACH() == null)
+      _errors :+= exceptionFactory.missingLookupIndexFunctionName(inputPosition(ctx.LPAREN().getSymbol))
   }
 
   private def checkCreateIndex(ctx: Cypher5Parser.CreateIndexContext): Unit = {
     if (ctx.BTREE() != null) {
+      val msg = "Invalid index type b-tree, use range, point or text index instead."
+      val position = inputPosition(ctx.BTREE().getSymbol)
       _errors :+= exceptionFactory.syntaxException(
-        "Invalid index type b-tree, use range, point or text index instead.",
-        inputPosition(ctx.BTREE().getSymbol)
+        GqlHelper.getGql42001_42I52(msg, position.offset, position.line, position.column),
+        msg,
+        position
       )
     }
   }
 
   private def checkDropIndex(ctx: Cypher5Parser.DropIndexContext): Unit = {
-    val indexName = ctx.symbolicNameOrStringParameter()
+    val indexName = ctx.commandNameExpression()
     if (indexName == null) {
       // old drop index by schema
+      val msg =
+        "Indexes cannot be dropped by schema, please drop by name instead: DROP INDEX index_name. The index name can be found using SHOW INDEXES."
+      val position = inputPosition(ctx.ON().getSymbol)
       _errors :+= exceptionFactory.syntaxException(
-        "Indexes cannot be dropped by schema, please drop by name instead: DROP INDEX index_name. The index name can be found using SHOW INDEXES.",
-        inputPosition(ctx.ON().getSymbol)
+        GqlHelper.getGql42001_42I52(msg, position.offset, position.line, position.column),
+        msg,
+        position
       )
     }
   }
 
-  private def checkInsertPattern(ctx: Cypher5Parser.InsertPatternContext): Unit = {
-    if (ctx.EQ() != null) {
-      _errors :+= exceptionFactory.syntaxException(
+  private def checkInsertPattern(ctx: Cypher5Parser.InsertPatternContext): Unit =
+    if (ctx.EQ() != null)
+      _errors :+= exceptionFactory.invalidUseOfInsert(
+        "Named patterns are",
+        "remove the name",
         "Named patterns are not allowed in `INSERT`. Use `CREATE` instead or remove the name.",
         pos(ctxChild(ctx, 0))
       )
-    }
-  }
 
   private def checkInsertLabelConjunction(ctx: Cypher5Parser.InsertNodeLabelExpressionContext): Unit = {
     val colons = ctx.COLON()
     val firstIsColon = nodeChild(ctx, 0).getSymbol.getType == Cypher5Parser.COLON
 
     if (firstIsColon && colons.size > 1) {
-      _errors :+= exceptionFactory.syntaxException(
+      _errors :+= exceptionFactory.invalidUseOfInsert(
+        "Colon `:` conjunction is",
+        "conjunction with ampersand `&` instead",
         "Colon `:` conjunction is not allowed in INSERT. Use `CREATE` or conjunction with ampersand `&` instead.",
         inputPosition(colons.get(1).getSymbol)
       )
     } else if (!firstIsColon && colons.size() > 0) {
-      _errors :+= exceptionFactory.syntaxException(
+      _errors :+= exceptionFactory.invalidUseOfInsert(
+        "Colon `:` conjunction is",
+        "conjunction with ampersand `&` instead",
         "Colon `:` conjunction is not allowed in INSERT. Use `CREATE` or conjunction with ampersand `&` instead.",
         inputPosition(colons.get(0).getSymbol)
       )
@@ -779,31 +824,49 @@ final class Cypher5SyntaxChecker(exceptionFactory: CypherExceptionFactory) exten
       functionName.namespace.parts.isEmpty &&
       ctx.functionArgument().size == 2
     ) {
-      _errors :+= exceptionFactory.syntaxException(
-        "Invalid normal form, expected NFC, NFD, NFKC, NFKD",
-        ctx.functionArgument(1).expression().ast[Expression]().position
-      )
+      val normalForm = ctx.functionArgument(1).expression().ast[Expression]()
+      _errors :+= exceptionFactory.invalidNormalForm(normalForm)
     }
   }
 
   private def checkTypePart(ctx: Cypher5Parser.TypePartContext): Unit = {
     val cypherType = ctx.typeName().ast
     if (cypherType.isInstanceOf[ClosedDynamicUnionType] && ctx.typeNullability() != null) {
-      _errors :+= exceptionFactory.syntaxException(
-        "Closed Dynamic Union Types can not be appended with `NOT NULL`, specify `NOT NULL` on all inner types instead.",
-        pos(ctx.typeNullability())
-      )
+      _errors :+= exceptionFactory.invalidNotNullClosedDynamicUnion(pos(ctx.typeNullability()))
     }
   }
 
   private def checkHint(ctx: Cypher5Parser.HintContext): Unit = {
     nodeChild(ctx, 1).getSymbol.getType match {
-      case Cypher5Parser.BTREE => _errors :+= exceptionFactory.syntaxException(
-          ASTExceptionFactory.invalidHintIndexType(HintIndexType.BTREE),
-          pos(nodeChild(ctx, 1))
+      case Cypher5Parser.BTREE =>
+        val message = ASTExceptionFactory.invalidHintIndexType()
+        val position = pos(nodeChild(ctx, 1))
+        _errors :+= exceptionFactory.syntaxException(
+          GqlHelper.getGql42001_42I52(message, position.offset, position.line, position.column),
+          message,
+          position
         )
       case _ =>
     }
+  }
+
+  private def checkDefaultLanguageSpecification(ctx: Cypher5Parser.DefaultLanguageSpecificationContext): Unit = {
+    val versionNumberStr = ctx.UNSIGNED_DECIMAL_INTEGER().getText
+    CypherVersion.values().find(v => v.versionName.equals(versionNumberStr)) match {
+      case Some(_) =>
+      case None => _errors :+= exceptionFactory.invalidInputException(
+          versionNumberStr,
+          "Cypher version",
+          CypherVersion.values().map(_.description).toList,
+          s"Invalid Cypher version '$versionNumberStr'. Valid Cypher versions are: ${CypherVersion.values().map(_.versionName).mkString(", ")}",
+          pos(ctx.UNSIGNED_DECIMAL_INTEGER())
+        )
+    }
+  }
+
+  def failOnObfuscatedLiteral(ctx: ParserRuleContext): Unit = {
+    if (!semanticFeatures.contains(EnableParsingOfObfuscatedLiterals))
+      throw exceptionFactory.invalidInputException("******", List("an expression"), "Invalid input '******'", pos(ctx))
   }
 }
 

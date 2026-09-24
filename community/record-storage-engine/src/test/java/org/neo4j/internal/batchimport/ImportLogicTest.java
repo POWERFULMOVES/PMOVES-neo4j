@@ -39,12 +39,12 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
+import org.neo4j.batchimport.api.AdditionalInitialIds;
 import org.neo4j.batchimport.api.IndexImporterFactory;
 import org.neo4j.batchimport.api.input.Collector;
 import org.neo4j.graphdb.Direction;
-import org.neo4j.internal.batchimport.cache.NodeRelationshipCache;
 import org.neo4j.internal.batchimport.cache.NumberArrayFactories;
+import org.neo4j.internal.batchimport.cache.legacy.NodeRelationshipCache;
 import org.neo4j.internal.batchimport.staging.ExecutionMonitor;
 import org.neo4j.internal.batchimport.store.BatchingNeoStores;
 import org.neo4j.io.fs.FileSystemAbstraction;
@@ -52,17 +52,21 @@ import org.neo4j.io.layout.recordstorage.RecordDatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.memory.EmptyMemoryTracker;
+import org.neo4j.storageengine.api.LogMetadataProviderImpl;
+import org.neo4j.test.LatestVersions;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.Neo4jLayoutExtension;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.extension.pagecache.PageCacheExtension;
+import org.neo4j.test.scheduler.JobSchedulerAdapter;
+import org.neo4j.wal.LogTailLogVersionsMetadata;
 
 @PageCacheExtension
 @Neo4jLayoutExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class ImportLogicTest {
     private static final CursorContextFactory CONTEXT_FACTORY =
             new CursorContextFactory(PageCacheTracer.NULL, EMPTY_CONTEXT_SUPPLIER);
@@ -92,8 +96,6 @@ class ImportLogicTest {
                 databaseLayout,
                 DEFAULT,
                 getInstance(),
-                DefaultAdditionalIds.EMPTY,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
                 defaults(),
                 INSTANCE)) {
             //noinspection EmptyTryBlock
@@ -124,48 +126,49 @@ class ImportLogicTest {
         int denseNodeThreshold = 5;
         int numberOfNodes = 100;
         int numberOfTypes = 10;
-        NodeRelationshipCache cache =
-                new NodeRelationshipCache(NumberArrayFactories.HEAP, denseNodeThreshold, EmptyMemoryTracker.INSTANCE);
-        cache.setNodeCount(numberOfNodes + 1);
-        Direction[] directions = Direction.values();
-        for (int i = 0; i < numberOfNodes; i++) {
-            int count = random.nextInt(1, denseNodeThreshold * 2);
-            cache.setCount(i, count, random.nextInt(numberOfTypes), random.among(directions));
-        }
-        cache.countingCompleted();
-        List<DataStatistics.RelationshipTypeCount> types = new ArrayList<>();
-        int numberOfRelationships = 0;
-        for (int i = 0; i < numberOfTypes; i++) {
-            int count = random.nextInt(1, 100);
-            types.add(new DataStatistics.RelationshipTypeCount(i, count));
-            numberOfRelationships += count;
-        }
-        types.sort((t1, t2) -> Long.compare(t2.getCount(), t1.getCount()));
-        DataStatistics typeDistribution =
-                new DataStatistics(0, 0, types.toArray(new DataStatistics.RelationshipTypeCount[0]));
-
-        // WHEN enough memory for all types
-        {
-            long memory = cache.calculateMaxMemoryUsage(numberOfRelationships) * numberOfTypes;
-            int upToType = ImportLogic.nextSetOfTypesThatFitInMemory(
-                    typeDistribution, 0, memory, cache.getNumberOfDenseNodes());
-
-            // THEN
-            assertEquals(types.size(), upToType);
-        }
-
-        // and WHEN less than enough memory for all types
-        {
-            long memory = cache.calculateMaxMemoryUsage(numberOfRelationships) * numberOfTypes / 3;
-            int startingFromType = 0;
-            int rounds = 0;
-            while (startingFromType < types.size()) {
-                rounds++;
-                startingFromType = ImportLogic.nextSetOfTypesThatFitInMemory(
-                        typeDistribution, startingFromType, memory, cache.getNumberOfDenseNodes());
+        try (NodeRelationshipCache cache = new NodeRelationshipCache(
+                NumberArrayFactories.OFF_HEAP, denseNodeThreshold, EmptyMemoryTracker.INSTANCE)) {
+            cache.setNodeCount(numberOfNodes + 1);
+            Direction[] directions = Direction.values();
+            for (int i = 0; i < numberOfNodes; i++) {
+                int count = random.nextInt(1, denseNodeThreshold * 2);
+                cache.setCount(i, count, random.nextInt(numberOfTypes), random.among(directions));
             }
-            assertEquals(types.size(), startingFromType);
-            assertThat(rounds).isGreaterThan(1);
+            cache.countingCompleted();
+            List<DataStatistics.RelationshipTypeCount> types = new ArrayList<>();
+            int numberOfRelationships = 0;
+            for (int i = 0; i < numberOfTypes; i++) {
+                int count = random.nextInt(1, 100);
+                types.add(new DataStatistics.RelationshipTypeCount(i, count));
+                numberOfRelationships += count;
+            }
+            types.sort((t1, t2) -> Long.compare(t2.getCount(), t1.getCount()));
+            DataStatistics typeDistribution =
+                    new DataStatistics(0, 0, types.toArray(new DataStatistics.RelationshipTypeCount[0]));
+
+            // WHEN enough memory for all types
+            {
+                long memory = cache.calculateMaxMemoryUsage(numberOfRelationships) * numberOfTypes;
+                int upToType = ImportLogic.nextSetOfTypesThatFitInMemory(
+                        typeDistribution, 0, memory, cache.getNumberOfDenseNodes());
+
+                // THEN
+                assertEquals(types.size(), upToType);
+            }
+
+            // and WHEN less than enough memory for all types
+            {
+                long memory = cache.calculateMaxMemoryUsage(numberOfRelationships) * numberOfTypes / 3;
+                int startingFromType = 0;
+                int rounds = 0;
+                while (startingFromType < types.size()) {
+                    rounds++;
+                    startingFromType = ImportLogic.nextSetOfTypesThatFitInMemory(
+                            typeDistribution, startingFromType, memory, cache.getNumberOfDenseNodes());
+                }
+                assertEquals(types.size(), startingFromType);
+                assertThat(rounds).isGreaterThan(1);
+            }
         }
     }
 
@@ -183,8 +186,6 @@ class ImportLogicTest {
                 databaseLayout,
                 DEFAULT,
                 getInstance(),
-                DefaultAdditionalIds.EMPTY,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
                 defaults(),
                 INSTANCE)) {
             // when
@@ -211,6 +212,67 @@ class ImportLogicTest {
 
             // then
             verify(monitor).done(eq(true), anyLong(), contains(dataStatistics.toString()));
+        }
+    }
+
+    @Test
+    void notEmptyInitialIds() {
+        LogMetadataProviderImpl logMetadataProvider = new LogMetadataProviderImpl(
+                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
+                LatestVersions.LATEST_LOG_FORMAT,
+                LatestVersions.LATEST_KERNEL_VERSION);
+        ImportLogic.instantiateNeoStores(
+                fileSystem,
+                databaseLayout,
+                NULL,
+                DEFAULT,
+                getInstance(),
+                new TestAdditionalInitialIds(),
+                logMetadataProvider,
+                defaults(),
+                new JobSchedulerAdapter(),
+                INSTANCE,
+                CONTEXT_FACTORY,
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
+
+        assertEquals(10, logMetadataProvider.getLastCommittedTransactionId());
+        assertEquals(14, logMetadataProvider.getCheckpointLogVersion());
+    }
+
+    private static class TestAdditionalInitialIds implements AdditionalInitialIds {
+        @Override
+        public long lastCommittedTransactionId() {
+            return 10;
+        }
+
+        @Override
+        public int lastCommittedTransactionChecksum() {
+            return 11;
+        }
+
+        @Override
+        public long lastCommittedTransactionLogVersion() {
+            return 12;
+        }
+
+        @Override
+        public long lastCommittedTransactionLogByteOffset() {
+            return 13;
+        }
+
+        @Override
+        public long checkpointLogVersion() {
+            return 14;
+        }
+
+        @Override
+        public long lastAppendIndex() {
+            return 20;
+        }
+
+        @Override
+        public long lastCommittedTransactionAppendIndex() {
+            return 15;
         }
     }
 }

@@ -71,9 +71,11 @@ import org.neo4j.io.fs.StoreChannel;
 import org.neo4j.io.fs.StoreFileChannel;
 import org.neo4j.io.memory.ByteBuffers;
 import org.neo4j.io.pagecache.IOController;
-import org.neo4j.io.pagecache.PageSwapper;
-import org.neo4j.io.pagecache.PageSwapperFactory;
 import org.neo4j.io.pagecache.PageSwapperTest;
+import org.neo4j.io.pagecache.impl.muninn.swapper.FileLockException;
+import org.neo4j.io.pagecache.impl.muninn.swapper.PageSwapper;
+import org.neo4j.io.pagecache.impl.muninn.swapper.PageSwapperFactory;
+import org.neo4j.io.pagecache.impl.muninn.swapper.SingleFilePageSwapperFactory;
 import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.memory.EmptyMemoryTracker;
@@ -104,11 +106,6 @@ public class SingleFilePageSwapperTest extends PageSwapperTest {
     @Override
     protected PageSwapperFactory swapperFactory(FileSystemAbstraction fileSystem) {
         return new SingleFilePageSwapperFactory(fileSystem, new DefaultPageCacheTracer(), EmptyMemoryTracker.INSTANCE);
-    }
-
-    @Override
-    protected void mkdirs(Path dir) throws IOException {
-        getFs().mkdirs(dir);
     }
 
     protected Path getPath() {
@@ -148,25 +145,6 @@ public class SingleFilePageSwapperTest extends PageSwapperTest {
             int numberOfReads = 12;
             for (int i = 0; i < numberOfReads; i++) {
                 assertEquals(4 + RESERVED_BYTES, swapper.read(0, target));
-            }
-            assertEquals(numberOfReads, controller.getExternalIOCounter());
-        }
-    }
-
-    @Test
-    void reportExternalIoOnSwapInWithLength() throws IOException {
-        byte[] bytes = new byte[] {1, 2, 3, 4};
-        try (StoreChannel channel = getFs().write(getPath())) {
-            channel.writeAll(wrap(bytes));
-        }
-
-        PageSwapperFactory factory = createSwapperFactory(getFs());
-        CountingIOController controller = new CountingIOController();
-        try (var swapper = createSwapper(factory, getPath(), 4, null, false, false, controller)) {
-            long target = createPage(4);
-            int numberOfReads = 12;
-            for (int i = 0; i < numberOfReads; i++) {
-                assertEquals(4 + RESERVED_BYTES, swapper.read(0, target, 4 + RESERVED_BYTES));
             }
             assertEquals(numberOfReads, controller.getExternalIOCounter());
         }
@@ -256,7 +234,6 @@ public class SingleFilePageSwapperTest extends PageSwapperTest {
                                 0,
                                 new long[] {target1, target2, target3},
                                 new int[] {4 + RESERVED_BYTES, 4 + RESERVED_BYTES, 4 + RESERVED_BYTES},
-                                buffers,
                                 buffers));
             }
             assertEquals(0, controller.getExternalIOCounter());
@@ -443,15 +420,11 @@ public class SingleFilePageSwapperTest extends PageSwapperTest {
     void creatingSwapperForFileMustTakeLockOnFile() throws Exception {
         PageSwapperFactory factory = createSwapperFactory(fileSystem);
         Path file = testDir.file("file");
-        ((StoreChannel) fileSystem.write(file)).close();
+        fileSystem.write(file).close();
 
-        PageSwapper pageSwapper = createSwapper(factory, file, 4, NO_CALLBACK, false);
-
-        try {
+        try (PageSwapper pageSwapper = createSwapper(factory, file, 4, NO_CALLBACK, false)) {
             StoreChannel channel = fileSystem.write(file);
             assertThrows(OverlappingFileLockException.class, channel::tryLock);
-        } finally {
-            pageSwapper.close();
         }
     }
 
@@ -475,7 +448,7 @@ public class SingleFilePageSwapperTest extends PageSwapperTest {
         PageSwapperFactory factory = createSwapperFactory(fileSystem);
         Path file = testDir.file("file");
 
-        ((StoreChannel) fileSystem.write(file)).close();
+        fileSystem.write(file).close();
 
         var process = start(
                 pb -> pb.directory(
@@ -513,7 +486,7 @@ public class SingleFilePageSwapperTest extends PageSwapperTest {
     void mustUnlockFileWhenThePageSwapperIsClosed() throws Exception {
         PageSwapperFactory factory = createSwapperFactory(fileSystem);
         Path file = testDir.file("file");
-        ((StoreChannel) fileSystem.write(file)).close();
+        fileSystem.write(file).close();
 
         createSwapper(factory, file, 4, NO_CALLBACK, false).close();
 
@@ -528,19 +501,15 @@ public class SingleFilePageSwapperTest extends PageSwapperTest {
     void fileMustRemainLockedEvenIfChannelIsClosedByStrayInterrupt() throws Exception {
         PageSwapperFactory factory = createSwapperFactory(fileSystem);
         Path file = testDir.file("file");
-        ((StoreChannel) fileSystem.write(file)).close();
+        fileSystem.write(file).close();
 
-        PageSwapper pageSwapper = createSwapper(factory, file, 4, NO_CALLBACK, false);
-
-        try {
+        try (PageSwapper pageSwapper = createSwapper(factory, file, 4, NO_CALLBACK, false)) {
             StoreChannel channel = fileSystem.write(file);
 
             Thread.currentThread().interrupt();
             pageSwapper.force();
 
             assertThrows(OverlappingFileLockException.class, channel::tryLock);
-        } finally {
-            pageSwapper.close();
         }
     }
 
@@ -638,11 +607,9 @@ public class SingleFilePageSwapperTest extends PageSwapperTest {
         Path file = getPath();
         RandomAdversary adversary = new RandomAdversary(0.5, 0.0, 0.0);
         PageSwapperFactory factory = createSwapperFactory(new AdversarialFileSystemAbstraction(adversary, getFs()));
-        PageSwapper swapper = createSwapper(factory, file, bytesTotal, NO_CALLBACK, true);
 
-        long page = createPage(bytesTotal);
-
-        try {
+        try (PageSwapper swapper = createSwapper(factory, file, bytesTotal, NO_CALLBACK, true)) {
+            long page = createPage(bytesTotal);
             for (int i = 0; i < 10_000; i++) {
                 adversary.enableAdversary(false);
                 swapper.write(0, zeroPage);
@@ -654,8 +621,6 @@ public class SingleFilePageSwapperTest extends PageSwapperTest {
                 swapper.read(0, page);
                 assertThat(array(page)).isEqualTo(data);
             }
-        } finally {
-            swapper.close();
         }
     }
 
@@ -736,9 +701,9 @@ public class SingleFilePageSwapperTest extends PageSwapperTest {
         try {
             for (int i = 0; i < 10_000; i++) {
                 adversary.enableAdversary(false);
-                swapper.write(0, zeroPages, pageLengths, pageCount, pageCount);
+                swapper.write(0, zeroPages, pageLengths, pageCount);
                 adversary.enableAdversary(true);
-                swapper.write(0, writePages, pageLengths, pageCount, pageCount);
+                swapper.write(0, writePages, pageLengths, pageCount);
                 for (long readPage : readPages) {
                     clear(readPage);
                 }
@@ -783,12 +748,12 @@ public class SingleFilePageSwapperTest extends PageSwapperTest {
         private final AtomicLong externalIOCounter = new AtomicLong();
 
         @Override
-        public void maybeLimitIO(int recentlyCompletedIOs, FileFlushEvent flushes) {
+        public void maybeLimitIO(int recentlyCompletedIOs, int affectedPages, FileFlushEvent flushes) {
             // empty
         }
 
         @Override
-        public void reportIO(int completedIOs) {
+        public void reportIO(int completedIOs, int affectedPages) {
             externalIOCounter.addAndGet(completedIOs);
         }
 

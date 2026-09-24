@@ -21,23 +21,26 @@ package org.neo4j.bolt.authentication;
 
 import java.io.IOException;
 import java.time.Duration;
-import java.util.Map;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.bolt.test.annotation.BoltTestExtension;
 import org.neo4j.bolt.test.annotation.connection.initializer.VersionSelected;
+import org.neo4j.bolt.test.annotation.setup.FactoryFunction;
 import org.neo4j.bolt.test.annotation.setup.SettingsFunction;
 import org.neo4j.bolt.test.annotation.test.TransportTest;
+import org.neo4j.bolt.test.connection.setup.SettingBuilder;
 import org.neo4j.bolt.testing.assertions.BoltConnectionAssertions;
 import org.neo4j.bolt.testing.client.BoltTestConnection;
 import org.neo4j.bolt.testing.messages.BoltV40Wire;
 import org.neo4j.bolt.testing.messages.BoltWire;
 import org.neo4j.bolt.transport.Neo4jWithSocketExtension;
 import org.neo4j.configuration.connectors.BoltConnectorInternalSettings;
-import org.neo4j.graphdb.config.Setting;
 import org.neo4j.io.ByteUnit;
-import org.neo4j.kernel.api.exceptions.Status;
+import org.neo4j.logging.AssertableLogProvider;
+import org.neo4j.logging.LogAssertions;
 import org.neo4j.packstream.io.PackstreamBuf;
 import org.neo4j.packstream.struct.StructHeader;
+import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.OtherThreadExtension;
 import org.neo4j.test.extension.testdirectory.EphemeralTestDirectoryExtension;
 
@@ -45,14 +48,26 @@ import org.neo4j.test.extension.testdirectory.EphemeralTestDirectoryExtension;
 @Neo4jWithSocketExtension
 @BoltTestExtension
 @ExtendWith(OtherThreadExtension.class)
-public class UnauthenticatedIT {
+class UnauthenticatedIT {
+
+    private final AssertableLogProvider internalLogProvider = new AssertableLogProvider();
+
+    @FactoryFunction
+    void customizeDatabase(TestDatabaseManagementServiceBuilder factory) {
+        factory.setInternalLogProvider(this.internalLogProvider);
+    }
+
+    @AfterEach
+    void cleanup() {
+        this.internalLogProvider.clear();
+    }
 
     @SettingsFunction
-    static void customizeSettings(Map<Setting<?>, Object> settings) {
-        settings.put(BoltConnectorInternalSettings.unsupported_bolt_unauth_connection_timeout, Duration.ofSeconds(5));
-        settings.put(
-                BoltConnectorInternalSettings.unsupported_bolt_unauth_connection_max_inbound_bytes,
-                ByteUnit.kibiBytes(1));
+    static void customizeSettings(SettingBuilder settings) {
+        settings.set(BoltConnectorInternalSettings.unsupported_bolt_unauth_connection_timeout, Duration.ofSeconds(5))
+                .set(
+                        BoltConnectorInternalSettings.unsupported_bolt_unauth_connection_max_inbound_bytes,
+                        ByteUnit.kibiBytes(1));
     }
 
     @TransportTest
@@ -92,11 +107,11 @@ public class UnauthenticatedIT {
                 .writeString("foo")
                 .writeString("bar"));
 
-        BoltConnectionAssertions.assertThat(connection)
-                .receivesFailureFuzzyV40(
-                        Status.Request.Invalid,
-                        "Illegal value for field \"extra\": Value of size 2147483647 exceeded limit of")
-                .isEventuallyTerminated();
+        BoltConnectionAssertions.assertThat(connection).isEventuallyTerminated();
+
+        LogAssertions.assertThat(this.internalLogProvider)
+                .forLevel(AssertableLogProvider.Level.ERROR)
+                .containsMessagesOnce("Message has exceeded maximum permitted complexity of 64 elements");
     }
 
     @TransportTest
@@ -110,11 +125,10 @@ public class UnauthenticatedIT {
                 .writeString("foo")
                 .writeString("bar"));
 
-        // Then
-        BoltConnectionAssertions.assertThat(connection)
-                .receivesFailureFuzzyV40(
-                        Status.Request.Invalid,
-                        "Illegal value for field \"extra\": Value of size 2147483647 exceeded limit of")
-                .isEventuallyTerminated();
+        BoltConnectionAssertions.assertThat(connection).isEventuallyTerminated();
+
+        LogAssertions.assertThat(this.internalLogProvider)
+                .forLevel(AssertableLogProvider.Level.ERROR)
+                .containsMessagesOnce("Message has exceeded maximum permitted complexity of 64 elements");
     }
 }

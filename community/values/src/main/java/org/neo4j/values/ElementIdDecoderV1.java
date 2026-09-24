@@ -26,7 +26,7 @@ import org.neo4j.common.EntityType;
 
 public class ElementIdDecoderV1 implements ElementIdDecoder.VersionedElementIdDecoder {
 
-    public static byte ELEMENT_ID_FORMAT_VERSION = 1;
+    public static final byte ELEMENT_ID_FORMAT_VERSION = 1;
 
     @Override
     public long nodeId(String elementId) {
@@ -41,6 +41,14 @@ public class ElementIdDecoderV1 implements ElementIdDecoder.VersionedElementIdDe
     @Override
     public UUID database(String elementId) {
         return decodeDatabase(elementId);
+    }
+
+    public long decodeElementId(String elementId) {
+        return decode(elementId).entityId;
+    }
+
+    public EntityType decodeElementType(String elementId) {
+        return decode(elementId).entityType;
     }
 
     protected record ElementId(long entityId, EntityType entityType, UUID database) {}
@@ -61,6 +69,9 @@ public class ElementIdDecoderV1 implements ElementIdDecoder.VersionedElementIdDe
             var entityId = Long.parseLong(parts[2]);
             var entityType = decodeEntityType(id, header);
             return new ElementId(entityId, entityType, database);
+        } catch (NumberFormatException e) {
+            // extends IllegalArgumentException
+            throw new IllegalArgumentException(format("Element ID %s has an unexpected format.", id), e);
         } catch (IllegalArgumentException iae) {
             throw iae;
         } catch (Exception e) {
@@ -75,6 +86,9 @@ public class ElementIdDecoderV1 implements ElementIdDecoder.VersionedElementIdDe
             verifyVersion(id, header);
 
             return UUID.fromString(parts[1]);
+        } catch (NumberFormatException e) {
+            // extends IllegalArgumentException
+            throw new IllegalArgumentException(format("Element ID %s has an unexpected format.", id), e);
         } catch (IllegalArgumentException iae) {
             throw iae;
         } catch (Exception e) {
@@ -103,8 +117,9 @@ public class ElementIdDecoderV1 implements ElementIdDecoder.VersionedElementIdDe
         return switch (entityTypeId) {
             case 0 -> EntityType.NODE;
             case 1 -> EntityType.RELATIONSHIP;
-            default -> throw new IllegalArgumentException(
-                    format("Element ID %s has unknown entity type ID %s", id, entityTypeId));
+            default ->
+                throw new IllegalArgumentException(
+                        format("Element ID %s has unknown entity type ID %s", id, entityTypeId));
         };
     }
 

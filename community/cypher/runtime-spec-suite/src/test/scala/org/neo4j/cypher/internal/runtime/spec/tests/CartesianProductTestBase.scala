@@ -23,6 +23,7 @@ import org.neo4j.cypher.internal.CypherRuntime
 import org.neo4j.cypher.internal.RuntimeContext
 import org.neo4j.cypher.internal.logical.plans.DoNotGetValue
 import org.neo4j.cypher.internal.logical.plans.GetValue
+import org.neo4j.cypher.internal.logical.plans.IndexOrderAscending
 import org.neo4j.cypher.internal.logical.plans.IndexOrderNone
 import org.neo4j.cypher.internal.runtime.TestSubscriber
 import org.neo4j.cypher.internal.runtime.spec.Edition
@@ -33,6 +34,8 @@ import org.neo4j.cypher.internal.runtime.spec.rewriters.TestPlanCombinationRewri
 import org.neo4j.graphdb.Direction
 
 import scala.jdk.CollectionConverters.IterableHasAsScala
+
+object CartesianProductTestBase
 
 abstract class CartesianProductTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
@@ -850,8 +853,18 @@ abstract class CartesianProductTestBase[CONTEXT <: RuntimeContext](
       .projection("n.prop as nn", "m.prop as mm")
       .apply()
       .|.cartesianProduct()
-      .|.|.nodeIndexOperator("m:Label(prop < ???)", paramExpr = Some(varFor("j")), getValue = _ => DoNotGetValue)
-      .|.nodeIndexOperator("n:Label(prop < ???)", paramExpr = Some(varFor("i")), getValue = _ => GetValue)
+      .|.|.nodeIndexOperator(
+        "m:Label(prop < ???)",
+        paramExpr = Some(varFor("j")),
+        getValue = _ => DoNotGetValue,
+        indexOrder = IndexOrderAscending
+      )
+      .|.nodeIndexOperator(
+        "n:Label(prop < ???)",
+        paramExpr = Some(varFor("i")),
+        getValue = _ => GetValue,
+        indexOrder = IndexOrderAscending
+      )
       .input(variables = Seq("i", "j"))
       .build()
 
@@ -889,11 +902,11 @@ abstract class CartesianProductTestBase[CONTEXT <: RuntimeContext](
       .build()
 
     val subscriber = TestSubscriber.concurrent
-    val result = execute(
+    val result = executeWithSubscriber(
       logicalQuery,
       runtime,
-      inputStream,
       subscriber,
+      inputStream,
       testPlanCombinationRewriterHints = Set(TestPlanCombinationRewriter.NoEager)
     )
 
@@ -947,11 +960,11 @@ abstract class CartesianProductTestBase[CONTEXT <: RuntimeContext](
       .build()
 
     val subscriber = TestSubscriber.concurrent
-    val result = execute(
+    val result = executeWithSubscriber(
       logicalQuery,
       runtime,
-      inputStream,
       subscriber,
+      inputStream,
       testPlanCombinationRewriterHints = Set(TestPlanCombinationRewriter.NoEager)
     )
 

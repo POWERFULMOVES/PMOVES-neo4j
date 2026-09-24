@@ -47,8 +47,6 @@ import org.neo4j.graphdb.config.Setting;
 import org.neo4j.index.internal.gbptree.GBPTree;
 import org.neo4j.internal.schema.AllIndexProviderDescriptors;
 import org.neo4j.kernel.database.Database;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.logging.AssertableLogProvider;
 import org.neo4j.monitoring.DatabaseHealth;
@@ -57,11 +55,15 @@ import org.neo4j.monitoring.Panic;
 import org.neo4j.test.Barrier;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
 import org.neo4j.values.storable.Values;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
 
 @TestDirectoryExtension
+@SkipOnSpd
 class RecoveryCleanupIT {
     @Inject
     private TestDirectory testDirectory;

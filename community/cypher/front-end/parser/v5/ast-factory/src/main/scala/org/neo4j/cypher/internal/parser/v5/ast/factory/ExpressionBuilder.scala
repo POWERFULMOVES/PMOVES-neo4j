@@ -49,7 +49,6 @@ import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.FixedQuantifier
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
 import org.neo4j.cypher.internal.expressions.FunctionInvocation.ArgumentUnordered
-import org.neo4j.cypher.internal.expressions.FunctionName
 import org.neo4j.cypher.internal.expressions.GreaterThan
 import org.neo4j.cypher.internal.expressions.GreaterThanOrEqual
 import org.neo4j.cypher.internal.expressions.In
@@ -72,7 +71,6 @@ import org.neo4j.cypher.internal.expressions.NFCNormalForm
 import org.neo4j.cypher.internal.expressions.NFDNormalForm
 import org.neo4j.cypher.internal.expressions.NFKCNormalForm
 import org.neo4j.cypher.internal.expressions.NFKDNormalForm
-import org.neo4j.cypher.internal.expressions.Namespace
 import org.neo4j.cypher.internal.expressions.NodePattern
 import org.neo4j.cypher.internal.expressions.NonPrefixedPatternPart
 import org.neo4j.cypher.internal.expressions.NoneIterablePredicate
@@ -83,14 +81,15 @@ import org.neo4j.cypher.internal.expressions.Or
 import org.neo4j.cypher.internal.expressions.ParenthesizedPath
 import org.neo4j.cypher.internal.expressions.PathConcatenation
 import org.neo4j.cypher.internal.expressions.PathFactor
+import org.neo4j.cypher.internal.expressions.PathLengthQuantifier
 import org.neo4j.cypher.internal.expressions.PathPatternPart
 import org.neo4j.cypher.internal.expressions.Pattern
 import org.neo4j.cypher.internal.expressions.PatternComprehension
 import org.neo4j.cypher.internal.expressions.PatternExpression
 import org.neo4j.cypher.internal.expressions.PatternPart
-import org.neo4j.cypher.internal.expressions.PatternPartWithSelector
 import org.neo4j.cypher.internal.expressions.PlusQuantifier
 import org.neo4j.cypher.internal.expressions.Pow
+import org.neo4j.cypher.internal.expressions.PrefixedPatternPart
 import org.neo4j.cypher.internal.expressions.Property
 import org.neo4j.cypher.internal.expressions.PropertyKeyName
 import org.neo4j.cypher.internal.expressions.PropertySelector
@@ -111,13 +110,16 @@ import org.neo4j.cypher.internal.expressions.StringLiteral
 import org.neo4j.cypher.internal.expressions.Subtract
 import org.neo4j.cypher.internal.expressions.UnaryAdd
 import org.neo4j.cypher.internal.expressions.UnarySubtract
-import org.neo4j.cypher.internal.expressions.UnsignedDecimalIntegerLiteral
 import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.expressions.VariableSelector
 import org.neo4j.cypher.internal.expressions.Xor
 import org.neo4j.cypher.internal.expressions.functions.Trim
+import org.neo4j.cypher.internal.label_expressions.LabelExpression
 import org.neo4j.cypher.internal.label_expressions.LabelExpressionPredicate
-import org.neo4j.cypher.internal.macros.AssertMacros
+import org.neo4j.cypher.internal.macros.AssertMacros3
+import org.neo4j.cypher.internal.notification.DeprecatedIdentifierUnicode
+import org.neo4j.cypher.internal.notification.DeprecatedIdentifierWhitespaceUnicode
+import org.neo4j.cypher.internal.notification.InternalNotificationLogger
 import org.neo4j.cypher.internal.parser.AstRuleCtx
 import org.neo4j.cypher.internal.parser.ast.util.Util.astBinaryFold
 import org.neo4j.cypher.internal.parser.ast.util.Util.astChild
@@ -130,18 +132,18 @@ import org.neo4j.cypher.internal.parser.ast.util.Util.ctxChild
 import org.neo4j.cypher.internal.parser.ast.util.Util.lastChild
 import org.neo4j.cypher.internal.parser.ast.util.Util.nodeChild
 import org.neo4j.cypher.internal.parser.ast.util.Util.nodeChildType
-import org.neo4j.cypher.internal.parser.ast.util.Util.optUnsignedDecimalInt
+import org.neo4j.cypher.internal.parser.ast.util.Util.optSafeUnsignedDecimalInt
 import org.neo4j.cypher.internal.parser.ast.util.Util.pos
-import org.neo4j.cypher.internal.parser.ast.util.Util.unsignedDecimalInt
+import org.neo4j.cypher.internal.parser.ast.util.Util.safeUnsignedDecimalInt
 import org.neo4j.cypher.internal.parser.common.ast.factory.ParserTrimSpecification
 import org.neo4j.cypher.internal.parser.common.deprecation.DeprecatedChars
 import org.neo4j.cypher.internal.parser.v5.Cypher5Parser
 import org.neo4j.cypher.internal.parser.v5.Cypher5ParserListener
 import org.neo4j.cypher.internal.util.CypherExceptionFactory
-import org.neo4j.cypher.internal.util.DeprecatedIdentifierUnicode
-import org.neo4j.cypher.internal.util.DeprecatedIdentifierWhitespaceUnicode
+import org.neo4j.cypher.internal.util.FunctionName
 import org.neo4j.cypher.internal.util.InputPosition
-import org.neo4j.cypher.internal.util.InternalNotificationLogger
+import org.neo4j.cypher.internal.util.Namespace
+import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.symbols.AnyType
 import org.neo4j.cypher.internal.util.symbols.BooleanType
 import org.neo4j.cypher.internal.util.symbols.CTAny
@@ -163,11 +165,12 @@ import org.neo4j.cypher.internal.util.symbols.NothingType
 import org.neo4j.cypher.internal.util.symbols.NullType
 import org.neo4j.cypher.internal.util.symbols.PathType
 import org.neo4j.cypher.internal.util.symbols.PointType
-import org.neo4j.cypher.internal.util.symbols.PropertyValueType
+import org.neo4j.cypher.internal.util.symbols.PropertyValueCypher5Type
 import org.neo4j.cypher.internal.util.symbols.RelationshipType
 import org.neo4j.cypher.internal.util.symbols.StringType
 import org.neo4j.cypher.internal.util.symbols.ZonedDateTimeType
 import org.neo4j.cypher.internal.util.symbols.ZonedTimeType
+import org.neo4j.cypher.internal.util.topDown
 
 import java.util.stream.Collectors
 
@@ -185,9 +188,12 @@ trait ExpressionBuilder extends Cypher5ParserListener {
     ctx.ast = firstToken.getType match {
       case Cypher5Parser.LCURLY =>
         if (ctx.from != null || ctx.to != null || ctx.COMMA() != null) {
-          IntervalQuantifier(optUnsignedDecimalInt(ctx.from), optUnsignedDecimalInt(ctx.to))(pos(ctx))
+          IntervalQuantifier(
+            optSafeUnsignedDecimalInt(ctx.from),
+            optSafeUnsignedDecimalInt(ctx.to)
+          )(pos(ctx))
         } else {
-          FixedQuantifier(unsignedDecimalInt(nodeChild(ctx, 1).getSymbol))(pos(firstToken))
+          FixedQuantifier(safeUnsignedDecimalInt(nodeChild(ctx, 1).getSymbol))(pos(firstToken))
         }
       case Cypher5Parser.PLUS  => PlusQuantifier()(pos(firstToken))
       case Cypher5Parser.TIMES => StarQuantifier()(pos(firstToken))
@@ -215,7 +221,6 @@ trait ExpressionBuilder extends Cypher5ParserListener {
     if (size == 1) {
       ctx.ast = ctxChild(ctx, 0).ast[PathFactor]()
     } else {
-      val p = pos(ctx)
       val parts = new mutable.ArrayDeque[PathFactor](1)
       var relPattern: RelationshipPattern = null
       var i = 0
@@ -225,7 +230,7 @@ trait ExpressionBuilder extends Cypher5ParserListener {
             val nodePattern = nCtx.ast[NodePattern]()
             if (relPattern != null) {
               val lhs = parts.removeLast().asInstanceOf[SimplePattern]
-              parts.addOne(RelationshipChain(lhs, relPattern, nodePattern)(p))
+              parts.addOne(RelationshipChain(lhs, relPattern, nodePattern)(lhs.position))
               relPattern = null
             } else {
               parts.addOne(nodePattern)
@@ -250,21 +255,21 @@ trait ExpressionBuilder extends Cypher5ParserListener {
     }
   }
 
-  private def selectorCount(node: TerminalNode, p: InputPosition): UnsignedDecimalIntegerLiteral =
-    if (node == null) UnsignedDecimalIntegerLiteral("1")(p)
-    else UnsignedDecimalIntegerLiteral(node.getText)(pos(node))
+  private def selectorCount(node: TerminalNode, p: InputPosition): PathLengthQuantifier =
+    if (node == null) PathLengthQuantifier("1")(p)
+    else PathLengthQuantifier(node.getText)(pos(node))
 
   final override def exitSelector(ctx: Cypher5Parser.SelectorContext): Unit = {
     val p = pos(ctx)
     ctx.ast = ctx match {
       case anyShortestCtx: Cypher5Parser.AnyShortestPathContext =>
-        PatternPart.AnyShortestPath(selectorCount(anyShortestCtx.UNSIGNED_DECIMAL_INTEGER(), p))(p)
+        PatternPart.AnyShortestPath(Left(selectorCount(anyShortestCtx.UNSIGNED_DECIMAL_INTEGER(), p)))(p)
       case allShortestCtx: Cypher5Parser.AllShortestPathContext =>
         PatternPart.AllShortestPaths()(pos(allShortestCtx))
       case anyCtx: Cypher5Parser.AnyPathContext =>
-        PatternPart.AnyPath(selectorCount(anyCtx.UNSIGNED_DECIMAL_INTEGER(), p))(p)
+        PatternPart.AnyPath(Left(selectorCount(anyCtx.UNSIGNED_DECIMAL_INTEGER(), p)))(p)
       case shortestGrpCtx: Cypher5Parser.ShortestGroupContext =>
-        PatternPart.ShortestGroups(selectorCount(shortestGrpCtx.UNSIGNED_DECIMAL_INTEGER(), p))(p)
+        PatternPart.ShortestGroups(Left(selectorCount(shortestGrpCtx.UNSIGNED_DECIMAL_INTEGER(), p)))(p)
       case allPathCtx: Cypher5Parser.AllPathContext =>
         PatternPart.AllPaths()(p)
       case _ => throw new IllegalStateException(s"Unexpected context $ctx")
@@ -275,10 +280,11 @@ trait ExpressionBuilder extends Cypher5ParserListener {
     val p = pos(ctx)
     val pattern = astChild[PatternPart](ctx, 1) match {
       case nonPrefixedPatternPart: NonPrefixedPatternPart => nonPrefixedPatternPart
-      case ps: PatternPartWithSelector =>
+      case ps: PrefixedPatternPart =>
         val pathPatternKind = if (ctx.quantifier() == null) "parenthesized" else "quantified"
-        throw exceptionFactory.syntaxException(
-          s"Path selectors such as `${ps.selector.prettified}` are not supported within $pathPatternKind path patterns.",
+        throw exceptionFactory.unsupportedPathSelectorInPathPattern(
+          ps.selector.prettified,
+          pathPatternKind,
           ps.position
         )
     }
@@ -298,32 +304,32 @@ trait ExpressionBuilder extends Cypher5ParserListener {
   ): Unit = {
     // This is weird, we should refactor range to be more sensible and not use nested options
     ctx.ast = if (ctx.DOTDOT() != null) {
-      val from = optUnsignedDecimalInt(ctx.from)
-      val to = optUnsignedDecimalInt(ctx.to)
+      val from = optSafeUnsignedDecimalInt(ctx.from)
+      val to = optSafeUnsignedDecimalInt(ctx.to)
       Some(org.neo4j.cypher.internal.expressions.Range(from, to)(from.map(_.position).getOrElse(pos(ctx))))
     } else if (ctx.single != null) {
-      val single = Some(UnsignedDecimalIntegerLiteral(ctx.single.getText)(pos(ctx.single)))
+      val single = Some(PathLengthQuantifier(ctx.single.getText)(pos(ctx.single)))
       Some(org.neo4j.cypher.internal.expressions.Range(single, single)(pos(ctx)))
     } else None
   }
 
   final override def exitExpression(ctx: Cypher5Parser.ExpressionContext): Unit = {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
     ctx.ast = astBinaryFold[Expression](ctx, (lhs, token, rhs) => Or(lhs, rhs)(pos(token)))
   }
 
   final override def exitExpression11(ctx: Cypher5Parser.Expression11Context): Unit = {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
     ctx.ast = astBinaryFold[Expression](ctx, (lhs, token, rhs) => Xor(lhs, rhs)(pos(token)))
   }
 
   final override def exitExpression10(ctx: Cypher5Parser.Expression10Context): Unit = {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
     ctx.ast = astBinaryFold[Expression](ctx, (lhs, token, rhs) => And(lhs, rhs)(pos(token)))
   }
 
   final override def exitExpression9(ctx: Cypher5Parser.Expression9Context): Unit = {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(ctx.expression8() == lastChild(ctx))
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(ctx.expression8() == lastChild(ctx))
     ctx.ast = ctx.children.size match {
       case 1 => ctxChild(ctx, 0).ast
       case 2 => Not(astChild(ctx, 1))(pos(ctx))
@@ -334,7 +340,7 @@ trait ExpressionBuilder extends Cypher5ParserListener {
   }
 
   final override def exitExpression8(ctx: Cypher5Parser.Expression8Context): Unit = {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
     ctx.ast = ctx.children.size match {
       case 1 => ctxChild(ctx, 0).ast
       case 3 => binaryPredicate(ctxChild(ctx, 0).ast(), child(ctx, 1), child(ctx, 2))
@@ -378,7 +384,7 @@ trait ExpressionBuilder extends Cypher5ParserListener {
   }
 
   private def stringAndListComparisonExpression(lhs: Expression, ctx: AstRuleCtx): Expression = {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(
       ctx.isInstanceOf[Cypher5Parser.StringAndListComparisonContext] ||
         ctx.isInstanceOf[Cypher5Parser.WhenStringOrListContext]
     )
@@ -394,7 +400,7 @@ trait ExpressionBuilder extends Cypher5ParserListener {
   }
 
   private def nullComparisonExpression(lhs: Expression, ctx: AstRuleCtx): Expression = {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(
       ctx.isInstanceOf[Cypher5Parser.NullComparisonContext] ||
         ctx.isInstanceOf[Cypher5Parser.WhenNullContext]
     )
@@ -403,7 +409,7 @@ trait ExpressionBuilder extends Cypher5ParserListener {
   }
 
   private def typeComparisonExpression(lhs: Expression, ctx: AstRuleCtx): Expression = {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(
       ctx.isInstanceOf[Cypher5Parser.TypeComparisonContext] ||
         ctx.isInstanceOf[Cypher5Parser.WhenTypeContext]
     )
@@ -440,7 +446,7 @@ trait ExpressionBuilder extends Cypher5ParserListener {
   }
 
   final override def exitExpression6(ctx: Cypher5Parser.Expression6Context): Unit = {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
     ctx.ast = astBinaryFold(ctx, binaryAdditive)
   }
 
@@ -465,7 +471,7 @@ trait ExpressionBuilder extends Cypher5ParserListener {
   }
 
   final override def exitExpression4(ctx: Cypher5Parser.Expression4Context): Unit = {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
     ctx.ast = astBinaryFold[Expression](ctx, (lhs, token, rhs) => Pow(lhs, rhs)(pos(token.getSymbol)))
   }
 
@@ -487,17 +493,19 @@ trait ExpressionBuilder extends Cypher5ParserListener {
     }
   }
 
-  // TODO All postfix should probably have positions that work in the same manner
   private def postFix(lhs: Expression, rhs: Cypher5Parser.PostFixContext): Expression = {
-    val p = lhs.position
+    val p = pos(rhs)
     rhs match {
       case propCtx: Cypher5Parser.PropertyPostfixContext => Property(lhs, ctxChild(propCtx, 0).ast())(p)
       case indexCtx: Cypher5Parser.IndexPostfixContext =>
-        ContainerIndex(lhs, ctxChild(indexCtx, 1).ast())(pos(ctxChild(indexCtx, 1)))
+        ContainerIndex(lhs, ctxChild(indexCtx, 1).ast())(p)
       case labelCtx: Cypher5Parser.LabelPostfixContext =>
-        LabelExpressionPredicate(lhs, ctxChild(labelCtx, 0).ast())(p, isParenthesized = false)
+        LabelExpressionPredicate(
+          lhs,
+          ctxChild(labelCtx, 0).ast[LabelExpression]()
+        )(p, isParenthesized = false, isPostfix = true)
       case rangeCtx: Cypher5Parser.RangePostfixContext =>
-        ListSlice(lhs, astOpt(rangeCtx.fromExp), astOpt(rangeCtx.toExp))(pos(rhs))
+        ListSlice(lhs, astOpt(rangeCtx.fromExp), astOpt(rangeCtx.toExp))(p)
       case _ => throw new IllegalStateException(s"Unexpected rhs $rhs")
     }
   }
@@ -530,7 +538,7 @@ trait ExpressionBuilder extends Cypher5ParserListener {
 
   final override def exitExpression1(ctx: Cypher5Parser.Expression1Context): Unit = {
     ctx.ast = ctx.children.size match {
-      case 1 => ctxChild(ctx, 0).ast()
+      case 1 => ctxChild(ctx, 0).ast
       case _ => throw new IllegalStateException("Unexpected expression")
     }
   }
@@ -540,7 +548,7 @@ trait ExpressionBuilder extends Cypher5ParserListener {
   ): Unit = {
     ctx.ast = CaseExpression(
       expression = None,
-      alternatives = astSeq(ctx.caseAlternative()),
+      alternatives = astSeq[(Expression, Expression)](ctx.caseAlternative()),
       default = astOpt(ctx.expression())
     )(pos(ctx))
   }
@@ -583,6 +591,7 @@ trait ExpressionBuilder extends Cypher5ParserListener {
     while (i < size) {
       ctx.children.get(i) match {
         case whenCtx: Cypher5Parser.ExtendedWhenContext =>
+          val uniqueThen = thenExp.endoRewrite(topDown(Rewriter.lift { case v: LogicalVariable => v.copyId }))
           val newWhen = whenCtx match {
             case _: Cypher5Parser.WhenEqualsContext =>
               Equals(lhs, astChild(whenCtx, 0))(pos(nodeChild(ctx, i - 1)))
@@ -598,7 +607,7 @@ trait ExpressionBuilder extends Cypher5ParserListener {
               normalFormComparisonExpression(lhs, formCtx.normalForm(), formCtx.NOT() != null, pos(formCtx))
             case _ => throw new IllegalStateException(s"Unexpected context $whenCtx")
           }
-          buffer.addOne(newWhen -> thenExp)
+          buffer.addOne(newWhen -> uniqueThen)
         case _ =>
       }
       i += 1
@@ -690,9 +699,10 @@ trait ExpressionBuilder extends Cypher5ParserListener {
     ctx: Cypher5Parser.ParenthesizedExpressionContext
   ): Unit = {
     ctx.ast = ctxChild(ctx, 1).ast match {
-      case lep: LabelExpressionPredicate => lep.copy()(lep.position, isParenthesized = true)
-      case v: Variable if !v.isIsolated  => v.copy()(v.position, isIsolated = true)
-      case x                             => x
+      case lep: LabelExpressionPredicate =>
+        lep.copy()(lep.position, isParenthesized = true, lep.isPostfix, lep.hasLabeledKeyword, lep.hasNotKeyword)
+      case v: Variable if !v.isIsolated => v.copy()(v.position, isIsolated = true)
+      case x                            => x
     }
   }
 
@@ -760,15 +770,15 @@ trait ExpressionBuilder extends Cypher5ParserListener {
     if (regQuery != null) regQuery.ast[Query]()
     else {
       val patternParts = patternList.ast[ArraySeq[PatternPart]]().map {
-        case p: PatternPartWithSelector => p
-        case p: NonPrefixedPatternPart  => PatternPartWithSelector(PatternPart.AllPaths()(p.position), p)
+        case p: PrefixedPatternPart    => p
+        case p: NonPrefixedPatternPart => PrefixedPatternPart(PatternPart.AllPaths()(p.position), p)
       }
       val patternPos = patternParts.head.position
       val where = astOpt[Where](whereClause)
       val finalMatchMode = astOpt(matchMode, MatchMode.default(patternPos))
       SingleQuery(
         ArraySeq(
-          Match(optional = false, finalMatchMode, Pattern.ForMatch(patternParts)(patternPos), Seq.empty, where)(
+          Match(optional = false, finalMatchMode, Pattern.ForMatch(patternParts)(patternPos), Seq.empty, where, None)(
             patternPos
           )
         )
@@ -819,7 +829,8 @@ trait ExpressionBuilder extends Cypher5ParserListener {
       distinct,
       expressions,
       ArgumentUnordered,
-      ctx.parent.isInstanceOf[Cypher5Parser.GraphReferenceContext]
+      ctx.parent.isInstanceOf[Cypher5Parser.GraphReferenceContext],
+      maybeLocalFunction = None
     )(functionName.namespace.position)
   }
 
@@ -893,7 +904,7 @@ trait ExpressionBuilder extends Cypher5ParserListener {
         }
       case 2 => firstToken match {
           case Cypher5Parser.SIGNED   => IntegerType(true)(p)
-          case Cypher5Parser.PROPERTY => PropertyValueType(true)(p)
+          case Cypher5Parser.PROPERTY => PropertyValueCypher5Type(true)(p)
           case Cypher5Parser.LOCAL => nodeChild(ctx, 1).getSymbol.getType match {
               case Cypher5Parser.TIME     => LocalTimeType(true)(p)
               case Cypher5Parser.DATETIME => LocalDateTimeType(true)(p)
@@ -925,7 +936,7 @@ trait ExpressionBuilder extends Cypher5ParserListener {
               case _ => throw new IllegalStateException(s"Unexpected context $ctx (first token type $firstToken)")
             }
           case Cypher5Parser.ANY => nodeChild(ctx, 1).getSymbol.getType match {
-              case Cypher5Parser.PROPERTY => PropertyValueType(true)(p)
+              case Cypher5Parser.PROPERTY => PropertyValueCypher5Type(true)(p)
               case _ => throw new IllegalStateException(s"Unexpected context $ctx (first token type $firstToken)")
             }
           case _ => throw new IllegalStateException(s"Unexpected context $ctx (first token type $firstToken)")
@@ -943,7 +954,7 @@ trait ExpressionBuilder extends Cypher5ParserListener {
             }
           case Cypher5Parser.LIST | Cypher5Parser.ARRAY => ListType(ctx.`type`().ast(), true)(p)
           case Cypher5Parser.ANY =>
-            AssertMacros.checkOnlyWhenAssertionsAreEnabled(ctx.LT() != null && ctx.GT() != null)
+            AssertMacros3.checkOnlyWhenAssertionsAreEnabled(ctx.LT() != null && ctx.GT() != null)
             ctx.`type`().ast[CypherType]() match {
               case du: ClosedDynamicUnionType => du
               case other                      => ClosedDynamicUnionType(Set(other))(other.position)
@@ -953,7 +964,7 @@ trait ExpressionBuilder extends Cypher5ParserListener {
       case _ => firstToken match {
           case Cypher5Parser.LIST | Cypher5Parser.ARRAY => ListType(ctx.`type`().ast(), true)(p)
           case Cypher5Parser.ANY =>
-            AssertMacros.checkOnlyWhenAssertionsAreEnabled(ctx.LT() != null && ctx.GT() != null)
+            AssertMacros3.checkOnlyWhenAssertionsAreEnabled(ctx.LT() != null && ctx.GT() != null)
             ctx.`type`().ast[CypherType]() match {
               case du: ClosedDynamicUnionType => du
               case other                      => ClosedDynamicUnionType(Set(other))(other.position)
@@ -1049,7 +1060,8 @@ trait ExpressionBuilder extends Cypher5ParserListener {
       FunctionInvocation(
         FunctionName("normalize")(pos(ctx)),
         distinct = false,
-        IndexedSeq(expression, StringLiteral(normalForm)(pos(ctx).withInputLength(0)))
+        IndexedSeq(expression, StringLiteral(normalForm)(pos(ctx).withInputLength(0))),
+        maybeLocalFunction = None
       )(pos(ctx))
   }
 
@@ -1069,7 +1081,8 @@ trait ExpressionBuilder extends Cypher5ParserListener {
         args = IndexedSeq(
           StringLiteral(trimSpecification)(pos(ctx).withInputLength(0)),
           trimSource
-        )
+        ),
+        maybeLocalFunction = None
       )(
         pos(ctx)
       )
@@ -1081,7 +1094,8 @@ trait ExpressionBuilder extends Cypher5ParserListener {
           StringLiteral(trimSpecification)(pos(ctx).withInputLength(0)),
           trimCharacterString.get,
           trimSource
-        )
+        ),
+        maybeLocalFunction = None
       )(
         pos(ctx)
       )

@@ -25,6 +25,9 @@ import org.neo4j.cypher.internal.ir.PatternLength
 import org.neo4j.cypher.internal.ir.SimplePatternLength
 import org.neo4j.cypher.internal.ir.VarPatternLength
 import org.neo4j.cypher.internal.logical.builder.PatternParser.Pattern
+import org.neo4j.cypher.internal.logical.builder.PatternParser.Unused
+import org.neo4j.cypher.internal.logical.builder.PatternParser.Used
+import org.neo4j.cypher.internal.logical.builder.PatternParser.VariableWithUsage
 import org.neo4j.cypher.internal.util.InputPosition.NONE
 
 class PatternParser {
@@ -62,26 +65,58 @@ class PatternParser {
                 s"$star, $min, $max is not a supported variable length identifier"
               )
           }
-        val relNameOrUnnamed =
-          if (relName.isEmpty) {
-            nextUnnamed()
-          } else {
-            VariableParser.unescaped(relName)
-          }
-        Pattern(VariableParser.unescaped(from), dir, relTypes, relNameOrUnnamed, VariableParser.unescaped(to), length)
+        Pattern(fromName(from), dir, relTypes, fromName(relName), fromName(to), length)
       case _ => throw new IllegalArgumentException(s"'$pattern' cannot be parsed as a pattern")
     }
   }
+
+  def fromName(name: String): VariableWithUsage =
+    if (name.isEmpty) Unused(nextUnnamed()) else Used(VariableParser.unescaped(name))
 }
 
 object PatternParser {
 
+  sealed trait VariableWithUsage {
+    def name: String
+    def toOption: Option[String]
+  }
+
+  case class Unused(name: String) extends VariableWithUsage {
+    override def toOption: Option[String] = None
+  }
+
+  case class Used(name: String) extends VariableWithUsage {
+    override def toOption: Option[String] = Some(name)
+  }
+
   case class Pattern(
-    from: String,
+    private val fromNode: VariableWithUsage,
     dir: SemanticDirection,
     relTypes: Seq[RelTypeName],
-    relName: String,
-    to: String,
+    private val relationship: VariableWithUsage,
+    private val toNode: VariableWithUsage,
     length: PatternLength
-  )
+  ) {
+    def from: String = fromNode.name
+    def to: String = toNode.name
+    def relName: String = relationship.name
+
+    def maybeFrom: Option[String] = fromNode.toOption
+    def maybeTo: Option[String] = toNode.toOption
+    def maybeRelName: Option[String] = relationship.toOption
+  }
+
+  object Pattern {
+
+    def apply(
+      from: String,
+      direction: SemanticDirection,
+      relTypes: Seq[RelTypeName],
+      relName: String,
+      to: String,
+      length: PatternLength
+    ): Pattern = {
+      Pattern(Used(from), direction, relTypes, Used(relName), Used(to), length)
+    }
+  }
 }

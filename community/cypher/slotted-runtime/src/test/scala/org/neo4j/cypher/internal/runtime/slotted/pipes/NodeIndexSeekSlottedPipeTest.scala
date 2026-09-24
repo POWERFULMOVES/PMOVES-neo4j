@@ -49,9 +49,15 @@ class NodeIndexSeekSlottedPipeTest extends CypherFunSuite {
     val state = QueryStateHelper.emptyWithResourceManager(resourceManager)
     val slots = SlotConfigurationBuilder.empty.newLong("n", nullable = false, CTNode).build()
 
-    val cursor = new StubNodeValueIndexCursor().withNode(0)
+    val cursor = new StubNodeValueIndexCursor().withEntity(0)
     when(
-      state.query.nodeIndexSeek(any[IndexReadSession], any[Boolean], any[IndexOrder], any[Seq[PropertyIndexQuery]])
+      state.query.nodeIndexSeek(
+        any[IndexReadSession],
+        any[Boolean],
+        any[IndexOrder],
+        any[Seq[PropertyIndexQuery]],
+        any[Boolean]
+      )
     ).thenAnswer((_: InvocationOnMock) => {
       // NOTE: this is what is done in TransactionBoundQueryContext
       resourceManager.trace(cursor)
@@ -66,7 +72,8 @@ class NodeIndexSeekSlottedPipeTest extends CypherFunSuite {
       SingleQueryExpression(LiteralHelper.literal(42)),
       NonLockingSeek,
       IndexOrderNone,
-      slots
+      slots,
+      includeChangesFromThisTransaction = true
     )()
     pipe.rowFactory = SlottedCypherRowFactory(slots, SlotConfiguration.Size.zero)
     // exhaust
@@ -80,9 +87,15 @@ class NodeIndexSeekSlottedPipeTest extends CypherFunSuite {
     val state = QueryStateHelper.emptyWithResourceManager(resourceManager)
     val slots = SlotConfigurationBuilder.empty.newLong("n", nullable = false, CTNode).build()
 
-    val cursor = new StubNodeValueIndexCursor().withNode(0)
+    val cursor = new StubNodeValueIndexCursor().withEntity(0)
     when(
-      state.query.nodeIndexSeek(any[IndexReadSession], any[Boolean], any[IndexOrder], any[Seq[PropertyIndexQuery]])
+      state.query.nodeIndexSeek(
+        any[IndexReadSession],
+        any[Boolean],
+        any[IndexOrder],
+        any[Seq[PropertyIndexQuery]],
+        any[Boolean]
+      )
     ).thenAnswer((_: InvocationOnMock) => {
       // NOTE: this is what is done in TransactionBoundQueryContext
       resourceManager.trace(cursor)
@@ -96,7 +109,8 @@ class NodeIndexSeekSlottedPipeTest extends CypherFunSuite {
       SingleQueryExpression(LiteralHelper.literal(42)),
       NonLockingSeek,
       IndexOrderNone,
-      slots
+      slots,
+      includeChangesFromThisTransaction = true
     )()
     pipe.rowFactory = SlottedCypherRowFactory(slots, SlotConfiguration.Size.zero)
     val result = pipe.createResults(state)

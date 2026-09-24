@@ -23,8 +23,6 @@ import org.apache.commons.lang3.StringUtils
 import org.apache.commons.lang3.StringUtils.EMPTY
 import org.neo4j.configuration.GraphDatabaseSettings
 import org.neo4j.cypher.internal.CypherVersion
-import org.neo4j.cypher.internal.ast.CommandResultItem
-import org.neo4j.cypher.internal.ast.ShowColumn
 import org.neo4j.cypher.internal.ast.ShowTransactionsClause.activeLockCountColumn
 import org.neo4j.cypher.internal.ast.ShowTransactionsClause.allocatedDirectBytesColumn
 import org.neo4j.cypher.internal.ast.ShowTransactionsClause.clientAddressColumn
@@ -39,6 +37,7 @@ import org.neo4j.cypher.internal.ast.ShowTransactionsClause.currentQueryIdColumn
 import org.neo4j.cypher.internal.ast.ShowTransactionsClause.currentQueryIdleTimeColumn
 import org.neo4j.cypher.internal.ast.ShowTransactionsClause.currentQueryPageFaultsColumn
 import org.neo4j.cypher.internal.ast.ShowTransactionsClause.currentQueryPageHitsColumn
+import org.neo4j.cypher.internal.ast.ShowTransactionsClause.currentQueryProgressColumn
 import org.neo4j.cypher.internal.ast.ShowTransactionsClause.currentQueryStartTimeColumn
 import org.neo4j.cypher.internal.ast.ShowTransactionsClause.currentQueryStatusColumn
 import org.neo4j.cypher.internal.ast.ShowTransactionsClause.currentQueryWaitTimeColumn
@@ -64,15 +63,20 @@ import org.neo4j.cypher.internal.ast.ShowTransactionsClause.statusDetailsColumn
 import org.neo4j.cypher.internal.ast.ShowTransactionsClause.transactionIdColumn
 import org.neo4j.cypher.internal.ast.ShowTransactionsClause.usernameColumn
 import org.neo4j.cypher.internal.ast.ShowTransactionsClause.waitTimeColumn
+import org.neo4j.cypher.internal.logical.plans.CommandDefaultColumn
+import org.neo4j.cypher.internal.logical.plans.CommandYieldColumn
 import org.neo4j.cypher.internal.runtime.ClosingIterator
 import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Expression
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.QueryState
+import org.neo4j.cypher.internal.util.attribution.Id
+import org.neo4j.exceptions.InternalException
 import org.neo4j.internal.kernel.api.helpers.TransactionDependenciesResolver
 import org.neo4j.internal.kernel.api.security.AdminActionOnResource
 import org.neo4j.internal.kernel.api.security.PrivilegeAction.SHOW_TRANSACTION
 import org.neo4j.internal.kernel.api.security.UserSegment
 import org.neo4j.kernel.api.KernelTransactionHandle
+import org.neo4j.kernel.api.query.ExtendedQueryStatistics
 import org.neo4j.kernel.api.query.QuerySnapshot
 import org.neo4j.kernel.impl.util.ValueUtils
 import org.neo4j.memory.HeapHighWaterMarkTracker
@@ -81,7 +85,10 @@ import org.neo4j.values.AnyValue
 import org.neo4j.values.storable.DurationValue
 import org.neo4j.values.storable.Value
 import org.neo4j.values.storable.Values
+import org.neo4j.values.virtual.ListValue
+import org.neo4j.values.virtual.ListValueBuilder
 import org.neo4j.values.virtual.MapValue
+import org.neo4j.values.virtual.MapValueBuilder
 import org.neo4j.values.virtual.VirtualValues
 
 import java.lang
@@ -93,15 +100,14 @@ import java.util.Optional
 import java.util.concurrent.TimeUnit
 
 import scala.jdk.CollectionConverters.CollectionHasAsScala
-import scala.jdk.CollectionConverters.MapHasAsScala
 
 // SHOW TRANSACTION[S] [transaction-id[,...]] [WHERE clause|YIELD clause]
 case class ShowTransactionsCommand(
-  givenIds: Either[List[String], Expression],
-  defaultColumns: List[ShowColumn],
-  yieldColumns: List[CommandResultItem],
+  givenIds: Option[Expression],
+  defaultColumns: List[CommandDefaultColumn],
+  yieldColumns: List[CommandYieldColumn],
   cypherVersion: CypherVersion
-) extends Command(defaultColumns, yieldColumns) {
+)(val id: Id = Id.INVALID_ID) extends Command(defaultColumns, yieldColumns) {
   private val returnCypher5Values: Boolean = cypherVersion == CypherVersion.Cypher5
 
   private val needQueryColumns =
@@ -121,10 +127,11 @@ case class ShowTransactionsCommand(
       requestedColumnsNames.contains(currentQueryIdleTimeColumn) ||
       requestedColumnsNames.contains(currentQueryAllocatedBytesColumn) ||
       requestedColumnsNames.contains(currentQueryPageHitsColumn) ||
-      requestedColumnsNames.contains(currentQueryPageFaultsColumn)
+      requestedColumnsNames.contains(currentQueryPageFaultsColumn) ||
+      requestedColumnsNames.contains(currentQueryProgressColumn)
 
   override def originalNameRows(state: QueryState, baseRow: CypherRow): ClosingIterator[Map[String, AnyValue]] = {
-    val ids = Command.extractNames(givenIds, state, baseRow, "SHOW TRANSACTIONS")
+    val ids = Command.extractNames(givenIds, state, baseRow, "SHOW TRANSACTIONS", cypherVersion)
     val ctx = state.query
     val securityContext = ctx.transactionalContext.securityContext
     val trackQueryCpuTime =
@@ -161,7 +168,7 @@ case class ShowTransactionsCommand(
       case (transaction: KernelTransactionHandle, querySnapshot: util.Optional[QuerySnapshot], _) =>
         handleQuerySnapshotsMap.put(transaction, querySnapshot)
     }
-    val transactionDependenciesResolver = new TransactionDependenciesResolver(handleQuerySnapshotsMap)
+    var transactionDependenciesResolver: TransactionDependenciesResolver = null
 
     val zoneId = getConfiguredTimeZone(ctx)
     val rows = askedForTransactions.map {
@@ -189,11 +196,17 @@ case class ShowTransactionsCommand(
           queryIdleTime,
           queryAllocatedBytes,
           queryPageHits,
-          queryPageFaults
+          queryPageFaults,
+          queryProgress
         ) = getQueryColumns(querySnapshot, txId, dbName, zoneId, trackQueryCpuTime)
 
         val (status, statusDetails) =
           if (requestedColumnsNames.contains(statusColumn) || requestedColumnsNames.contains(statusDetailsColumn)) {
+            if (transactionDependenciesResolver == null) {
+              val memoryTracker = state.memoryTrackerForOperatorProvider.memoryTrackerForOperator(id.x)
+              transactionDependenciesResolver =
+                new TransactionDependenciesResolver(handleQuerySnapshotsMap, memoryTracker)
+            }
             getStatus(transaction, transactionDependenciesResolver)
           } else ("", "")
 
@@ -255,7 +268,7 @@ case class ShowTransactionsCommand(
             ))
           // Number of active locks held by the transaction
           case `activeLockCountColumn` =>
-            Some(activeLockCountColumn -> Values.longValue(transaction.activeLocks.size()))
+            Some(activeLockCountColumn -> Values.longValue(transaction.activeLockCount()))
           // Number of active locks held by the currently executing query
           case `currentQueryActiveLockCountColumn` => Some(currentQueryActiveLockCountColumn -> queryActiveLockCount)
           // The CPU time
@@ -294,15 +307,20 @@ case class ShowTransactionsCommand(
             Some(
               initializationStackTraceColumn -> Values.stringValue(transaction.transactionInitialisationTrace.getTrace)
             )
-          case unknown =>
+          // The progress of the currently executing query
+          case `currentQueryProgressColumn` => Some(currentQueryProgressColumn -> queryProgress)
+          case unknown                      =>
             // This match should cover all existing columns but we get scala warnings
             // on non-exhaustive match due to it being string values
-            throw new IllegalStateException(s"Missing case for column: $unknown")
+            throw InternalException.internalError(
+              this.getClass.getSimpleName,
+              s"Unknown column for show transactions. Missing case for column: $unknown.",
+              s"Missing case for column: $unknown"
+            )
         }.toMap[String, AnyValue]
     }
 
-    val updatedRows = updateRowsWithPotentiallyRenamedColumns(rows)
-    ClosingIterator.apply(updatedRows.iterator)
+    ClosingIterator.apply(rows.iterator)
   }
 
   private def getQueryColumns(
@@ -314,6 +332,7 @@ case class ShowTransactionsCommand(
   ) =
     if (needQueryColumns && querySnapshot.isPresent) {
       val query = querySnapshot.get
+      lazy val querySessionTransactionId = getQuerySessionTransactionId(query, dbName).toString
 
       val currentQueryId =
         if (requestedColumnsNames.contains(currentQueryIdColumn))
@@ -325,15 +344,8 @@ case class ShowTransactionsCommand(
         else Values.NO_VALUE
       val outerTransactionId =
         if (requestedColumnsNames.contains(outerTransactionIdColumn)) {
-          val parentDbName = query.parentDbName()
-          val parentTransactionSequenceNumber = query.parentTransactionSequenceNumber()
-          val querySessionDbName = if (parentDbName != null) parentDbName else dbName
-          val querySessionTransactionId =
-            if (parentTransactionSequenceNumber > UNKNOWN_TX_SEQUENCE_NUMBER) parentTransactionSequenceNumber
-            else query.transactionSequenceNumber()
-          val querySessionTransaction = TransactionId(querySessionDbName, querySessionTransactionId).toString
-          if (querySessionTransaction == txId) Values.stringValue(EMPTY)
-          else Values.stringValue(querySessionTransaction)
+          if (querySessionTransactionId == txId) Values.stringValue(EMPTY)
+          else Values.stringValue(querySessionTransactionId)
         } else Values.NO_VALUE
       val parameters =
         if (requestedColumnsNames.contains(parametersColumn))
@@ -347,14 +359,7 @@ case class ShowTransactionsCommand(
         val maybeRuntime = query.runtime
         if (maybeRuntime == null) Values.stringValue(EMPTY) else Values.stringValue(maybeRuntime)
       } else Values.NO_VALUE
-      val indexes = if (requestedColumnsNames.contains(indexesColumn))
-        VirtualValues.list(query.indexes.asScala.toList.map(m => {
-          val scalaMap = m.asScala
-          val keys = scalaMap.keys.toArray
-          val vals: Array[AnyValue] = scalaMap.values.map(Values.stringValue).toArray
-          VirtualValues.map(keys, vals)
-        }): _*)
-      else Values.NO_VALUE
+      val indexes = if (requestedColumnsNames.contains(indexesColumn)) buildIndexValue(query) else Values.NO_VALUE
       val queryStartTime = if (requestedColumnsNames.contains(currentQueryStartTimeColumn))
         getDatetimeFromMillis(query.startTimestampMillis, zoneId)
       else Values.NO_VALUE
@@ -393,6 +398,11 @@ case class ShowTransactionsCommand(
       val queryPageFaults = if (requestedColumnsNames.contains(currentQueryPageFaultsColumn))
         Values.longValue(query.pageFaults)
       else Values.NO_VALUE
+      val queryProgress = if (requestedColumnsNames.contains(currentQueryProgressColumn)) {
+        // return null if inner query
+        if (querySessionTransactionId != txId) Values.NO_VALUE
+        else getQueryProgress(query.queryStatistics())
+      } else Values.NO_VALUE
 
       QueryColumns(
         currentQueryId,
@@ -411,7 +421,8 @@ case class ShowTransactionsCommand(
         queryIdleTime,
         queryAllocatedBytes,
         queryPageHits,
-        queryPageFaults
+        queryPageFaults,
+        queryProgress
       )
     } else if (returnCypher5Values) QueryColumns(
       Values.stringValue(EMPTY),
@@ -423,6 +434,7 @@ case class ShowTransactionsCommand(
       VirtualValues.EMPTY_LIST,
       Values.stringValue(EMPTY),
       Values.stringValue(EMPTY),
+      Values.NO_VALUE,
       Values.NO_VALUE,
       Values.NO_VALUE,
       Values.NO_VALUE,
@@ -449,30 +461,49 @@ case class ShowTransactionsCommand(
       Values.NO_VALUE,
       Values.NO_VALUE,
       Values.NO_VALUE,
+      Values.NO_VALUE,
       Values.NO_VALUE
     )
 
   private def getLongOrNull(long: lang.Long) = long match {
     case l: lang.Long => Values.longValue(l)
-    case _            => Values.NO_VALUE
+    case null         => Values.NO_VALUE
   }
 
   private def getDurationOrNullFromMillis(long: lang.Long) = long match {
     case l: lang.Long => Values.durationValue(Duration.ofMillis(l))
-    case _            => Values.NO_VALUE
+    case null         => Values.NO_VALUE
   }
 
   private def getDurationFromMicro(long: lang.Long) = long match {
-    case l: lang.Long             => Values.durationValue(Duration.ofMillis(TimeUnit.MICROSECONDS.toMillis(l)))
-    case _ if returnCypher5Values => Values.NO_VALUE
-    case _                        => DurationValue.ZERO
+    case l: lang.Long                => Values.durationValue(Duration.ofMillis(TimeUnit.MICROSECONDS.toMillis(l)))
+    case null if returnCypher5Values => Values.NO_VALUE
+    case null                        => DurationValue.ZERO
   }
 
-  private def getMapValue(m: util.Map[String, AnyRef]) = {
-    val scalaMap = m.asScala
-    val keys = scalaMap.keys.toArray
-    val vals: Array[AnyValue] = scalaMap.values.map(ValueUtils.of).toArray
-    VirtualValues.map(keys, vals)
+  private def getMapValue(m: util.Map[String, AnyRef]): MapValue = {
+    val builder = new MapValueBuilder()
+    m.forEach((k, v) => builder.add(k, ValueUtils.of(v)))
+    builder.build()
+  }
+
+  private def getQueryProgress(queryStatistics: ExtendedQueryStatistics): MapValue = {
+    val builder = new MapValueBuilder()
+    Map[String, Long](
+      "nodesCreated" -> queryStatistics.nodesCreated,
+      "nodesDeleted" -> queryStatistics.nodesDeleted,
+      "relationshipsCreated" -> queryStatistics.relationshipsCreated,
+      "relationshipsDeleted" -> queryStatistics.relationshipsDeleted,
+      "propertiesSet" -> queryStatistics.propertiesSet,
+      "labelsAdded" -> queryStatistics.labelsAdded,
+      "labelsRemoved" -> queryStatistics.labelsRemoved,
+      "fileLinesRead" -> queryStatistics.getFileLinesRead,
+      "transactionsStarted" -> queryStatistics.getTransactionsStarted,
+      "transactionsCommitted" -> queryStatistics.getTransactionsCommitted,
+      "transactionsRolledBack" -> queryStatistics.getTransactionsRolledBack
+    ).foreachEntry((k, v) => builder.add(k, Values.longValue(v)))
+
+    builder.build()
   }
 
   private def getDatetimeFromMillis(startTime: Long, zoneId: ZoneId) =
@@ -494,6 +525,26 @@ case class ShowTransactionsCommand(
       handleDetails = defaultDetails
     }
     handleDetails
+  }
+
+  private def getQuerySessionTransactionId(query: QuerySnapshot, dbName: String): TransactionId = {
+    val parentDbName = query.parentDbName()
+    val parentTransactionSequenceNumber = query.parentTransactionSequenceNumber()
+    val querySessionDbName = if (parentDbName != null) parentDbName else dbName // either parentDbName or dbName
+    val querySessionTransactionId =
+      if (parentTransactionSequenceNumber > UNKNOWN_TX_SEQUENCE_NUMBER) parentTransactionSequenceNumber
+      else query.transactionSequenceNumber()
+    TransactionId(querySessionDbName, querySessionTransactionId)
+  }
+
+  private def buildIndexValue(query: QuerySnapshot): ListValue = {
+    val listValueBuilder = ListValueBuilder.newListBuilder()
+    query.indexes.forEach(m => {
+      val mapBuilder = new MapValueBuilder()
+      m.forEach((k, v) => mapBuilder.add(k, Values.stringValue(v)))
+      listValueBuilder.add(mapBuilder.build())
+    })
+    listValueBuilder.build()
   }
 
   private def getExecutingStatus(
@@ -530,7 +581,8 @@ case class ShowTransactionsCommand(
     queryIdleTime: Value,
     queryAllocatedBytes: Value,
     queryPageHits: Value,
-    queryPageFaults: Value
+    queryPageFaults: Value,
+    queryProgress: AnyValue
   )
 
 }

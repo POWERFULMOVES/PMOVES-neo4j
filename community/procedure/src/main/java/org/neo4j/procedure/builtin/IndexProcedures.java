@@ -31,7 +31,6 @@ import org.neo4j.internal.kernel.api.exceptions.ProcedureException;
 import org.neo4j.internal.kernel.api.exceptions.schema.IndexNotFoundKernelException;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.kernel.api.KernelTransaction;
-import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.impl.api.index.IndexPopulationFailure;
 import org.neo4j.kernel.impl.api.index.IndexSamplingMode;
 import org.neo4j.kernel.impl.api.index.IndexingService;
@@ -46,12 +45,12 @@ public class IndexProcedures {
     }
 
     void awaitIndexByName(String indexName, long timeout, TimeUnit timeoutUnits) throws ProcedureException {
-        final IndexDescriptor index = getIndex(indexName, "awaitIndexByName");
+        IndexDescriptor index = getIndex(indexName, "awaitIndexByName");
         waitUntilOnline(index, timeout, timeoutUnits, "awaitIndexByName");
     }
 
     void resampleIndex(String indexName) throws ProcedureException {
-        final IndexDescriptor index = getIndex(indexName, "resampleIndex");
+        IndexDescriptor index = getIndex(indexName, "resampleIndex");
         triggerSampling(index);
     }
 
@@ -80,31 +79,25 @@ public class IndexProcedures {
         try {
             Predicates.awaitEx(() -> isOnline(index, procedureName), timeout, timeoutUnits);
         } catch (TimeoutException e) {
-            throw new ProcedureException(
-                    Status.Procedure.ProcedureTimedOut,
-                    "Index on '%s' did not come online within %s %s",
-                    index.userDescription(ktx.tokenRead()),
-                    timeout,
-                    timeoutUnits);
+            throw ProcedureException.indexDidNotComeOnline(
+                    procedureName, index.userDescription(ktx.tokenRead()), timeout, timeoutUnits);
         }
     }
 
     private boolean isOnline(IndexDescriptor index, String procedureName) throws ProcedureException {
         InternalIndexState state = getState(index, procedureName);
-        switch (state) {
-            case POPULATING:
-                return false;
-            case ONLINE:
-                return true;
-            case FAILED:
+        return switch (state) {
+            case POPULATING -> false;
+            case ONLINE -> true;
+            case FAILED -> {
                 String cause = getFailure(index, procedureName);
-                throw new ProcedureException(
-                        Status.Schema.IndexCreationFailed,
-                        IndexPopulationFailure.appendCauseOfFailure("Index '%s' is in failed state.", cause),
-                        index.getName());
-            default:
-                throw new IllegalStateException("Unknown index state " + state);
-        }
+                throw ProcedureException.indexInFailedState(
+                        index.getName(),
+                        String.format(
+                                IndexPopulationFailure.appendCauseOfFailure("Index '%s' is in failed state.", cause),
+                                index.getName()));
+            }
+        };
     }
 
     private InternalIndexState getState(IndexDescriptor index, String procedureName) throws ProcedureException {

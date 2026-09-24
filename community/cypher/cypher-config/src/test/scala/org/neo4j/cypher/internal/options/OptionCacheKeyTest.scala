@@ -28,8 +28,8 @@ class OptionCacheKeyTest extends CypherFunSuite {
 
   implicit val cacheKeyInts: OptionCacheKey[Int] = OptionCacheKey.create(value => s"the number $value")
   implicit val cacheKeyStrings: OptionCacheKey[String] = OptionCacheKey.create(value => s"text $value")
-  implicit val cacheKeyInner: OptionCacheKey[MyInner] = OptionCacheKey.derive[MyInner]
-  implicit val cacheKeyOuter: OptionCacheKey[MyOuter] = OptionCacheKey.derive[MyOuter]
+  implicit val cacheKeyInner: OptionCacheKey[MyInner] = OptionCacheKey.derived[MyInner]
+  implicit val cacheKeyOuter: OptionCacheKey[MyOuter] = OptionCacheKey.derived[MyOuter]
 
   test("Can create cache key for any case class") {
     cacheKeyOuter.cacheKey(MyOuter(MyInner("abc", "foo"), 123)) shouldEqual "text abc text foo the number 123"

@@ -26,11 +26,8 @@ import static java.util.concurrent.TimeUnit.MINUTES;
 import static org.assertj.core.api.Assertions.allOf;
 import static org.assertj.core.api.Assertions.anyOf;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.fail;
 import static org.assertj.core.api.Assertions.not;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.neo4j.shell.Conditions.contains;
 import static org.neo4j.shell.Conditions.emptyString;
@@ -40,7 +37,6 @@ import static org.neo4j.shell.Conditions.notContains;
 import static org.neo4j.shell.Conditions.startsWith;
 import static org.neo4j.shell.DatabaseManager.DEFAULT_DEFAULT_DB_NAME;
 import static org.neo4j.shell.DatabaseManager.SYSTEM_DB_NAME;
-import static org.neo4j.shell.util.Versions.majorVersion;
 
 import java.io.BufferedReader;
 import java.io.FileReader;
@@ -101,6 +97,26 @@ class MainIntegrationTest extends TestHarness {
                 .assertSuccessAndConnected()
                 .assertThatOutput(
                         contains("\"neo4j\", [\"admin\", \"PUBLIC\"], FALSE, FALSE, NULL"), endsWithInteractiveExit);
+    }
+
+    @Test
+    void shouldGetVersionedFunction() throws Exception {
+        assumeAtLeastVersion("2025.05.0"); // For testing - switch to 5.26.0, have 5.26.+ server running with version
+        // featureflag
+        buildTest()
+                .addArgs("-u", USER, "-p", PASSWORD, "--format", "plain")
+                .userInputLines("CYPHER 25 CALL dbms.upgradeStatus(); :exit")
+                .run()
+                .assertThatErrorOutput(
+                        contains(
+                                "42N08: syntax error or access rule violation - no such procedure. The procedure dbms.upgradeStatus() was not found. Verify that the spelling is correct."));
+        buildTest()
+                .addArgs("-u", USER, "-p", PASSWORD, "--format", "plain")
+                .userInputLines("CYPHER 5 CALL dbms.upgradeStatus(); :exit")
+                .run()
+                .assertThatErrorOutput(
+                        notContains(
+                                "42N08: syntax error or access rule violation - no such procedure. The procedure dbms.upgradeStatus() was not found. Verify that the spelling is correct."));
     }
 
     @Test
@@ -280,7 +296,7 @@ class MainIntegrationTest extends TestHarness {
                 .addArgs("-u", USER, "-p", PASSWORD, "--file", fileFromResource("invalid.cypher"))
                 .run()
                 .assertFailure()
-                .assertThatErrorOutput(o -> o.contains("Invalid input"))
+                .errorOutputSatisfies(o -> assertThat(o).contains("Invalid input"))
                 .assertOutputLines("result", "42");
     }
 
@@ -395,7 +411,10 @@ class MainIntegrationTest extends TestHarness {
                         ":disconnect ", format(":connect -u %s -p %s -d %s", USER, "wut!", SYSTEM_DB_NAME), ":exit")
                 .run()
                 .assertSuccessAndDisconnected(false)
-                .assertThatErrorOutput(contains("The client is unauthorized due to authentication failure."))
+                .errorOutputSatisfies(e -> assertThat(e)
+                        .containsAnyOf(
+                                "42NFF: syntax error or access rule violation - permission/access denied. Access denied, see the security logs for details.",
+                                "The client is unauthorized due to authentication failure"))
                 .assertThatOutput(
                         contains("> :disconnect "
                                 + format("%nDisconnected> :connect -u %s -p %s -d %s", USER, "wut!", SYSTEM_DB_NAME)),
@@ -412,7 +431,10 @@ class MainIntegrationTest extends TestHarness {
                         ":exit")
                 .run()
                 .assertSuccessAndDisconnected(false)
-                .assertThatErrorOutput(contains("The client is unauthorized due to authentication failure."))
+                .errorOutputSatisfies(e -> assertThat(e)
+                        .containsAnyOf(
+                                "42NFF: syntax error or access rule violation - permission/access denied. Access denied, see the security logs for details.",
+                                "The client is unauthorized due to authentication failure"))
                 .assertThatOutput(
                         contains("> :disconnect "
                                 + format(
@@ -504,7 +526,7 @@ class MainIntegrationTest extends TestHarness {
                 .userInputLines(":source " + file, ":exit")
                 .run()
                 .assertSuccessAndConnected(false)
-                .assertThatErrorOutput(o -> o.contains("Invalid input"))
+                .errorOutputSatisfies(o -> assertThat(o).contains("Invalid input"))
                 .assertThatOutput(
                         contains("> :source " + file + format("%nresult%n42%n") + USER + "@"), endsWithInteractiveExit);
     }
@@ -624,8 +646,7 @@ class MainIntegrationTest extends TestHarness {
     @Test
     void shouldHandleMultiLineHistory() throws Exception {
         final var history = Files.createTempFile("temp-cypher-shell-history", null);
-        var expected =
-                """
+        var expected = """
                 > :history
                  1  return
                     'hej' as greeting;
@@ -649,10 +670,9 @@ class MainIntegrationTest extends TestHarness {
     void createHistoryFileIfNotExists() throws Exception {
         final var historyDirectory = Files.createTempDirectory("temp-cypher-shell-history");
         final var history = historyDirectory.resolve("dir").resolve("dir").resolve("the-history");
-        assertFalse(Files.exists(history));
+        assertThat(history).doesNotExist();
 
-        var expected =
-                """
+        var expected = """
                 > :history
                  1  return 1;
                  2  :history
@@ -665,15 +685,14 @@ class MainIntegrationTest extends TestHarness {
                 .assertSuccessAndConnected()
                 .assertThatOutput(contains(expected), endsWithInteractiveExit);
 
-        assertTrue(Files.exists(history));
+        assertThat(history).exists();
     }
 
     @Test
     void historyFromEnvironment() throws Exception {
         final var history = Files.createTempFile("temp-cypher-shell-history", null);
 
-        var expected1 =
-                """
+        var expected1 = """
                 > :history
                  1  return 1;
                  2  :history
@@ -686,10 +705,9 @@ class MainIntegrationTest extends TestHarness {
                 .run()
                 .assertSuccessAndConnected()
                 .assertThatOutput(contains(expected1), endsWithInteractiveExit);
-        assertTrue(Files.exists(history));
+        assertThat(history).exists();
 
-        var expected2 =
-                """
+        var expected2 = """
                 > :history
                  1  return 1;
                  2  :history
@@ -706,7 +724,7 @@ class MainIntegrationTest extends TestHarness {
                 .assertSuccessAndConnected()
                 .assertThatOutput(contains(expected2), endsWithInteractiveExit);
 
-        assertTrue(Files.exists(history));
+        assertThat(history).exists();
     }
 
     @Test
@@ -735,13 +753,12 @@ class MainIntegrationTest extends TestHarness {
                 .assertSuccessAndConnected();
 
         var readHistory = Files.readAllLines(history);
-        assertEquals(3, readHistory.size());
+        assertThat(readHistory).hasSize(3);
         assertThat(readHistory.get(0)).is(endsWith("return 1;"));
         assertThat(readHistory.get(1)).is(endsWith("return 2;"));
         assertThat(readHistory.get(2)).is(endsWith(":exit"));
 
-        var expected1 =
-                """
+        var expected1 = """
                 > :history
                  1  return 1;
                  2  return 2;
@@ -763,7 +780,7 @@ class MainIntegrationTest extends TestHarness {
                 .assertThatOutput(contains(expected1), contains(expected2));
 
         var readHistoryAfterClear = Files.readAllLines(history);
-        assertEquals(2, readHistoryAfterClear.size());
+        assertThat(readHistoryAfterClear).hasSize(2);
         assertThat(readHistoryAfterClear.get(0)).is(endsWith(":history"));
         assertThat(readHistoryAfterClear.get(1)).is(endsWith(":exit"));
     }
@@ -775,9 +792,7 @@ class MainIntegrationTest extends TestHarness {
                 .userInputLines("return 1;", "return 2;", ":history", ":exit")
                 .run()
                 .assertSuccessAndConnected()
-                .assertThatOutput(
-                        contains(
-                                """
+                .assertThatOutput(contains("""
                         neo4j@neo4j> return 1;
                         1
                         1
@@ -798,9 +813,7 @@ class MainIntegrationTest extends TestHarness {
                 .userInputLines("return 3;", "return 4;", ":history", ":exit")
                 .run()
                 .assertSuccessAndConnected()
-                .assertThatOutput(
-                        contains(
-                                """
+                .assertThatOutput(contains("""
                         neo4j@neo4j> return 3;
                         3
                         3
@@ -815,7 +828,7 @@ class MainIntegrationTest extends TestHarness {
     }
 
     @Test
-    public void failGracefullyOnUnknownCommands() throws ArgumentParserException, IOException {
+    void failGracefullyOnUnknownCommands() throws ArgumentParserException, IOException {
         buildTest()
                 .addArgs("-u", USER, "-p", PASSWORD)
                 .userInputLines(":non-existing-command")
@@ -850,9 +863,11 @@ class MainIntegrationTest extends TestHarness {
                 .assertThatOutput(contains("neo4j@neo4j> :disconnect\n" + "Disconnected> :connect -u new_user -p "
                         + PASSWORD + " -d neo4j\n" + "Disconnected> show current user yield user;\n"
                         + "Disconnected>"))
-                .assertThatErrorOutput(
-                        contains("The client is unauthorized due to authentication failure"),
-                        contains("Not connected"));
+                .errorOutputSatisfies(e -> assertThat(e)
+                        .contains("Not connected")
+                        .containsAnyOf(
+                                "42NFF: syntax error or access rule violation - permission/access denied. Access denied, see the security logs for details.",
+                                "The client is unauthorized due to authentication failure"));
     }
 
     @Test
@@ -870,9 +885,11 @@ class MainIntegrationTest extends TestHarness {
                                 + "password: ***\n"
                                 + "Disconnected> show current user yield user;\n"
                                 + "Disconnected>"))
-                .assertThatErrorOutput(
-                        contains("The client is unauthorized due to authentication failure"),
-                        contains("Not connected"));
+                .errorOutputSatisfies(e -> assertThat(e)
+                        .contains("Not connected")
+                        .containsAnyOf(
+                                "42NFF: syntax error or access rule violation - permission/access denied. Access denied, see the security logs for details.",
+                                "The client is unauthorized due to authentication failure"));
     }
 
     @Test
@@ -905,6 +922,22 @@ class MainIntegrationTest extends TestHarness {
                         + "res\n"
                         + "1\n"
                         + "neo4j@neo4j> :exit"));
+    }
+
+    @Test
+    void shouldNicelyPrintVectors() throws Exception {
+        assumeAtLeastVersion("2025.10.0"); // When vectors were made GA
+
+        buildTest()
+                .addArgs("-u", USER, "-p", PASSWORD, "--format", "plain")
+                .userInputLines(
+                        "CYPHER 25 WITH vector([1, 2, 3], 3, INTEGER) AS vector RETURN vector, valueType(vector) AS vectorType;",
+                        ":exit")
+                .run()
+                .assertSuccessAndConnected(true)
+                .assertThatOutput(contains("""
+                        vector([1, 2, 3], 3, INTEGER NOT NULL), "VECTOR<INTEGER NOT NULL>(3) NOT NULL"
+                        """));
     }
 
     @Test
@@ -949,9 +982,7 @@ class MainIntegrationTest extends TestHarness {
                 .userInputLines(userInput)
                 .run()
                 .assertSuccessAndConnected()
-                .assertThatOutput(
-                        contains(
-                                """
+                .assertThatOutput(contains("""
                                         > :params
                                         {
                                           ` backticks `: true,
@@ -995,9 +1026,7 @@ class MainIntegrationTest extends TestHarness {
                                           string_escape: '\\'yes?\\'',
                                           string_escape2_judgement_day: '\\"mjau\\"',
                                           time: time('02:00:00Z')
-                                        }"""),
-                        contains(
-                                """
+                                        }"""), contains("""
                                         result
                                         {int: TRUE}
                                         {float: TRUE}
@@ -1029,17 +1058,13 @@ class MainIntegrationTest extends TestHarness {
                 .addArgs("--param", "easyAs => 1 + 2 + 3")
                 .addArgs("--param", "{a: 1, b: duration({seconds:1}), c:'hi'}")
                 .addArgs("--param", "{a: 2*2, d: toString(3)}")
-                .userInputLines(
-                        ":params",
-                        """
+                .userInputLines(":params", """
                         unwind [$purple,$advice,$when,$repeatAfterMe,$easyAs,$a,$b,$c,$d] as param
                         return param;
                         """)
                 .run()
                 .assertSuccessAndConnected()
-                .assertThatOutput(
-                        contains(
-                                """
+                .assertThatOutput(contains("""
                                  > :params
                                  {
                                    a: 4,
@@ -1051,9 +1076,7 @@ class MainIntegrationTest extends TestHarness {
                                    purple: 'rain',
                                    repeatAfterMe: 'ABC',
                                    when: date('2021-01-12')
-                                 }"""),
-                        contains(
-                                """
+                                 }"""), contains("""
                                  neo4j@neo4j> unwind [$purple,$advice,$when,$repeatAfterMe,$easyAs,$a,$b,$c,$d] as param
                                               return param;
                                  param
@@ -1089,9 +1112,7 @@ class MainIntegrationTest extends TestHarness {
                         ":params", "return $purple, $white, $advice, $when, $repeatAfterMe, $easyAs, $dt, $dt2;")
                 .run()
                 .assertSuccessAndConnected()
-                .assertThatOutput(
-                        contains(
-                                """
+                .assertThatOutput(contains("""
                             > :params
                             {
                               advice: ['talk', 'less', 'smile', 'more'],
@@ -1102,9 +1123,7 @@ class MainIntegrationTest extends TestHarness {
                               repeatAfterMe: 'ABC',
                               when: date('2021-01-12'),
                               white: 'space'
-                            }"""),
-                        contains(
-                                """
+                            }"""), contains("""
                              > return $purple, $white, $advice, $when, $repeatAfterMe, $easyAs, $dt, $dt2;
                              $purple, $white, $advice, $when, $repeatAfterMe, $easyAs, $dt, $dt2
                              "rain", "space", ["talk", "less", "smile", "more"], 2021-01-12, "ABC", 6, 2023-02-06T00:00-06:00[America/Chicago], 2023-02-06T00:00-06:00[America/Chicago]
@@ -1129,9 +1148,7 @@ class MainIntegrationTest extends TestHarness {
                         "unwind [$purple,$advice,$when,$repeatAfterMe,$easyAs,$a,$b,$c,$d,$nope] as param return param;")
                 .run()
                 .assertSuccessAndConnected()
-                .assertThatOutput(
-                        contains(
-                                """
+                .assertThatOutput(contains("""
                         > :params
                         {
                           a: {
@@ -1147,9 +1164,7 @@ class MainIntegrationTest extends TestHarness {
                           repeatAfterMe: 'ABC',
                           when: date('2021-01-12')
                         }
-                        """),
-                        contains(
-                                """
+                        """), contains("""
                         > unwind [$purple,$advice,$when,$repeatAfterMe,$easyAs,$a,$b,$c,$d,$nope] as param return param;
                         param
                         "rain"
@@ -1180,9 +1195,7 @@ class MainIntegrationTest extends TestHarness {
                         "return $purple, $advice, $when, $repeatAfterMe, $easyAs, $dt, $dt2;")
                 .run()
                 .assertSuccessAndConnected()
-                .assertThatOutput(
-                        contains(
-                                """
+                .assertThatOutput(contains("""
                                         > :params
                                         {
                                           advice: ['talk', 'less', 'smile', 'more'],
@@ -1192,9 +1205,7 @@ class MainIntegrationTest extends TestHarness {
                                           purple: 'rain',
                                           repeatAfterMe: 'ABC',
                                           when: date('2021-01-12')
-                                        }"""),
-                        contains(
-                                """
+                                        }"""), contains("""
                                         > return $purple, $advice, $when, $repeatAfterMe, $easyAs, $dt, $dt2;
                                         $purple, $advice, $when, $repeatAfterMe, $easyAs, $dt, $dt2
                                         "rain", ["talk", "less", "smile", "more"], 2021-01-12, "ABC", 6, 2023-02-06T00:00-06:00[America/Chicago], 2023-02-06T00:00-06:00[America/Chicago]
@@ -1220,9 +1231,7 @@ class MainIntegrationTest extends TestHarness {
                                 "Parameter values needs to have a literal type (not nodes, relationships or paths), but found: `a`: [node"),
                         contains(
                                 "Parameter values needs to have a literal type (not nodes, relationships or paths), but found: `b`: {a: [[node"))
-                .assertThatOutput(
-                        contains(
-                                """
+                .assertThatOutput(contains("""
                         neo4j@neo4j> create ();
                         neo4j@neo4j> :params { a: 1 }
                         neo4j@neo4j> :params { a: collect { match (n) return n } }
@@ -1249,9 +1258,7 @@ class MainIntegrationTest extends TestHarness {
                         ":exit")
                 .run()
                 .assertSuccess()
-                .assertThatOutput(
-                        contains(
-                                """
+                .assertThatOutput(contains("""
                         neo4j@neo4j> create ( { p: 'x' });
                         neo4j@neo4j> :params { a: 1 }
                         neo4j@neo4j> :params { a: collect { match (n) return n.p } }
@@ -1271,8 +1278,7 @@ class MainIntegrationTest extends TestHarness {
     void shouldShowPlanDescription() throws Exception {
         assumeAtLeastVersion("4.4.0");
 
-        var expected = serverVersion.major() >= 5
-                ? """
+        var expected = serverVersion.major() >= 5 ? """
                                 +-----------------+----+---------+----------------+---------------------+
                                 | Operator        | Id | Details | Estimated Rows | Pipeline            |
                                 +-----------------+----+---------+----------------+---------------------+
@@ -1280,8 +1286,7 @@ class MainIntegrationTest extends TestHarness {
                                 | |               +----+---------+----------------+                     |
                                 | +AllNodesScan   |  1 | n       |             10 | Fused in Pipeline 0 |
                                 +-----------------+----+---------+----------------+---------------------+
-                                """
-                : """
+                                """ : """
                                +-----------------------+---------+----------------+---------------------+
                                | Operator              | Details | Estimated Rows | Other               |
                                +-----------------------+---------+----------------+---------------------+
@@ -1328,9 +1333,7 @@ class MainIntegrationTest extends TestHarness {
                 .run()
                 .assertSuccessAndConnected()
                 .assertThatOutput(
-                        contains("as user neo4j impersonating impersonate_me"),
-                        contains(
-                                """
+                        contains("as user neo4j impersonating impersonate_me"), contains("""
                                 neo4j(impersonate_me)@neo4j> :impersonate
                                 neo4j@neo4j> :impersonate impersonate_me
                                 neo4j(impersonate_me)@neo4j> :impersonate neo4j
@@ -1341,8 +1344,7 @@ class MainIntegrationTest extends TestHarness {
                                 +----------------------------------------+
                                 | (:ImpersonationTest {otherProp: "hi"}) |
                                 +----------------------------------------+
-                                """),
-                        endsWithInteractiveExit);
+                                """), endsWithInteractiveExit);
     }
 
     @Test
@@ -1369,15 +1371,15 @@ class MainIntegrationTest extends TestHarness {
                 .userInputLines(":impersonate impersonate_me", "MATCH (n:ImpersonationTest) RETURN n;", ":exit")
                 .run()
                 .assertSuccess(false)
-                .assertThatErrorOutput(contains("Cannot impersonate user 'impersonate_me'"))
-                .assertThatOutput(
-                        contains(
-                                """
+                .errorOutputSatisfies(e -> assertThat(e)
+                        .containsAnyOf(
+                                "42NFF: syntax error or access rule violation - permission/access denied. Access denied, see the security logs for details.",
+                                "Cannot impersonate user 'impersonate_me'."))
+                .assertThatOutput(contains("""
                                 alice@neo4j> :impersonate impersonate_me
                                 Disconnected> MATCH (n:ImpersonationTest) RETURN n;
                                 Disconnected> :exit
-                                """),
-                        endsWithInteractiveExit);
+                                """), endsWithInteractiveExit);
     }
 
     @Test
@@ -1388,13 +1390,10 @@ class MainIntegrationTest extends TestHarness {
                 .userInputLines("SHOW CURRENT USER YIELD user;", ":exit")
                 .run()
                 .assertSuccess()
-                .assertThatOutput(
-                        contains(
-                                """
+                .assertThatOutput(contains("""
                                 user
                                 "the_undertaker"
-                                """),
-                        endsWithInteractiveExit);
+                                """), endsWithInteractiveExit);
     }
 
     @Test
@@ -1406,13 +1405,10 @@ class MainIntegrationTest extends TestHarness {
                 .userInputLines("SHOW CURRENT USER YIELD user;", ":exit")
                 .run()
                 .assertSuccess()
-                .assertThatOutput(
-                        contains(
-                                """
+                .assertThatOutput(contains("""
                                 user
                                 "hulk_hogan"
-                                """),
-                        endsWithInteractiveExit);
+                                """), endsWithInteractiveExit);
     }
 
     @Test
@@ -1440,6 +1436,21 @@ class MainIntegrationTest extends TestHarness {
     }
 
     @Test
+    void debugLogToFile() throws Exception {
+        final var tempFile = Files.createTempFile("temp-log", null);
+        buildTest()
+                .addArgs("-u", USER, "-p", PASSWORD, "--debug", tempFile.toString())
+                .userInputLines("return 1;", ":exit")
+                .run()
+                .assertSuccess();
+
+        assertFileContains(tempFile, "Executing cypher: return 1");
+        assertFileContains(tempFile, "org.neo4j.driver.internal.logging");
+
+        Files.delete(tempFile);
+    }
+
+    @Test
     void license() throws ArgumentParserException, IOException {
         buildTest()
                 .addArgs("-u", USER, "-p", PASSWORD)
@@ -1456,29 +1467,44 @@ class MainIntegrationTest extends TestHarness {
     @Test
     void sysInfo() throws Exception {
         assumeAtLeastVersion("4.4.0");
+        assumeIsEnterpriseEdition();
         buildTest()
                 .addArgs("-u", USER, "-p", PASSWORD)
                 .userInputLines(":sysinfo", ":exit")
                 .run()
                 .assertSuccessAndConnected()
-                .assertThatOutput(
-                        contains("\"neo4j\""),
-                        contains("\"system\""),
-                        contains("\"Property ID\""),
-                        contains("\"Relationship ID\""),
-                        contains("\"Relationship Type ID\""),
-                        contains("\"Total\""),
-                        contains("\"Database\""),
-                        contains("\"Hits\""),
-                        contains("\"Hit Ratio\""),
-                        contains("\"Usage Ratio\""),
-                        contains("\"Page Faults\""),
-                        contains("\"Last Tx Id\""),
-                        contains("\"Current Read\""),
-                        contains("\"Current Write\""),
-                        contains("\"Peak Transactions\""),
-                        contains("\"Committed Read\""),
-                        contains("\"Committed Write\""));
+                .outputSatisfies(o -> assertThat(o)
+                        .containsOnlyOnce("\"neo4j\"")
+                        .containsOnlyOnce("\"system\"")
+                        .containsOnlyOnce("\"Node ID\"")
+                        .containsOnlyOnce("\"Relationship ID\"")
+                        .containsOnlyOnce("\"Relationship Type ID\"")
+                        .containsOnlyOnce("\"Total\"")
+                        .containsOnlyOnce("\"Database\"")
+                        .containsOnlyOnce("\"Hits\"")
+                        .containsOnlyOnce("\"Hit Ratio\"")
+                        .containsOnlyOnce("\"Usage Ratio\"")
+                        .containsOnlyOnce("\"Page Faults\"")
+                        .containsIgnoringCase("\"Last Tx Id\"")
+                        .containsOnlyOnce("\"Last Tx")
+                        .containsOnlyOnce("\"Current Read\"")
+                        .containsOnlyOnce("\"Current Write\"")
+                        .containsOnlyOnce("\"Peak Transactions\"")
+                        .containsOnlyOnce("\"Committed Read\"")
+                        .containsOnlyOnce("\"Committed Write\""));
+    }
+
+    @Test
+    void sysInfoCommunity() throws Exception {
+        assumeAtLeastVersion("4.4.0");
+        assumeIsCommunityEdition();
+        buildTest()
+                .addArgs("-u", USER, "-p", PASSWORD)
+                .userInputLines(":sysinfo", ":exit")
+                .run()
+                .assertSuccessAndConnected()
+                .outputSatisfies(
+                        o -> assertThat(o).containsOnlyOnce("\"neo4j\"").containsOnlyOnce("\"system\""));
     }
 
     @Test
@@ -1489,9 +1515,7 @@ class MainIntegrationTest extends TestHarness {
                 .run()
                 .assertSuccess(false)
                 .assertThatErrorOutput(contains("Connect to a database to use :sysinfo"))
-                .assertThatOutput(
-                        contains(
-                                """
+                .assertThatOutput(contains("""
                                 Disconnected> :sysinfo
                                 Disconnected> :exit
                                 """));
@@ -1506,9 +1530,7 @@ class MainIntegrationTest extends TestHarness {
                 .run()
                 .assertSuccessAndConnected(false)
                 .assertThatErrorOutput(contains(":sysinfo is only supported since 4.4.0"))
-                .assertThatOutput(
-                        contains(
-                                """
+                .assertThatOutput(contains("""
                                 neo4j@neo4j> :sysinfo
                                 neo4j@neo4j> :exit
                                 """));
@@ -1532,8 +1554,7 @@ class MainIntegrationTest extends TestHarness {
         final String expected;
         if (protocolVersion.compareTo(Versions.version("5.6")) >= 0) {
             expected =
-                    "info: If a part of a query contains multiple disconnected patterns, this will build a cartesian product between all those parts. This may produce a large amount of data and slow down query processing. While occasionally intended, it may often be possible to reformulate the query that avoids the use of this cross product, perhaps by adding a relationship between the different parts or by using OPTIONAL MATCH (identifier is: (b))\n"
-                            + "03N90 (Neo.ClientNotification.Statement.CartesianProduct)";
+                    "info: cartesian product. The disconnected pattern '(a:A), (b:B)' builds a cartesian product. A cartesian product may produce a large amount of data and slow down query processing. (03N90)";
         } else if (serverVersion.compareTo(Versions.version("5.0.0")) >= 0) {
             expected =
                     "info: If a part of a query contains multiple disconnected patterns, this will build a cartesian product between all those parts. This may produce a large amount of data and slow down query processing. While occasionally intended, it may often be possible to reformulate the query that avoids the use of this cross product, perhaps by adding a relationship between the different parts or by using OPTIONAL MATCH (identifier is: (b)) (Neo.ClientNotification.Statement.CartesianProduct)";
@@ -1557,11 +1578,11 @@ class MainIntegrationTest extends TestHarness {
         final String expected;
 
         if (protocolVersion.compareTo(Versions.version("5.6")) >= 0) {
-            expected = "warn: The query used a deprecated function: `id`.\n"
-                    + "01N02 (Neo.ClientNotification.Statement.FeatureDeprecationWarning)";
+            expected =
+                    "warn: feature deprecated with replacement. id is deprecated. It is replaced by elementId or consider using an application-generated id. (01N01)";
         } else {
             expected =
-                    "warn: The query used a deprecated function: `id`. (Neo.ClientNotification.Statement.FeatureDeprecationWarning)";
+                    "warn: The query used a deprecated function. ('id' has been replaced by 'elementId or consider using an application-generated id') (Neo.ClientNotification.Statement.FeatureDeprecationWarning)";
         }
 
         buildTest()
@@ -1654,6 +1675,125 @@ class MainIntegrationTest extends TestHarness {
                 .assertThatOutput(endsWithInteractiveExit);
     }
 
+    @Test
+    void errorFormatGql() throws Exception {
+        final String expected;
+        if (isAtLeastVersion("5.27.0")) {
+            expected = """
+                    42N08: syntax error or access rule violation - no such procedure. The procedure dibs() was not found. Verify that the spelling is correct.
+                      42001: syntax error or access rule violation - invalid syntax
+                    """;
+        } else {
+            expected = """
+                    There is no procedure with the name `dibs` registered for this database instance. Please ensure you've spelled the procedure name correctly and that the procedure is properly deployed.
+                    """;
+        }
+        buildTest()
+                .addArgs("-u", USER, "-p", PASSWORD, "--error-format", "gql")
+                .userInputLines("call dibs;", ":exit")
+                .run()
+                .assertSuccess(false)
+                .assertThatOutput(contains("""
+                        neo4j@neo4j> call dibs;
+                        neo4j@neo4j> :exit"""))
+                .errorOutputSatisfies(err ->
+                        assertThat(err).as("serverVersion=%s", serverVersion).isEqualTo(expected));
+    }
+
+    @Test
+    void errorFormatGqlWithPosition() throws Exception {
+        final String expected;
+        if (isAtLeastVersion("5.27.0")) {
+            expected = """
+                    42N62: syntax error or access rule violation - variable not defined. Variable `m` not defined. (line 2, column 9 (offset: 19))
+                    " RETURN m"
+                             ^
+                      42001: syntax error or access rule violation - invalid syntax
+                    """;
+        } else {
+            expected = """
+                    Variable `m` not defined (line 2, column 9 (offset: 19))
+                    " RETURN m"
+                             ^
+                    """;
+        }
+        buildTest()
+                .addArgs("-u", USER, "-p", PASSWORD, "--error-format", "gql")
+                .userInputLines("MATCH (n) \n RETURN m;", ":exit")
+                .run()
+                .assertSuccess(false)
+                .assertThatOutput(contains("""
+                                neo4j@neo4j> MATCH (n)\s
+                                              RETURN m;
+                                neo4j@neo4j> :exit"""))
+                .errorOutputSatisfies(err ->
+                        assertThat(err).as("serverVersion=%s", serverVersion).isEqualTo(expected));
+    }
+
+    @Test
+    void errorFormatLegacy() throws Exception {
+        buildTest()
+                .addArgs("-u", USER, "-p", PASSWORD, "--error-format", "legacy")
+                .userInputLines("call dibs;", ":exit")
+                .run()
+                .assertSuccess(false)
+                .assertThatOutput(contains("""
+                        neo4j@neo4j> call dibs;
+                        neo4j@neo4j> :exit"""))
+                .errorOutputSatisfies(err -> assertThat(err).isEqualTo("""
+                        There is no procedure with the name `dibs` registered for this database instance. Please ensure you've spelled the procedure name correctly and that the procedure is properly deployed.
+                        """));
+    }
+
+    @Test
+    void errorFormatDefault() throws Exception {
+        final String expected;
+        if (isAtLeastVersion("5.27.0")) {
+            expected = """
+                    42N08: syntax error or access rule violation - no such procedure. The procedure dibs() was not found. Verify that the spelling is correct.
+                      42001: syntax error or access rule violation - invalid syntax
+                    """;
+        } else {
+            expected = """
+                    There is no procedure with the name `dibs` registered for this database instance. Please ensure you've spelled the procedure name correctly and that the procedure is properly deployed.
+                    """;
+        }
+        buildTest()
+                .addArgs("-u", USER, "-p", PASSWORD)
+                .userInputLines("call dibs;", ":exit")
+                .run()
+                .assertSuccess(false)
+                .assertThatOutput(contains("""
+                        neo4j@neo4j> call dibs;
+                        neo4j@neo4j> :exit"""))
+                .errorOutputSatisfies(err ->
+                        assertThat(err).as("serverVersion=%s", serverVersion).isEqualTo(expected));
+    }
+
+    @Test
+    void errorFormatStacktrace() throws Exception {
+        final List<String> expected;
+        if (isAtLeastVersion("5.27.0")) {
+            expected = List.of(
+                    "org.neo4j.driver.exceptions.ClientException: There is no procedure with the name `dibs`",
+                    "Suppressed: org.neo4j.driver.internal.util.ErrorUtil$InternalExceptionCause",
+                    "Caused by: org.neo4j.driver.exceptions.Neo4jException: 42N08: The procedure dibs() was not found.");
+        } else {
+            expected = List.of(
+                    "org.neo4j.driver.exceptions.ClientException: There is no procedure with the name `dibs` registered for this database instance",
+                    "Suppressed: org.neo4j.driver.internal.util.ErrorUtil$InternalExceptionCause");
+        }
+        buildTest()
+                .addArgs("-u", USER, "-p", PASSWORD, "--error-format", "stacktrace")
+                .userInputLines("call dibs;", ":exit")
+                .run()
+                .assertSuccess(false)
+                .assertThatOutput(contains("""
+                        neo4j@neo4j> call dibs;
+                        neo4j@neo4j> :exit"""))
+                .errorOutputSatisfies(err -> assertThat(err).contains(expected));
+    }
+
     private static CypherStatement cypher(String cypher) {
         return CypherStatement.complete(cypher);
     }
@@ -1673,7 +1813,7 @@ class MainIntegrationTest extends TestHarness {
 
     private static void createOrReplaceUser(
             CypherShell shell, String name, String password, boolean requirePasswordChange) throws CommandException {
-        if (majorVersion(shell.getServerVersion()) >= 4) {
+        if (versionOrThrow(shell.getServerVersion()).major() >= 4) {
             var changeString = requirePasswordChange ? "" : " CHANGE NOT REQUIRED";
             shell.execute(CypherStatement.complete(
                     "CREATE OR REPLACE USER " + name + " SET PASSWORD '" + password + "'" + changeString + ";"));
@@ -1694,6 +1834,14 @@ class MainIntegrationTest extends TestHarness {
         }
     }
 
+    private static org.neo4j.shell.util.Version versionOrThrow(String version) {
+        try {
+            return Versions.version(version);
+        } catch (Versions.FailedToParseException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     private String return42Output() {
         return format("> return 42 as x;%n" + return42VerboseTable());
     }
@@ -1707,7 +1855,7 @@ class MainIntegrationTest extends TestHarness {
     }
 
     private void withDefaultDatabaseStopped(ThrowingAction<Exception> test) {
-        final var useWait = serverVersion.compareTo(Versions.version("4.4.0")) >= 0;
+        final var useWait = serverVersion.compareTo(versionOrThrow("4.4.0")) >= 0;
         final var stop = "STOP DATABASE " + DEFAULT_DEFAULT_DB_NAME + (useWait ? " WAIT;" : ";");
         final var start = "START DATABASE " + DEFAULT_DEFAULT_DB_NAME + (useWait ? " WAIT;" : ";");
         try {

@@ -39,7 +39,6 @@ import static org.neo4j.kernel.database.DatabaseIdFactory.from;
 import static org.neo4j.kernel.impl.api.chunk.TransactionRollbackProcess.EMPTY_ROLLBACK_PROCESS;
 import static org.neo4j.kernel.impl.api.transaction.serial.DatabaseSerialGuard.EMPTY_GUARD;
 import static org.neo4j.kernel.impl.locking.NoLocksClient.NO_LOCKS_CLIENT;
-import static org.neo4j.kernel.impl.util.collection.CollectionsFactorySupplier.ON_HEAP;
 
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
@@ -51,6 +50,7 @@ import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.neo4j.collection.Dependencies;
+import org.neo4j.collection.factory.OnHeapCollectionsFactory;
 import org.neo4j.collection.pool.Pool;
 import org.neo4j.configuration.Config;
 import org.neo4j.dbms.DbmsRuntimeVersionProvider;
@@ -67,6 +67,7 @@ import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
 import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.api.procedure.ProcedureView;
+import org.neo4j.kernel.availability.AvailabilityGuard;
 import org.neo4j.kernel.database.DatabaseTracers;
 import org.neo4j.kernel.impl.api.index.IndexingService;
 import org.neo4j.kernel.impl.api.index.stats.IndexStatisticsStore;
@@ -78,11 +79,12 @@ import org.neo4j.kernel.impl.factory.GraphDatabaseFacade;
 import org.neo4j.kernel.impl.locking.LockManager;
 import org.neo4j.kernel.impl.monitoring.TransactionMonitor;
 import org.neo4j.kernel.impl.query.TransactionExecutionMonitor;
-import org.neo4j.kernel.impl.transaction.log.TransactionCommitmentFactory;
+import org.neo4j.kernel.impl.security.URIAccessRules;
 import org.neo4j.kernel.internal.event.DatabaseTransactionEventListeners;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.MemoryPools;
 import org.neo4j.monitoring.DatabaseHealth;
+import org.neo4j.monitoring.ExceptionHandlerService;
 import org.neo4j.resources.CpuClock;
 import org.neo4j.storageengine.api.StorageEngine;
 import org.neo4j.storageengine.api.enrichment.ApplyEnrichmentStrategy;
@@ -94,6 +96,7 @@ import org.neo4j.time.Clocks;
 import org.neo4j.token.TokenHolders;
 import org.neo4j.token.api.TokenHolder;
 import org.neo4j.values.ElementIdMapper;
+import org.neo4j.wal.TransactionCommitmentFactory;
 
 class KernelTransactionTerminationTest {
     private static final int TEST_RUN_TIME_SECS = 5;
@@ -282,7 +285,7 @@ class KernelTransactionTerminationTest {
                     mock(StorageEngine.class, RETURNS_MOCKS),
                     any -> CanWrite.INSTANCE,
                     new CursorContextFactory(new DefaultPageCacheTracer(), EMPTY_CONTEXT_SUPPLIER),
-                    ON_HEAP,
+                    OnHeapCollectionsFactory.INSTANCE,
                     new StandardConstraintSemantics(),
                     mock(SchemaState.class),
                     mockedTokenHolders(),
@@ -309,8 +312,11 @@ class KernelTransactionTerminationTest {
                     NullLogProvider.getInstance(),
                     TransactionValidatorFactory.EMPTY_VALIDATOR_FACTORY,
                     EMPTY_GUARD,
+                    RaftUpgradeBarrier.NO_OP,
                     false,
-                    TopologyGraphDbmsModel.HostedOnMode.SINGLE);
+                    mock(ExceptionHandlerService.class),
+                    TopologyGraphDbmsModel.HostedOnMode.SINGLE,
+                    mock(AvailabilityGuard.class));
 
             this.monitor = monitor;
         }
@@ -323,12 +329,20 @@ class KernelTransactionTerminationTest {
 
         static TestKernelTransaction create() {
             return new TestKernelTransaction(
-                    new CommitTrackingMonitor(), dependenciesOf(mock(GraphDatabaseFacade.class)));
+                    new CommitTrackingMonitor(),
+                    dependenciesOf(mock(GraphDatabaseFacade.class), mock(URIAccessRules.class)));
         }
 
         TestKernelTransaction initialize() {
             initialize(
-                    42, Type.IMPLICIT, AUTH_DISABLED, NO_TIMEOUT, 1L, EMBEDDED_CONNECTION, mock(ProcedureView.class));
+                    42,
+                    Type.IMPLICIT,
+                    AUTH_DISABLED,
+                    NO_TIMEOUT,
+                    1L,
+                    EMBEDDED_CONNECTION,
+                    mock(ProcedureView.class),
+                    0L);
             monitor.reset();
             return this;
         }
@@ -388,6 +402,9 @@ class KernelTransactionTerminationTest {
 
         @Override
         public void transactionRetry() {}
+
+        @Override
+        public void transactionMarkedMultiChunk() {}
 
         @Override
         public void addHeapTransactionSize(long transactionSizeHeap) {}

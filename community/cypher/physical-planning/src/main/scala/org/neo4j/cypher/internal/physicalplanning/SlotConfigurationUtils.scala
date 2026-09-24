@@ -80,8 +80,87 @@ object SlotConfigurationUtils {
           context.getRefAt(offset)
 
       case _ =>
-        throw new InternalException(s"Do not know how to make getter for slot $slot")
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"Do not know how to make getter for slot $slot"
+        )
     }
+
+  def makeNullableGetPrimitiveNodeFunctionFor(offset: Int): ToLongFunction[ReadableRow] = {
+    val nonNullable = makeGetPrimitiveNodeFunctionFor(offset)
+    (context: ReadableRow) => {
+      val value = context.getRefAt(offset)
+      if (value eq Values.NO_VALUE) PRIMITIVE_NULL
+      else nonNullable.applyAsLong(context)
+    }
+  }
+
+  def makeGetPrimitiveNodeFunctionFor(offset: Int): ToLongFunction[ReadableRow] = {
+    (context: ReadableRow) =>
+      {
+        val value = context.getRefAt(offset)
+
+        try {
+          value.asInstanceOf[VirtualNodeValue].id()
+        } catch {
+          case _: java.lang.ClassCastException =>
+            value match {
+              case value: Value =>
+                throw ParameterWrongTypeException.expectedEntityAtRefSlotFoundInstead(
+                  offset,
+                  "node",
+                  String.valueOf(value),
+                  value.prettyPrint(),
+                  CypherTypeValueMapper.valueType(value)
+                )
+              case other =>
+                throw ParameterWrongTypeException.expectedEntityAtRefSlotFoundInstead(
+                  offset,
+                  "node",
+                  String.valueOf(other),
+                  String.valueOf(other),
+                  CypherTypeValueMapper.valueType(other)
+                )
+            }
+        }
+      }
+  }
+
+  def makeNullableGetPrimitiveRelationshipFunctionFor(offset: Int): ToLongFunction[ReadableRow] = {
+    val nonNullable = makeGetPrimitiveRelationshipFunctionFor(offset)
+    (context: ReadableRow) => {
+      val value = context.getRefAt(offset)
+      if (value eq Values.NO_VALUE) PRIMITIVE_NULL
+      else nonNullable.applyAsLong(context)
+    }
+  }
+
+  def makeGetPrimitiveRelationshipFunctionFor(offset: Int): ToLongFunction[ReadableRow] = (context: ReadableRow) => {
+    val value = context.getRefAt(offset)
+    try {
+      value.asInstanceOf[VirtualRelationshipValue].id()
+    } catch {
+      case _: java.lang.ClassCastException =>
+        value match {
+          case value: Value =>
+            throw ParameterWrongTypeException.expectedEntityAtRefSlotFoundInstead(
+              offset,
+              "relationship",
+              String.valueOf(value),
+              value.prettyPrint(),
+              CypherTypeValueMapper.valueType(value)
+            )
+          case other =>
+            throw ParameterWrongTypeException.expectedEntityAtRefSlotFoundInstead(
+              offset,
+              "relationship",
+              String.valueOf(other),
+              String.valueOf(other),
+              CypherTypeValueMapper.valueType(other)
+            )
+        }
+    }
+  }
 
   /**
    * Use this to make a specialized getter function for a slot and a primitive return type (i.e. CTNode or CTRelationship),
@@ -97,119 +176,10 @@ object SlotConfigurationUtils {
         (context: ReadableRow) =>
           context.getLongAt(offset)
 
-      case (RefSlot(offset, false, _), CTNode, true) =>
-        (context: ReadableRow) =>
-          val value = context.getRefAt(offset)
-          try {
-            value.asInstanceOf[VirtualNodeValue].id()
-          } catch {
-            case _: java.lang.ClassCastException =>
-              value match {
-                case value: Value =>
-                  throw ParameterWrongTypeException.expectedEntityAtRefSlotFoundInstead(
-                    offset,
-                    "node",
-                    String.valueOf(value),
-                    value.prettyPrint(),
-                    CypherTypeValueMapper.valueType(value)
-                  )
-                case other =>
-                  throw ParameterWrongTypeException.expectedEntityAtRefSlotFoundInstead(
-                    offset,
-                    "node",
-                    String.valueOf(other),
-                    String.valueOf(other),
-                    CypherTypeValueMapper.valueType(other)
-                  )
-              }
-          }
-      case (RefSlot(offset, false, _), CTRelationship, true) =>
-        (context: ReadableRow) =>
-          val value = context.getRefAt(offset)
-          try {
-            value.asInstanceOf[VirtualRelationshipValue].id()
-          } catch {
-            case _: java.lang.ClassCastException =>
-              value match {
-                case value: Value =>
-                  throw ParameterWrongTypeException.expectedEntityAtRefSlotFoundInstead(
-                    offset,
-                    "relationship",
-                    String.valueOf(value),
-                    value.prettyPrint(),
-                    CypherTypeValueMapper.valueType(value)
-                  )
-                case other =>
-                  throw ParameterWrongTypeException.expectedEntityAtRefSlotFoundInstead(
-                    offset,
-                    "relationship",
-                    String.valueOf(other),
-                    String.valueOf(other),
-                    CypherTypeValueMapper.valueType(other)
-                  )
-              }
-          }
-
-      case (RefSlot(offset, true, _), CTNode, true) =>
-        (context: ReadableRow) =>
-          val value = context.getRefAt(offset)
-          try {
-            if (value eq Values.NO_VALUE)
-              PRIMITIVE_NULL
-            else
-              value.asInstanceOf[VirtualNodeValue].id()
-          } catch {
-            case _: java.lang.ClassCastException =>
-              value match {
-                case value: Value =>
-                  throw ParameterWrongTypeException.expectedEntityAtRefSlotFoundInstead(
-                    offset,
-                    "node",
-                    String.valueOf(value),
-                    value.prettyPrint(),
-                    CypherTypeValueMapper.valueType(value)
-                  )
-                case other =>
-                  throw ParameterWrongTypeException.expectedEntityAtRefSlotFoundInstead(
-                    offset,
-                    "node",
-                    String.valueOf(other),
-                    String.valueOf(other),
-                    CypherTypeValueMapper.valueType(other)
-                  )
-              }
-          }
-
-      case (RefSlot(offset, true, _), CTRelationship, true) =>
-        (context: ReadableRow) =>
-          val value = context.getRefAt(offset)
-          try {
-            if (value eq Values.NO_VALUE)
-              PRIMITIVE_NULL
-            else
-              value.asInstanceOf[VirtualRelationshipValue].id()
-          } catch {
-            case _: java.lang.ClassCastException =>
-              value match {
-                case value: Value =>
-                  throw ParameterWrongTypeException.expectedEntityAtRefSlotFoundInstead(
-                    offset,
-                    "relationship",
-                    String.valueOf(value),
-                    value.prettyPrint(),
-                    CypherTypeValueMapper.valueType(value)
-                  )
-                case other =>
-                  throw ParameterWrongTypeException.expectedEntityAtRefSlotFoundInstead(
-                    offset,
-                    "relationship",
-                    String.valueOf(other),
-                    String.valueOf(other),
-                    CypherTypeValueMapper.valueType(other)
-                  )
-              }
-          }
-
+      case (RefSlot(offset, false, _), CTNode, true)         => makeGetPrimitiveNodeFunctionFor(offset)
+      case (RefSlot(offset, false, _), CTRelationship, true) => makeGetPrimitiveRelationshipFunctionFor(offset)
+      case (RefSlot(offset, true, _), CTNode, true)          => makeNullableGetPrimitiveNodeFunctionFor(offset)
+      case (RefSlot(offset, true, _), CTRelationship, true)  => makeNullableGetPrimitiveRelationshipFunctionFor(offset)
       case (RefSlot(offset, _, _), CTNode, false) =>
         (context: ReadableRow) =>
           context.getRefAt(offset) match {
@@ -225,7 +195,10 @@ object SlotConfigurationUtils {
           }
 
       case _ =>
-        throw new InternalException(s"Do not know how to make a primitive getter for slot $slot with type $returnType")
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"Do not know how to make a primitive getter for slot $slot with type $returnType"
+        )
     }
 
   /**
@@ -373,7 +346,10 @@ object SlotConfigurationUtils {
           context.setRefAt(offset, value)
 
       case _ =>
-        throw new InternalException(s"Do not know how to make setter for slot $slot")
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"Do not know how to make setter for slot $slot"
+        )
     }
 
   /**
@@ -386,7 +362,10 @@ object SlotConfigurationUtils {
         if (AssertionRunner.isAssertionsEnabled && !nullable) {
           (context: CypherRow, value: Long, _: EntityById) =>
             if (value == PRIMITIVE_NULL)
-              throw new ParameterWrongTypeException(s"Cannot assign null to a non-nullable slot")
+              throw ParameterWrongTypeException.internalError(
+                this.getClass.getSimpleName,
+                s"Cannot assign null to a non-nullable slot"
+              )
             context.setLongAt(offset, value)
         } else {
           (context: CypherRow, value: Long, _: EntityById) =>
@@ -397,7 +376,10 @@ object SlotConfigurationUtils {
         if (AssertionRunner.isAssertionsEnabled && !nullable) {
           (context: CypherRow, value: Long, _: EntityById) =>
             if (value == PRIMITIVE_NULL)
-              throw new ParameterWrongTypeException(s"Cannot assign null to a non-nullable slot")
+              throw ParameterWrongTypeException.internalError(
+                this.getClass.getSimpleName,
+                s"Cannot assign null to a non-nullable slot"
+              )
             context.setLongAt(offset, value)
         } else {
           (context: CypherRow, value: Long, _: EntityById) =>
@@ -408,7 +390,10 @@ object SlotConfigurationUtils {
         if (AssertionRunner.isAssertionsEnabled) {
           (context: CypherRow, value: Long, entityById: EntityById) =>
             if (value == PRIMITIVE_NULL)
-              throw new ParameterWrongTypeException(s"Cannot assign null to a non-nullable slot")
+              throw ParameterWrongTypeException.internalError(
+                this.getClass.getSimpleName,
+                s"Cannot assign null to a non-nullable slot"
+              )
             context.setRefAt(offset, entityById.nodeById(value))
         } else {
           (context: CypherRow, value: Long, entityById: EntityById) =>
@@ -421,7 +406,10 @@ object SlotConfigurationUtils {
           (context: CypherRow, value: Long, entityById: EntityById) =>
             if (value == -1L)
               if (value == PRIMITIVE_NULL)
-                throw new ParameterWrongTypeException(s"Cannot assign null to a non-nullable slot")
+                throw ParameterWrongTypeException.internalError(
+                  this.getClass.getSimpleName,
+                  s"Cannot assign null to a non-nullable slot"
+                )
             context.setRefAt(offset, entityById.relationshipById(value))
         } else {
           (context: CypherRow, value: Long, entityById: EntityById) =>
@@ -444,7 +432,10 @@ object SlotConfigurationUtils {
             context.setRefAt(offset, entityById.relationshipById(value))
 
       case _ =>
-        throw new InternalException(s"Do not know how to make a primitive $valueType setter for slot $slot")
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"Do not know how to make a primitive $valueType setter for slot $slot"
+        )
     }
 
   /**

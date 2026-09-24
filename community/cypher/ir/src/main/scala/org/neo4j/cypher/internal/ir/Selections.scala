@@ -19,27 +19,42 @@
  */
 package org.neo4j.cypher.internal.ir
 
+import org.neo4j.cypher.internal.expressions.And
+import org.neo4j.cypher.internal.expressions.Ands
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.HasLabels
 import org.neo4j.cypher.internal.expressions.HasLabelsOrTypes
 import org.neo4j.cypher.internal.expressions.HasTypes
+import org.neo4j.cypher.internal.expressions.ImpliedLabel
 import org.neo4j.cypher.internal.expressions.LabelName
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.Not
 import org.neo4j.cypher.internal.expressions.Ors
 import org.neo4j.cypher.internal.expressions.PartialPredicate
+import org.neo4j.cypher.internal.expressions.PartialPredicate.PartialPredicateWrapper
 import org.neo4j.cypher.internal.expressions.Property
 import org.neo4j.cypher.internal.expressions.RelTypeName
 import org.neo4j.cypher.internal.expressions.Variable
+import org.neo4j.cypher.internal.ir.Selections.AsHasLabelsPredicate
 import org.neo4j.cypher.internal.ir.ast.ExistsIRExpression
 import org.neo4j.cypher.internal.ir.helpers.ExpressionConverters.PredicateConverter
+import org.neo4j.cypher.internal.macros.AssertMacros3.checkOnlyWhenAssertionsAreEnabled
 import org.neo4j.cypher.internal.util.Foldable.FoldableAny
 import org.neo4j.cypher.internal.util.Foldable.SkipChildren
+import org.neo4j.cypher.internal.util.Rewritable
+import org.neo4j.cypher.internal.util.collection.immutable.ListSet
 
 import scala.collection.MapView
 import scala.collection.mutable
 
-case class Selections private (predicates: Set[Predicate]) {
+case class Selections private (predicates: Set[Predicate]) extends Rewritable {
+
+  checkOnlyWhenAssertionsAreEnabled(
+    checkNoTopLevelConjunctions,
+    s"""And/Ands found in Selections: $predicates
+       |A call to `PredicateConverter.asPredicates` might be missing.""".stripMargin
+  )
+
   def isEmpty: Boolean = predicates.isEmpty
 
   def predicatesGiven(ids: Set[LogicalVariable]): Seq[Expression] = {
@@ -65,6 +80,9 @@ case class Selections private (predicates: Set[Predicate]) {
   def flatPredicates: Seq[Expression] =
     flatPredicatesSet.toIndexedSeq
 
+  def map(f: Predicate => Predicate): Selections =
+    new Selections(predicates.map(f))
+
   def filter(filterExpression: Predicate => Boolean): Selections =
     new Selections(predicates.filter(filterExpression))
 
@@ -73,13 +91,16 @@ case class Selections private (predicates: Set[Predicate]) {
     (new Selections(truePartition), new Selections(falsePartition))
   }
 
+  def withoutImpliedPredicates: Selections =
+    this.copy(predicates.filterNot(_.isImplied))
+
   /**
    * The top level label predicates for each variable.
    * That means if "a" -> hasLabels("a", "A") is returned, we can safely assume that a has the label A.
    */
   lazy val labelPredicates: Map[LogicalVariable, Set[HasLabels]] =
     predicates.foldLeft(Map.empty[LogicalVariable, Set[HasLabels]]) {
-      case (acc, Predicate(_, hasLabels @ HasLabels(v: Variable, _))) =>
+      case (acc, AsHasLabelsPredicate(hasLabels @ HasLabels(v: Variable, _))) =>
         acc.updated(v, acc.getOrElse(v, Set.empty) + hasLabels)
       case (acc, _) => acc
     }
@@ -158,7 +179,9 @@ case class Selections private (predicates: Set[Predicate]) {
   def coveredBy(solvedPredicates: Seq[Expression]): Boolean =
     flatPredicates.forall(solvedPredicates.contains)
 
-  def contains(e: Expression): Boolean = predicates.exists { _.expr == e }
+  def contains(e: Expression): Boolean = predicates.exists {
+    _.expr == e
+  }
 
   def ++(other: Selections): Selections = Selections(predicates ++ other.predicates)
 
@@ -169,6 +192,17 @@ case class Selections private (predicates: Set[Predicate]) {
   def --(expressions: Iterable[Expression]): Selections = Selections(predicates -- expressions.flatMap(_.asPredicates))
 
   def nonEmpty: Boolean = !isEmpty
+
+  override def dup(children: Seq[AnyRef]): this.type = {
+    new Selections(children.head.asInstanceOf[Set[Predicate]]).asInstanceOf[this.type]
+  }
+
+  private def checkNoTopLevelConjunctions: Boolean = {
+    predicates.forall {
+      case Predicate(_, _: Ands | _: And) => false
+      case _                              => true
+    }
+  }
 }
 
 object Selections {
@@ -187,15 +221,36 @@ object Selections {
     def isCoveredByOtherPredicate(partial: PartialPredicate[_]): Boolean =
       partial.coveringPredicate.asPredicates.forall(subExpr => predicates.contains(subExpr))
 
-    val keptPredicates = predicates.filter {
-      case Predicate(_, partial: PartialPredicate[_]) => !isCoveredByOtherPredicate(partial)
-      case _                                          => true
+    def replaceCoveredPredicates(predicateToFilter: Expression): Option[Expression] = predicateToFilter match {
+      case partial: PartialPredicate[_] if isCoveredByOtherPredicate(partial) => None
+      case Ors(exprs) =>
+        val replacedExprs = exprs.flatMap {
+          case ands: Ands => replaceCoveredPredicates(ands)
+          case other      => Some(other)
+        }
+        Some(Ors.create(replacedExprs))
+      case Ands(exprs) =>
+        val replacedExprs = exprs.flatMap(replaceCoveredPredicates)
+        if (replacedExprs.isEmpty)
+          None
+        else
+          Some(Ands.create(replacedExprs))
+      case other => Some(other)
+    }
+
+    val keptPredicates = predicates.flatMap {
+      case originalPredicate @ Predicate(dependencies, expr) =>
+        replaceCoveredPredicates(expr).fold(ListSet.empty[Predicate]) {
+          case replacedExpr if replacedExpr != expr => replacedExpr.asPredicates
+          case expr                                 => ListSet(originalPredicate)
+        }
     }
 
     new Selections(keptPredicates)
   }
 
   def from(expressions: Iterable[Expression]): Selections = Selections(expressions.flatMap(_.asPredicates).toSet)
+
   def from(expressions: Expression): Selections = Selections(expressions.asPredicates)
 
   def containsExistsSubquery(e: Expression): Boolean = e match {
@@ -203,5 +258,15 @@ object Selections {
     case Not(_: ExistsIRExpression) => true
     case Ors(exprs)                 => exprs.exists(containsExistsSubquery)
     case _                          => false
+  }
+
+  object AsHasLabelsPredicate {
+
+    def unapply(p: Predicate): Option[HasLabels] = p match {
+      case Predicate(_, hasLabels: HasLabels)                             => Some(hasLabels)
+      case Predicate(_, PartialPredicateWrapper(hasLabels: HasLabels, _)) => Some(hasLabels)
+      case Predicate(_, ImpliedLabel(hasLabel))                           => Some(hasLabel)
+      case _                                                              => None
+    }
   }
 }

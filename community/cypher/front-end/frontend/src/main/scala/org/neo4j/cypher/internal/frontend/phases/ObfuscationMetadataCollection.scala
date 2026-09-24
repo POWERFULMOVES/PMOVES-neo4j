@@ -16,72 +16,173 @@
  */
 package org.neo4j.cypher.internal.frontend.phases
 
+import org.neo4j.cypher.internal.ast.Limit
+import org.neo4j.cypher.internal.ast.LoadCSV
+import org.neo4j.cypher.internal.ast.Skip
 import org.neo4j.cypher.internal.ast.Statement
 import org.neo4j.cypher.internal.expressions.AutoExtractedParameter
+import org.neo4j.cypher.internal.expressions.BooleanLiteral
+import org.neo4j.cypher.internal.expressions.DoubleLiteral
 import org.neo4j.cypher.internal.expressions.Expression
+import org.neo4j.cypher.internal.expressions.Infinity
+import org.neo4j.cypher.internal.expressions.IntegerLiteral
 import org.neo4j.cypher.internal.expressions.Literal
+import org.neo4j.cypher.internal.expressions.NaN
 import org.neo4j.cypher.internal.expressions.Parameter
 import org.neo4j.cypher.internal.expressions.SensitiveAutoParameter
 import org.neo4j.cypher.internal.expressions.SensitiveLiteral
 import org.neo4j.cypher.internal.expressions.SensitiveParameter
+import org.neo4j.cypher.internal.expressions.SensitiveStringLiteral
+import org.neo4j.cypher.internal.expressions.StringInterpolation
+import org.neo4j.cypher.internal.expressions.StringLiteral
 import org.neo4j.cypher.internal.frontend.phases.CompilationPhaseTracer.CompilationPhase.METADATA_COLLECTION
+import org.neo4j.cypher.internal.frontend.phases.factories.ParsePipelineTransformerFactory
+import org.neo4j.cypher.internal.frontend.phases.factories.ParsingConfig
+import org.neo4j.cypher.internal.rewriting.conditions.CallInvocationsResolved
+import org.neo4j.cypher.internal.rewriting.conditions.FunctionInvocationsResolved
 import org.neo4j.cypher.internal.util.Foldable.FoldableAny
 import org.neo4j.cypher.internal.util.Foldable.FoldingBehavior
 import org.neo4j.cypher.internal.util.Foldable.SkipChildren
+import org.neo4j.cypher.internal.util.Foldable.TraverseChildren
 import org.neo4j.cypher.internal.util.LiteralOffset
 import org.neo4j.cypher.internal.util.ObfuscationMetadata
 import org.neo4j.cypher.internal.util.StepSequencer
+import org.neo4j.cypher.internal.util.StepSequencer.Condition
+import org.neo4j.cypher.internal.util.symbols.CTAny
+import org.neo4j.cypher.internal.util.symbols.CTBoolean
+import org.neo4j.cypher.internal.util.symbols.CTFloat
+import org.neo4j.cypher.internal.util.symbols.CTInteger
+import org.neo4j.cypher.internal.util.symbols.CTString
+
+case object ObfuscationMetadataCollected extends Condition
 
 /**
- * Collect sensitive literals and parameters.
+ * Collect two config-independent views of the literals to redact (see [[ObfuscationMetadata]]): the sensitive-only
+ * view (passwords, sensitive arguments/parameters) and the all-literals view.
+ *
+ * This phase runs more than once per query and merges its results:
+ *  - An early pass, directly after parsing and BEFORE any rewrites, catches every literal while offsets are
+ *    still those of the original query text — rewrites (e.g. merging predicates) can move or merge literals,
+ *    which would corrupt or lose all-literals offsets.
+ *  - A later pass, after procedure/function resolution, catches the SensitiveParameter/sensitive-argument
+ *    markers placed by SensitiveParameterRewriter, which do not exist yet during the early pass. The
+ *    [[preConditions]] below describe THIS pass.
  */
-case object ObfuscationMetadataCollection extends Phase[BaseContext, BaseState, BaseState] {
+case object ObfuscationMetadataCollection
+    extends Phase[BaseContext, BaseState, BaseState]
+    with StepSequencer.Step
+    with ParsePipelineTransformerFactory {
 
   override def phase: CompilationPhaseTracer.CompilationPhase = METADATA_COLLECTION
 
-  override def postConditions: Set[StepSequencer.Condition] = Set.empty
+  override def preConditions: Set[StepSequencer.Condition] =
+    Set(CallInvocationsResolved, FunctionInvocationsResolved)
+
+  override def postConditions: Set[StepSequencer.Condition] = Set(ObfuscationMetadataCollected)
+
+  override def invalidatedConditions: Set[StepSequencer.Condition] = Set.empty
 
   override def process(from: BaseState, context: BaseContext): BaseState = {
-    val extractedParamNames = from.maybeExtractedParams.map(_.keySet.map(_.name)).getOrElse(Set.empty)
+    val extractedParameters = from.maybeExtractedParams.getOrElse(Map.empty)
+    val extractedParamNames = extractedParameters.keySet.map(_.name)
     val parameters = from.statement().folder.findAllByClass[Parameter]
 
-    val offsets =
-      collectSensitiveLiteralOffsets(from.statement(), from.maybeExtractedParams.getOrElse(Map.empty))
+    val Offsets(sensitiveOffsets, allOffsets) = collectLiteralOffsets(from.statement(), extractedParameters)
     val sensitiveParams = collectSensitiveParameterNames(parameters, extractedParamNames)
+    val metadata = ObfuscationMetadata(sensitiveOffsets, allOffsets, sensitiveParams)
 
-    from.withObfuscationMetadata(ObfuscationMetadata(offsets, sensitiveParams))
+    from.withObfuscationMetadata(from.maybeObfuscationMetadata.fold(metadata)(_.merge(metadata)))
   }
 
-  private def collectSensitiveLiteralOffsets(
+  private case class Offsets(sensitive: Vector[LiteralOffset], all: Vector[LiteralOffset])
+
+  private def segmentOffsetOf(literal: Literal): Option[LiteralOffset] = {
+    val sensitiveLiteral = literal.asSensitiveLiteral
+    Option.when(sensitiveLiteral.literalLength > 0)(
+      LiteralOffset(
+        sensitiveLiteral.position.offset,
+        sensitiveLiteral.position.line,
+        Some(sensitiveLiteral.literalLength),
+        wrapInBraces = true
+      )
+    )
+  }
+
+  private def collectLiteralOffsets(
     statement: Statement,
     extractedParameters: Map[AutoExtractedParameter, Expression]
-  ): Vector[LiteralOffset] = {
-
-    val partial: PartialFunction[Any, Vector[LiteralOffset] => FoldingBehavior[Vector[LiteralOffset]]] = {
-      case literal: SensitiveLiteral =>
-        (acc: Vector[LiteralOffset]) =>
-          SkipChildren(acc :+ LiteralOffset(
-            literal.position.offset,
-            literal.position.line,
-            Some(literal.literalLength)
-          ))
-      case p: AutoExtractedParameter with SensitiveAutoParameter =>
-        (acc: Vector[LiteralOffset]) =>
-          extractedParameters.get(p) match {
-            case Some(originalExp) =>
-              val literalOffsets = originalExp.folder.findAllByClass[Literal]
-                .map(_.asSensitiveLiteral)
-                .map(l => LiteralOffset(l.position.offset, l.position.line, Some(l.literalLength)))
-              SkipChildren(acc ++ literalOffsets)
-            case None =>
-              // Note, this can lead to query obfuscator failing and the query not being logged
-              SkipChildren(acc :+ LiteralOffset(p.position.offset, p.position.line, None))
-          }
+  ): Offsets = {
+    lazy val sensitiveOnly: PartialFunction[Any, Offsets => FoldingBehavior[Offsets]] = {
+      // Allows wrapping the string literals inside a StringInterpolation with braces
+      case interp: StringInterpolation => { case acc @ Offsets(_, all) =>
+        val segmentOffsets = interp.stringParts.flatMap {
+          case literal: Literal => segmentOffsetOf(literal)
+          case p: AutoExtractedParameter => extractedParameters.get(p).collect { case literal: Literal =>
+              segmentOffsetOf(literal)
+            }.flatten
+          case _ => None
+        }
+        val withSegments = acc.copy(all = all ++ segmentOffsets)
+        SkipChildren(interp.expressions.folder.treeFold(withSegments)(partial))
+      }
+      case literal: SensitiveLiteral if literal.literalLength > 0 => { case Offsets(sensitive, all) =>
+        val offset = LiteralOffset(
+          literal.position.offset,
+          literal.position.line,
+          Some(literal.literalLength),
+          literalTypeOf(literal)
+        )
+        SkipChildren(Offsets(sensitive :+ offset, all :+ offset))
+      }
+      case p: AutoExtractedParameter with SensitiveAutoParameter => { case Offsets(sensitive, all) =>
+        extractedParameters.get(p) match {
+          case Some(originalExp) =>
+            // contributes when the original holds plain Literals (e.g. a sensitive procedure/function argument).
+            val offsets = originalExp.folder.findAllByClass[Literal]
+              .collect {
+                case original if original.asSensitiveLiteral.literalLength > 0 =>
+                  val l = original.asSensitiveLiteral
+                  LiteralOffset(
+                    l.position.offset,
+                    l.position.line,
+                    Some(l.literalLength),
+                    literalTypeOf(original)
+                  )
+              }
+              .toVector
+            SkipChildren(Offsets(sensitive ++ offsets, all ++ offsets))
+          case None =>
+            // Original literal not recovered: mark the position with unknown length so it is still redacted.
+            val offset = LiteralOffset(p.position.offset, p.position.line, None)
+            SkipChildren(Offsets(sensitive :+ offset, all :+ offset))
+        }
+      }
     }
 
-    val fromStatement = statement.folder.treeFold(Vector.empty[LiteralOffset])(partial)
-    val fromStatementAndExtracted = extractedParameters.folder.treeFold(fromStatement)(partial)
-    fromStatementAndExtracted.distinct.sortBy(_.start(0))
+    lazy val partial: PartialFunction[Any, Offsets => FoldingBehavior[Offsets]] = sensitiveOnly.orElse {
+      case slicing @ (_: Skip | _: Limit) => acc =>
+          SkipChildren(slicing.folder.treeFold(acc)(sensitiveOnly))
+      case loadCsv: LoadCSV => acc =>
+          SkipChildren(loadCsv.urlString.folder.treeFold(acc)(partial))
+      case literal: Literal => { case acc @ Offsets(sensitive, all) =>
+        val sensitiveLiteral = literal.asSensitiveLiteral
+        if (sensitiveLiteral.literalLength > 0) {
+          val offset = LiteralOffset(
+            sensitiveLiteral.position.offset,
+            sensitiveLiteral.position.line,
+            Some(sensitiveLiteral.literalLength),
+            literalTypeOf(literal)
+          )
+          SkipChildren(Offsets(sensitive, all :+ offset))
+        } else {
+          TraverseChildren(acc)
+        }
+      }
+    }
+
+    val fromStatement =
+      statement.folder.treeFold(Offsets(Vector.empty, Vector.empty))(partial)
+    extractedParameters.folder.treeFold(fromStatement)(partial)
   }
 
   private def collectSensitiveParameterNames(
@@ -89,4 +190,18 @@ case object ObfuscationMetadataCollection extends Phase[BaseContext, BaseState, 
     extractedParamNames: Set[String]
   ): Set[String] =
     queryParams.folder.findAllByClass[SensitiveParameter].map(_.name).toSet -- extractedParamNames
+
+  /**
+   * Only primitive leaf literals carry a type; lists and maps are not Literals, so the fold tags their leaves.
+   * `null` falls through to ANY on purpose: a NULL hint would reveal the literal in full, null having one value.
+   */
+  private def literalTypeOf(node: Any): String = node match {
+    case _: IntegerLiteral                            => CTInteger.toCypherTypeString
+    case _: DoubleLiteral | _: Infinity | _: NaN      => CTFloat.toCypherTypeString
+    case _: StringLiteral | _: SensitiveStringLiteral => CTString.toCypherTypeString
+    case _: BooleanLiteral                            => CTBoolean.toCypherTypeString
+    case _                                            => CTAny.toCypherTypeString
+  }
+
+  override def getTransformer(config: ParsingConfig): Transformer[BaseContext, BaseState, BaseState] = this
 }

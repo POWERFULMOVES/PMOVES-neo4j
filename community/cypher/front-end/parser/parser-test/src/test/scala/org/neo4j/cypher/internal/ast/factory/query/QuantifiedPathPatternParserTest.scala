@@ -19,9 +19,8 @@ package org.neo4j.cypher.internal.ast.factory.query
 import org.neo4j.cypher.internal.ast.Clause
 import org.neo4j.cypher.internal.ast.Match
 import org.neo4j.cypher.internal.ast.Statements
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
+import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
 import org.neo4j.cypher.internal.ast.test.util.AstParsingTestBase
-import org.neo4j.cypher.internal.ast.test.util.LegacyAstParsingTestSupport
 import org.neo4j.cypher.internal.expressions.FixedQuantifier
 import org.neo4j.cypher.internal.expressions.GraphPatternQuantifier
 import org.neo4j.cypher.internal.expressions.IntervalQuantifier
@@ -29,19 +28,19 @@ import org.neo4j.cypher.internal.expressions.MatchMode
 import org.neo4j.cypher.internal.expressions.NamedPatternPart
 import org.neo4j.cypher.internal.expressions.ParenthesizedPath
 import org.neo4j.cypher.internal.expressions.PathConcatenation
+import org.neo4j.cypher.internal.expressions.PathLengthQuantifier
 import org.neo4j.cypher.internal.expressions.PathPatternPart
 import org.neo4j.cypher.internal.expressions.Pattern
 import org.neo4j.cypher.internal.expressions.PatternPart
-import org.neo4j.cypher.internal.expressions.PatternPartWithSelector
 import org.neo4j.cypher.internal.expressions.PlusQuantifier
+import org.neo4j.cypher.internal.expressions.PrefixedPatternPart
 import org.neo4j.cypher.internal.expressions.QuantifiedPath
 import org.neo4j.cypher.internal.expressions.RelationshipChain
 import org.neo4j.cypher.internal.expressions.SemanticDirection
 import org.neo4j.cypher.internal.expressions.SemanticDirection.BOTH
 import org.neo4j.cypher.internal.expressions.StarQuantifier
-import org.neo4j.cypher.internal.expressions.UnsignedDecimalIntegerLiteral
 
-class QuantifiedPathPatternParserTest extends AstParsingTestBase with LegacyAstParsingTestSupport {
+class QuantifiedPathPatternParserTest extends AstParsingTestBase {
 
   test("(n)") {
     parses[PatternPart].toAstPositioned {
@@ -155,8 +154,8 @@ class QuantifiedPathPatternParserTest extends AstParsingTestBase with LegacyAstP
               )
             )(pos),
             IntervalQuantifier(
-              Some(UnsignedDecimalIntegerLiteral("1")(pos)),
-              Some(UnsignedDecimalIntegerLiteral("3")(pos))
+              Some(PathLengthQuantifier("1")(pos)),
+              Some(PathLengthQuantifier("3")(pos))
             )(
               pos
             ),
@@ -273,7 +272,7 @@ class QuantifiedPathPatternParserTest extends AstParsingTestBase with LegacyAstP
   }
 }
 
-class QuantifiedPathPatternInMatchParserTest extends AstParsingTestBase with LegacyAstParsingTestSupport {
+class QuantifiedPathPatternInMatchParserTest extends AstParsingTestBase {
 
   test("MATCH p= ( (a)-->(b) ) WHERE a.prop") {
     parsesTo[Clause] {
@@ -281,7 +280,7 @@ class QuantifiedPathPatternInMatchParserTest extends AstParsingTestBase with Leg
         optional = false,
         matchMode = MatchMode.default(pos),
         Pattern.ForMatch(Seq(
-          PatternPartWithSelector(
+          PrefixedPatternPart(
             PatternPart.AllPaths()(pos),
             NamedPatternPart(
               varFor("p"),
@@ -294,7 +293,8 @@ class QuantifiedPathPatternInMatchParserTest extends AstParsingTestBase with Leg
           )
         ))(pos),
         hints = Seq.empty,
-        where = Some(where(prop("a", "prop")))
+        where = Some(where(prop("a", "prop"))),
+        search = None
       )(pos)
     }
   }
@@ -325,7 +325,8 @@ class QuantifiedPathPatternInMatchParserTest extends AstParsingTestBase with Leg
           ))(pos))
         ).map(_.withAllPathsSelector))(pos),
         hints = Seq.empty,
-        where = None
+        where = None,
+        search = None
       )(pos)
     }
   }
@@ -389,22 +390,23 @@ class QuantifiedPathPatternInMatchParserTest extends AstParsingTestBase with Leg
 
   // pattern expressions are not implemented, yet
   test("MATCH (n) WITH [ p = (n)--(m) ((a)-->(b))+ | p ] as paths RETURN *") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '(': expected\n  \"!=\"\n  \"%\"\n  \"*\"")
-      case _ => _.withSyntaxError(
-          """Invalid input '(': expected an expression (line 1, column 31 (offset: 30))
-            |"MATCH (n) WITH [ p = (n)--(m) ((a)-->(b))+ | p ] as paths RETURN *"
-            |                               ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '(': expected an expression (line 1, column 31 (offset: 30))
+        |"MATCH (n) WITH [ p = (n)--(m) ((a)-->(b))+ | p ] as paths RETURN *"
+        |                               ^""".stripMargin
+    )
   }
 
   // pattern expression are not implemented, yet
   test("MATCH (n), (m) WHERE (n) ((a)-->(b))+ (m) RETURN *") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '('")
-      case _ => _.withSyntaxError(
+    parseIn[Statements] {
+      case Cypher5 => _.withSyntaxError(
           """Invalid input '(': expected an expression, 'FOREACH', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 26 (offset: 25))
+            |"MATCH (n), (m) WHERE (n) ((a)-->(b))+ (m) RETURN *"
+            |                          ^""".stripMargin
+        )
+      case _ => _.withSyntaxError(
+          """Invalid input '(': expected an expression, 'FOREACH', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 26 (offset: 25))
             |"MATCH (n), (m) WHERE (n) ((a)-->(b))+ (m) RETURN *"
             |                          ^""".stripMargin
         )
@@ -413,18 +415,15 @@ class QuantifiedPathPatternInMatchParserTest extends AstParsingTestBase with Leg
 
   // node abbreviations are not implemented, yet
   test("MATCH (n)--((a)-->(b))+") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '(': expected \":\" or an identifier")
-      case _ => _.withSyntaxError(
-          """Invalid input '(': expected a parameter, a variable name, ')', ':', 'IS', 'WHERE' or '{' (line 1, column 13 (offset: 12))
-            |"MATCH (n)--((a)-->(b))+"
-            |             ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '(': expected a parameter, a variable name, ')', ':', 'IS', 'WHERE' or '{' (line 1, column 13 (offset: 12))
+        |"MATCH (n)--((a)-->(b))+"
+        |             ^""".stripMargin
+    )
   }
 }
 
-class QuantifiedPathParserTest extends AstParsingTestBase with LegacyAstParsingTestSupport {
+class QuantifiedPathParserTest extends AstParsingTestBase {
 
   test("((n)-[r]->(m))*") {
     parsesTo[QuantifiedPath] {
@@ -521,7 +520,7 @@ class QuantifiedPathParserTest extends AstParsingTestBase with LegacyAstParsingT
   }
 }
 
-class QuantifiedPathPatternsQuantifierParserTest extends AstParsingTestBase with LegacyAstParsingTestSupport {
+class QuantifiedPathPatternsQuantifierParserTest extends AstParsingTestBase {
 
   test("+") {
     parses[GraphPatternQuantifier].toAstPositioned {
@@ -568,8 +567,8 @@ class QuantifiedPathPatternsQuantifierParserTest extends AstParsingTestBase with
   test("{1_000, 1_000_000}") {
     parses[GraphPatternQuantifier].toAstPositioned {
       IntervalQuantifier(
-        Some(UnsignedDecimalIntegerLiteral("1_000")((1, 2, 1))),
-        Some(UnsignedDecimalIntegerLiteral("1_000_000")((1, 9, 8)))
+        Some(PathLengthQuantifier("1_000")((1, 2, 1))),
+        Some(PathLengthQuantifier("1_000_000")((1, 9, 8)))
       )((1, 1, 0))
     }
   }

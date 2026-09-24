@@ -24,7 +24,9 @@ import static java.util.stream.Collectors.joining;
 import static org.apache.commons.lang3.ArrayUtils.EMPTY_INT_ARRAY;
 import static org.neo4j.internal.schema.IndexType.LOOKUP;
 import static org.neo4j.io.IOUtils.closeAllUnchecked;
+import static org.neo4j.kernel.impl.api.TransactionVisibilityProvider.EMPTY_VISIBILITY_PROVIDER;
 import static org.neo4j.kernel.impl.api.index.IndexPopulationFailure.failure;
+import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_ID;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -34,17 +36,23 @@ import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.Callable;
-import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.IntStream;
+import org.eclipse.collections.api.map.primitive.MutableLongObjectMap;
+import org.eclipse.collections.impl.factory.primitive.LongObjectMaps;
 import org.neo4j.common.EntityType;
 import org.neo4j.common.Subject;
 import org.neo4j.common.TokenNameLookup;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseInternalSettings;
+import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.function.ThrowingConsumer;
+import org.neo4j.internal.kernel.api.IndexMonitor;
 import org.neo4j.internal.kernel.api.InternalIndexState;
 import org.neo4j.internal.kernel.api.PopulationProgress;
 import org.neo4j.internal.schema.IndexDescriptor;
@@ -61,9 +69,11 @@ import org.neo4j.kernel.api.exceptions.index.IndexProxyAlreadyClosedKernelExcept
 import org.neo4j.kernel.api.index.IndexPopulator;
 import org.neo4j.kernel.api.index.IndexSample;
 import org.neo4j.kernel.api.index.IndexUpdater;
+import org.neo4j.kernel.impl.api.TransactionVisibilityProvider;
 import org.neo4j.kernel.impl.api.index.stats.IndexStatisticsStore;
 import org.neo4j.logging.InternalLog;
 import org.neo4j.logging.InternalLogProvider;
+import org.neo4j.memory.HeapEstimator;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.scheduler.Group;
 import org.neo4j.scheduler.JobHandle;
@@ -84,7 +94,7 @@ import org.neo4j.values.storable.Value;
  * updates that are fed into the {@link IndexPopulator populators}. Only a single call to this
  * method should be made during the life time of a {@link MultipleIndexPopulator} and should be called by the
  * same thread instantiating this instance.</li>
- * <li>{@link #queueConcurrentUpdate(IndexEntryUpdate)} which queues updates which will be read by the thread currently executing
+ * <li>{@link #queueConcurrentUpdate(IndexEntryUpdate, CursorContext)} which queues updates which will be read by the thread currently executing
  * the store scan and incorporated into that data stream. Calls to this method may come from any number
  * of concurrent threads.</li>
  * </ul>
@@ -95,36 +105,39 @@ import org.neo4j.values.storable.Value;
  * <li>One or more calls to {@link #addPopulator(IndexPopulator, IndexProxyStrategy, FlippableIndexProxy)}.</li>
  * <li>Call to {@link #create(CursorContext)} to create data structures and files to start accepting updates.</li>
  * <li>Call to {@link #createStoreScan(CursorContextFactory)} and {@link StoreScan#run(StoreScan.ExternalUpdatesCheck)}(blocking call).</li>
- * <li>While all nodes are being indexed, calls to {@link #queueConcurrentUpdate(IndexEntryUpdate)} are accepted.</li>
- * <li>Call to {@link #flipAfterStoreScan(CursorContext)} after successful population, or {@link #cancel(Throwable, CursorContext)} if not</li>
+ * <li>While all nodes are being indexed, calls to {@link #queueConcurrentUpdate(IndexEntryUpdate, CursorContext)} are accepted.</li>
+ * <li>Call to {@link #flipAfterStoreScan(CursorContext, boolean)} after successful population, or {@link #cancel(Throwable, CursorContext)} if not</li>
  * </ol>
  * <p>
  * It is possible for concurrent updates from transactions to arrive while index population is in progress. Such
- * updates are inserted in the {@link #queueConcurrentUpdate(IndexEntryUpdate) queue}. When store scan notices that
+ * updates are inserted in the {@link #queueConcurrentUpdate(IndexEntryUpdate, CursorContext) queue}. When store scan notices that
  * queue size has reached {@link #queueThreshold} then it drains all batched updates and waits for all job scheduler
  * tasks to complete and flushes updates from the queue using {@link MultipleIndexUpdater}. If queue size never reaches
  * {@link #queueThreshold} than all queued concurrent updates are flushed after the store scan in
- * {@link #flipAfterStoreScan(CursorContext)}.
+ * {@link #flipAfterStoreScan(CursorContext, boolean)}.
  * <p>
  */
 public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, AutoCloseable {
     private static final String MULTIPLE_INDEX_POPULATOR_TAG = "multipleIndexPopulator";
+    private static final String EXTERNAL_UPDATES_QUEUE_TAG = "multipleIndexPopulator.externalUpdatesQueue";
     private static final String POPULATION_WORK_FLUSH_TAG = "populationWorkFlush";
     private static final String EOL = System.lineSeparator();
 
+    private static final long VERSIONED_ENTRY_UPDATE_SIZE =
+            HeapEstimator.shallowSizeOfInstance(VersionedEntryUpdate.class);
+
     private final int queueThreshold;
     final int batchMaxByteSizeScan;
-    private final boolean printDebug;
 
     // Concurrency queue since multiple concurrent threads may enqueue updates into it. It is important for this queue
     // to have fast #size() method since it might be drained in batches
-    private final Queue<IndexEntryUpdate<?>> concurrentUpdateQueue = new LinkedBlockingQueue<>();
+    private final Queue<VersionedEntryUpdate> concurrentUpdateQueue = new LinkedBlockingQueue<>();
     private final AtomicLong concurrentUpdateQueueByteSize = new AtomicLong();
 
     // Populators are added into this list. The same thread adding populators will later call #createStoreScan.
     // Multiple concurrent threads might fail individual populations.
     // Failed populations are removed from this list while iterating over it.
-    private final List<IndexPopulation> populations = new CopyOnWriteArrayList<>();
+    private final ConcurrentHashMap<IndexDescriptor, IndexPopulation> populations = new ConcurrentHashMap<>();
 
     private final AtomicLong activeTasks = new AtomicLong();
     private final IndexStoreView storeView;
@@ -137,10 +150,17 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
     private final JobScheduler jobScheduler;
     private final CursorContext cursorContext;
     private final MemoryTracker memoryTracker;
+    private final long horizonPollIntervalNanos;
     private volatile StoreScan storeScan;
     private final TokenNameLookup tokenNameLookup;
     private final String databaseName;
     private final Subject subject;
+    private final TransactionVisibilityProvider transactionVisibilityProvider;
+    private final IndexMonitor monitor;
+    private final AtomicBoolean populationJobStopped = new AtomicBoolean(false);
+    private final long transactionIdCreatedIndexes;
+    private final boolean multiversion;
+    private volatile long populationHorizon;
 
     public MultipleIndexPopulator(
             IndexStoreView storeView,
@@ -153,7 +173,11 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
             MemoryTracker memoryTracker,
             String databaseName,
             Subject subject,
-            Config config) {
+            Config config,
+            TransactionVisibilityProvider transactionVisibilityProvider,
+            IndexMonitor monitor,
+            CursorContext cursorContextOfIndexCreator,
+            boolean multiversion) {
         this.storeView = storeView;
         this.contextFactory = contextFactory;
         this.cursorContext = contextFactory.create(MULTIPLE_INDEX_POPULATOR_TAG);
@@ -168,16 +192,23 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
         this.databaseName = databaseName;
         this.subject = subject;
 
-        this.printDebug = config.get(GraphDatabaseInternalSettings.index_population_print_debug);
         this.queueThreshold = config.get(GraphDatabaseInternalSettings.index_population_queue_threshold);
         this.batchMaxByteSizeScan = config.get(GraphDatabaseInternalSettings.index_population_batch_max_byte_size)
                 .intValue();
+        this.horizonPollIntervalNanos = config.get(GraphDatabaseSettings.transaction_monitor_check_interval)
+                .toNanos();
+        this.transactionVisibilityProvider = transactionVisibilityProvider;
+        this.monitor = monitor;
+        this.transactionIdCreatedIndexes =
+                cursorContextOfIndexCreator.getVersionContext().committingTransactionId();
+        this.multiversion = multiversion;
+        this.populationHorizon = Long.MAX_VALUE;
     }
 
     IndexPopulation addPopulator(
             IndexPopulator populator, IndexProxyStrategy indexProxyStrategy, FlippableIndexProxy flipper) {
         IndexPopulation population = createPopulation(populator, indexProxyStrategy, flipper);
-        populations.add(population);
+        populations.put(indexProxyStrategy.getIndexDescriptor(), population);
         return population;
     }
 
@@ -194,7 +225,7 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
         forEachPopulation(
                 population -> {
                     log.info("Index population started: [%s]", population.userDescription(tokenNameLookup));
-                    population.create();
+                    population.create(cursorContext);
                 },
                 cursorContext);
     }
@@ -235,11 +266,14 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
      * Queues an update to be fed into the index populators. These updates come from changes being made
      * to storage while a concurrent scan is happening to keep populators up to date with all latest changes.
      *
-     * @param update {@link IndexEntryUpdate} to queue.
+     * @param update        {@link IndexEntryUpdate} to queue.
+     * @param cursorContext context of transaction applying update
      */
-    void queueConcurrentUpdate(IndexEntryUpdate<?> update) {
-        concurrentUpdateQueue.add(update);
-        concurrentUpdateQueueByteSize.addAndGet(update.roughSizeOfUpdate());
+    void queueConcurrentUpdate(IndexEntryUpdate update, CursorContext cursorContext) {
+        var entryUpdate = new VersionedEntryUpdate(
+                update.eagerly(), cursorContext.getVersionContext().committingTransactionId());
+        concurrentUpdateQueue.add(entryUpdate);
+        concurrentUpdateQueueByteSize.addAndGet(entryUpdate.heapSize());
     }
 
     /**
@@ -249,7 +283,7 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
      * @param failure the cause.
      */
     public void cancel(Throwable failure, CursorContext cursorContext) {
-        for (IndexPopulation population : populations) {
+        for (IndexPopulation population : populations.values()) {
             cancel(population, failure, cursorContext);
         }
     }
@@ -298,13 +332,14 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
     }
 
     @VisibleForTesting
-    MultipleIndexUpdater newPopulatingUpdater(CursorContext cursorContext) {
-        Map<SchemaDescriptor, IndexPopulationUpdater> updaters = new HashMap<>();
+    MultipleIndexUpdater newPopulatingUpdater(CursorContext cursorContext, CursorContext populatorContext) {
+        MutableLongObjectMap<IndexPopulationUpdater> updaters =
+                LongObjectMaps.mutable.withInitialCapacity(populations.size());
         forEachPopulation(
-                population -> {
-                    IndexUpdater updater = population.populator.newPopulatingUpdater(cursorContext);
-                    updaters.put(population.schema(), new IndexPopulationUpdater(population, updater));
-                },
+                population -> updaters.put(
+                        population.indexProxyStrategy.getIndexDescriptor().getId(),
+                        new IndexPopulationUpdater(
+                                population, population.populator.newPopulatingUpdater(populatorContext))),
                 cursorContext);
         return new MultipleIndexUpdater(this, updaters, logProvider, cursorContext);
     }
@@ -314,7 +349,7 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
      * This means population job has finished, successfully or unsuccessfully and resources can be released.
      *
      * Note that {@link IndexPopulation index populations} cannot be closed. Instead, the underlying
-     * {@link IndexPopulator index populator} is closed by {@link #flipAfterStoreScan(CursorContext)},
+     * {@link IndexPopulator index populator} is closed by {@link #flipAfterStoreScan(CursorContext, boolean)},
      * {@link #cancel(IndexPopulation, Throwable, CursorContext)} or {@link #stop(IndexPopulation, CursorContext)}.
      */
     @Override
@@ -343,11 +378,19 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
      * to {@link OnlineIndexProxy online}, given that nothing goes wrong.
      *
      */
-    void flipAfterStoreScan(CursorContext cursorContext) {
-        for (IndexPopulation population : populations) {
+    void flipAfterStoreScan(CursorContext cursorContext, boolean awaitHorizon) {
+        for (IndexPopulation population : populations.values()) {
             try {
                 population.scanCompleted(cursorContext);
-                population.flip(cursorContext);
+                if (populationJobStopped.getAcquire()) {
+                    // Stopped while doing post-scan work, so that work was abandoned part-way through. Flipping now
+                    // would publish an index built from whatever it happened to finish - for a vector index, one left
+                    // permanently uncompacted, with nothing to ever trigger the merge again. Keep it populating so
+                    // that it gets rebuilt instead.
+                    stop(population, cursorContext);
+                    continue;
+                }
+                population.flip(cursorContext, awaitHorizon);
             } catch (Throwable t) {
                 cancel(population, t, cursorContext);
             }
@@ -355,7 +398,7 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
     }
 
     private int[] propertyKeyIds() {
-        return populations.stream()
+        return populations.values().stream()
                 .flatMapToInt(this::propertyKeyIds)
                 .distinct()
                 .toArray();
@@ -366,7 +409,7 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
     }
 
     private int[] entityTokenIds() {
-        return populations.stream()
+        return populations.values().stream()
                 .flatMapToInt(population -> Arrays.stream(population.schema().getEntityTokenIds()))
                 .sorted()
                 .distinct()
@@ -408,7 +451,7 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
     }
 
     private boolean removeFromOngoingPopulations(IndexPopulation indexPopulation) {
-        return populations.remove(indexPopulation);
+        return populations.remove(indexPopulation.indexProxyStrategy.getIndexDescriptor()) != null;
     }
 
     @Override
@@ -419,43 +462,41 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
     }
 
     @Override
-    public void applyExternalUpdates(long currentlyIndexedNodeId) {
+    public void applyExternalUpdates(long currentlyIndexedEntityId) {
         if (concurrentUpdateQueue.isEmpty()) {
             return;
         }
 
-        if (printDebug) {
-            log.info("Populating from queue at %d", currentlyIndexedNodeId);
-        }
-
-        long updateByteSizeDrained = 0;
-        try (MultipleIndexUpdater updater = newPopulatingUpdater(cursorContext)) {
+        // index updates for the entry are guaranteed to come from transactions that observe exact previous version of
+        // the entry
+        // in concurrent updates queue we only preserve commiting transaction id and use unbounded visibility here,
+        // so index updater can correctly process entries and merge them if needed.
+        // this is especially important for token indexes where one tree entry represents multiple entities
+        try (var populatorContext = cursorContext.createUnboundedReadRelatedContext(EXTERNAL_UPDATES_QUEUE_TAG);
+                var updater = newPopulatingUpdater(cursorContext, populatorContext)) {
+            long updateByteSizeDrained = 0;
             do {
-                // no need to check for null as nobody else is emptying this queue
-                IndexEntryUpdate<?> update = concurrentUpdateQueue.poll();
-                // Since updates can be added concurrently with us draining the queue simply setting the value to 0
-                // after drained will not be 100% synchronized with the queue contents and could potentially cause a
-                // large
-                // drift over time. Therefore each update polled from the queue will subtract its size instead.
-                updateByteSizeDrained += update != null ? update.roughSizeOfUpdate() : 0;
-                if (update != null && update.getEntityId() <= currentlyIndexedNodeId) {
-                    updater.process(update);
-                    if (printDebug) {
-                        log.info("Applied %s from queue", update.describe(tokenNameLookup));
+                var update = concurrentUpdateQueue.poll();
+                if (update != null) {
+                    // Since updates can be added concurrently with us draining the queue simply setting the value to 0
+                    // after drained will not be 100% synchronized with the queue contents and could potentially cause a
+                    // large
+                    // drift over time. Therefore each update polled from the queue will subtract its size instead.
+                    var entryUpdate = update.entryUpdate;
+                    updateByteSizeDrained += update.heapSize();
+                    if (entryUpdate.getEntityId() <= currentlyIndexedEntityId) {
+                        populatorContext.getVersionContext().initWrite(update.transactionId);
+                        updater.process(entryUpdate);
                     }
-                } else if (printDebug) {
-                    log.info("Skipped %s from queue", update == null ? null : update.describe(tokenNameLookup));
                 }
             } while (!concurrentUpdateQueue.isEmpty());
             concurrentUpdateQueueByteSize.addAndGet(-updateByteSizeDrained);
-        }
-        if (printDebug) {
-            log.info("Done applying updates from queue");
+            monitor.concurrentUpdatesQueueDrained(updateByteSizeDrained);
         }
     }
 
     private void forEachPopulation(ThrowingConsumer<IndexPopulation, Exception> action, CursorContext cursorContext) {
-        for (IndexPopulation population : populations) {
+        for (IndexPopulation population : populations.values()) {
             try {
                 action.accept(population);
             } catch (Throwable failure) {
@@ -466,7 +507,7 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
 
     private PropertyScanConsumer createPropertyScanConsumer() {
         // are we going to populate only token indexes?
-        if (populations.stream()
+        if (populations.values().stream()
                 .allMatch(population ->
                         population.indexProxyStrategy.getIndexDescriptor().getIndexType() == LOOKUP)) {
             return null;
@@ -477,7 +518,7 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
 
     private TokenScanConsumer createTokenScanConsumer() {
         // is there a token index among the to-be-populated indexes?
-        var maybeTokenIdxPopulation = populations.stream()
+        var maybeTokenIdxPopulation = populations.values().stream()
                 .filter(population ->
                         population.indexProxyStrategy.getIndexDescriptor().getIndexType() == LOOKUP)
                 .findAny();
@@ -486,27 +527,53 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
 
     @Override
     public String toString() {
-        String updatesString = populations.stream().map(Object::toString).collect(joining(", ", "[", "]"));
+        String updatesString =
+                populations.values().stream().map(Object::toString).collect(joining(", ", "[", "]"));
 
         return "MultipleIndexPopulator{activeTasks=" + activeTasks + ", " + "batchedUpdatesFromScan = " + updatesString
                 + ", concurrentUpdateQueue = " + concurrentUpdateQueue.size() + "}";
     }
 
     IndexDescriptor[] indexDescriptors() {
-        return populations.stream()
+        return populations.values().stream()
                 .map(p -> p.indexProxyStrategy.getIndexDescriptor())
                 .toArray(IndexDescriptor[]::new);
     }
 
-    public static class MultipleIndexUpdater implements IndexUpdater {
-        private final Map<SchemaDescriptor, IndexPopulationUpdater> populationsWithUpdaters;
+    public void notifyPopulationJobStopped() {
+        populationJobStopped.setRelease(true);
+        // Populators doing long-running post-scan work need to hear about this directly: the job is stopped by a
+        // thread that then waits for the population to finish, so it would otherwise wait for that work to complete.
+        for (IndexPopulation population : populations.values()) {
+            population.populator.cancelPostScanWork();
+        }
+    }
+
+    public void refreshVisibility(CursorContext cursorContext) {
+        cursorContext.getVersionContext().refreshVisibilityBoundaries();
+        populationHorizon = cursorContext.getVersionContext().highestGapFree();
+        forEachPopulation(population -> population.resetVisibility(cursorContext), cursorContext);
+    }
+
+    /**
+     * Earliest transaction id that should be accessible for this population to continue.
+     * Job starts with horizon equal transactionIdCreatedIndexes, to prevent global horizon from moving past it and
+     * causing race in {@link #refreshVisibility(CursorContext)}
+     * When population ready to start store scan it bumps horizon to the last closed transaction at the moment
+     */
+    public long populationHorison() {
+        return populationHorizon;
+    }
+
+    static final class MultipleIndexUpdater implements AutoCloseable {
+        private final MutableLongObjectMap<IndexPopulationUpdater> populationsWithUpdaters;
         private final MultipleIndexPopulator multipleIndexPopulator;
         private final InternalLog log;
         private final CursorContext cursorContext;
 
         MultipleIndexUpdater(
                 MultipleIndexPopulator multipleIndexPopulator,
-                Map<SchemaDescriptor, IndexPopulationUpdater> populationsWithUpdaters,
+                MutableLongObjectMap<IndexPopulationUpdater> populationsWithUpdaters,
                 InternalLogProvider logProvider,
                 CursorContext cursorContext) {
             this.multipleIndexPopulator = multipleIndexPopulator;
@@ -515,10 +582,9 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
             this.cursorContext = cursorContext;
         }
 
-        @Override
-        public void process(IndexEntryUpdate<?> update) {
+        public void process(IndexEntryUpdate update) {
             IndexPopulationUpdater populationUpdater =
-                    populationsWithUpdaters.get(update.indexKey().schema());
+                    populationsWithUpdaters.get(update.indexKey().getId());
             if (populationUpdater != null) {
                 IndexPopulation population = populationUpdater.population;
                 IndexUpdater updater = populationUpdater.updater;
@@ -532,7 +598,7 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
                     } catch (Throwable ce) {
                         log.error(format("Failed to close index updater: [%s]", updater), ce);
                     }
-                    populationsWithUpdaters.remove(update.indexKey().schema());
+                    populationsWithUpdaters.remove(update.indexKey().getId());
                     multipleIndexPopulator.cancel(population, t, cursorContext);
                 }
             }
@@ -557,6 +623,7 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
         private final IndexProxyStrategy indexProxyStrategy;
         private boolean populationOngoing = true;
         private final ReentrantLock populatorLock = new ReentrantLock();
+        private long highestClosedTxAtPopulationStart = BASE_TX_ID;
 
         IndexPopulation(IndexPopulator populator, IndexProxyStrategy indexProxyStrategy, FlippableIndexProxy flipper) {
             this.populator = populator;
@@ -568,12 +635,24 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
             flipper.flipTo(new FailedIndexProxy(indexProxyStrategy, populator, failure, logProvider));
         }
 
-        void create() throws IOException {
+        void create(CursorContext cursorContext) throws IOException {
             populatorLock.lock();
             try {
                 if (populationOngoing) {
                     populator.create();
+                    highestClosedTxAtPopulationStart =
+                            cursorContext.getVersionContext().highestClosed();
                 }
+            } finally {
+                populatorLock.unlock();
+            }
+        }
+
+        void resetVisibility(CursorContext cursorContext) {
+            populatorLock.lock();
+            try {
+                highestClosedTxAtPopulationStart =
+                        cursorContext.getVersionContext().highestClosed();
             } finally {
                 populatorLock.unlock();
             }
@@ -613,16 +692,27 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
             }
         }
 
-        void flip(CursorContext cursorContext)
+        void flip(CursorContext cursorContext, boolean awaitHorizon)
                 throws IndexProxyAlreadyClosedKernelException, ExceptionDuringFlipKernelException {
             phaseTracker.enterPhase(PhaseTracker.Phase.FLIP);
+            if (awaitHorizon && populationOngoing) {
+                // scan is completed, population should allow horizon to progress further to avoid deadlock with the
+                // next statement
+                populationHorizon = highestClosedTxAtPopulationStart;
+                // In multiversion database index must remain pouplating until everything that was added into index
+                // through the store scan is visible by any current and future transactions.
+                // To achieve this we remember highestEverSeen transaction at population start and don't flip until
+                // horizon reaches that transaction
+                awaitUntilHorizonReached(highestClosedTxAtPopulationStart);
+            }
             flipper.flip(() -> {
                 populatorLock.lock();
                 try {
                     if (populationOngoing) {
                         applyExternalUpdates(Long.MAX_VALUE);
-                        if (populations.contains(IndexPopulation.this)) {
-                            if (indexProxyStrategy.getIndexDescriptor().getIndexType() != IndexType.LOOKUP) {
+                        var indexDescriptor = indexProxyStrategy.getIndexDescriptor();
+                        if (populations.containsKey(indexDescriptor)) {
+                            if (indexDescriptor.getIndexType() != IndexType.LOOKUP) {
                                 IndexSample sample = populator.sample(cursorContext);
                                 indexProxyStrategy.replaceStatisticsForIndex(sample);
                             }
@@ -668,6 +758,9 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
                         }
                     };
 
+            if (multiversion) {
+                cursorContext.getVersionContext().initWrite(transactionIdCreatedIndexes);
+            }
             populator.scanCompleted(phaseTracker, populationWorkScheduler, cursorContext);
         }
 
@@ -676,35 +769,49 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
         }
     }
 
-    private class PropertyScanConsumerImpl implements PropertyScanConsumer {
+    public void awaitHorizonBeforeScan() {
+        awaitUntilHorizonReached(transactionIdCreatedIndexes);
+    }
 
+    private void awaitUntilHorizonReached(long targetTransaction) {
+        if (EMPTY_VISIBILITY_PROVIDER.equals(transactionVisibilityProvider)) {
+            return;
+        }
+        while (!populationJobStopped.getAcquire()
+                && transactionVisibilityProvider.oldestCleanupHorizon() < targetTransaction) {
+            LockSupport.parkNanos(horizonPollIntervalNanos);
+            if (needToApplyExternalUpdates()) {
+                applyExternalUpdates(Long.MAX_VALUE);
+            }
+        }
+    }
+
+    private class PropertyScanConsumerImpl implements PropertyScanConsumer {
         @Override
         public Batch newBatch() {
             return new Batch() {
                 final List<EntityUpdates> updates = new ArrayList<>();
 
                 @Override
-                public void addRecord(long entityId, int[] tokens, Map<Integer, Value> properties) {
+                public long addRecord(
+                        long entityId, int[] tokens, Map<Integer, Value> properties, MemoryTracker memoryTracker) {
+                    long heapSize = EntityUpdates.SHALLOW_SIZE + HeapEstimator.sizeOf(tokens);
                     var builder = EntityUpdates.forEntity(entityId, true).withTokens(tokens);
-                    properties.forEach(builder::added);
+                    for (var property : properties.entrySet()) {
+                        var key = property.getKey();
+                        var value = property.getValue();
+                        builder.added(key, value);
+                        heapSize += value.estimatedHeapUsage();
+                    }
+                    memoryTracker.allocateHeap(heapSize);
                     updates.add(builder.build());
+                    return heapSize;
                 }
 
                 @Override
                 public void process() {
                     try (var cursorContext = contextFactory.create(POPULATION_WORK_FLUSH_TAG)) {
                         addFromScan(updates, cursorContext);
-                    }
-
-                    if (printDebug) {
-                        if (!updates.isEmpty()) {
-                            long lastEntityId = updates.get(updates.size() - 1).getEntityId();
-                            log.info(
-                                    "Added scan updates for entities %d-%d",
-                                    updates.get(0).getEntityId(), lastEntityId);
-                        } else {
-                            log.info("Added zero scan updates");
-                        }
                     }
                 }
             };
@@ -713,15 +820,20 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
         private void addFromScan(List<EntityUpdates> entityUpdates, CursorContext cursorContext) {
             // This is called from a full store node scan, meaning that all node properties are included in the
             // EntityUpdates object. Therefore no additional properties need to be loaded.
-            Map<IndexPopulation, List<IndexEntryUpdate<IndexPopulation>>> updates = new HashMap<>(populations.size());
+            Map<IndexPopulation, List<IndexEntryUpdate>> updates = HashMap.newHashMap(populations.size());
+            var descriptors = populations.keySet();
             for (EntityUpdates update : entityUpdates) {
-                for (IndexEntryUpdate<IndexPopulation> indexUpdate : update.valueUpdatesForIndexKeys(populations)) {
-                    IndexPopulation population = indexUpdate.indexKey();
-                    population.populator.includeSample(indexUpdate);
-                    updates.computeIfAbsent(population, p -> new ArrayList<>()).add(indexUpdate);
+                for (var indexUpdate : update.valueUpdatesForIndexKeys(descriptors)) {
+                    IndexPopulation population = populations.get(indexUpdate.indexKey());
+                    // population could be cancelled concurrently and removed from the map
+                    if (population != null) {
+                        population.populator.includeSample(indexUpdate);
+                        updates.computeIfAbsent(population, p -> new ArrayList<>())
+                                .add(indexUpdate);
+                    }
                 }
             }
-            for (Map.Entry<IndexPopulation, List<IndexEntryUpdate<IndexPopulation>>> entry : updates.entrySet()) {
+            for (Map.Entry<IndexPopulation, List<IndexEntryUpdate>> entry : updates.entrySet()) {
                 try {
                     entry.getKey().populator.add(entry.getValue(), cursorContext);
                 } catch (Throwable e) {
@@ -741,17 +853,22 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
         @Override
         public Batch newBatch() {
             return new Batch() {
-                private final List<TokenIndexEntryUpdate<IndexPopulation>> updates = new ArrayList<>();
+                private final List<TokenIndexEntryUpdate> updates = new ArrayList<>();
 
                 @Override
-                public void addRecord(long entityId, int[] tokens) {
-                    updates.add(IndexEntryUpdate.change(entityId, population, EMPTY_INT_ARRAY, tokens));
+                public long addRecord(long entityId, int[] tokens, MemoryTracker memoryTracker) {
+                    long heapSize = TokenIndexEntryUpdate.SHALLOW_SIZE + HeapEstimator.sizeOf(tokens);
+                    memoryTracker.allocateHeap(heapSize);
+                    updates.add(TokenIndexEntryUpdate.tokenChange(
+                            entityId, population.indexProxyStrategy.getIndexDescriptor(), EMPTY_INT_ARRAY, tokens));
+                    return heapSize;
                 }
 
                 @Override
                 public void process() {
-                    try {
-                        population.populator.add(updates, cursorContext);
+                    try (var populationContext =
+                            cursorContext.createUnboundedReadRelatedContext(MULTIPLE_INDEX_POPULATOR_TAG)) {
+                        population.populator.add(updates, populationContext);
                     } catch (Throwable e) {
                         cancel(population, e, cursorContext);
                     }
@@ -775,13 +892,8 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
         @Override
         public void run(ExternalUpdatesCheck externalUpdatesCheck) {
             delegate.run(externalUpdatesCheck);
-            String entityType;
-            if (nodeScan) {
-                entityType = "node";
-            } else {
-                entityType = "relationship";
-            }
-            log.debug("Completed " + entityType + " store scan. " + "Flushing all pending updates." + EOL
+            String entityType = nodeScan ? "node" : "relationship";
+            log.debug("Completed " + entityType + " store scan. Flushing all pending updates." + EOL
                     + MultipleIndexPopulator.this);
         }
 
@@ -807,4 +919,10 @@ public class MultipleIndexPopulator implements StoreScan.ExternalUpdatesCheck, A
     }
 
     private record IndexPopulationUpdater(IndexPopulation population, IndexUpdater updater) {}
+
+    private record VersionedEntryUpdate(IndexEntryUpdate entryUpdate, long transactionId) {
+        long heapSize() {
+            return VERSIONED_ENTRY_UPDATE_SIZE + entryUpdate.roughSizeOfUpdate();
+        }
+    }
 }

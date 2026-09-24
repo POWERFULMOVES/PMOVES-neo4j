@@ -27,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.neo4j.configuration.GraphDatabaseSettings.SYSTEM_DATABASE_NAME;
 import static org.neo4j.internal.helpers.collection.Iterators.asList;
 import static org.neo4j.internal.kernel.api.procs.ProcedureCallContext.EMPTY;
+import static org.neo4j.values.storable.Values.EMPTY_STRING;
 import static org.neo4j.values.storable.Values.stringValue;
 
 import java.util.concurrent.CountDownLatch;
@@ -53,6 +54,7 @@ import org.neo4j.kernel.impl.query.CacheMetrics;
 import org.neo4j.kernel.impl.query.QueryCacheStatistics;
 import org.neo4j.kernel.internal.Version;
 import org.neo4j.monitoring.Monitors;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.values.AnyValue;
 import org.neo4j.values.virtual.VirtualValues;
 
@@ -221,6 +223,7 @@ class BuiltInProceduresIT extends KernelIntegrationTest implements ProcedureITBa
         }
     }
 
+    @SkipOnSpd(reason = "Assumes community edition")
     @Test
     void listAllComponents() throws Throwable {
         // Given a running database
@@ -235,16 +238,24 @@ class BuiltInProceduresIT extends KernelIntegrationTest implements ProcedureITBa
                     ProcedureCallContext.EMPTY);
 
             // Then
-            assertThat(asList(stream)).containsExactly(new AnyValue[] {
-                stringValue("Neo4j Kernel"),
-                VirtualValues.list(stringValue(Version.getNeo4jVersion())),
-                stringValue("community")
-            });
+            assertThat(asList(stream))
+                    .containsExactly(
+                            new AnyValue[] {
+                                stringValue("Neo4j Kernel"),
+                                VirtualValues.list(stringValue(Version.getNeo4jVersion())),
+                                stringValue("community")
+                            },
+                            new AnyValue[] {
+                                stringValue("Cypher"),
+                                VirtualValues.list(stringValue("5"), stringValue("25")),
+                                EMPTY_STRING
+                            });
         }
 
         commit();
     }
 
+    @SkipOnSpd(reason = "Calls procedure which is unsupported in SPD")
     @Test
     void prepareForReplanningShouldEmptyQueryCache() {
         // Given, something is cached
@@ -268,6 +279,7 @@ class BuiltInProceduresIT extends KernelIntegrationTest implements ProcedureITBa
         assertThat(cacheMetrics.getDiscards() - discardsBefore).isEqualTo(2L);
     }
 
+    @SkipOnSpd(reason = "Calls procedure which is unsupported in SPD")
     @Test
     void prepareForReplanningShouldTriggerIndexesSampling() {
         // Given

@@ -50,9 +50,13 @@ public interface TransactionCounters {
 
     long getNumberOfRolledBackWriteTransactions();
 
+    long getNumberOfRolledBackDeadlockedTransactions();
+
     long totalTransactionsValidationFailures();
 
     long totalTransactionsRetries();
+
+    long getNumberOfChunkedTransactions();
 
     void setTransactionSizeCallback(TransactionSizeMonitor transactionSizeMonitor);
 }

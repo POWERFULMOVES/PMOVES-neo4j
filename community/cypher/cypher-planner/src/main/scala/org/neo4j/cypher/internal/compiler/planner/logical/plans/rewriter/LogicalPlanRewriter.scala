@@ -19,9 +19,7 @@
  */
 package org.neo4j.cypher.internal.compiler.planner.logical.plans.rewriter
 
-import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
 import org.neo4j.cypher.internal.compiler.phases.CompilationContains
-import org.neo4j.cypher.internal.compiler.phases.LogicalPlanCondition
 import org.neo4j.cypher.internal.compiler.phases.LogicalPlanState
 import org.neo4j.cypher.internal.compiler.phases.PlannerContext
 import org.neo4j.cypher.internal.compiler.phases.ValidateAvailableSymbols
@@ -31,18 +29,17 @@ import org.neo4j.cypher.internal.compiler.planner.logical.steps.SortPredicatesBy
 import org.neo4j.cypher.internal.frontend.phases.CompilationPhaseTracer.CompilationPhase
 import org.neo4j.cypher.internal.frontend.phases.CompilationPhaseTracer.CompilationPhase.LOGICAL_PLANNING
 import org.neo4j.cypher.internal.frontend.phases.Phase
+import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerConfig
 import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerFactory
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
-import org.neo4j.cypher.internal.options.CypherEagerAnalyzerOption
 import org.neo4j.cypher.internal.planner.spi.DatabaseMode
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.Cardinalities
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.EffectiveCardinalities
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.LabelAndRelTypeInfos
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.ProvidedOrders
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.Solveds
-import org.neo4j.cypher.internal.rewriting.rewriters.SimplifyPredicates
-import org.neo4j.cypher.internal.rewriting.rewriters.UniquenessRewriter
-import org.neo4j.cypher.internal.rewriting.rewriters.VarLengthRewriter
+import org.neo4j.cypher.internal.rewriting.rewriters.ElementUniquenessRewriter
+import org.neo4j.cypher.internal.rewriting.rewriters.VarLengthBoundPredicateRewriter
 import org.neo4j.cypher.internal.rewriting.rewriters.combineHasLabels
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.cypher.internal.util.Rewriter
@@ -77,19 +74,17 @@ case object PlanRewriter extends LogicalPlanRewriter with StepSequencer.Step wit
     readOnly: Boolean
   ): Rewriter = {
     val isShardedDatabase = context.planContext.databaseMode == DatabaseMode.SHARDED
-    val trailToVarExpandRewriter = TrailToVarExpandRewriter(
+    val trailToVarExpandRewriter = RepeatToVarExpandRewriter.forGeneralCase(
       labelAndRelTypeInfos,
       otherAttributes.withAlso(solveds, cardinalities, effectiveCardinalities, providedOrders),
       anonymousVariableNameGenerator,
-      rewritableTrailExtractor = TrailToVarExpandRewriter.RewritableTrailExtractor.FilterAfterExpand,
-      isBlockFormat = context.planContext.storageHasPropertyColocation,
-      executionModelSupportsCursorReuseInBlockFormat = context.executionModel.supportsCursorReuseInBlockFormat,
-      isShardedDatabase = isShardedDatabase
+      isShardedDatabase,
+      context
     )
     val pruningVarExpanderRewriter = pruningVarExpander(anonymousVariableNameGenerator, VarExpandRewritePolicy.default)
 
     val trailWithTwoFiltersToPruningVarExpandRewriter = trailWithTwoFiltersToPruningVarExpand(
-      originalTrailRewriter = trailToVarExpandRewriter,
+      trailRewriter = RepeatToVarExpandRewriter.forEnablingPruningVarExpand(trailToVarExpandRewriter),
       pruningRewriter = pruningVarExpanderRewriter
     )
 
@@ -102,7 +97,7 @@ case object PlanRewriter extends LogicalPlanRewriter with StepSequencer.Step wit
         providedOrders,
         context.logicalPlanIdGen
       )),
-      Some(SimplifyPredicates),
+      Option.when(isShardedDatabase)(RemoveUnusedVariablesFromOption),
       Some(RemoveUnusedGroupVariablesRewriter),
       Option.when(context.config.gpmShortestToLegacyShortestEnabled())(
         StatefulShortestToFindShortestRewriter(
@@ -124,10 +119,6 @@ case object PlanRewriter extends LogicalPlanRewriter with StepSequencer.Step wit
 
     val rewritersAfterUnnestApply: Seq[Rewriter] = Seq(
       Some(unnestCartesianProduct),
-      Option.when(context.eagerAnalyzer != CypherEagerAnalyzerOption.lp)(cleanUpEager(
-        cardinalities,
-        otherAttributes.withAlso(solveds, effectiveCardinalities, labelAndRelTypeInfos, providedOrders)
-      )),
       Some(simplifyPredicates),
       Some(unnestOptional),
       Some(predicateRemovalThroughJoins(
@@ -146,26 +137,50 @@ case object PlanRewriter extends LogicalPlanRewriter with StepSequencer.Step wit
         pruningVarExpanderRewriter,
         trailWithTwoFiltersToPruningVarExpandRewriter
       )),
+      Some(collectDistinctRewriter),
       // Only used on read-only queries, until rewriter is tested to work with cleanUpEager
       Option.when(readOnly)(bfsAggregationRemover),
       // Only used on read-only queries, until rewriter is tested to work with cleanUpEager
-      // Parallel runtime does currently not support PartialSort/PartialTop, which is introduced in bfsDepthOrderer
+      // To support PartialSort/PartialTop, which is introduced in bfsDepthOrderer the runtime needs
+      // to be able to preserve order
       Option.when(context.executionModel.providedOrderPreserving && readOnly)(bfsDepthOrderer),
       Some(useTop),
       Some(skipInPartialSort),
       Some(simplifySelections),
       Some(limitNestedPlanExpressions(
         cardinalities,
-        otherAttributes.withAlso(effectiveCardinalities, labelAndRelTypeInfos, solveds, providedOrders)
+        otherAttributes.withAlso(effectiveCardinalities, labelAndRelTypeInfos, solveds, providedOrders),
+        context.expressionEvaluator
       )),
       Some(combineHasLabels),
       Some(truncateDatabaseDeeagerizer),
-      Some(UniquenessRewriter(anonymousVariableNameGenerator)),
-      Some(VarLengthRewriter),
-      Some(extractRuntimeConstants(anonymousVariableNameGenerator)),
+      Some(ElementUniquenessRewriter(anonymousVariableNameGenerator)),
+      Some(VarLengthBoundPredicateRewriter),
+      Some(extractRuntimeConstants(
+        anonymousVariableNameGenerator,
+        context.cancellationChecker
+      )),
       Some(groupPercentileFunctions(
         anonymousVariableNameGenerator,
         otherAttributes.withAlso(solveds, cardinalities, effectiveCardinalities, providedOrders)
+      )),
+      Some(AllReduceSingletonRewriter(
+        anonymousVariableNameGenerator,
+        solveds,
+        cardinalities,
+        providedOrders,
+        context.logicalPlanIdGen
+      )),
+      Some(AllReduceFallback(anonymousVariableNameGenerator)),
+      Option.when(
+        context.config.mergeOptimizationEnabled()
+      )(mergeRewriter(context.planContext.storageSupportsFastExpandInto)),
+      Option.when(
+        (context.config.remoteNodeIndexSeek() || context.config.remoteRelationshipIndexSeek()) && isShardedDatabase
+      )(RemoteIndexSeekRewriter(
+        context.config.remoteNodeIndexWriteOperators(),
+        rewriteNodes = context.config.remoteNodeIndexSeek(),
+        rewriteRelationships = context.config.remoteRelationshipIndexSeek()
       ))
     ).flatten
 
@@ -205,7 +220,8 @@ case object PlanRewriter extends LogicalPlanRewriter with StepSequencer.Step wit
     LogicalPlanRewritten,
     // This belongs to simplifyPredicates
     AndedPropertyInequalitiesRemoved,
-    LogicalPlanCondition.wrap(ValidateAvailableSymbols)
+    ValidateAvailableSymbols,
+    NoAllReducePredicatesLeft
   )
 
   override def invalidatedConditions: Set[StepSequencer.Condition] = Set(
@@ -215,10 +231,7 @@ case object PlanRewriter extends LogicalPlanRewriter with StepSequencer.Step wit
     SortPredicatesBySelectivity.completed
   )
 
-  override def getTransformer(
-    pushdownPropertyReads: Boolean,
-    semanticFeatures: Seq[SemanticFeature]
-  ): LogicalPlanRewriter = this
+  override def getTransformer(planPipelineConfig: PlanPipelineTransformerConfig): LogicalPlanRewriter = this
 
   /**
    * Special case for rewriting Trails with two Filters:
@@ -233,12 +246,9 @@ case object PlanRewriter extends LogicalPlanRewriter with StepSequencer.Step wit
    * But _only_ if the resulting VarExpand is in turn rewritable by [[pruningVarExpander]].
    */
   private def trailWithTwoFiltersToPruningVarExpand(
-    originalTrailRewriter: TrailToVarExpandRewriter,
+    trailRewriter: RepeatToVarExpandRewriter,
     pruningRewriter: Rewriter
   ): Rewriter = {
-    val trailRewriter = originalTrailRewriter.copy(
-      rewritableTrailExtractor = TrailToVarExpandRewriter.RewritableTrailExtractor.FilterBeforeAndAfterExpand
-    )
     new Rewriter {
       override def apply(start: AnyRef): AnyRef = {
         val intermediate = trailRewriter(start)

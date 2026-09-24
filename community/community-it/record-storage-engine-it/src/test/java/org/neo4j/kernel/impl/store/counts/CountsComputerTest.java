@@ -21,6 +21,7 @@ package org.neo4j.kernel.impl.store.counts;
 
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
@@ -65,10 +66,11 @@ import org.neo4j.io.layout.recordstorage.RecordDatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
 import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
-import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.io.pagecache.tracing.cursor.PageCursorTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.impl.coreapi.InternalTransaction;
 import org.neo4j.kernel.impl.store.CountsComputer;
@@ -77,8 +79,8 @@ import org.neo4j.kernel.impl.store.NodeStore;
 import org.neo4j.kernel.impl.store.RelationshipStore;
 import org.neo4j.kernel.impl.store.StoreFactory;
 import org.neo4j.kernel.impl.store.format.FormatFamily;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
+import org.neo4j.kernel.recovery.RecoveryStartupChecker;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.storageengine.api.TransactionIdStore;
@@ -120,8 +122,7 @@ class CountsComputerTest {
 
     @Test
     void tracePageCacheAccessOnInitialization() throws IOException {
-        DatabaseManagementService managementService = dbBuilder.build();
-        try {
+        try (var managementService = dbBuilder.build()) {
             GraphDatabaseAPI db = (GraphDatabaseAPI) managementService.database(DEFAULT_DATABASE_NAME);
             try (var tx = db.beginTx()) {
                 // Just make it non-empty
@@ -140,8 +141,6 @@ class CountsComputerTest {
             softly.assertThat(cursorTracer.pins()).as("Pins").isEqualTo(4);
             softly.assertThat(cursorTracer.unpins()).as("Unpins").isEqualTo(4);
             softly.assertThat(cursorTracer.hits()).as("hits").isEqualTo(3);
-        } finally {
-            managementService.shutdown();
         }
     }
 
@@ -525,7 +524,7 @@ class CountsComputerTest {
     }
 
     private Path countsStoreFile() {
-        return databaseLayout.countStore();
+        return databaseLayout.countStore().baseSegment();
     }
 
     private static long getLastTxId(GraphDatabaseAPI db) {
@@ -571,7 +570,8 @@ class CountsComputerTest {
                 NullLogProvider.getInstance(),
                 CONTEXT_FACTORY,
                 PAGE_CACHE_TRACER,
-                openOptions);
+                openOptions,
+                RecoveryStartupChecker.EMPTY_CHECKER);
     }
 
     private void rebuildCounts(long lastCommittedTransactionId) throws IOException {
@@ -594,7 +594,7 @@ class CountsComputerTest {
                 LOG_PROVIDER,
                 CONTEXT_FACTORY,
                 false,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL);
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
 
         try (NeoStores neoStores = storeFactory.openAllNeoStores()) {
             NodeStore nodeStore = neoStores.getNodeStore();
@@ -611,13 +611,13 @@ class CountsComputerTest {
                     relationshipStore,
                     highLabelId,
                     highRelationshipTypeId,
-                    NumberArrayFactories.AUTO_WITHOUT_PAGECACHE,
+                    NumberArrayFactories.AUTO_WITHOUT_SWAP,
                     progressMonitorFactory,
                     CONTEXT_FACTORY,
                     INSTANCE);
             try (var countsStore = createCountsStore(countsComputer, neoStores.getOpenOptions())) {
                 countsStore.start(NULL_CONTEXT, INSTANCE);
-                countsStore.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+                countsStore.checkpoint(DatabaseFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
             } catch (IOException e) {
                 throw new RuntimeException(e);
             }
@@ -658,7 +658,7 @@ class CountsComputerTest {
         }
 
         @Override
-        protected Indicator newIndicator(String process) {
+        protected Indicator newIndicator(String process, IndicatorListener listener) {
             return new Indicator(100) {
                 @Override
                 public void startProcess(long totalCount) {

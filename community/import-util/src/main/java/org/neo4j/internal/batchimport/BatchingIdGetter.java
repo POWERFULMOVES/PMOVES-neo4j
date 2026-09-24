@@ -48,7 +48,8 @@ public class BatchingIdGetter implements IdSequence {
             return id;
         }
 
-        currentBatchStartId = source.nextConsecutiveIdRange(batchSize, false, cursorContext);
+        currentBatchStartId =
+                source.nextConsecutiveIdRange(batchSize, 0, cursorContext).id();
         currentBatchIndex = 0;
         return nextIdFromCurrentBatch();
     }
@@ -65,6 +66,12 @@ public class BatchingIdGetter implements IdSequence {
             while ((id = nextIdFromCurrentBatch()) != LongReference.NULL) {
                 marker.markDeleted(id);
             }
+        }
+    }
+
+    public void markIdAsDeleted(long id, CursorContext cursorContext) {
+        try (var marker = source.transactionalMarker(cursorContext)) {
+            marker.markDeleted(id);
         }
     }
 }

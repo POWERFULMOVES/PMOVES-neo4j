@@ -19,7 +19,7 @@
  */
 package org.neo4j.fabric.eval
 
-import org.neo4j.bolt.protocol.common.message.request.connection.RoutingContext
+import org.neo4j.boltmessages.request.connection.RoutingContext
 import org.neo4j.fabric.eval.Catalog.Alias
 import org.neo4j.fabric.eval.Catalog.Composite
 import org.neo4j.fabric.eval.Catalog.ExternalAlias
@@ -46,7 +46,7 @@ class CommunityCatalogManager(
   @volatile private var systemDbTransactionIdStore: TransactionIdStore = _
 
   final override def currentCatalog(): Catalog = {
-    val lastTxId = systemDbTransactionIdStore.getLastClosedTransactionId
+    val lastTxId = systemDbTransactionIdStore.getHighestGapFreeClosedTransactionId
     if (cachedCatalogTxId < lastTxId) {
       val newCatalog = createCatalog()
       cachedCatalogLock.synchronized {

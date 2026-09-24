@@ -42,6 +42,7 @@ import org.neo4j.graphdb.Resource;
 import org.neo4j.graphdb.ResourceIterable;
 import org.neo4j.graphdb.ResourceIterator;
 import org.neo4j.internal.helpers.Exceptions;
+import org.neo4j.internal.helpers.Strings;
 
 /**
  * Utility methods for processing iterables. Where possible, If the iterable implements
@@ -53,13 +54,11 @@ public final class Iterables {
         throw new AssertionError("no instance");
     }
 
-    public static <T> Iterable<T> empty() {
-        return Collections.emptyList();
-    }
+    private static final Iterable<Object> EMPTY = Collections::emptyIterator;
 
     @SuppressWarnings("unchecked")
-    public static <T> ResourceIterable<T> emptyResourceIterable() {
-        return (ResourceIterable<T>) EmptyResourceIterable.EMPTY_RESOURCE_ITERABLE;
+    public static <T> Iterable<T> empty() {
+        return (Iterable<T>) EMPTY;
     }
 
     /**
@@ -94,17 +93,11 @@ public final class Iterables {
         return collection;
     }
 
-    public static <X> Iterable<X> filter(Predicate<? super X> specification, Iterable<X> i) {
+    public static <X> Iterable<X> filter(Iterable<X> i, Predicate<? super X> specification) {
         return new FilterIterable<>(i, specification);
     }
 
-    public static <X> List<X> reverse(List<X> iterable) {
-        List<X> list = asList(iterable);
-        Collections.reverse(list);
-        return list;
-    }
-
-    public static <FROM, TO> Iterable<TO> map(Function<? super FROM, ? extends TO> function, Iterable<FROM> from) {
+    public static <FROM, TO> Iterable<TO> map(Iterable<FROM> from, Function<? super FROM, ? extends TO> function) {
         return new MapIterable<>(from, function);
     }
 
@@ -124,13 +117,13 @@ public final class Iterables {
         return concat(Arrays.asList((Iterable<T>[]) iterables));
     }
 
-    public static <T> Iterable<T> concat(final Iterable<? extends Iterable<T>> iterables) {
+    public static <T> Iterable<T> concat(Iterable<? extends Iterable<T>> iterables) {
         return new CombiningIterable<>(iterables);
     }
 
-    public static <T, C extends T> Iterable<T> append(final C item, final Iterable<T> iterable) {
+    public static <T, C extends T> Iterable<T> append(C item, Iterable<T> iterable) {
         return () -> {
-            final Iterator<T> iterator = iterable.iterator();
+            Iterator<T> iterator = iterable.iterator();
 
             return new Iterator<>() {
                 T last = item;
@@ -172,7 +165,7 @@ public final class Iterables {
         return list.toArray((T[]) Array.newInstance(componentType, list.size()));
     }
 
-    public static <T> ResourceIterable<T> asResourceIterable(final Iterable<T> iterable) {
+    public static <T> ResourceIterable<T> asResourceIterable(Iterable<T> iterable) {
         if (iterable instanceof ResourceIterable<?>) {
             return (ResourceIterable<T>) iterable;
         }
@@ -190,28 +183,74 @@ public final class Iterables {
     }
 
     /**
-     * Returns the given iterable's first element or {@code null} if no
-     * element found.
+     * Join the elements of the {@code values} into a string, as if each element is transformed with
+     * {@link String#valueOf}.
      * <p>
-     * If the {@code iterable} implements {@link Resource}, then it will be closed in a {@code finally} block
+     * If the {@code values} implements {@link Resource}, then it will be closed in a {@code finally} block
      * after the items have been joined.
      * <p>
-     * If the {@link Iterable#iterator() iterator} created by the {@code iterable} implements {@link Resource}
+     * If the {@link Iterable#iterator() iterator} created by the {@code values} implements {@link Resource}
      * it will be {@link Resource#close() closed} in a {@code finally} block after the items have been joined.
      *
      * @param values the {@link Iterable} to get elements from.
-     * @param separator the separator to use between the items in {@code values}.
      * @return the joined string.
      */
-    public static String toString(Iterable<?> values, String separator) {
+    public static String toString(Iterable<?> values) {
+        return toString(values, Strings.EMPTY);
+    }
+
+    /**
+     * Join the elements of the {@code values} into a string with provided deliter separating the values, as if each
+     * element is transformed with {@link String#valueOf}.
+     * <p>
+     * If the {@code values} implements {@link Resource}, then it will be closed in a {@code finally} block
+     * after the items have been joined.
+     * <p>
+     * If the {@link Iterable#iterator() iterator} created by the {@code values} implements {@link Resource}
+     * it will be {@link Resource#close() closed} in a {@code finally} block after the items have been joined.
+     *
+     * @param values the {@link Iterable} to get elements from.
+     * @param delimiter the delimiter to use between the items in {@code values}.
+     * @return the joined string.
+     */
+    public static String toString(Iterable<?> values, CharSequence delimiter) {
+        return toString(values, delimiter, Strings.EMPTY, Strings.EMPTY);
+    }
+
+    /**
+     * Join the elements of the {@code values} into a string with provided deliter separating the values, surrounded by
+     * the provided prefix and suffix, as if each element is transformed with {@link String#valueOf}.
+     * <p>
+     * If the {@code values} implements {@link Resource}, then it will be closed in a {@code finally} block
+     * after the items have been joined.
+     * <p>
+     * If the {@link Iterable#iterator() iterator} created by the {@code values} implements {@link Resource}
+     * it will be {@link Resource#close() closed} in a {@code finally} block after the items have been joined.
+     *
+     * @param values the {@link Iterable} to get elements from.
+     * @param delimiter the delimiter to use between the items in {@code values}.
+     * @param prefix the prefix to the joined string
+     * @param suffix the suffix to the joined string
+     * @return the joined string.
+     */
+    public static String toString(
+            Iterable<?> values, CharSequence delimiter, CharSequence prefix, CharSequence suffix) {
         Iterator<?> it = values.iterator();
         try {
             StringBuilder sb = new StringBuilder();
+            if (!prefix.isEmpty()) {
+                sb.append(prefix);
+            }
+
             while (it.hasNext()) {
                 sb.append(it.next());
-                if (it.hasNext()) {
-                    sb.append(separator);
+                if (!delimiter.isEmpty() && it.hasNext()) {
+                    sb.append(delimiter);
                 }
+            }
+
+            if (!suffix.isEmpty()) {
+                sb.append(suffix);
             }
             return sb.toString();
         } finally {
@@ -470,25 +509,29 @@ public final class Iterables {
         }
     }
 
-    public static Iterable<Long> asIterable(final long... array) {
+    public static Iterable<Long> asIterable(long... array) {
         return () -> Iterators.asIterator(array);
     }
 
-    public static Iterable<Integer> asIterable(final int... array) {
+    public static Iterable<Integer> asIterable(int... array) {
         return () -> Iterators.asIterator(array);
     }
 
     @SafeVarargs
-    public static <T> Iterable<T> asIterable(final T... array) {
+    public static <T> Iterable<T> asIterable(T... array) {
         return () -> Iterators.iterator(array);
     }
 
-    public static <T> ResourceIterable<T> resourceIterable(final Iterable<T> iterable) {
+    public static <T> Iterable<T> asUnmodifiable(Iterable<T> iterable) {
+        return () -> Iterators.asUnmodifiable(iterable.iterator());
+    }
+
+    public static <T> ResourceIterable<T> resourceIterable(Iterable<T> iterable) {
         return new AbstractResourceIterable<>() {
             @Override
             protected ResourceIterator<T> newIterator() {
                 Iterator<T> iterator = iterable.iterator();
-                Resource resource = (iterator instanceof Resource) ? (Resource) iterator : Resource.EMPTY;
+                Resource resource = iterator instanceof Resource r ? r : Resource.EMPTY;
                 return Iterators.resourceIterator(iterator, resource);
             }
 
@@ -499,7 +542,7 @@ public final class Iterables {
         };
     }
 
-    public static <T> Iterable<T> option(final T item) {
+    public static <T> Iterable<T> option(T item) {
         if (item == null) {
             return Collections.emptyList();
         }
@@ -551,7 +594,7 @@ public final class Iterables {
      */
     public static <V> void forEach(Iterable<V> iterable, Consumer<V> consumer) {
         try {
-            for (final var item : iterable) {
+            for (V item : iterable) {
                 consumer.accept(item);
             }
         } finally {
@@ -592,7 +635,7 @@ public final class Iterables {
     public static <T> List<T> union(List<T> list1, List<T> list2) {
         requireNonNull(list1);
         requireNonNull(list2);
-        var result = new ArrayList<T>(list1.size() + list2.size());
+        List<T> result = new ArrayList<>(list1.size() + list2.size());
         result.addAll(list1);
         result.addAll(list2);
         return result;
@@ -606,20 +649,6 @@ public final class Iterables {
     public static void tryCloseResource(Iterable<?> iterable) {
         if (iterable instanceof Resource closeable) {
             closeable.close();
-        }
-    }
-
-    private static class EmptyResourceIterable<T> implements ResourceIterable<T> {
-        private static final ResourceIterable<Object> EMPTY_RESOURCE_ITERABLE = new EmptyResourceIterable<>();
-
-        @Override
-        public ResourceIterator<T> iterator() {
-            return Iterators.emptyResourceIterator();
-        }
-
-        @Override
-        public void close() {
-            // no-op
         }
     }
 }

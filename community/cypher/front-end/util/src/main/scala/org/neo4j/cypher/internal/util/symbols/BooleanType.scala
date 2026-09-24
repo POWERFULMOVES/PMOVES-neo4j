@@ -20,11 +20,11 @@ import org.neo4j.cypher.internal.util.InputPosition
 
 case class BooleanType(isNullable: Boolean)(val position: InputPosition) extends CypherType {
   val parentType: CypherType = CTAny
-  override val toString = "Boolean"
+  override val toClassString = "Boolean"
   override val toCypherTypeString = "BOOLEAN"
 
   override def sortOrder: Int = CypherTypeOrder.BOOLEAN.id
-  override def hasValueRepresentation: Boolean = true
+  override def couldBeStoredInProperty: Boolean = true
 
   override def withIsNullable(isNullable: Boolean): CypherType = this.copy(isNullable = isNullable)(position)
 

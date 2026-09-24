@@ -20,22 +20,25 @@
 package org.neo4j.bolt.protocol.common.message;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.neo4j.bolt.testing.util.ErrorUtil.useNewMessage;
+import static org.neo4j.gqlstatus.ErrorClassification.TRANSIENT_ERROR;
 
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.neo4j.configuration.GraphDatabaseSettings;
+import org.neo4j.exceptions.CypherExecutionException;
 import org.neo4j.exceptions.InvalidArgumentException;
 import org.neo4j.gqlstatus.DiagnosticRecord;
-import org.neo4j.gqlstatus.ErrorClassification;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
 import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.graphdb.DatabaseShutdownException;
+import org.neo4j.graphdb.TransientTransactionFailureException;
 import org.neo4j.kernel.DeadlockDetectedException;
 import org.neo4j.kernel.api.exceptions.Status;
-import org.neo4j.storageengine.api.txstate.validation.TransactionConflictException;
 
 class ErrorTest {
     @Test
@@ -51,7 +54,7 @@ class ErrorTest {
     @Test
     void shouldConvertDeadlockException() {
         // When
-        Error error = Error.from(new DeadlockDetectedException(null));
+        Error error = Error.from(DeadlockDetectedException.deadlockDetected(null));
 
         // Then
         assertEquals(Status.Transaction.DeadlockDetected, error.status());
@@ -72,14 +75,30 @@ class ErrorTest {
         // GQL info
         assertInstanceOf(ErrorGqlStatusObject.class, error.wrappedThrowable());
         var gqlError = (ErrorGqlStatusObject) error.wrappedThrowable();
-        assertEquals(gqlError.gqlStatus(), "08N09");
+        assertEquals("08N09", gqlError.gqlStatus());
         assertEquals(
-                gqlError.statusDescription(),
-                "error: connection exception - database unavailable. The database `neo4j` is currently unavailable. Check the database status. Retry your request at a later time.");
+                "error: connection exception - database unavailable. The database `neo4j` is currently unavailable. Check the database status. Retry your request at a later time.",
+                gqlError.statusDescription());
     }
 
     @Nested
     class TestAsBoltMessage {
+
+        @Test
+        void doNotFailWithStackOverflowWhenCausesFormCircle() {
+            // those two exceptions form the simplest loop
+            var shutdownException =
+                    DatabaseShutdownException.databaseUnavailable(GraphDatabaseSettings.DEFAULT_DATABASE_NAME);
+            var transientException = new TransientTransactionFailureException(
+                    shutdownException.gqlStatusObject(),
+                    Status.Transaction.DeadlockDetected,
+                    "test",
+                    shutdownException);
+
+            Error boltError = Error.from(transientException);
+            assertThat(assertDoesNotThrow(boltError::asBoltMessage).metadata().description())
+                    .contains("The database `neo4j` is currently unavailable.");
+        }
 
         @Test
         void shouldAssignUnknownStatusToUnpredictedException() {
@@ -90,7 +109,11 @@ class ErrorTest {
 
             // Then
             assertThat(metadata.status()).isEqualTo(Status.General.UnknownError);
-            assertThat(metadata.message()).isEqualTo(cause.getMessage());
+            assertThat(metadata.message())
+                    .isEqualTo(useNewMessage(
+                                    "50N00: Internal exception raised Throwable: This is not an error we know how to handle.")
+                            .whenLegacyFallbackTo("This is not an error we know how to handle."));
+            assertThat(metadata.legacyMessage()).isEqualTo(cause.getMessage());
             assertThat(metadata.gqlStatus()).isEqualTo("50N00");
             assertThat(metadata.description())
                     .isEqualTo(
@@ -107,17 +130,22 @@ class ErrorTest {
         @Test
         void shouldConvertDeadlockException() {
             // When
-            var cause = new DeadlockDetectedException("Dead lock");
+            var cause = DeadlockDetectedException.deadlockDetected("Dead lock");
             Error error = Error.from(cause);
             var metadata = error.asBoltMessage().metadata();
 
             // Then
             assertThat(metadata.status()).isEqualTo(Status.Transaction.DeadlockDetected);
             assertThat(metadata.message()).isEqualTo(cause.getMessage());
-            assertThat(metadata.gqlStatus()).isEqualTo(ErrorGqlStatusObject.DEFAULT_STATUS_CODE);
-            assertThat(metadata.description()).isEqualTo(ErrorGqlStatusObject.DEFAULT_STATUS_DESCRIPTION);
+            assertThat(metadata.gqlStatus()).isEqualTo(GqlStatusInfoCodes.STATUS_50N05.getStatusString());
+            assertThat(metadata.description())
+                    .isEqualTo("error: general processing exception - deadlock detected. "
+                            + "Deadlock detected while trying to acquire locks. See log for more details.");
             assertThat(metadata.diagnosticRecord())
-                    .isEqualTo(DiagnosticRecord.from().build().asMap());
+                    .isEqualTo(DiagnosticRecord.from()
+                            .withClassification(TRANSIENT_ERROR)
+                            .build()
+                            .asMap());
             assertThat(metadata.cause()).isNull();
         }
 
@@ -134,6 +162,10 @@ class ErrorTest {
             // Then
             assertThat(metadata.status()).isEqualTo(Status.General.DatabaseUnavailable);
             assertThat(metadata.message())
+                    .isEqualTo(useNewMessage(
+                                    "08N09: The database `MyDb` is currently unavailable. Check the database status. Retry your request at a later time.")
+                            .whenLegacyFallbackTo(metadata.legacyMessage()));
+            assertThat(metadata.legacyMessage())
                     .isEqualTo(Status.General.DatabaseUnavailable.code().description());
             assertThat(metadata.cause()).isNull();
             assertThat(metadata.gqlStatus()).isEqualTo("08N09");
@@ -142,7 +174,7 @@ class ErrorTest {
                             "error: connection exception - database unavailable. The database `MyDb` is currently unavailable. Check the database status. Retry your request at a later time.");
             assertThat(metadata.diagnosticRecord())
                     .isEqualTo(DiagnosticRecord.from()
-                            .withClassification(ErrorClassification.TRANSIENT_ERROR)
+                            .withClassification(TRANSIENT_ERROR)
                             .build()
                             .asMap());
         }
@@ -158,7 +190,8 @@ class ErrorTest {
 
             // Then
             assertThat(metadata.status()).isEqualTo(ex.status());
-            assertThat(metadata.message()).isEqualTo(ex.legacyMessage());
+            assertThat(metadata.message()).isEqualTo(ex.getMessage());
+            assertThat(metadata.legacyMessage()).isEqualTo(ex.legacyMessage());
             assertThat(metadata.gqlStatus()).isEqualTo(ex.gqlStatus());
             assertThat(metadata.description()).isEqualTo(ex.statusDescription());
             assertThat(metadata.diagnosticRecord()).isEqualTo(ex.diagnosticRecord());
@@ -177,7 +210,8 @@ class ErrorTest {
 
             // Then
             assertThat(metadata.status()).isEqualTo(gqlEx.status());
-            assertThat(metadata.message()).isEqualTo(gqlEx.legacyMessage());
+            assertThat(metadata.message()).isEqualTo(gqlEx.getMessage());
+            assertThat(metadata.legacyMessage()).isEqualTo(gqlEx.legacyMessage());
             assertThat(metadata.gqlStatus()).isEqualTo(gqlEx.gqlStatus());
             assertThat(metadata.description()).isEqualTo(gqlEx.statusDescription());
             assertThat(metadata.diagnosticRecord()).isEqualTo(gqlEx.diagnosticRecord());
@@ -187,7 +221,7 @@ class ErrorTest {
         @Test
         void shouldHandleGqlErrorWithCause() {
             // Given
-            var cause = transactionConflictException();
+            var cause = gqlException();
             var ex = invalidArgumentException(cause);
 
             // When
@@ -196,7 +230,8 @@ class ErrorTest {
 
             // Then
             assertThat(metadata.status()).isEqualTo(ex.status());
-            assertThat(metadata.message()).isEqualTo(ex.legacyMessage());
+            assertThat(metadata.message()).isEqualTo(ex.getMessage());
+            assertThat(metadata.legacyMessage()).isEqualTo(ex.legacyMessage());
             assertThat(metadata.gqlStatus()).isEqualTo(ex.gqlStatus());
             assertThat(metadata.description()).isEqualTo(ex.statusDescription());
             assertThat(metadata.diagnosticRecord()).isEqualTo(ex.diagnosticRecord());
@@ -205,6 +240,7 @@ class ErrorTest {
             var causeMetadata = metadata.cause();
             assertThat(causeMetadata.status()).isEqualTo(cause.status());
             assertThat(causeMetadata.message()).isEqualTo(cause.getMessage());
+            assertThat(causeMetadata.legacyMessage()).isEqualTo(cause.getMessage());
             assertThat(causeMetadata.gqlStatus()).isEqualTo(cause.gqlStatus());
             assertThat(causeMetadata.description()).isEqualTo(cause.statusDescription());
             assertThat(causeMetadata.diagnosticRecord()).isEqualTo(cause.diagnosticRecord());
@@ -214,7 +250,7 @@ class ErrorTest {
         @Test
         void shouldHandleExceptionCausedGqlErrorCause() {
             // Given
-            var cause = transactionConflictException();
+            var cause = gqlException();
             var gqlEx = invalidArgumentException(cause);
             var ex = new RuntimeException("Something is rotten", gqlEx);
 
@@ -224,7 +260,8 @@ class ErrorTest {
 
             // Then
             assertThat(metadata.status()).isEqualTo(gqlEx.status());
-            assertThat(metadata.message()).isEqualTo(gqlEx.legacyMessage());
+            assertThat(metadata.message()).isEqualTo(gqlEx.getMessage());
+            assertThat(metadata.legacyMessage()).isEqualTo(gqlEx.legacyMessage());
             assertThat(metadata.gqlStatus()).isEqualTo(gqlEx.gqlStatus());
             assertThat(metadata.description()).isEqualTo(gqlEx.statusDescription());
             assertThat(metadata.diagnosticRecord()).isEqualTo(gqlEx.diagnosticRecord());
@@ -244,8 +281,7 @@ class ErrorTest {
         }
 
         static InvalidArgumentException invalidArgumentException(Throwable exceptionCause) {
-            var builder = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N85)
-                    .withClassification(ErrorClassification.CLIENT_ERROR);
+            var builder = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N85);
 
             if (exceptionCause instanceof ErrorGqlStatusObject cause) {
                 builder = builder.withCause(cause);
@@ -255,14 +291,8 @@ class ErrorTest {
             return new InvalidArgumentException(gql, "Can't specify both allowed and denied databases", exceptionCause);
         }
 
-        static TransactionConflictException transactionConflictException() {
-            var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_25N11)
-                    .withClassification(ErrorClassification.TRANSIENT_ERROR)
-                    .build();
-            return new TransactionConflictException(
-                    gql,
-                    "Concurrent modification exception. Constraint to be removed already removed by another transaction.",
-                    null);
+        static CypherExecutionException gqlException() {
+            return CypherExecutionException.internalError("foo", "bar");
         }
     }
 }

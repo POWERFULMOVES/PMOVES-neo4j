@@ -28,12 +28,6 @@ import org.neo4j.cypher.internal.compiler.planner.logical.plans.AsPropertySeekab
 import org.neo4j.cypher.internal.compiler.planner.logical.plans.AsStringRangeSeekable
 import org.neo4j.cypher.internal.compiler.planner.logical.plans.AsValueRangeSeekable
 import org.neo4j.cypher.internal.compiler.planner.logical.plans.PropertySeekable
-import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.EntityIndexLeafPlanner.IndexCompatiblePredicate
-import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.EntityIndexLeafPlanner.IndexRequirement
-import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.EntityIndexLeafPlanner.MultipleExactPredicate
-import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.EntityIndexLeafPlanner.NonSeekablePredicate
-import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.EntityIndexLeafPlanner.NotExactPredicate
-import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.EntityIndexLeafPlanner.SingleExactPredicate
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.IndexCompatiblePredicatesProvider.allPossibleRangeIndexRequirements
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.IndexCompatiblePredicatesProvider.findExplicitCompatiblePredicates
 import org.neo4j.cypher.internal.expressions.Contains
@@ -53,9 +47,9 @@ import org.neo4j.cypher.internal.util.symbols.CTPoint
 import org.neo4j.cypher.internal.util.symbols.CTString
 import org.neo4j.cypher.internal.util.symbols.PointType
 import org.neo4j.cypher.internal.util.symbols.StringType
+import org.neo4j.index.nativeimpl.NativeIndexCapability
 import org.neo4j.internal.schema.IndexCapability
 import org.neo4j.internal.schema.IndexQuery.IndexQueryType
-import org.neo4j.kernel.impl.index.schema.RangeIndexProvider
 import org.neo4j.values.storable.ValueCategory
 
 trait IndexCompatiblePredicatesProvider {
@@ -69,7 +63,7 @@ trait IndexCompatiblePredicatesProvider {
    * @param semanticTable         semantic table
    * @param planContext           planContext to ask for indexes
    */
-  private[index] def findIndexCompatiblePredicates(
+  def findIndexCompatiblePredicates(
     predicates: Set[Expression],
     arguments: Set[LogicalVariable],
     semanticTable: SemanticTable,
@@ -197,24 +191,30 @@ object IndexCompatiblePredicatesProvider {
         ))
 
       // n.prop < |<=| >| >= value
-      case predicate @ AsValueRangeSeekable(seekable) if valid(seekable.ident, seekable.dependencies) =>
-        val queryExpression = seekable.asQueryExpression
-        val cypherType = seekable.propertyValueType(semanticTable)
-        val rangePredicate = IndexCompatiblePredicate(
-          seekable.ident,
-          seekable.property,
-          predicate,
-          queryExpression,
-          predicateExactness = NotExactPredicate,
-          solvedPredicate = Some(predicate),
-          dependencies = seekable.dependencies,
-          indexRequirements = Set(IndexRequirement.SupportsIndexQuery(IndexQueryType.RANGE)),
-          cypherType = cypherType
-        )
+      case predicate @ AsValueRangeSeekable(seekables)
+        if seekables.exists(seekable => valid(seekable.ident, seekable.dependencies)) =>
+        // When both the LHS and the RHS are property accesses, then there will be two seekables.
+        // If at least one of them is valid, we consider range-index scans on the valid ones.
+        seekables.filter(seekable => valid(seekable.ident, seekable.dependencies)).flatMap {
+          seekable =>
+            val queryExpression = seekable.asQueryExpression
+            val cypherType = seekable.propertyValueType(semanticTable)
+            val rangePredicate = IndexCompatiblePredicate(
+              seekable.ident,
+              seekable.property,
+              predicate,
+              queryExpression,
+              predicateExactness = NotExactPredicate,
+              solvedPredicate = Some(predicate),
+              dependencies = seekable.dependencies,
+              indexRequirements = Set(IndexRequirement.SupportsIndexQuery(IndexQueryType.RANGE)),
+              cypherType = cypherType
+            )
 
-        Set(rangePredicate) ++
-          Option.when(cypherType.isSubtypeOf(CTString))(rangePredicate.convertToTextScannable) ++
-          Option.when(cypherType.isSubtypeOf(CTPoint))(rangePredicate.convertToPointScannable)
+            Set(rangePredicate) ++
+              Option.when(cypherType.isSubtypeOf(CTString))(rangePredicate.convertToTextScannable) ++
+              Option.when(cypherType.isSubtypeOf(CTPoint))(rangePredicate.convertToPointScannable)
+        }
 
       case predicate @ AsBoundingBoxSeekable(seekable) if valid(seekable.ident, seekable.dependencies) =>
         val queryExpression = seekable.asQueryExpression
@@ -233,20 +233,25 @@ object IndexCompatiblePredicatesProvider {
       // An index seek for this will almost satisfy the predicate, but with the possibility of some false positives.
       // Since it reduces the cardinality to almost the level of the predicate, we can use the predicate to calculate cardinality,
       // but not mark it as solved, since the planner will still need to solve it with a Filter.
-      case predicate @ AsDistanceSeekable(seekable) if valid(seekable.ident, seekable.dependencies) =>
-        val queryExpression = seekable.asQueryExpression
-        Set(IndexCompatiblePredicate(
-          seekable.ident,
-          seekable.property,
-          predicate,
-          queryExpression,
-          predicateExactness = NotExactPredicate,
-          solvedPredicate = Some(PartialDistanceSeekWrapper(predicate)),
-          dependencies = seekable.dependencies,
-          // Distance on an index level uses IndexQueryType.BOUNDING_BOX
-          indexRequirements = Set(IndexRequirement.SupportsIndexQuery(IndexQueryType.BOUNDING_BOX)),
-          cypherType = seekable.propertyValueType(semanticTable)
-        ))
+      case predicate @ AsDistanceSeekable(seekables)
+        if seekables.exists(seekable => valid(seekable.ident, seekable.dependencies)) =>
+        seekables.filter(seekable => valid(seekable.ident, seekable.dependencies))
+          .map {
+            seekable =>
+              val queryExpression = seekable.asQueryExpression
+              IndexCompatiblePredicate(
+                seekable.ident,
+                seekable.property,
+                predicate,
+                queryExpression,
+                predicateExactness = NotExactPredicate,
+                solvedPredicate = Some(PartialDistanceSeekWrapper(predicate)),
+                dependencies = seekable.dependencies,
+                // Distance on an index level uses IndexQueryType.BOUNDING_BOX
+                indexRequirements = Set(IndexRequirement.SupportsIndexQuery(IndexQueryType.BOUNDING_BOX)),
+                cypherType = seekable.propertyValueType(semanticTable)
+              )
+          }
 
       // n.prop ENDS WITH 'substring'
       case predicate @ EndsWith(prop @ Property(variable: Variable, _), expr) if valid(variable, expr.dependencies) =>
@@ -254,7 +259,7 @@ object IndexCompatiblePredicatesProvider {
           variable,
           prop,
           predicate,
-          ExistenceQueryExpression(),
+          ExistenceQueryExpression,
           predicateExactness = NonSeekablePredicate,
           solvedPredicate = Some(predicate),
           dependencies = expr.dependencies,
@@ -268,7 +273,7 @@ object IndexCompatiblePredicatesProvider {
           variable,
           prop,
           predicate,
-          ExistenceQueryExpression(),
+          ExistenceQueryExpression,
           predicateExactness = NonSeekablePredicate,
           solvedPredicate = Some(predicate),
           dependencies = expr.dependencies,
@@ -277,33 +282,38 @@ object IndexCompatiblePredicatesProvider {
         ))
 
       // MATCH (n:User) WHERE n.prop IS NOT NULL RETURN n
-      case predicate @ AsPropertyScannable(scannable) if valid(scannable.ident, Set.empty) =>
-        val explicitlyScannableRangePredicate = IndexCompatiblePredicate(
-          scannable.ident,
-          scannable.property,
-          predicate,
-          ExistenceQueryExpression(),
-          predicateExactness = NotExactPredicate,
-          solvedPredicate = Some(predicate),
-          dependencies = Set.empty,
-          indexRequirements = Set(IndexRequirement.SupportsIndexQuery(IndexQueryType.EXISTS)),
-          cypherType = scannable.cypherType
-        )
-
-        val finalPredicate = scannable.cypherType match {
-          case StringType(_) => explicitlyScannableRangePredicate.convertToTextScannable
-          case PointType(_)  => explicitlyScannableRangePredicate.convertToPointScannable
-          case _             => explicitlyScannableRangePredicate.convertToRangeScannable
-        }
-
-        Set(finalPredicate)
+      case predicate @ AsPropertyScannable(scannables)
+        // A predicate like `a.prop < point.distance(a.location, b.point)` leads to three scannables:
+        // - range index scan on a.prop
+        // - point index scan on a.location
+        // - point index scan on b.point
+        if scannables.exists(scannable => valid(scannable.ident, Set.empty)) =>
+        scannables.filter(scannable => valid(scannable.ident, Set.empty))
+          .map(scannable => {
+            val explicitlyScannableRangePredicate = IndexCompatiblePredicate(
+              scannable.ident,
+              scannable.property,
+              predicate,
+              ExistenceQueryExpression,
+              predicateExactness = NotExactPredicate,
+              solvedPredicate = Some(predicate),
+              dependencies = Set.empty,
+              indexRequirements = Set(IndexRequirement.SupportsIndexQuery(IndexQueryType.EXISTS)),
+              cypherType = scannable.cypherType
+            )
+            scannable.cypherType match {
+              case StringType(_) => explicitlyScannableRangePredicate.convertToTextScannable
+              case PointType(_)  => explicitlyScannableRangePredicate.convertToPointScannable
+              case _             => explicitlyScannableRangePredicate.convertToRangeScannable
+            }
+          })
 
       case _ => Set.empty[IndexCompatiblePredicate]
     }
   }
 
   private val allPossibleRangeIndexRequirements: Set[IndexRequirement] = {
-    val rangeIndexCapability: IndexCapability = RangeIndexProvider.CAPABILITY
+    val rangeIndexCapability: IndexCapability = NativeIndexCapability.RANGE
     val supportedQueryTypes = IndexQueryType.values().collect {
       case queryType if rangeIndexCapability.isQuerySupported(queryType, ValueCategory.ANYTHING) =>
         IndexRequirement.SupportsIndexQuery(queryType)

@@ -22,28 +22,29 @@ package org.neo4j.internal.batchimport.store;
 import static java.lang.Math.min;
 import static java.nio.file.StandardOpenOption.READ;
 import static org.eclipse.collections.impl.factory.Sets.immutable;
+import static org.neo4j.configuration.GraphDatabaseInternalSettings.counts_store_max_cached_entries;
 import static org.neo4j.configuration.GraphDatabaseSettings.check_point_iops_limit;
 import static org.neo4j.configuration.GraphDatabaseSettings.pagecache_memory;
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
+import static org.neo4j.internal.id.IdSlotDistribution.SINGLE_IDS;
 import static org.neo4j.io.ByteUnit.gibiBytes;
 import static org.neo4j.io.IOUtils.closeAll;
 import static org.neo4j.io.IOUtils.uncheckedConsumer;
-import static org.neo4j.io.mem.MemoryAllocator.createAllocator;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.kernel.impl.store.StoreType.PROPERTY;
 import static org.neo4j.kernel.impl.store.StoreType.PROPERTY_ARRAY;
 import static org.neo4j.kernel.impl.store.StoreType.PROPERTY_STRING;
 import static org.neo4j.kernel.impl.store.StoreType.RELATIONSHIP_GROUP;
-import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_COMMIT_TIMESTAMP;
-import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_CONSENSUS_INDEX;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.function.Predicate;
 import org.eclipse.collections.api.set.ImmutableSet;
-import org.neo4j.batchimport.api.AdditionalInitialIds;
 import org.neo4j.batchimport.api.Configuration;
 import org.neo4j.batchimport.api.input.Input;
 import org.neo4j.configuration.Config;
@@ -54,32 +55,34 @@ import org.neo4j.internal.batchimport.cache.MemoryStatsVisitor;
 import org.neo4j.internal.batchimport.store.io.IoTracer;
 import org.neo4j.internal.counts.CountsBuilder;
 import org.neo4j.internal.counts.CountsStoreProvider;
-import org.neo4j.internal.counts.DegreeStoreProvider;
+import org.neo4j.internal.counts.GBPTreeGenericCountsStore;
 import org.neo4j.internal.counts.GBPTreeRelationshipGroupDegreesStore;
+import org.neo4j.internal.counts.RelationshipGroupDegreesStore;
 import org.neo4j.internal.id.DefaultIdGeneratorFactory;
 import org.neo4j.internal.id.IdGenerator;
 import org.neo4j.internal.id.IdGeneratorFactory;
+import org.neo4j.internal.recordstorage.RecordIdType;
 import org.neo4j.internal.recordstorage.StoreTokens;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseFile;
 import org.neo4j.io.layout.DatabaseLayout;
+import org.neo4j.io.layout.recordstorage.RecordDatabaseFile;
 import org.neo4j.io.layout.recordstorage.RecordDatabaseLayout;
-import org.neo4j.io.mem.MemoryAllocator;
 import org.neo4j.io.os.OsBeanUtil;
 import org.neo4j.io.pagecache.ExternallyManagedPageCache;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.PagedFile;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
-import org.neo4j.io.pagecache.impl.SingleFilePageSwapperFactory;
 import org.neo4j.io.pagecache.impl.muninn.MuninnPageCache;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.impl.muninn.VersionStorage;
 import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.api.index.IndexDirectoryStructure;
 import org.neo4j.kernel.impl.store.DynamicAllocatorProvider;
 import org.neo4j.kernel.impl.store.DynamicAllocatorProviders;
-import org.neo4j.kernel.impl.store.MetaDataStore;
 import org.neo4j.kernel.impl.store.NeoStores;
 import org.neo4j.kernel.impl.store.NodeStore;
 import org.neo4j.kernel.impl.store.PropertyStore;
@@ -93,14 +96,14 @@ import org.neo4j.kernel.impl.store.format.RecordFormatSelector;
 import org.neo4j.kernel.impl.store.format.RecordFormats;
 import org.neo4j.kernel.impl.store.format.RecordStorageCapability;
 import org.neo4j.kernel.impl.store.record.RelationshipGroupRecord;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
-import org.neo4j.kernel.impl.transaction.log.files.LogFilesMatcher;
+import org.neo4j.kernel.recovery.RecoveryStartupChecker;
 import org.neo4j.logging.InternalLogProvider;
 import org.neo4j.logging.internal.LogService;
-import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.scheduler.JobScheduler;
+import org.neo4j.storageengine.api.LogMetadataProvider;
 import org.neo4j.token.TokenHolders;
+import org.neo4j.wal.files.LogFilesMatcher;
 
 /**
  * Creator and accessor of {@link NeoStores} with some logic to provide very batch friendly services to the
@@ -130,7 +133,6 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
     private final PageCache pageCache;
     private final IoTracer ioTracer;
     private final RecordFormats recordFormats;
-    private final AdditionalInitialIds initialIds;
     private final boolean externalPageCache;
     private final IdGeneratorFactory idGeneratorFactory;
     private final IdGeneratorFactory tempIdGeneratorFactory;
@@ -139,6 +141,7 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
     private final String databaseName;
     private final ImmutableSet<OpenOption> openOptions;
     private final PageCacheTracer pageCacheTracer;
+    private final DatabaseCreationOptions databaseCreationOptions;
 
     // Some stores are considered temporary during the import and will be reordered/restructured
     // into the main store. These temporary stores will live here
@@ -146,10 +149,10 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
     private NeoStores temporaryNeoStores;
     private TokenHolders tokenHolders;
     private PageCacheFlusher flusher;
-    private final LogTailLogVersionsMetadata logTailMetadata;
     private boolean doubleRelationshipRecordUnits;
 
     private boolean successful;
+    private boolean needsRebuildNodeStoreIdFile;
 
     private BatchingNeoStores(
             FileSystemAbstraction fileSystem,
@@ -158,13 +161,12 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
             Config neo4jConfig,
             Configuration importConfiguration,
             LogService logService,
-            AdditionalInitialIds initialIds,
-            LogTailLogVersionsMetadata logTailMetadata,
             boolean externalPageCache,
             IoTracer ioTracer,
             CursorContextFactory contextFactory,
             MemoryTracker memoryTracker,
-            PageCacheTracer pageCacheTracer) {
+            PageCacheTracer pageCacheTracer,
+            DatabaseCreationOptions databaseCreationOptions) {
         this.fileSystem = fileSystem;
         this.recordFormats = RecordFormatSelector.selectForStoreOrConfigForNewDbs(
                 neo4jConfig,
@@ -174,11 +176,10 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
                 logService.getInternalLogProvider(),
                 contextFactory);
         this.importConfiguration = importConfiguration;
-        this.initialIds = initialIds;
         this.internalLogProvider = logService.getInternalLogProvider();
         this.userLogProvider = logService.getUserLogProvider();
         this.databaseLayout = databaseLayout;
-        this.temporaryDatabaseLayout = RecordDatabaseLayout.ofFlat(databaseLayout.file(TEMP_STORE_NAME));
+        this.temporaryDatabaseLayout = RecordDatabaseLayout.ofFlat(databaseLayout.path(TEMP_STORE_NAME));
         this.neo4jConfig = neo4jConfig;
         this.pageCache = pageCache;
         this.ioTracer = ioTracer;
@@ -189,9 +190,9 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
                 new DefaultIdGeneratorFactory(fileSystem, immediate(), pageCacheTracer, databaseName);
         this.contextFactory = contextFactory;
         this.memoryTracker = memoryTracker;
-        this.logTailMetadata = logTailMetadata;
         this.pageCacheTracer = pageCacheTracer;
         this.openOptions = PageCacheOptionsSelector.select(recordFormats);
+        this.databaseCreationOptions = databaseCreationOptions;
     }
 
     /**
@@ -220,9 +221,7 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
     }
 
     private void deleteCountsStore() throws IOException {
-        if (fileSystem.fileExists(databaseLayout.countStore())) {
-            fileSystem.deleteFile(databaseLayout.countStore());
-        }
+        databaseLayout.countStore().delete(fileSystem);
     }
 
     public void assertDatabaseIsNonExistent() throws DirectoryNotEmptyException {
@@ -242,16 +241,15 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
     }
 
     private boolean hasExistingDatabaseContents() {
-        Path metaDataFile = databaseLayout.metadataStore();
-        try (PagedFile pagedFile =
-                pageCache.map(metaDataFile, pageCache.pageSize(), databaseName, immutable.of(READ))) {
+        try (PagedFile pagedFile = pageCache.map(databaseLayout.metadataStore(), databaseName, immutable.of(READ))) {
             // OK so the db probably exists
         } catch (IOException e) {
             // It's OK
             return false;
         }
 
-        try (NeoStores stores = newStoreFactory(databaseLayout, idGeneratorFactory, contextFactory, immutable.empty())
+        try (NeoStores stores = newStoreFactory(
+                        databaseLayout, idGeneratorFactory, contextFactory, databaseCreationOptions)
                 .openNeoStores(StoreType.NODE, StoreType.RELATIONSHIP)) {
             return stores.getNodeStore().getIdGenerator().getHighId() > 0
                     || stores.getRelationshipStore().getIdGenerator().getHighId() > 0;
@@ -276,13 +274,13 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
         for (StoreType type : StoreType.STORE_TYPES) {
             if (!storesToKeep.test(type)) {
                 DatabaseFile databaseFile = type.getDatabaseFile();
-                databaseLayout.allFiles(databaseFile).forEach(uncheckedConsumer(fileSystem::deleteFile));
+                databaseLayout.allFiles(databaseFile).forEach(uncheckedConsumer(sf -> sf.delete(fileSystem)));
             }
         }
     }
 
     private void instantiateStores() throws IOException {
-        neoStores = newStoreFactory(databaseLayout, idGeneratorFactory, contextFactory, immutable.empty())
+        neoStores = newStoreFactory(databaseLayout, idGeneratorFactory, contextFactory, databaseCreationOptions)
                 .openAllNeoStores();
         DynamicAllocatorProvider allocatorProvider = DynamicAllocatorProviders.nonTransactionalAllocator(neoStores);
         tokenHolders = StoreTokens.directTokenHolders(neoStores, allocatorProvider, contextFactory, memoryTracker);
@@ -292,23 +290,11 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
         try (var cursorContext = contextFactory.create(BATCHING_STORE_CREATION_TAG)) {
             neoStores.start(cursorContext);
             temporaryNeoStores.start(cursorContext);
-            MetaDataStore metaDataStore = neoStores.getMetaDataStore();
-            metaDataStore.setLastCommittedAndClosedTransactionId(
-                    initialIds.lastCommittedTransactionId(),
-                    initialIds.lastCommittedTransactionAppendIndex(),
-                    logTailMetadata.getLastCommittedTransaction().kernelVersion(),
-                    initialIds.lastCommittedTransactionChecksum(),
-                    BASE_TX_COMMIT_TIMESTAMP,
-                    UNKNOWN_CONSENSUS_INDEX,
-                    initialIds.lastCommittedTransactionLogByteOffset(),
-                    initialIds.lastCommittedTransactionLogVersion(),
-                    initialIds.lastAppendIndex());
-            metaDataStore.setCheckpointLogVersion(initialIds.checkpointLogVersion());
         }
     }
 
     private NeoStores instantiateTempStores() {
-        return newStoreFactory(temporaryDatabaseLayout, tempIdGeneratorFactory, contextFactory, immutable.empty())
+        return newStoreFactory(temporaryDatabaseLayout, tempIdGeneratorFactory, contextFactory, databaseCreationOptions)
                 .openNeoStores(TEMP_STORE_TYPES);
     }
 
@@ -317,13 +303,12 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
             RecordDatabaseLayout databaseLayout,
             Configuration config,
             LogService logService,
-            AdditionalInitialIds initialIds,
-            LogTailLogVersionsMetadata logTailMetadata,
             Config dbConfig,
             JobScheduler jobScheduler,
             PageCacheTracer pageCacheTracer,
             CursorContextFactory contextFactory,
-            MemoryTracker memoryTracker) {
+            MemoryTracker memoryTracker,
+            DatabaseCreationOptions databaseCreationOptions) {
         Config neo4jConfig = getNeo4jConfig(dbConfig);
         ExternallyManagedPageCache providedPageCache = config.providedPageCache();
         PageCache pageCache = providedPageCache != null
@@ -337,13 +322,12 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
                 neo4jConfig,
                 config,
                 logService,
-                initialIds,
-                logTailMetadata,
                 false,
                 pageCacheTracer::bytesWritten,
                 contextFactory,
                 memoryTracker,
-                pageCacheTracer);
+                pageCacheTracer,
+                databaseCreationOptions);
     }
 
     public static BatchingNeoStores batchingNeoStoresWithExternalPageCache(
@@ -354,8 +338,6 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
             RecordDatabaseLayout databaseLayout,
             Configuration config,
             LogService logService,
-            AdditionalInitialIds initialIds,
-            LogTailLogVersionsMetadata logTailMetadata,
             Config dbConfig,
             MemoryTracker memoryTracker) {
         return new BatchingNeoStores(
@@ -365,13 +347,12 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
                 getNeo4jConfig(dbConfig),
                 config,
                 logService,
-                initialIds,
-                logTailMetadata,
                 true,
                 tracer::bytesWritten,
                 contextFactory,
                 memoryTracker,
-                tracer);
+                tracer,
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
     }
 
     private static Config getNeo4jConfig(Config dbConfig) {
@@ -395,7 +376,7 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
 
         // Get the upper bound of what we can get from the default config calculation
         // We even want to limit amount of memory a bit more since we don't need very much during import
-        long maxFreeMemory = OsBeanUtil.getFreePhysicalMemory();
+        long maxFreeMemory = OsBeanUtil.getFreeMemory();
         if (0 < maxFreeMemory && maxFreeMemory < Long.MAX_VALUE) {
             // We got a reading of amount of free memory from the OS, use this to potentially reduce the page cache
             // size if the amount of free memory is very small.
@@ -412,24 +393,22 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
             PageCacheTracer tracer,
             JobScheduler jobScheduler,
             MemoryTracker memoryTracker) {
-        SingleFilePageSwapperFactory swapperFactory =
-                new SingleFilePageSwapperFactory(fileSystem, tracer, EmptyMemoryTracker.INSTANCE);
-        MemoryAllocator memoryAllocator = createAllocator(config.get(pagecache_memory), memoryTracker);
-        MuninnPageCache.Configuration configuration = MuninnPageCache.config(memoryAllocator)
-                .pageCacheTracer(tracer)
+        var configuration = MuninnPageCache.forMemory(config.get(pagecache_memory))
                 .memoryTracker(memoryTracker)
+                .pageCacheTracer(tracer)
                 .bufferFactory(new ConfigurableIOBufferFactory(config, memoryTracker))
                 .faultLockStriping(1 << 11)
                 .reservedPageBytes(PageCache.RESERVED_BYTES)
+                .closeAllocatorOnShutdown(true)
                 .disableEvictionThread();
-        return new MuninnPageCache(swapperFactory, jobScheduler, configuration);
+        return new MuninnPageCache(fileSystem, jobScheduler, configuration);
     }
 
     private StoreFactory newStoreFactory(
             RecordDatabaseLayout databaseLayout,
             IdGeneratorFactory idGeneratorFactory,
             CursorContextFactory contextFactory,
-            ImmutableSet<OpenOption> openOptions) {
+            DatabaseCreationOptions databaseCreationOptions) {
         return new StoreFactory(
                 databaseLayout,
                 neo4jConfig,
@@ -441,8 +420,7 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
                 internalLogProvider,
                 contextFactory,
                 false,
-                logTailMetadata,
-                openOptions);
+                databaseCreationOptions);
     }
 
     /**
@@ -480,7 +458,10 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
     }
 
     public void buildCountsStore(
-            CountsBuilder builder, CursorContextFactory contextFactory, MemoryTracker memoryTracker) {
+            CountsBuilder builder,
+            LogMetadataProvider logMetadataProvider,
+            CursorContextFactory contextFactory,
+            MemoryTracker memoryTracker) {
         try {
             deleteCountsStore();
         } catch (IOException e) {
@@ -498,9 +479,7 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
                         pageCacheTracer);
                 var cursorContext = contextFactory.create("buildCountsStore")) {
             countsStore.start(cursorContext, memoryTracker);
-            try (var flushEvent = pageCacheTracer.beginFileFlush()) {
-                countsStore.checkpoint(flushEvent, cursorContext);
-            }
+            countsStore.checkpoint(pageCacheTracer, EMPTY_ASYNC_BLOCK_ACCESSOR, cursorContext);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
@@ -508,29 +487,33 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
         // Also build an empty relationship group degrees store since the importer will not make any group degrees
         // external.
         // This will prevent an unnecessary rebuild on the first startup.
-        try (var groupDegreesStore = DegreeStoreProvider.getInstance()
-                        .openDegreesStore(
-                                pageCache,
-                                fileSystem,
-                                databaseLayout,
-                                userLogProvider,
-                                immediate(),
-                                neo4jConfig,
-                                contextFactory,
-                                pageCacheTracer,
-                                new GBPTreeRelationshipGroupDegreesStore.EmptyDegreesRebuilder(
-                                        neoStores.getMetaDataStore().getLastCommittedTransactionId()),
-                                openOptions,
-                                false,
-                                VersionStorage.EMPTY_STORAGE);
+        try (var groupDegreesStore = openGroupDegreeStore(logMetadataProvider, contextFactory);
                 var cursorContext = contextFactory.create("buildRelationshipDegreesStore")) {
             groupDegreesStore.start(cursorContext, memoryTracker);
-            try (var flushEvent = pageCacheTracer.beginFileFlush()) {
-                groupDegreesStore.checkpoint(flushEvent, cursorContext);
-            }
+            groupDegreesStore.checkpoint(pageCacheTracer, EMPTY_ASYNC_BLOCK_ACCESSOR, cursorContext);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
+    }
+
+    private RelationshipGroupDegreesStore openGroupDegreeStore(
+            LogMetadataProvider logMetadataProvider, CursorContextFactory contextFactory) throws IOException {
+        return new GBPTreeRelationshipGroupDegreesStore(
+                pageCache,
+                databaseLayout.relationshipGroupDegreesStore(),
+                fileSystem,
+                immediate(),
+                new GBPTreeRelationshipGroupDegreesStore.EmptyDegreesRebuilder(
+                        logMetadataProvider.getLastCommittedTransactionId()),
+                false,
+                GBPTreeGenericCountsStore.NO_MONITOR,
+                databaseLayout.getDatabaseName(),
+                neo4jConfig.get(counts_store_max_cached_entries),
+                userLogProvider,
+                contextFactory,
+                pageCacheTracer,
+                openOptions,
+                RecoveryStartupChecker.EMPTY_CHECKER);
     }
 
     private CountsStore openCountsStore(
@@ -571,8 +554,10 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
             flushAndForce(cursorContext);
         }
 
-        // Close the neo store
-        closeAll(neoStores, temporaryNeoStores);
+        try (var nodeIdFileSwapper = rebuildNodeIdFileIfNeeded()) {
+            // Close the neo store
+            closeAll(neoStores, temporaryNeoStores);
+        }
         if (!externalPageCache) {
             pageCache.close();
         }
@@ -580,6 +565,36 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
         if (successful) {
             cleanup();
         }
+    }
+
+    private Closeable rebuildNodeIdFileIfNeeded() throws IOException {
+        return !needsRebuildNodeStoreIdFile ? () -> {} : rebuildNodeIdFile();
+    }
+
+    private Closeable rebuildNodeIdFile() throws IOException {
+        var idGeneratorFactory = new DefaultIdGeneratorFactory(
+                fileSystem, immediate(), pageCacheTracer, databaseLayout.getDatabaseName());
+        var idFile = databaseLayout.idFile(RecordDatabaseFile.NODE_STORE).get().baseSegment();
+        var rebuiltIdFile = idFile.resolveSibling("rebuilt-node.db.id");
+        try (var idGenerator = idGeneratorFactory.open(
+                        pageCache,
+                        new StoreFile(rebuiltIdFile),
+                        RecordIdType.NODE,
+                        () -> neoStores.getNodeStore().getNumberOfReservedLowIds(),
+                        Long.MAX_VALUE,
+                        false,
+                        neo4jConfig,
+                        contextFactory,
+                        openOptions,
+                        SINGLE_IDS);
+                var cursorContext = contextFactory.create("Rebuild ID generator")) {
+            idGenerator.start(neoStores.getNodeStore().freeIds(cursorContext), cursorContext);
+            try (var flushEvent = pageCacheTracer.beginFileFlush()) {
+                idGenerator.checkpoint(flushEvent, EMPTY_ASYNC_BLOCK_ACCESSOR, cursorContext);
+            }
+        }
+
+        return () -> fileSystem.renameFile(rebuiltIdFile, idFile, StandardCopyOption.REPLACE_EXISTING);
     }
 
     public void markHighIds() {
@@ -592,14 +607,11 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
         Path tempDbDirectory = temporaryDatabaseLayout.databaseDirectory();
         if (!tempDbDirectory.getParent().equals(databaseLayout.databaseDirectory())) {
             throw new IllegalStateException(
-                    "Temporary store is dislocated. It should be located under current database directory but instead located in: "
+                    "Temporary store is dislocated. It should be located under current database directory but instead"
+                            + " located in: "
                             + tempDbDirectory.getParent());
         }
         fileSystem.deleteRecursively(tempDbDirectory);
-    }
-
-    public long getLastCommittedTransactionId() {
-        return neoStores.getMetaDataStore().getLastCommittedTransactionId();
     }
 
     public NeoStores getNeoStores() {
@@ -645,10 +657,10 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
 
     public void flushAndForce(CursorContext cursorContext) throws IOException {
         if (neoStores != null) {
-            neoStores.flush(DatabaseFlushEvent.NULL, cursorContext);
+            neoStores.flush(DatabaseFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, cursorContext);
         }
         if (temporaryNeoStores != null) {
-            temporaryNeoStores.flush(DatabaseFlushEvent.NULL, cursorContext);
+            temporaryNeoStores.flush(DatabaseFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, cursorContext);
         }
     }
 
@@ -680,5 +692,22 @@ public class BatchingNeoStores implements AutoCloseable, MemoryStatsVisitor.Visi
 
     public ImmutableSet<OpenOption> getOpenOptions() {
         return openOptions;
+    }
+
+    /**
+     * Makes a note that the node store .id file needs to be rebuilt in the end. This can be due to node import
+     * being run with externally chosen node IDs and the overhead of keeping track of the holes during import
+     * can be too large and can therefor be done afterwards.
+     */
+    public void needsRebuildNodeStoreIdFile() {
+        needsRebuildNodeStoreIdFile = true;
+    }
+
+    public Config getNeo4jConfig() {
+        return neo4jConfig;
+    }
+
+    public RecordFormats getRecordFormats() {
+        return recordFormats;
     }
 }

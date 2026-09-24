@@ -25,19 +25,19 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import java.io.IOException;
 import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
-import org.neo4j.storageengine.api.MetadataProvider;
+import org.neo4j.storageengine.api.LogMetadataProvider;
 import org.neo4j.test.Race;
 import org.neo4j.test.extension.DbmsExtension;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
 
 @DbmsExtension
 public class DatabaseAppendIndexIT {
     @Inject
-    private MetadataProvider metadataProvider;
+    private LogMetadataProvider metadataProvider;
 
     @Inject
     private CheckPointer checkPointer;
@@ -50,25 +50,25 @@ public class DatabaseAppendIndexIT {
 
     @Test
     void appendIndexAndTransactionIdsAreMatching() {
-        assertEquals(metadataProvider.getLastAppendIndex(), metadataProvider.getLastClosedTransactionId());
+        assertEquals(metadataProvider.getLastAppendIndex(), metadataProvider.getHighestGapFreeClosedTransactionId());
 
         try (Transaction transaction = databaseAPI.beginTx()) {
             transaction.createNode();
             transaction.commit();
         }
-        assertEquals(metadataProvider.getLastAppendIndex(), metadataProvider.getLastClosedTransactionId());
+        assertEquals(metadataProvider.getLastAppendIndex(), metadataProvider.getHighestGapFreeClosedTransactionId());
     }
 
     @Test
     void appendIndexMatchingTransactionIdWhenInternalTransactionsExecuted() {
-        assertEquals(metadataProvider.getLastAppendIndex(), metadataProvider.getLastClosedTransactionId());
+        assertEquals(metadataProvider.getLastAppendIndex(), metadataProvider.getHighestGapFreeClosedTransactionId());
 
         try (Transaction transaction = databaseAPI.beginTx()) {
             var node = transaction.createNode(Label.label("marker"));
             node.setProperty("foo", "bar");
             transaction.commit();
         }
-        assertEquals(metadataProvider.getLastAppendIndex(), metadataProvider.getLastClosedTransactionId());
+        assertEquals(metadataProvider.getLastAppendIndex(), metadataProvider.getHighestGapFreeClosedTransactionId());
     }
 
     @Test
@@ -79,14 +79,14 @@ public class DatabaseAppendIndexIT {
             transaction.commit();
         }
 
-        assertEquals(metadataProvider.getLastAppendIndex(), metadataProvider.getLastClosedTransactionId());
+        assertEquals(metadataProvider.getLastAppendIndex(), metadataProvider.getHighestGapFreeClosedTransactionId());
 
         checkPointer.forceCheckPoint(new SimpleTriggerInfo("test trigger"));
 
         var checkpointInfo = logFiles.getCheckpointFile().findLatestCheckpoint().orElseThrow();
         assertEquals(metadataProvider.getLastAppendIndex(), checkpointInfo.appendIndex());
         assertEquals(
-                metadataProvider.getLastClosedTransactionId(),
+                metadataProvider.getHighestGapFreeClosedTransactionId(),
                 checkpointInfo.transactionId().id());
     }
 

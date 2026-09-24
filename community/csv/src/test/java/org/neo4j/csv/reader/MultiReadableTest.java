@@ -19,14 +19,13 @@
  */
 package org.neo4j.csv.reader;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.IOException;
 import java.io.StringReader;
 import org.junit.jupiter.api.Test;
 import org.neo4j.collection.RawIterator;
+import org.neo4j.common.EntityType;
 
 class MultiReadableTest {
     private static final Configuration CONFIG =
@@ -44,13 +43,13 @@ class MultiReadableTest {
             {"and here comes", "the third line"}
         };
         RawIterator<CharReadable, IOException> readers = readerIteratorFromStrings(data, null);
-        CharSeeker seeker = CharSeekers.charSeeker(new MultiReadable(readers), CONFIG, true);
+        CharSeeker seeker = CharSeekers.charSeeker(new MultiReadable(readers), CONFIG, true, EntityType.NODE);
 
         // WHEN/THEN
         for (String[] line : data) {
             assertNextLine(line, seeker, mark, extractors);
         }
-        assertFalse(seeker.seek(mark, delimiter));
+        assertThat(seeker.seek(mark, delimiter)).isFalse();
         seeker.close();
     }
 
@@ -64,13 +63,13 @@ class MultiReadableTest {
 
         // WHEN
         RawIterator<CharReadable, IOException> readers = readerIteratorFromStrings(data, '\n');
-        CharSeeker seeker = CharSeekers.charSeeker(new MultiReadable(readers), CONFIG, true);
+        CharSeeker seeker = CharSeekers.charSeeker(new MultiReadable(readers), CONFIG, true, EntityType.NODE);
 
         // WHEN/THEN
         for (String[] line : data) {
             assertNextLine(line, seeker, mark, extractors);
         }
-        assertFalse(seeker.seek(mark, delimiter));
+        assertThat(seeker.seek(mark, delimiter)).isFalse();
         seeker.close();
     }
 
@@ -83,23 +82,25 @@ class MultiReadableTest {
         };
         RawIterator<CharReadable, IOException> readers = readerIteratorFromStrings(data, '\n');
         CharReadable reader = new MultiReadable(readers);
-        assertEquals(0L, reader.position());
+        assertThat(reader.position()).isZero();
         SectionedCharBuffer buffer = new SectionedCharBuffer(15);
 
         // WHEN
         reader.read(buffer, buffer.front());
-        assertEquals(15, reader.position());
+        assertThat(reader.position()).isEqualTo(15);
         reader.read(buffer, buffer.front());
-        assertEquals(23, reader.position(), "Should not transition to a new reader in the middle of a read");
-        assertEquals("Reader1", reader.sourceDescription());
+        assertThat(reader.position())
+                .as("Should not transition to a new reader in the middle of a read")
+                .isEqualTo(23);
+        assertThat(reader.sourceDescription()).isEqualTo("Reader1");
 
         // we will transition to the new reader in the call below
         reader.read(buffer, buffer.front());
-        assertEquals(23 + 15, reader.position());
+        assertThat(reader.position()).isEqualTo(23 + 15);
         reader.read(buffer, buffer.front());
-        assertEquals(23 + 30, reader.position());
+        assertThat(reader.position()).isEqualTo(23 + 30);
         reader.read(buffer, buffer.front());
-        assertFalse(buffer.hasAvailable());
+        assertThat(buffer.hasAvailable()).isFalse();
     }
 
     @Test
@@ -115,25 +116,25 @@ class MultiReadableTest {
         int read = readable.read(target, 0, target.length);
 
         // then
-        assertEquals(source1.length() + 1 /*added newline-char*/, read);
+        assertThat(read).isEqualTo(source1.length() + 1);
 
         // and when
         target = new char[source2.length()];
         read = readable.read(target, 0, target.length);
 
         // then
-        assertEquals(source2.length(), read);
+        assertThat(read).isEqualTo(source2.length());
 
         read = readable.read(target, 0, target.length);
-        assertEquals(1 /*added newline-char*/, read);
+        assertThat(read).isOne();
     }
 
     private void assertNextLine(String[] line, CharSeeker seeker, Mark mark, Extractors extractors) throws IOException {
         for (String value : line) {
-            assertTrue(seeker.seek(mark, delimiter));
-            assertEquals(value, seeker.extract(mark, extractors.string()));
+            assertThat(seeker.seek(mark, delimiter)).isTrue();
+            assertThat(seeker.extract(mark, extractors.string())).isEqualTo(value);
         }
-        assertTrue(mark.isEndOfLine());
+        assertThat(mark.isEndOfLine()).isTrue();
     }
 
     private RawIterator<CharReadable, IOException> readerIteratorFromStrings(
@@ -156,13 +157,14 @@ class MultiReadableTest {
                                 return "Reader" + cursor;
                             }
                         },
-                        string.length() * 2);
+                        string.length() * 2,
+                        null);
             }
 
             private String join(String[] strings) {
                 StringBuilder builder = new StringBuilder();
                 for (String string : strings) {
-                    builder.append(builder.length() > 0 ? "," : "").append(string);
+                    builder.append(builder.isEmpty() ? "" : ",").append(string);
                 }
                 if (lineEnding != null) {
                     builder.append(lineEnding);

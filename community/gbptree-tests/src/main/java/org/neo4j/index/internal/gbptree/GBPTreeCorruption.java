@@ -20,7 +20,6 @@
 package org.neo4j.index.internal.gbptree;
 
 import static org.neo4j.index.internal.gbptree.CursorCreator.bind;
-import static org.neo4j.index.internal.gbptree.GBPTreeGenerationTarget.NO_GENERATION_TARGET;
 import static org.neo4j.index.internal.gbptree.GenerationSafePointerPair.pointer;
 import static org.neo4j.index.internal.gbptree.TreeNodeUtil.BYTE_POS_KEYCOUNT;
 import static org.neo4j.index.internal.gbptree.TreeNodeUtil.BYTE_POS_LEFTSIBLING;
@@ -48,8 +47,8 @@ public final class GBPTreeCorruption {
             long unstableGeneration = treeState.unstableGeneration();
             long crashGeneration = crashGeneration(treeState);
             pageCursor.setOffset(offset);
-            long pointer = pointer(GenerationSafePointerPair.read(
-                    pageCursor, stableGeneration, unstableGeneration, NO_GENERATION_TARGET));
+            long pointer = pointer(GenerationSafePointerPair.read(pageCursor, stableGeneration, unstableGeneration)
+                    .pointer());
             overwriteGSPP(pageCursor, offset, crashGeneration, pointer);
         };
     }
@@ -63,9 +62,8 @@ public final class GBPTreeCorruption {
     }
 
     public static <KEY, VALUE> PageCorruption<KEY, VALUE> setPointer(GBPTreePointerType pointerType, long pointer) {
-        return (cursor, layout, leafNode, internalNode, treeState) -> {
-            overwriteGSPP(cursor, pointerType.offset(internalNode), treeState.stableGeneration(), pointer);
-        };
+        return (cursor, layout, leafNode, internalNode, treeState) ->
+                overwriteGSPP(cursor, pointerType.offset(internalNode), treeState.stableGeneration(), pointer);
     }
 
     public static <KEY, VALUE> PageCorruption<KEY, VALUE> notATreeNode() {
@@ -102,7 +100,8 @@ public final class GBPTreeCorruption {
     public static <KEY, VALUE> PageCorruption<KEY, VALUE> rightSiblingPointerHasTooLowGeneration() {
         return (cursor, layout, leafNode, internalNode, treeState) -> {
             long rightSibling = pointer(
-                    TreeNodeUtil.rightSibling(cursor, treeState.stableGeneration(), treeState.unstableGeneration()));
+                    TreeNodeUtil.rightSibling(cursor, treeState.stableGeneration(), treeState.unstableGeneration())
+                            .pointer());
             overwriteGSPP(cursor, BYTE_POS_RIGHTSIBLING, GenerationSafePointer.MIN_GENERATION, rightSibling);
         };
     }
@@ -110,7 +109,8 @@ public final class GBPTreeCorruption {
     public static <KEY, VALUE> PageCorruption<KEY, VALUE> leftSiblingPointerHasTooLowGeneration() {
         return (cursor, layout, leafNode, internalNode, treeState) -> {
             long leftSibling = pointer(
-                    TreeNodeUtil.leftSibling(cursor, treeState.stableGeneration(), treeState.unstableGeneration()));
+                    TreeNodeUtil.leftSibling(cursor, treeState.stableGeneration(), treeState.unstableGeneration())
+                            .pointer());
             overwriteGSPP(cursor, BYTE_POS_LEFTSIBLING, GenerationSafePointer.MIN_GENERATION, leftSibling);
         };
     }
@@ -126,14 +126,13 @@ public final class GBPTreeCorruption {
 
     public static <KEY, VALUE> PageCorruption<KEY, VALUE> setChild(int childPos, long childPointer) {
         return (cursor, layout, leafNode, internalNode, treeState) -> {
-            GenerationKeeper childGeneration = new GenerationKeeper();
             long stableGeneration = treeState.stableGeneration();
             long unstableGeneration = treeState.unstableGeneration();
-            internalNode.childAt(cursor, childPos, stableGeneration, unstableGeneration, childGeneration);
+            var pointer = internalNode.childWithGenerationAt(cursor, childPos, stableGeneration, unstableGeneration);
             overwriteGSPP(
                     cursor,
                     GBPTreePointerType.child(childPos).offset(internalNode),
-                    childGeneration.generation,
+                    pointer.generation(),
                     childPointer);
         };
     }
@@ -162,7 +161,7 @@ public final class GBPTreeCorruption {
             var newCount = leafNode.removeKeyValueAt(
                     cursor, higherKeyPos, keyCount, stableGeneration1, unstableGeneration1, NULL_CONTEXT);
             TreeNodeUtil.setKeyCount(cursor, newCount);
-            leafNode.defragment(cursor, newCount, NULL_CONTEXT);
+            leafNode.defragment(cursor, newCount, stableGeneration1, unstableGeneration1, NULL_CONTEXT);
 
             // Insert key and value in lower position
             long stableGeneration = treeState.stableGeneration();
@@ -183,11 +182,10 @@ public final class GBPTreeCorruption {
             // Record key and right child on higher position together with generation of child pointer
             KEY key = layout.newKey();
             internalNode.keyAt(cursor, key, higherKeyPos, NULL_CONTEXT);
-            final GenerationKeeper childPointerGeneration = new GenerationKeeper();
             long stableGeneration2 = treeState.stableGeneration();
             long unstableGeneration2 = treeState.unstableGeneration();
-            long rightChild = internalNode.childAt(
-                    cursor, higherKeyPos + 1, stableGeneration2, unstableGeneration2, childPointerGeneration);
+            var rightChild = internalNode.childWithGenerationAt(
+                    cursor, higherKeyPos + 1, stableGeneration2, unstableGeneration2);
 
             // Remove key and right child, may need to defragment node to make sure we have room for insert later
             long stableGeneration1 = treeState.stableGeneration();
@@ -203,7 +201,7 @@ public final class GBPTreeCorruption {
             internalNode.insertKeyAndRightChildAt(
                     cursor,
                     key,
-                    rightChild,
+                    rightChild.pointer(),
                     lowerKeyPos,
                     keyCount - 1,
                     stableGeneration,
@@ -213,36 +211,33 @@ public final class GBPTreeCorruption {
 
             // Overwrite the newly inserted child to reset the generation
             final int childOffset = internalNode.childOffset(lowerKeyPos + 1);
-            overwriteGSPP(cursor, childOffset, childPointerGeneration.generation, rightChild);
+            overwriteGSPP(cursor, childOffset, rightChild.generation(), rightChild.pointer());
         };
     }
 
-    public static <KEY, VALUE> PageCorruption<KEY, VALUE> swapChildOrder(
-            int firstChildPos, int secondChildPos, int keyCount) {
+    public static <KEY, VALUE> PageCorruption<KEY, VALUE> swapChildOrder(int firstChildPos, int secondChildPos) {
         return (cursor, layout, leafNode, internalNode, treeState) -> {
             // Read first and second child together with generation
-            final GenerationKeeper firstChildGeneration = new GenerationKeeper();
             long stableGeneration1 = treeState.stableGeneration();
             long unstableGeneration1 = treeState.unstableGeneration();
-            long firstChild = internalNode.childAt(
-                    cursor, firstChildPos, stableGeneration1, unstableGeneration1, firstChildGeneration);
-            final GenerationKeeper secondChildGeneration = new GenerationKeeper();
+            var firstChild =
+                    internalNode.childWithGenerationAt(cursor, firstChildPos, stableGeneration1, unstableGeneration1);
             long stableGeneration = treeState.stableGeneration();
             long unstableGeneration = treeState.unstableGeneration();
-            long secondChild = internalNode.childAt(
-                    cursor, secondChildPos, stableGeneration, unstableGeneration, secondChildGeneration);
+            var secondChild =
+                    internalNode.childWithGenerationAt(cursor, secondChildPos, stableGeneration, unstableGeneration);
 
             // Overwrite respective child with the other
             overwriteGSPP(
                     cursor,
                     GBPTreePointerType.child(firstChildPos).offset(internalNode),
-                    secondChildGeneration.generation,
-                    secondChild);
+                    secondChild.generation(),
+                    secondChild.pointer());
             overwriteGSPP(
                     cursor,
                     GBPTreePointerType.child(secondChildPos).offset(internalNode),
-                    firstChildGeneration.generation,
-                    firstChild);
+                    firstChild.generation(),
+                    firstChild.pointer());
         };
     }
 
@@ -257,7 +252,7 @@ public final class GBPTreeCorruption {
             long unstableGeneration1 = treeState.unstableGeneration();
             leafNode.removeKeyValueAt(cursor, keyPos, keyCount, stableGeneration1, unstableGeneration1, NULL_CONTEXT);
             TreeNodeUtil.setKeyCount(cursor, keyCount - 1);
-            leafNode.defragment(cursor, keyCount - 1, NULL_CONTEXT);
+            leafNode.defragment(cursor, keyCount - 1, stableGeneration1, unstableGeneration1, NULL_CONTEXT);
 
             // Insert new key and value
             long stableGeneration = treeState.stableGeneration();
@@ -345,13 +340,13 @@ public final class GBPTreeCorruption {
 
     public static <KEY, VALUE> IndexCorruption<KEY, VALUE> addFreelistEntry(long releasedId) {
         return (pagedFile, layout, leafNode, internalNode, treeState) -> {
-            FreeListIdProvider freelist = getFreelist(pagedFile, treeState);
+            FreelistIdProvider freelist = getFreelist(pagedFile, treeState);
             var cursorCreator = bind(pagedFile, PagedFile.PF_SHARED_WRITE_LOCK, NULL_CONTEXT);
             freelist.releaseId(treeState.stableGeneration(), treeState.unstableGeneration(), releasedId, cursorCreator);
             freelist.flush(treeState.stableGeneration(), treeState.unstableGeneration(), cursorCreator);
             try (PageCursor cursor = pagedFile.io(0, PagedFile.PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
                 goTo(cursor, "", treeState.pageId());
-                FreeListIdProvider.FreelistMetaData freelistMetaData = freelist.metaData();
+                FreelistIdProvider.FreelistMetaData freelistMetaData = freelist.metaData();
                 TreeState.write(
                         cursor,
                         treeState.stableGeneration(),
@@ -393,26 +388,23 @@ public final class GBPTreeCorruption {
         return (pagedFile, layout, leafNode, internalNode, treeState) -> {
             try (PageCursor cursor = pagedFile.io(0, PagedFile.PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
                 goTo(cursor, "", otherInternalNode);
-                final GenerationKeeper generationKeeper = new GenerationKeeper();
                 long stableGeneration = treeState.stableGeneration();
                 long unstableGeneration = treeState.unstableGeneration();
-                final long child = internalNode.childAt(
-                        cursor, otherChildPos, stableGeneration, unstableGeneration, generationKeeper);
+                var child =
+                        internalNode.childWithGenerationAt(cursor, otherChildPos, stableGeneration, unstableGeneration);
 
                 goTo(cursor, "", targetInternalNode);
                 overwriteGSPP(
                         cursor,
                         GBPTreePointerType.child(targetChildPos).offset(internalNode),
-                        generationKeeper.generation,
-                        child);
+                        child.generation(),
+                        child.pointer());
             }
         };
     }
 
     public static <KEY, VALUE> PageCorruption<KEY, VALUE> setKeyCount(int keyCount) {
-        return (cursor, layout, leafNode, internalNode, treeState) -> {
-            cursor.putInt(BYTE_POS_KEYCOUNT, keyCount);
-        };
+        return (cursor, layout, leafNode, internalNode, treeState) -> cursor.putInt(BYTE_POS_KEYCOUNT, keyCount);
     }
 
     public static <KEY, VALUE> PageCorruption<KEY, VALUE> setHighestReasonableKeyCount() {
@@ -457,14 +449,14 @@ public final class GBPTreeCorruption {
         };
     }
 
-    private static FreeListIdProvider getFreelist(PagedFile pagedFile, TreeState treeState) {
-        FreeListIdProvider freelist = new FreeListIdProvider(pagedFile.payloadSize());
+    private static FreelistIdProvider getFreelist(PagedFile pagedFile, TreeState treeState) {
+        FreelistIdProvider freelist = new FreelistIdProvider(pagedFile);
         freelist.initialize(
                 treeState.lastId(),
                 treeState.freeListWritePageId(),
                 treeState.freeListReadPageId(),
                 treeState.freeListWritePos(),
-                0);
+                treeState.freeListReadPos());
         return freelist;
     }
 

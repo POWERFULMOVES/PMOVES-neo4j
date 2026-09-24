@@ -29,7 +29,6 @@ import org.neo4j.cypher.internal.ast.Return
 import org.neo4j.cypher.internal.ast.ShowServers
 import org.neo4j.cypher.internal.ast.Statements
 import org.neo4j.cypher.internal.ast.Yield
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
 import org.neo4j.cypher.internal.expressions.ListLiteral
 import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.symbols.CTAny
@@ -115,42 +114,27 @@ class ServerManagementCommandParserTest extends AdministrationAndSchemaCommandPa
   }
 
   test("SHOW SERVERS RETURN *") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          "Invalid input 'RETURN': expected \"WHERE\", \"YIELD\" or <EOF> (line 1, column 14 (offset: 13))"
-        )
-      case _ => _.withSyntaxError(
-          """Invalid input 'RETURN': expected 'WHERE', 'YIELD' or <EOF> (line 1, column 14 (offset: 13))
-            |"SHOW SERVERS RETURN *"
-            |              ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'RETURN': expected 'WHERE', 'YIELD' or <EOF> (line 1, column 14 (offset: 13))
+        |"SHOW SERVERS RETURN *"
+        |              ^""".stripMargin
+    )
   }
 
   test("SHOW SERVERS 'name'") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          "Invalid input 'name': expected \"WHERE\", \"YIELD\" or <EOF> (line 1, column 14 (offset: 13))"
-        )
-      case _ => _.withSyntaxError(
-          """Invalid input ''name'': expected 'WHERE', 'YIELD' or <EOF> (line 1, column 14 (offset: 13))
-            |"SHOW SERVERS 'name'"
-            |              ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input ''name'': expected 'WHERE', 'YIELD' or <EOF> (line 1, column 14 (offset: 13))
+        |"SHOW SERVERS 'name'"
+        |              ^""".stripMargin
+    )
   }
 
   test("SHOW SERVER 'name'") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          "Invalid input 'name': expected \"WHERE\", \"YIELD\" or <EOF> (line 1, column 13 (offset: 12))"
-        )
-      case _ => _.withSyntaxError(
-          """Invalid input ''name'': expected 'WHERE', 'YIELD' or <EOF> (line 1, column 13 (offset: 12))
-            |"SHOW SERVER 'name'"
-            |             ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input ''name'': expected 'WHERE', 'YIELD' or <EOF> (line 1, column 13 (offset: 12))
+        |"SHOW SERVER 'name'"
+        |             ^""".stripMargin
+    )
   }
 
   // ENABLE
@@ -161,78 +145,66 @@ class ServerManagementCommandParserTest extends AdministrationAndSchemaCommandPa
 
   test("ENABLE SERVER $name OPTIONS { tags: ['snake', 'flower'] }") {
     val listLiteral = ListLiteral(List(literalString("snake"), literalString("flower")))(InputPosition(36, 1, 37))
-    val optionsMap = OptionsMap(Map("tags" -> listLiteral))
+    val optionsMap = OptionsMap(Map("tags" -> listLiteral))(pos)
     assertAst(EnableServer(Right(stringParam("name")), optionsMap)(defaultPos))
   }
 
   test("ENABLE SERVER 'name' OPTIONS { modeConstraint: $mode }") {
-    val optionsMap = OptionsMap(Map("modeConstraint" -> parameter("mode", CTAny)))
+    val optionsMap = OptionsMap(Map("modeConstraint" -> parameter("mode", CTAny)))(pos)
     assertAst(EnableServer(literal("name"), optionsMap)(defaultPos))
   }
 
   test("ENABLE SERVER 'name' OPTIONS $op") {
-    val optionsParam = OptionsParam(parameter("op", CTMap))
+    val optionsParam = OptionsParam(parameter("op", CTMap))(pos)
     assertAst(EnableServer(literal("name"), optionsParam)(defaultPos))
   }
 
   test("ENABLE SERVER name") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("""Invalid input 'name': expected "\"", "\'" or a parameter""")
-      case _ => _.withSyntaxError(
-          """Invalid input 'name': expected a parameter or a string (line 1, column 15 (offset: 14))
-            |"ENABLE SERVER name"
-            |               ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'name': expected a parameter or a string (line 1, column 15 (offset: 14))
+        |"ENABLE SERVER name"
+        |               ^""".stripMargin
+    )
   }
 
   test("ENABLE SERVER") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("""Invalid input '': expected "\"", "\'" or a parameter""")
-      case _ => _.withSyntaxError(
-          """Invalid input '': expected a parameter or a string (line 1, column 14 (offset: 13))
-            |"ENABLE SERVER"
-            |              ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '': expected a parameter or a string (line 1, column 14 (offset: 13))
+        |"ENABLE SERVER"
+        |              ^""".stripMargin
+    )
   }
 
   // ALTER
 
   test("ALTER SERVER 'name' SET OPTIONS { modeConstraint: 'PRIMARY'}") {
-    val optionsMap = OptionsMap(Map("modeConstraint" -> literalString("PRIMARY")))
+    val optionsMap = OptionsMap(Map("modeConstraint" -> literalString("PRIMARY")))(pos)
     assertAst(AlterServer(literal("name"), optionsMap)(defaultPos))
   }
 
   test("ALTER SERVER $name SET OPTIONS {}") {
-    val optionsMap = OptionsMap(Map.empty)
+    val optionsMap = OptionsMap(Map.empty)(pos)
     assertAst(AlterServer(Right(stringParam("name")), optionsMap)(defaultPos))
   }
 
   test("ALTER SERVER 'name' SET OPTIONS $map") {
-    assertAst(AlterServer(literal("name"), OptionsParam(parameter("map", CTMap)))(defaultPos))
+    assertAst(AlterServer(literal("name"), OptionsParam(parameter("map", CTMap))(pos))(defaultPos))
   }
 
   test("ALTER SERVER 'name'") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("""Invalid input '': expected "SET""")
-      case _ => _.withSyntaxError(
-          """Invalid input '': expected 'SET' (line 1, column 20 (offset: 19))
-            |"ALTER SERVER 'name'"
-            |                    ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '': expected 'SET' (line 1, column 20 (offset: 19))
+        |"ALTER SERVER 'name'"
+        |                    ^""".stripMargin
+    )
   }
 
   test("ALTER SERVER 'name' SET OPTIONS") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("""Invalid input '': expected "{" or a parameter""")
-      case _ => _.withSyntaxError(
-          """Invalid input '': expected a parameter or '{' (line 1, column 32 (offset: 31))
-            |"ALTER SERVER 'name' SET OPTIONS"
-            |                                ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '': expected a parameter or '{' (line 1, column 32 (offset: 31))
+        |"ALTER SERVER 'name' SET OPTIONS"
+        |                                ^""".stripMargin
+    )
   }
 
   // RENAME
@@ -246,25 +218,19 @@ class ServerManagementCommandParserTest extends AdministrationAndSchemaCommandPa
   }
 
   test("RENAME SERVER `bad,ger` TO $to") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("""Invalid input 'bad,ger': expected "\"", "\'" or a parameter""")
-      case _ => _.withSyntaxError(
-          """Invalid input '`bad,ger`': expected a parameter or a string (line 1, column 15 (offset: 14))
-            |"RENAME SERVER `bad,ger` TO $to"
-            |               ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '`bad,ger`': expected a parameter or a string (line 1, column 15 (offset: 14))
+        |"RENAME SERVER `bad,ger` TO $to"
+        |               ^""".stripMargin
+    )
   }
 
   test("RENAME SERVER 'badger' $to") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '$': expected \"TO\"")
-      case _ => _.withSyntaxError(
-          """Invalid input '$': expected 'TO' (line 1, column 24 (offset: 23))
-            |"RENAME SERVER 'badger' $to"
-            |                        ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '$': expected 'TO' (line 1, column 24 (offset: 23))
+        |"RENAME SERVER 'badger' $to"
+        |                        ^""".stripMargin
+    )
   }
 
   // DROP
@@ -278,29 +244,19 @@ class ServerManagementCommandParserTest extends AdministrationAndSchemaCommandPa
   }
 
   test("DROP SERVER name") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          """Invalid input 'name': expected "\"", "\'" or a parameter (line 1, column 13 (offset: 12))"""
-        )
-      case _ => _.withSyntaxError(
-          """Invalid input 'name': expected a parameter or a string (line 1, column 13 (offset: 12))
-            |"DROP SERVER name"
-            |             ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'name': expected a parameter or a string (line 1, column 13 (offset: 12))
+        |"DROP SERVER name"
+        |             ^""".stripMargin
+    )
   }
 
   test("DROP SERVER") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          """Invalid input '': expected "\"", "\'" or a parameter (line 1, column 12 (offset: 11))"""
-        )
-      case _ => _.withSyntaxError(
-          """Invalid input '': expected a parameter or a string (line 1, column 12 (offset: 11))
-            |"DROP SERVER"
-            |            ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '': expected a parameter or a string (line 1, column 12 (offset: 11))
+        |"DROP SERVER"
+        |            ^""".stripMargin
+    )
   }
 
   // DEALLOCATE
@@ -324,14 +280,11 @@ class ServerManagementCommandParserTest extends AdministrationAndSchemaCommandPa
   }
 
   test("DEALLOCATE SERVERS $name, 'foo'") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'SERVERS': expected \"DATABASE\" or \"DATABASES\"")
-      case _ => _.withSyntaxError(
-          """Invalid input 'SERVERS': expected 'DATABASE' or 'DATABASES' (line 1, column 12 (offset: 11))
-            |"DEALLOCATE SERVERS $name, 'foo'"
-            |            ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'SERVERS': expected 'DATABASE' or 'DATABASES' (line 1, column 12 (offset: 11))
+        |"DEALLOCATE SERVERS $name, 'foo'"
+        |            ^""".stripMargin
+    )
   }
 
   // REALLOCATE
@@ -349,15 +302,10 @@ class ServerManagementCommandParserTest extends AdministrationAndSchemaCommandPa
   }
 
   test("REALLOCATE SERVERS") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          "Invalid input 'SERVERS': expected \"DATABASE\" or \"DATABASES\" (line 1, column 12 (offset: 11))"
-        )
-      case _ => _.withSyntaxError(
-          """Invalid input 'SERVERS': expected 'DATABASE' or 'DATABASES' (line 1, column 12 (offset: 11))
-            |"REALLOCATE SERVERS"
-            |            ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'SERVERS': expected 'DATABASE' or 'DATABASES' (line 1, column 12 (offset: 11))
+        |"REALLOCATE SERVERS"
+        |            ^""".stripMargin
+    )
   }
 }

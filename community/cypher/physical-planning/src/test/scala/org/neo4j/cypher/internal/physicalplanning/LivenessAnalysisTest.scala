@@ -27,7 +27,6 @@ import org.neo4j.cypher.internal.expressions.UnPositionedVariable.varFor
 import org.neo4j.cypher.internal.frontend.phases.FieldSignature
 import org.neo4j.cypher.internal.frontend.phases.ProcedureReadOnlyAccess
 import org.neo4j.cypher.internal.frontend.phases.ProcedureSignature
-import org.neo4j.cypher.internal.frontend.phases.QualifiedName
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.pos
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setNodeProperty
@@ -39,11 +38,29 @@ import org.neo4j.cypher.internal.physicalplanning.PhysicalPlanningAttributes.Liv
 import org.neo4j.cypher.internal.util.Foldable.SkipChildren
 import org.neo4j.cypher.internal.util.Foldable.TraverseChildren
 import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.cypher.internal.util.Namespace
+import org.neo4j.cypher.internal.util.ProcedureName
 import org.neo4j.cypher.internal.util.attribution.Id
 import org.neo4j.cypher.internal.util.symbols.AnyType
 import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 
 class LivenessAnalysisTest extends CypherFunSuite {
+
+  test("ensure leaf plans copy their variables to parent plans") {
+    // https://github.com/neo4j/neo4j/issues/13568
+    new PlanWithLiveAsserts()
+      .produceResults("c").expectLive("c")
+      .apply().expectLive("c")
+      .|.union().expectLive("c")
+      .|.|.distinct("a AS c").expectLive("a", "c")
+      .|.|.argument("a").expectLive("a", "c")
+      .|.allNodeScan("c").expectLive("a", "c")
+      .sort("b ASC").expectLive("a", "b")
+      .projection("0 AS b").expectLive("a", "b")
+      .projection("0 AS a").expectLive("a")
+      .argument().expectLive()
+      .assertCorrectLiveness()
+  }
 
   test("simple eager") {
     new PlanWithLiveAsserts()
@@ -237,7 +254,7 @@ class LivenessAnalysisTest extends CypherFunSuite {
   test("procedure call") {
     val resolver = new LogicalPlanResolver(procedures =
       Set(ProcedureSignature(
-        QualifiedName(Seq("test"), "proc"),
+        ProcedureName(Namespace(List("test"))(InputPosition.NONE), "proc")(InputPosition.NONE),
         IndexedSeq(FieldSignature("input", AnyType(isNullable = true)(InputPosition.NONE))),
         Some(IndexedSeq(FieldSignature("output", AnyType(isNullable = true)(InputPosition.NONE)))),
         None,
@@ -317,7 +334,7 @@ class LivenessAnalysisTest extends CypherFunSuite {
     new PlanWithLiveAsserts()
       .produceResults("x").expectLive("x")
       .eager().expectLive("x")
-      .nestedPlanCollectExpressionProjection("x", "b.prop").expectLive("UNNAMED1", "a", "b", "x")
+      .nestedPlanCollectExpressionProjection("x", "b.prop").expectLive("a", "b", "x")
       .|.eager()
       .|.expand("(a)-->(b)")
       .|.allNodeScan("a")
@@ -344,7 +361,7 @@ class LivenessAnalysisTest extends CypherFunSuite {
     new PlanWithLiveAsserts()
       .produceResults("r", "x").expectLive("r", "x")
       .eager().expectLive("r", "x")
-      .nestedPlanExistsExpressionProjection("r").expectLive("UNNAMED1", "a", "b", "r", "x")
+      .nestedPlanExistsExpressionProjection("r").expectLive("a", "b", "r", "x")
       .|.eager()
       .|.expand("(a)-->(b)")
       .|.allNodeScan("a")
@@ -389,7 +406,7 @@ class LivenessAnalysisTest extends CypherFunSuite {
       .|.|.distinct("b+1 as x").expectLive("a", "b", "c", "x")
       .|.|.argument("a", "b", "c").expectLive("a", "b", "c")
       .|.projection("3 as c").expectLive("a", "b", "c")
-      .|.argument("a", "b").expectLive("a", "b")
+      .|.argument("a", "b").expectLive("a", "b", "c")
       .projection("1 as a", "2 as b").expectLive("a", "b")
       .argument().expectLive()
       .assertCorrectLiveness()

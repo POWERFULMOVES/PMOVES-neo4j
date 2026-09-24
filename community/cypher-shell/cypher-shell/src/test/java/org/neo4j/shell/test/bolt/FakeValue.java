@@ -27,6 +27,7 @@ import java.time.OffsetTime;
 import java.time.ZonedDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.function.Function;
 import org.neo4j.driver.Value;
 import org.neo4j.driver.exceptions.value.Uncoercible;
@@ -37,6 +38,8 @@ import org.neo4j.driver.types.Path;
 import org.neo4j.driver.types.Point;
 import org.neo4j.driver.types.Relationship;
 import org.neo4j.driver.types.Type;
+import org.neo4j.driver.types.UnsupportedType;
+import org.neo4j.driver.types.Vector;
 
 /**
  * A fake value
@@ -286,6 +289,21 @@ class FakeValue implements Value {
     @Override
     public Point asPoint() {
         throw new Uncoercible(getClass().getSimpleName(), "Point");
+    }
+
+    @Override
+    public Vector asVector() {
+        throw new Uncoercible(getClass().getSimpleName(), "Vector");
+    }
+
+    @Override
+    public UnsupportedType asUnsupportedType() {
+        throw new Uncoercible(getClass().getSimpleName(), "UnsupportedType");
+    }
+
+    @Override
+    public UUID asUUID() {
+        throw new Uncoercible(getClass().getSimpleName(), "UUID");
     }
 
     @Override

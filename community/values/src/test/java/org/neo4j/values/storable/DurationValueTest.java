@@ -26,10 +26,13 @@ import static java.time.temporal.ChronoUnit.MONTHS;
 import static java.time.temporal.ChronoUnit.NANOS;
 import static java.time.temporal.ChronoUnit.SECONDS;
 import static java.util.Collections.singletonList;
-import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.neo4j.internal.helpers.collection.Pair.pair;
 import static org.neo4j.values.storable.DateTimeValue.datetime;
 import static org.neo4j.values.storable.DateValue.date;
@@ -38,10 +41,14 @@ import static org.neo4j.values.storable.DurationValue.between;
 import static org.neo4j.values.storable.DurationValue.duration;
 import static org.neo4j.values.storable.DurationValue.durationBetween;
 import static org.neo4j.values.storable.DurationValue.parse;
+import static org.neo4j.values.storable.DurationValue.parsePattern;
 import static org.neo4j.values.storable.LocalTimeValue.localTime;
 import static org.neo4j.values.storable.TimeValue.time;
+import static org.neo4j.values.storable.Values.NO_VALUE;
+import static org.neo4j.values.storable.Values.booleanValue;
 import static org.neo4j.values.storable.Values.doubleValue;
 import static org.neo4j.values.storable.Values.longValue;
+import static org.neo4j.values.storable.Values.stringValue;
 import static org.neo4j.values.utils.AnyValueTestUtil.assertEqual;
 import static org.neo4j.values.utils.AnyValueTestUtil.assertNotEqual;
 
@@ -51,10 +58,17 @@ import java.time.temporal.Temporal;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.neo4j.exceptions.ArithmeticException;
 import org.neo4j.exceptions.InvalidArgumentException;
 import org.neo4j.exceptions.TemporalParseException;
+import org.neo4j.exceptions.UnsupportedTemporalUnitException;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.internal.helpers.collection.Pair;
+import org.neo4j.values.AnyValue;
 import org.neo4j.values.utils.TemporalUtil;
+import org.neo4j.values.virtual.MapValue;
+import org.neo4j.values.virtual.VirtualValues;
 
 class DurationValueTest {
     @Test
@@ -315,6 +329,61 @@ class DurationValueTest {
     }
 
     @Test
+    void shouldParseDurationPatternWithLiterals() {
+        assertEquals(duration(0, 0, 3600, 0), parsePattern(stringValue("1 hours"), stringValue("h 'hours'")));
+        assertEquals(duration(16, 25, 0, 0), parsePattern(stringValue("P1Y4M25D"), stringValue("'P'y'Y'M'M'd'D'")));
+        assertEquals(duration(0, 0, 3, 0), parsePattern(stringValue("3𓀡0"), stringValue("s'𓀡'h")));
+        assertEquals(duration(0, 0, 3600, 0), parsePattern(stringValue("1  0"), stringValue("h '' m")));
+        assertEquals(duration(0, 0, 3600, 0), parsePattern(stringValue("1 ' 0"), stringValue("h '''' m")));
+        // unescaped non-token characters are literals too, matched like escaped ones
+        assertEquals(duration(16, 3, 0, 0), parsePattern(stringValue("1-4-3"), stringValue("y-M-d")));
+        assertEquals(duration(0, 0, 36610, 0), parsePattern(stringValue("10:10:10"), stringValue("h:m:s")));
+    }
+
+    @Test
+    void shouldNotParseDurationPatternWhenEscapedLiteralOverrunsInput() {
+        assertThrows(TemporalParseException.class, () -> parsePattern(stringValue("1"), stringValue("'ab'H H")));
+        assertThrows(TemporalParseException.class, () -> parsePattern(stringValue("1"), stringValue("'a'H")));
+        assertThrows(TemporalParseException.class, () -> parsePattern(stringValue("1"), stringValue("''''H H")));
+        assertThrows(TemporalParseException.class, () -> parsePattern(stringValue("1"), stringValue("''''H")));
+        assertThrows(TemporalParseException.class, () -> parsePattern(stringValue("1"), stringValue("'ab'")));
+        // a literal that consumes the input exactly leaves nothing for a following field token
+        assertThrows(TemporalParseException.class, () -> parsePattern(stringValue("ab"), stringValue("'ab'H m")));
+    }
+
+    @Test
+    void shouldNotParseDurationPatternWhenLiteralDoesNotMatchInput() {
+        assertThrows(TemporalParseException.class, () -> parsePattern(stringValue("b1"), stringValue("'a'H")));
+        assertThrows(TemporalParseException.class, () -> parsePattern(stringValue("1a0"), stringValue("h 'b' m")));
+        // unescaped non-token characters must match the input like escaped ones
+        assertThrows(TemporalParseException.class, () -> parsePattern(stringValue("1q14 5"), stringValue("y q M")));
+        assertThrows(TemporalParseException.class, () -> parsePattern(stringValue("1_4"), stringValue("y-M")));
+        assertThrows(TemporalParseException.class, () -> parsePattern(stringValue("1.2"), stringValue("h:m")));
+        assertThrows(TemporalParseException.class, () -> parsePattern(stringValue("1-"), stringValue("y --")));
+    }
+
+    @Test
+    void shouldNotParseDurationPatternWhenTrailingTokenHasNoInput() {
+        assertThrows(TemporalParseException.class, () -> parsePattern(stringValue("ab"), stringValue("'ab'H")));
+        assertThrows(TemporalParseException.class, () -> parsePattern(stringValue("a"), stringValue("'a'H")));
+        assertThrows(
+                TemporalParseException.class, () -> parsePattern(stringValue("1 years"), stringValue("y 'years' q")));
+        assertThrows(TemporalParseException.class, () -> parsePattern(stringValue(""), stringValue("H")));
+    }
+
+    @Test
+    void shouldNotParseDurationPatternWithUnbalancedEscapes() {
+        // the malformed pattern is reported even though the input would also fail to match
+        assertThrows(InvalidArgumentException.class, () -> parsePattern(stringValue("1 ' 1"), stringValue("h ' m")));
+        assertThrows(InvalidArgumentException.class, () -> parsePattern(stringValue("1 ' 1"), stringValue("h ''' m")));
+    }
+
+    @Test
+    void shouldTreatPatternWithoutFieldTokensAsZeroDuration() {
+        assertEquals(duration(0, 0, 0, 0), parsePattern(stringValue("ab"), stringValue("'ab'")));
+    }
+
+    @Test
     void shouldWriteDuration() {
         // given
         for (DurationValue duration : new DurationValue[] {
@@ -348,6 +417,152 @@ class DurationValueTest {
         assertEquals(LocalDate.of(2017, 12, 4), LocalDate.of(2017, 12, 4).minus(parse("PT24H-1S")), "seconds");
         assertEquals(LocalDate.of(2017, 12, 5), LocalDate.of(2017, 12, 4).plus(parse("P1D")), "days");
         assertEquals(LocalDate.of(2017, 12, 3), LocalDate.of(2017, 12, 4).minus(parse("P1D")), "days");
+    }
+
+    @Test
+    void shouldFailOnOverflowWhenAddingDurationToTemporal() {
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(
+                        () -> DurationValue.MAX_VALUE.addTo(LocalDate.of(2017, 12, 3)))
+                .isInstanceOf(ArithmeticException.class)
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22003)
+                .hasStatusDescription(
+                        "error: data exception - numeric value out of range. The numeric value 2017-12-03 + 106751991167300 Days is outside the required range.")
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N28)
+                .hasStatusDescription(
+                        "error: data exception - overflow error. The result of the operation '+' has caused an overflow.");
+    }
+
+    @Test
+    void shouldFailOnOverflowWhenSubtractingDurationFromTemporal() {
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(
+                        () -> DurationValue.MAX_VALUE.subtractFrom(LocalDate.of(2017, 12, 3)))
+                .isInstanceOf(ArithmeticException.class)
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22003)
+                .hasStatusDescription(
+                        "error: data exception - numeric value out of range. The numeric value 2017-12-03 - 106751991167300 Days is outside the required range.")
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N28)
+                .hasStatusDescription(
+                        "error: data exception - overflow error. The result of the operation '-' has caused an overflow.");
+    }
+
+    @Test
+    void shouldFailOnWrongTypedDurationField() {
+        record Case(MapValue map, String component, String valueType) {}
+
+        List<Case> cases = List.of(
+                // Every writable duration field is rejected when given a non-number value.
+                new Case(field("years", booleanValue(true)), "years", "BOOLEAN"),
+                new Case(field("months", stringValue("abc")), "months", "STRING"),
+                new Case(field("weeks", booleanValue(false)), "weeks", "BOOLEAN"),
+                new Case(field("days", stringValue("abc")), "days", "STRING"),
+                new Case(field("hours", booleanValue(true)), "hours", "BOOLEAN"),
+                new Case(field("minutes", stringValue("abc")), "minutes", "STRING"),
+                new Case(field("seconds", booleanValue(true)), "seconds", "BOOLEAN"),
+                new Case(field("milliseconds", stringValue("abc")), "milliseconds", "STRING"),
+                new Case(field("microseconds", booleanValue(true)), "microseconds", "BOOLEAN"),
+                new Case(field("nanoseconds", stringValue("abc")), "nanoseconds", "STRING"),
+                // Non-number value types other than BOOLEAN/STRING are reported by their Cypher type name.
+                new Case(field("hours", date(2020, 1, 1)), "hours", "DATE"),
+                new Case(field("seconds", VirtualValues.list(longValue(1), longValue(2))), "seconds", "LIST<INTEGER>"),
+                // With several fields set, the first wrong-typed field (in decreasing-unit order) is reported.
+                new Case(
+                        VirtualValues.map(
+                                new String[] {"hours", "minutes"}, new AnyValue[] {longValue(10), stringValue("abc")}),
+                        "minutes",
+                        "STRING"),
+                new Case(
+                        VirtualValues.map(
+                                new String[] {"days", "seconds"}, new AnyValue[] {longValue(2), booleanValue(true)}),
+                        "seconds",
+                        "BOOLEAN"),
+                // A valid floating-point field alongside a wrong-typed field still reports the wrong-typed one.
+                new Case(
+                        VirtualValues.map(
+                                new String[] {"weeks", "days"}, new AnyValue[] {doubleValue(1.5), stringValue("x")}),
+                        "days",
+                        "STRING"));
+
+        for (Case c : cases) {
+            ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> DurationValue.build(c.map()))
+                    .as("duration(%s)", c.map())
+                    .isInstanceOf(UnsupportedTemporalUnitException.class)
+                    .hasGqlStatus(GqlStatusInfoCodes.STATUS_22G08)
+                    .hasStatusDescription("error: data exception - invalid duration function field value")
+                    .gqlCause()
+                    .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N40)
+                    .hasStatusDescription("error: data exception - non-assignable temporal component. Cannot assign '"
+                            + c.component() + "' of a " + c.valueType() + ".");
+        }
+    }
+
+    private static MapValue field(String name, AnyValue value) {
+        return VirtualValues.map(new String[] {name}, new AnyValue[] {value});
+    }
+
+    private static MapValue fields(String k1, AnyValue v1, String k2, AnyValue v2) {
+        return VirtualValues.map(new String[] {k1, k2}, new AnyValue[] {v1, v2});
+    }
+
+    @Test
+    void shouldIgnoreNullDurationFields() {
+        // expected == null means the map should fail with "at least one field required" (22N30).
+        record Case(MapValue map, DurationValue expected) {}
+
+        String[] durationFields = {
+            "years", "months", "weeks", "days", "hours",
+            "minutes", "seconds", "milliseconds", "microseconds", "nanoseconds"
+        };
+
+        List<Case> cases = new ArrayList<>();
+
+        // A field explicitly set to null is ignored, so a lone null field behaves like an empty map (22N30).
+        for (String f : durationFields) {
+            cases.add(new Case(field(f, NO_VALUE), null));
+        }
+        // A map where every field is null also behaves like an empty map.
+        AnyValue[] allNull = new AnyValue[durationFields.length];
+        java.util.Arrays.fill(allNull, NO_VALUE);
+        cases.add(new Case(VirtualValues.map(durationFields.clone(), allNull), null));
+
+        // A null field is ignored while the remaining (non-null) field is still applied. Each field, in turn,
+        // is the null one, paired with a different anchor field so the anchor drives the resulting duration.
+        cases.add(new Case(fields("years", NO_VALUE, "months", longValue(1)), duration(1, 0, 0, 0)));
+        cases.add(new Case(fields("months", NO_VALUE, "days", longValue(2)), duration(0, 2, 0, 0)));
+        cases.add(new Case(fields("weeks", NO_VALUE, "days", longValue(3)), duration(0, 3, 0, 0)));
+        cases.add(new Case(fields("days", NO_VALUE, "hours", longValue(1)), duration(0, 0, 3600, 0)));
+        cases.add(new Case(fields("hours", NO_VALUE, "minutes", longValue(5)), duration(0, 0, 300, 0)));
+        cases.add(new Case(fields("minutes", NO_VALUE, "seconds", longValue(7)), duration(0, 0, 7, 0)));
+        cases.add(new Case(fields("seconds", NO_VALUE, "days", longValue(1)), duration(0, 1, 0, 0)));
+        cases.add(new Case(fields("milliseconds", NO_VALUE, "nanoseconds", longValue(5)), duration(0, 0, 0, 5)));
+        cases.add(new Case(fields("microseconds", NO_VALUE, "nanoseconds", longValue(5)), duration(0, 0, 0, 5)));
+        cases.add(new Case(fields("nanoseconds", NO_VALUE, "microseconds", longValue(5)), duration(0, 0, 0, 5000)));
+
+        // Combinations: several nulls ignored at once, nulls mixed with integral and with floating-point fields.
+        cases.add(new Case(
+                VirtualValues.map(
+                        new String[] {"days", "hours", "minutes"}, new AnyValue[] {longValue(2), NO_VALUE, NO_VALUE}),
+                duration(0, 2, 0, 0)));
+        cases.add(new Case(
+                VirtualValues.map(
+                        new String[] {"years", "months", "days"},
+                        new AnyValue[] {longValue(1), longValue(2), NO_VALUE}),
+                duration(14, 0, 0, 0)));
+        cases.add(new Case(fields("hours", doubleValue(1.5), "minutes", NO_VALUE), duration(0, 0, 5400, 0)));
+
+        for (Case c : cases) {
+            if (c.expected() == null) {
+                ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> DurationValue.build(c.map()))
+                        .as("duration(%s)", c.map())
+                        .isInstanceOf(InvalidArgumentException.class)
+                        .hasGqlStatus(GqlStatusInfoCodes.STATUS_22007)
+                        .gqlCause()
+                        .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N30);
+            } else {
+                assertEquals(c.expected(), DurationValue.build(c.map()), "duration(" + c.map() + ")");
+            }
+        }
     }
 
     @Test
@@ -592,6 +807,25 @@ class DurationValueTest {
     }
 
     @Test
+    public void testGqlInfoForDoubleToLongOverflowError() {
+        var exception = catchThrowableOfType(
+                org.neo4j.exceptions.ArithmeticException.class, () -> DurationValue.approximate(1e30, 0, 0, 0));
+        assertEquals("long overflow", exception.getMessage());
+        assertEquals("22003", exception.gqlStatus());
+        assertEquals(
+                "error: data exception - numeric value out of range. The numeric value 1.0E30 is outside the required range.",
+                exception.statusDescription());
+        assertFalse(exception.cause().isEmpty());
+
+        var exceptionCause = exception.cause().get();
+        assertEquals("22N28", exceptionCause.gqlStatus());
+        assertEquals(
+                "error: data exception - overflow error. The result of the operation 'Double to Long' has caused an overflow.",
+                exceptionCause.statusDescription());
+        assertTrue(exceptionCause.cause().isEmpty());
+    }
+
+    @Test
     void shouldNotThrowWhenInsideOverflowLimit() {
         // when
         duration(0, 0, Long.MAX_VALUE, 999_999_999);
@@ -662,69 +896,70 @@ class DurationValueTest {
     @Test
     void shouldThrowOnParsingYearsOverflow() {
         long years = Long.MAX_VALUE;
-        InvalidArgumentException e =
-                assertThrows(InvalidArgumentException.class, () -> DurationValue.parse("P" + years + "Y"));
-        assertThat(e.getMessage()).contains("Invalid value for duration").contains("years=" + years);
+        assertThatThrownBy(() -> DurationValue.parse("P" + years + "Y"))
+                .isInstanceOf(InvalidArgumentException.class)
+                .hasMessageContaining("Invalid value for duration")
+                .hasMessageContaining("years=" + years);
     }
 
     @Test
     void shouldThrowOnParsingYearAndMonthOverflow() {
         long years = 1;
         long months = Long.MAX_VALUE;
-        InvalidArgumentException e = assertThrows(
-                InvalidArgumentException.class, () -> DurationValue.parse("P" + years + "Y" + months + "M"));
-        assertThat(e.getMessage())
-                .contains("Invalid value for duration")
-                .contains("years=" + years)
-                .contains("months=" + months);
+        assertThatThrownBy(() -> DurationValue.parse("P" + years + "Y" + months + "M"))
+                .isInstanceOf(InvalidArgumentException.class)
+                .hasMessageContaining("Invalid value for duration")
+                .hasMessageContaining("years=" + years)
+                .hasMessageContaining("months=" + months);
     }
 
     @Test
     void shouldThrowOnParsingWeeksOverflow() {
         long weeks = Long.MAX_VALUE;
-        InvalidArgumentException e =
-                assertThrows(InvalidArgumentException.class, () -> DurationValue.parse("P" + weeks + "W"));
-        assertThat(e.getMessage()).contains("Invalid value for duration").contains("weeks=" + weeks);
+        assertThatThrownBy(() -> DurationValue.parse("P" + weeks + "W"))
+                .isInstanceOf(InvalidArgumentException.class)
+                .hasMessageContaining("Invalid value for duration")
+                .hasMessageContaining("weeks=" + weeks);
     }
 
     @Test
     void shouldThrowOnParsingWeeksAndDaysOverflow() {
         long weeks = 1;
         long days = Long.MAX_VALUE;
-        InvalidArgumentException e =
-                assertThrows(InvalidArgumentException.class, () -> DurationValue.parse("P" + weeks + "W" + days + "D"));
-        assertThat(e.getMessage())
-                .contains("Invalid value for duration")
-                .contains("weeks=" + weeks)
-                .contains("days=" + days);
+        assertThatThrownBy(() -> DurationValue.parse("P" + weeks + "W" + days + "D"))
+                .isInstanceOf(InvalidArgumentException.class)
+                .hasMessageContaining("Invalid value for duration")
+                .hasMessageContaining("weeks=" + weeks)
+                .hasMessageContaining("days=" + days);
     }
 
     @Test
     void shouldThrowOnParsingHoursOverflow() {
         long hours = Long.MAX_VALUE;
-        InvalidArgumentException e =
-                assertThrows(InvalidArgumentException.class, () -> DurationValue.parse("PT" + hours + "H"));
-        assertThat(e.getMessage()).contains("Invalid value for duration").contains("hours=" + hours);
+        assertThatThrownBy(() -> DurationValue.parse("PT" + hours + "H"))
+                .isInstanceOf(InvalidArgumentException.class)
+                .hasMessageContaining("Invalid value for duration")
+                .hasMessageContaining("hours=" + hours);
     }
 
     @Test
     void shouldThrowOnParsingHoursAndSecondsOverflow() {
         long hours = 1;
         long seconds = Long.MAX_VALUE;
-        InvalidArgumentException e = assertThrows(
-                InvalidArgumentException.class, () -> DurationValue.parse("PT" + hours + "H" + seconds + "S"));
-        assertThat(e.getMessage())
-                .contains("Invalid value for duration")
-                .contains("hours=" + hours)
-                .contains("seconds=" + seconds);
+        assertThatThrownBy(() -> DurationValue.parse("PT" + hours + "H" + seconds + "S"))
+                .isInstanceOf(InvalidArgumentException.class)
+                .hasMessageContaining("Invalid value for duration")
+                .hasMessageContaining("hours=" + hours)
+                .hasMessageContaining("seconds=" + seconds);
     }
 
     @Test
     void shouldThrowOnMinutesOverflow() {
         long minutes = Long.MAX_VALUE;
-        InvalidArgumentException e =
-                assertThrows(InvalidArgumentException.class, () -> DurationValue.parse("PT" + minutes + "M"));
-        assertThat(e.getMessage()).contains("Invalid value for duration").contains("minutes=" + minutes);
+        assertThatThrownBy(() -> DurationValue.parse("PT" + minutes + "M"))
+                .isInstanceOf(InvalidArgumentException.class)
+                .hasMessageContaining("Invalid value for duration")
+                .hasMessageContaining("minutes=" + minutes);
     }
 
     @Test
@@ -745,14 +980,12 @@ class DurationValueTest {
     }
 
     private static void assertConstructorThrows(long months, long days, long seconds, long nanos) {
-        InvalidArgumentException e =
-                assertThrows(InvalidArgumentException.class, () -> duration(months, days, seconds, nanos));
-
-        assertThat(e.getMessage())
-                .contains("Invalid value for duration")
-                .contains("months=" + months)
-                .contains("days=" + days)
-                .contains("seconds=" + seconds)
-                .contains("nanos=" + nanos);
+        assertThatThrownBy(() -> duration(months, days, seconds, nanos))
+                .isInstanceOf(InvalidArgumentException.class)
+                .hasMessageContaining("Invalid value for duration")
+                .hasMessageContaining("months=" + months)
+                .hasMessageContaining("days=" + days)
+                .hasMessageContaining("seconds=" + seconds)
+                .hasMessageContaining("nanos=" + nanos);
     }
 }

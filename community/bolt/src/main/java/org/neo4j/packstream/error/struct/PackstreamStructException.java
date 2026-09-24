@@ -27,20 +27,12 @@ import org.neo4j.packstream.error.reader.PackstreamReaderException;
 public class PackstreamStructException extends PackstreamReaderException
         implements Status.HasStatus, ErrorGqlStatusObject {
 
-    public PackstreamStructException(String message) {
-        super(message);
+    protected PackstreamStructException(ErrorGqlStatusObject gqlStatusObject, String message) {
+        super(gqlStatusObject, ErrorMessageHolder.getMessage(gqlStatusObject, message), message);
     }
 
-    public PackstreamStructException(ErrorGqlStatusObject gqlStatusObject, String message) {
-        super(gqlStatusObject, ErrorMessageHolder.getMessage(gqlStatusObject, message));
-    }
-
-    public PackstreamStructException(String message, Throwable cause) {
-        super(message, cause);
-    }
-
-    public PackstreamStructException(ErrorGqlStatusObject gqlStatusObject, String message, Throwable cause) {
-        super(gqlStatusObject, ErrorMessageHolder.getMessage(gqlStatusObject, message), cause);
+    protected PackstreamStructException(ErrorGqlStatusObject gqlStatusObject, String message, Throwable cause) {
+        super(gqlStatusObject, ErrorMessageHolder.getMessage(gqlStatusObject, message), message, cause);
     }
 
     @Override

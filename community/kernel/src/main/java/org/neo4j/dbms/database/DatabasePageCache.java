@@ -22,6 +22,7 @@ package org.neo4j.dbms.database;
 import static java.util.Objects.requireNonNull;
 import static org.neo4j.configuration.GraphDatabaseInternalSettings.snapshot_query;
 import static org.neo4j.dbms.database.TicketMachine.Barrier.NO_BARRIER;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.PageCacheOpenOptions.CONTEXT_VERSION_UPDATES;
 
 import java.io.IOException;
@@ -39,6 +40,7 @@ import org.eclipse.collections.api.set.ImmutableSet;
 import org.neo4j.configuration.Config;
 import org.neo4j.dbms.database.TicketMachine.Barrier;
 import org.neo4j.dbms.database.TicketMachine.Ticket;
+import org.neo4j.io.async.AsyncBlockAccessor;
 import org.neo4j.io.pagecache.IOController;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.PageCursor;
@@ -46,8 +48,11 @@ import org.neo4j.io.pagecache.PagedFile;
 import org.neo4j.io.pagecache.buffer.IOBufferFactory;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.impl.muninn.EvictionBouncer;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.impl.muninn.VersionStorage;
 import org.neo4j.io.pagecache.monitoring.PageFileCounters;
+import org.neo4j.io.pagecache.segment.DatabaseSegmentTracker;
+import org.neo4j.io.pagecache.segment.FileSegmentTracker;
 import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.io.pagecache.tracing.FileMappedListener;
@@ -65,36 +70,51 @@ public class DatabasePageCache implements PageCache {
     private final Map<Path, DatabasePagedFile> uniqueDatabasePagedFiles = new ConcurrentHashMap<>();
     private final IOController ioController;
     private final List<FileMappedListener> mappedListeners = new CopyOnWriteArrayList<>();
+    private final DatabaseSegmentTracker pageCacheSegmentTracker;
     private final boolean useSnapshotEngine;
     private boolean closed;
     private final TicketMachine ticketMachine = new TicketMachine();
     private final VersionStorage versionStorage;
 
     public DatabasePageCache(
-            PageCache globalPageCache, IOController ioController, VersionStorage versionStorage, Config config) {
+            PageCache globalPageCache,
+            IOController ioController,
+            VersionStorage versionStorage,
+            DatabaseSegmentTracker databaseSegmentTracker,
+            Config config) {
         this.globalPageCache = requireNonNull(globalPageCache);
         this.ioController = requireNonNull(ioController);
         this.versionStorage = requireNonNull(versionStorage);
+        this.pageCacheSegmentTracker = databaseSegmentTracker;
         this.useSnapshotEngine = config.get(snapshot_query);
     }
 
     @Override
     public synchronized PagedFile map(
-            Path path,
+            StoreFile storeFile,
             int pageSize,
             String databaseName,
             ImmutableSet<OpenOption> openOptions,
             IOController ignoredController,
             EvictionBouncer evictionBouncer,
-            VersionStorage ignoredVersionStorage)
+            VersionStorage ignoredVersionStorage,
+            FileSegmentTracker ignoredsegmentTracker)
             throws IOException {
+        Path path = storeFile.baseSegment();
         // no one should call this version of map method with emptyDatabaseName != null,
         // since it is this class that is decorating map calls with the name of the database
         if (useSnapshotEngine) {
             openOptions = openOptions.newWith(CONTEXT_VERSION_UPDATES);
         }
         PagedFile pagedFile = globalPageCache.map(
-                path, pageSize, databaseName, openOptions, ioController, evictionBouncer, versionStorage);
+                storeFile,
+                pageSize,
+                databaseName,
+                openOptions,
+                ioController,
+                evictionBouncer,
+                versionStorage,
+                pageCacheSegmentTracker.createFileSegmentTracer(path));
         // Our default page cache handles mapping a file multiple times, where additional mappings for the
         // same file just returns the existing mapping. The DatabasePageCache needs to keep track of when
         // a file is mapped the first time _for this particular instance_ tho, so that listeners can be
@@ -111,8 +131,8 @@ public class DatabasePageCache implements PageCache {
     }
 
     @Override
-    public Optional<PagedFile> getExistingMapping(Path path) {
-        Path canonicalFile = path.normalize();
+    public Optional<PagedFile> getExistingMapping(StoreFile storeFile) {
+        Path canonicalFile = storeFile.baseSegment().normalize();
         return uniqueDatabasePagedFiles.values().stream()
                 .filter(pagedFile -> pagedFile.path().equals(canonicalFile))
                 .map(pf -> (PagedFile) pf)
@@ -126,7 +146,7 @@ public class DatabasePageCache implements PageCache {
 
     @Override
     public void flushAndForce(DatabaseFlushEvent flushEvent) throws IOException {
-        flushAndForce(flushEvent, NO_BARRIER);
+        flushAndForce(flushEvent, EMPTY_ASYNC_BLOCK_ACCESSOR, NO_BARRIER);
     }
 
     @Override
@@ -134,11 +154,12 @@ public class DatabasePageCache implements PageCache {
         flushAndForce(flushEvent);
     }
 
-    private void flushAndForce(DatabaseFlushEvent flushEvent, Barrier barrier) throws IOException {
+    private void flushAndForce(DatabaseFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, Barrier barrier)
+            throws IOException {
         for (DatabasePagedFile pagedFile : uniqueDatabasePagedFiles.values()) {
             if (barrier.canPass(pagedFile.flushTicket())) {
                 try (FileFlushEvent fileFlushEvent = flushEvent.beginFileFlush()) {
-                    pagedFile.flushAndForce(fileFlushEvent);
+                    pagedFile.flushAndForce(fileFlushEvent, asyncBlockAccessor);
                 }
             }
         }
@@ -163,6 +184,11 @@ public class DatabasePageCache implements PageCache {
     @Override
     public int pageSize() {
         return globalPageCache.pageSize();
+    }
+
+    @Override
+    public int pagePayloadSize(ImmutableSet<OpenOption> openOptions) {
+        return globalPageCache.pagePayloadSize(openOptions);
     }
 
     @Override
@@ -206,15 +232,16 @@ public class DatabasePageCache implements PageCache {
         mappedListeners.remove(mappedListener);
     }
 
-    public FlushGuard flushGuard(DatabaseFlushEvent flushEvent) {
+    public FlushGuard flushGuard(DatabaseFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor) {
         Barrier barrier = ticketMachine.nextBarrier();
-        return () -> flushAndForce(flushEvent, barrier);
+        return () -> flushAndForce(flushEvent, asyncBlockAccessor, barrier);
     }
 
     private synchronized void unmap(DatabasePagedFile databasePagedFile) {
         if (databasePagedFile.refCount.decrementAndGet() == 0) {
             invokeFileUnmapListeners(mappedListeners, databasePagedFile);
             uniqueDatabasePagedFiles.remove(databasePagedFile.path());
+            pageCacheSegmentTracker.removeFileSegmentTracer(databasePagedFile.path());
         }
     }
 
@@ -267,8 +294,14 @@ public class DatabasePageCache implements PageCache {
         }
 
         @Override
-        public void flushAndForce(FileFlushEvent flushEvent) throws IOException {
-            delegate.flushAndForce(flushEvent);
+        public void flush(FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor) throws IOException {
+            delegate.flush(flushEvent, asyncBlockAccessor);
+            flushTicket.use();
+        }
+
+        @Override
+        public void flushAndForce(FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor) throws IOException {
+            delegate.flushAndForce(flushEvent, asyncBlockAccessor);
             flushTicket.use();
         }
 

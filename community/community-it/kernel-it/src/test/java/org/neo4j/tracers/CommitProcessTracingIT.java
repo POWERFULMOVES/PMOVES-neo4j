@@ -49,11 +49,11 @@ import org.neo4j.kernel.impl.api.TransactionCommitProcess;
 import org.neo4j.kernel.impl.api.state.TxState;
 import org.neo4j.kernel.impl.api.txid.TransactionIdGenerator;
 import org.neo4j.kernel.impl.store.format.RecordFormatSelector;
-import org.neo4j.kernel.impl.transaction.log.CompleteCommandBatch;
-import org.neo4j.kernel.impl.transaction.log.TransactionCommitmentFactory;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.lock.LockTracer;
+import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.CommandCreationContext;
+import org.neo4j.storageengine.api.Leases;
 import org.neo4j.storageengine.api.StorageEngine;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.test.LatestVersions;
@@ -61,6 +61,8 @@ import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.DbmsExtension;
 import org.neo4j.test.extension.ExtensionCallback;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.wal.CompleteCommandBatch;
+import org.neo4j.wal.TransactionCommitmentFactory;
 
 @DbmsExtension(configurationCallback = "configure")
 public class CommitProcessTracingIT {
@@ -102,7 +104,7 @@ public class CommitProcessTracingIT {
         try (var cursorContext = contextFactory.create("tracePageCacheAccessOnCommandCreation");
                 var reader = storageEngine.newReader()) {
             assertZeroCursor(cursorContext);
-            try (CommandCreationContext context = storageEngine.newCommandCreationContext(false);
+            try (CommandCreationContext context = storageEngine.newCommandCreationContext(false, INSTANCE);
                     var storeCursors = storageEngine.createStorageCursors(cursorContext)) {
                 context.initialize(
                         kernelVersionProvider,
@@ -137,6 +139,7 @@ public class CommitProcessTracingIT {
                 0,
                 0,
                 0,
+                Leases.NO_LEASES,
                 LatestVersions.LATEST_KERNEL_VERSION,
                 ANONYMOUS);
         var pageCacheTracer = new DefaultPageCacheTracer();
@@ -152,7 +155,8 @@ public class CommitProcessTracingIT {
                             transactionCommitmentFactory.newCommitment(),
                             transactionIdGenerator),
                     NULL,
-                    EXTERNAL);
+                    EXTERNAL,
+                    EmptyMemoryTracker.INSTANCE);
 
             assertCursor(cursorContext, 1);
         }

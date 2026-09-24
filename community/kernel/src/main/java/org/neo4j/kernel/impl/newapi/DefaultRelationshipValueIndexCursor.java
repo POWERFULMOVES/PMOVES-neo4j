@@ -19,27 +19,27 @@
  */
 package org.neo4j.kernel.impl.newapi;
 
-import static org.neo4j.collection.PrimitiveLongCollections.mergeToSet;
-
-import org.eclipse.collections.api.set.primitive.LongSet;
+import org.neo4j.internal.helpers.collection.Iterables;
 import org.neo4j.internal.kernel.api.KernelReadTracer;
 import org.neo4j.internal.kernel.api.NodeCursor;
 import org.neo4j.internal.kernel.api.PropertyCursor;
 import org.neo4j.internal.kernel.api.PropertyIndexQuery;
 import org.neo4j.internal.kernel.api.RelationshipValueIndexCursor;
-import org.neo4j.internal.kernel.api.security.AccessMode;
 import org.neo4j.internal.schema.IndexDescriptor;
+import org.neo4j.internal.schema.IndexRemovalSnapshot;
 import org.neo4j.kernel.api.txstate.TransactionState;
 import org.neo4j.storageengine.api.PropertySelection;
 import org.neo4j.storageengine.api.Reference;
+import org.neo4j.storageengine.api.StorageProperty;
 
-class DefaultRelationshipValueIndexCursor extends DefaultEntityValueIndexCursor<DefaultRelationshipValueIndexCursor>
+public class DefaultRelationshipValueIndexCursor
+        extends DefaultEntityValueIndexCursor<DefaultRelationshipValueIndexCursor>
         implements RelationshipValueIndexCursor {
     private final InternalCursorFactory internalCursors;
     private final DefaultRelationshipScanCursor relationshipScanCursor;
-    private final boolean applyAccessModeToTxState;
-    private DefaultPropertyCursor securityPropertyCursor;
+    private TraceablePropertyCursor securityPropertyCursor;
     private int[] propertyIds;
+    private AccessControlDataProvider accessControlDataProvider;
 
     DefaultRelationshipValueIndexCursor(
             CursorPool<DefaultRelationshipValueIndexCursor> pool,
@@ -49,7 +49,6 @@ class DefaultRelationshipValueIndexCursor extends DefaultEntityValueIndexCursor<
         super(pool, applyAccessModeToTxState);
         this.relationshipScanCursor = relationshipScanCursor;
         this.internalCursors = internalCursors;
-        this.applyAccessModeToTxState = applyAccessModeToTxState;
     }
 
     @Override
@@ -143,47 +142,56 @@ class DefaultRelationshipValueIndexCursor extends DefaultEntityValueIndexCursor<
     @Override
     protected boolean canAccessAllDescribedEntities(IndexDescriptor descriptor) {
         propertyIds = descriptor.schema().getPropertyIds();
-        AccessMode accessMode = accessModeProvider.getAccessMode();
+        int[] relTypes = descriptor.schema().getEntityTokenIds();
 
-        for (int relType : descriptor.schema().getEntityTokenIds()) {
-            if (!accessMode.allowsTraverseRelType(relType)) {
-                return false;
-            }
-        }
-        if (!accessMode.allowsTraverseAllLabels()) {
-            return false;
-        }
-        for (int propId : propertyIds) {
-            for (int relType : descriptor.schema().getEntityTokenIds()) {
-                if (!accessMode.allowsReadRelationshipProperty(() -> relType, propId)) {
-                    return false;
-                }
-            }
-        }
-        return true;
+        return accessMode.allowsTraverseAndReadAllMatchingRelProperties(relTypes, propertyIds);
     }
 
     @Override
-    protected LongSet removed(TransactionState txState, LongSet removedFromIndex) {
-        return mergeToSet(txState.addedAndRemovedRelationships().getRemoved(), removedFromIndex)
-                .asUnmodifiable();
+    protected LongSetContains removed(TransactionState txState, IndexRemovalSnapshot removedFromIndex) {
+        var removed = txState.addedAndRemovedRelationships().getRemoved().toImmutable();
+        return (value) ->
+                removed.contains(value) || removedFromIndex.isRemoved().test(value);
     }
 
     @Override
     protected final boolean canAccessEntityAndProperties(long reference) {
-        readEntity(read -> read.singleRelationship(reference, relationshipScanCursor));
+        read.singleRelationship(reference, relationshipScanCursor);
         if (!relationshipScanCursor.next()) {
             // This relationship is not visible to this security context
             return false;
         }
 
-        int relType = relationshipScanCursor.type();
-        for (int prop : propertyIds) {
-            if (!accessModeProvider.getAccessMode().allowsReadRelationshipProperty(() -> relType, prop)) {
-                return false;
-            }
+        assert accessMode == accessModeProvider.getAccessMode() : "access mode changed while cursor is in use";
+        return accessMode.allowsReadRelProperties(
+                relationshipScanCursor::type, propertyIds, this::getAccessControlDataProvider);
+    }
+
+    /**
+     * AccessControlDataProvider when used as SelectedPropertiesProvider will return properties for the node pointed by {@link #relationshipScanCursor}
+     * This indirection is here for the sake of ultimate laziness
+     */
+    private AccessControlDataProvider getAccessControlDataProvider() {
+        if (accessControlDataProvider == null) {
+            accessControlDataProvider = new AccessControlDataProvider(
+                    () -> (propertyCursor, selection) -> propertyCursor.initRelationshipProperties(
+                            relationshipScanCursor.propertiesReference(), selection),
+                    internalCursors,
+                    applyAccessModeToTxState,
+                    this::txStateProperties,
+                    () -> read);
         }
-        return true;
+        return accessControlDataProvider;
+    }
+
+    private Iterable<StorageProperty> txStateProperties() {
+        if (txStateHolder.hasTxStateWithChanges()) {
+            return txStateHolder
+                    .txState()
+                    .getRelationshipState(relationshipScanCursor.relationshipReference())
+                    .addedProperties();
+        }
+        return Iterables.empty();
     }
 
     @Override
@@ -206,6 +214,11 @@ class DefaultRelationshipValueIndexCursor extends DefaultEntityValueIndexCursor<
             securityPropertyCursor.close();
             securityPropertyCursor.release();
             securityPropertyCursor = null;
+        }
+        if (accessControlDataProvider != null) {
+            accessControlDataProvider.close();
+            accessControlDataProvider.release();
+            accessControlDataProvider = null;
         }
     }
 }

@@ -30,6 +30,8 @@ import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.graphdb.RelationshipType
 import org.neo4j.values.storable.NoValue
 
+object UnionTestBase
+
 abstract class UnionTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
@@ -326,7 +328,7 @@ abstract class UnionTestBase[CONTEXT <: RuntimeContext](
   test("should unwind after union") {
     val size = sizeHint / 2
     // given
-    val nodes = givenGraph {
+    val nodes: Seq[Any] = givenGraph {
       nodeGraph(size)
     }
 
@@ -354,7 +356,7 @@ abstract class UnionTestBase[CONTEXT <: RuntimeContext](
 
   test("should distinct after union") {
     // given
-    val nodes = givenGraph {
+    val nodes: Seq[Any] = givenGraph {
       nodeGraph(sizeHint)
     }
 
@@ -516,7 +518,7 @@ abstract class UnionTestBase[CONTEXT <: RuntimeContext](
   test("should union under apply") {
     val size = Math.sqrt(sizeHint).toInt
     // given
-    val nodes = givenGraph {
+    val nodes: Seq[Any] = givenGraph {
       nodeGraph(size)
     }
 
@@ -579,7 +581,7 @@ abstract class UnionTestBase[CONTEXT <: RuntimeContext](
 
   test("should union under apply with follow-up operator") {
     // given
-    val nodes = givenGraph {
+    val nodes: Seq[Any] = givenGraph {
       nodeGraph(sizeHint)
     }
 
@@ -611,7 +613,7 @@ abstract class UnionTestBase[CONTEXT <: RuntimeContext](
   test("should union under cartesian product with follow-up operator") {
     val size = 5 // Math.sqrt(sizeHint).toInt
     // given
-    val nodes = givenGraph {
+    val nodes: Seq[Any] = givenGraph {
       nodeGraph(size)
     }
 
@@ -946,7 +948,7 @@ abstract class UnionTestBase[CONTEXT <: RuntimeContext](
 
   test("should union on nullable node variable") {
 
-    val (_, endNodes) = givenGraph {
+    val (_, endNodes: Seq[Any]) = givenGraph {
       bipartiteGraph(10, "Entity", "Entity", "REL")
     }
 
@@ -969,7 +971,7 @@ abstract class UnionTestBase[CONTEXT <: RuntimeContext](
 
   test("should union on nullable relationship variable") {
 
-    val (_, rels) = givenGraph {
+    val (_, rels: Seq[Any]) = givenGraph {
       lineGraph(10, "REL", "Entity")
     }
 
@@ -991,7 +993,7 @@ abstract class UnionTestBase[CONTEXT <: RuntimeContext](
   }
 
   private def sizeHintAlignedToMorselSize: Int = {
-    val morselSize = edition.cypherConfig.pipelinedBatchSizeSmall
+    val morselSize = runtimeTestSupport.runtimeContextManager.config.pipelinedBatchSizeSmall
     (1 + sizeHint / morselSize) * morselSize
   }
 }

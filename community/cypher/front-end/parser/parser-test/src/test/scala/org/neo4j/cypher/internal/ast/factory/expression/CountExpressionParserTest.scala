@@ -22,8 +22,7 @@ import org.neo4j.cypher.internal.ast.Match
 import org.neo4j.cypher.internal.ast.Statement
 import org.neo4j.cypher.internal.ast.Statements
 import org.neo4j.cypher.internal.ast.UnaliasedReturnItem
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher25
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
+import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
 import org.neo4j.cypher.internal.ast.test.util.AstParsingTestBase
 import org.neo4j.cypher.internal.ast.test.util.LegacyAstParsingTestSupport
 import org.neo4j.cypher.internal.expressions.AllIterablePredicate
@@ -34,7 +33,7 @@ import org.neo4j.cypher.internal.expressions.MatchMode
 import org.neo4j.cypher.internal.expressions.NamedPatternPart
 import org.neo4j.cypher.internal.expressions.Pattern
 import org.neo4j.cypher.internal.expressions.PatternPart
-import org.neo4j.cypher.internal.expressions.PatternPartWithSelector
+import org.neo4j.cypher.internal.expressions.PrefixedPatternPart
 import org.neo4j.cypher.internal.expressions.SemanticDirection.INCOMING
 import org.neo4j.cypher.internal.expressions.SemanticDirection.OUTGOING
 import org.neo4j.cypher.internal.expressions.SignedDecimalIntegerLiteral
@@ -322,7 +321,7 @@ class CountExpressionParserTest extends AstParsingTestBase with LegacyAstParsing
           optional = false,
           matchMode = MatchMode.default(pos),
           Pattern.ForMatch(Seq(
-            PatternPartWithSelector(
+            PrefixedPatternPart(
               PatternPart.AllPaths()(pos),
               NamedPatternPart(
                 varFor("pt"),
@@ -337,6 +336,7 @@ class CountExpressionParserTest extends AstParsingTestBase with LegacyAstParsing
             )
           ))(InputPosition(24, 1, 25)),
           Seq.empty,
+          None,
           None
         )(pos)
       )
@@ -390,35 +390,19 @@ class CountExpressionParserTest extends AstParsingTestBase with LegacyAstParsing
       return_(variableReturnItem("p"))
     )
 
-    parsesIn[Statement] {
-      case Cypher25 => _.toAst(
-          singleQuery(
-            match_(
-              nodePat(name = Some("m")),
-              where = Some(where(gte(
-                CountExpression(
-                  union(lhs, rhs)
-                )(InputPosition(16, 2, 7), None, None),
-                literal(3)
-              )))
-            ),
-            return_(variableReturnItem("m"))
-          )
-        )
-      case _ => _.toAst(
-          singleQuery(
-            match_(
-              nodePat(name = Some("m")),
-              where = Some(where(gte(
-                CountExpression(
-                  union(lhs, rhs)
-                )(InputPosition(16, 2, 7), None, None),
-                literal(3)
-              )))
-            ),
-            return_(variableReturnItem("m"))
-          )
-        )
+    parsesTo[Statement] {
+      singleQuery(
+        match_(
+          nodePat(name = Some("m")),
+          where = Some(where(gte(
+            CountExpression(
+              union(lhs, rhs)
+            )(InputPosition(16, 2, 7), None, None),
+            literal(3)
+          )))
+        ),
+        return_(variableReturnItem("m"))
+      )
     }
   }
 
@@ -558,10 +542,14 @@ class CountExpressionParserTest extends AstParsingTestBase with LegacyAstParsing
       |WHERE COUNT { MATCH (b) RETURN b WHERE true } >= 1
       |RETURN m""".stripMargin
   ) {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'WHERE'")
-      case _ => _.withSyntaxError(
+    parseIn[Statements] {
+      case Cypher5 => _.withSyntaxError(
           """Invalid input 'WHERE': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or '}' (line 2, column 34 (offset: 43))
+            |"WHERE COUNT { MATCH (b) RETURN b WHERE true } >= 1"
+            |                                  ^""".stripMargin
+        )
+      case _ => _.withSyntaxError(
+          """Invalid input 'WHERE': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or '}' (line 2, column 34 (offset: 43))
             |"WHERE COUNT { MATCH (b) RETURN b WHERE true } >= 1"
             |                                  ^""".stripMargin
         )
@@ -573,13 +561,10 @@ class CountExpressionParserTest extends AstParsingTestBase with LegacyAstParsing
       |WHERE COUNT { (a)-[r]->(b) WHERE a.prop = 1 RETURN r } > 1
       |RETURN m""".stripMargin
   ) {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'RETURN'")
-      case _ => _.withSyntaxError(
-          """Invalid input 'RETURN': expected an expression or '}' (line 2, column 45 (offset: 54))
-            |"WHERE COUNT { (a)-[r]->(b) WHERE a.prop = 1 RETURN r } > 1"
-            |                                             ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'RETURN': expected an expression or '}' (line 2, column 45 (offset: 54))
+        |"WHERE COUNT { (a)-[r]->(b) WHERE a.prop = 1 RETURN r } > 1"
+        |                                             ^""".stripMargin
+    )
   }
 }

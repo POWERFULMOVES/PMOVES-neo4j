@@ -17,13 +17,13 @@
 package org.neo4j.cypher.internal.ast.factory.expression
 
 import org.neo4j.cypher.internal.ast.Clause
+import org.neo4j.cypher.internal.ast.FreeProjection
 import org.neo4j.cypher.internal.ast.Return
 import org.neo4j.cypher.internal.ast.ReturnItems
 import org.neo4j.cypher.internal.ast.SingleQuery
 import org.neo4j.cypher.internal.ast.Statements
 import org.neo4j.cypher.internal.ast.UnaliasedReturnItem
 import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
 import org.neo4j.cypher.internal.ast.test.util.AstParsingTestBase
 import org.neo4j.cypher.internal.expressions.And
 import org.neo4j.cypher.internal.expressions.Expression
@@ -31,6 +31,10 @@ import org.neo4j.cypher.internal.expressions.ExtractScope
 import org.neo4j.cypher.internal.expressions.LabelOrRelTypeName
 import org.neo4j.cypher.internal.expressions.ListComprehension
 import org.neo4j.cypher.internal.expressions.ListLiteral
+import org.neo4j.cypher.internal.expressions.NFCNormalForm
+import org.neo4j.cypher.internal.expressions.NFDNormalForm
+import org.neo4j.cypher.internal.expressions.NFKCNormalForm
+import org.neo4j.cypher.internal.expressions.NFKDNormalForm
 import org.neo4j.cypher.internal.expressions.NodePattern
 import org.neo4j.cypher.internal.expressions.PatternComprehension
 import org.neo4j.cypher.internal.expressions.PatternExpression
@@ -43,6 +47,7 @@ import org.neo4j.cypher.internal.expressions.SemanticDirection.OUTGOING
 import org.neo4j.cypher.internal.label_expressions.LabelExpression.Disjunctions
 import org.neo4j.cypher.internal.label_expressions.LabelExpression.Leaf
 import org.neo4j.cypher.internal.util.symbols.CTAny
+import org.neo4j.cypher.internal.util.symbols.CTInteger
 
 /**
  * Label expression in Node patterns
@@ -796,21 +801,24 @@ class ExpressionLabelExpressionsParserTest extends AstParsingTestBase {
   }
 
   test("[x IN [1,2,3] WHERE n:(A | x)]") {
-    parsesTo[Expression] {
-      listComprehension(
-        varFor("x"),
-        listOfInt(1, 2, 3),
-        Some(
-          labelExpressionPredicate(
-            varFor("n", position = (1, 21, 20)),
-            labelDisjunction(
-              labelOrRelTypeLeaf("A", (1, 24, 23)),
-              labelOrRelTypeLeaf("x", (1, 28, 27)),
-              (1, 26, 25)
+    parsesIn[Expression] { _ =>
+      _.toAstWith(
+        listComprehension(
+          varFor("x"),
+          listOfInt(1, 2, 3),
+          Some(
+            labelExpressionPredicate(
+              varFor("n", position = (1, 21, 20)),
+              labelDisjunction(
+                labelOrRelTypeLeaf("A", (1, 24, 23)),
+                labelOrRelTypeLeaf("x", (1, 28, 27)),
+                (1, 26, 25)
+              )
             )
-          )
+          ),
+          None
         ),
-        None
+        prettifierRoundTrip = false
       )
     }
   }
@@ -869,86 +877,79 @@ class ExpressionLabelExpressionsParserTest extends AstParsingTestBase {
     }
   }
 
-  // JavaCc lookahead fails to parse this properly
   test("RETURN [x IN [1,2,3] WHERE n:A | (b | x)]") {
-    parsesIn[Statements] {
-      case Cypher5JavaCc => _.withAnyFailure.withMessageStart(
-          "Invalid input '(': expected \"+\" or \"-\" (line 1, column 34 (offset: 33))"
-        )
-      case _ => _.toAst(
-          Statements(Seq(SingleQuery(Seq(Return(
-            distinct = false,
-            ReturnItems(
-              includeExisting = false,
-              Seq(UnaliasedReturnItem(
-                ListComprehension(
-                  ExtractScope(
-                    varFor("x"),
-                    Some(labelExpressionPredicate(
-                      varFor("n"),
-                      Disjunctions(Seq(
-                        Leaf(LabelOrRelTypeName("A")(pos)),
-                        Leaf(LabelOrRelTypeName("b")(pos)),
-                        Leaf(LabelOrRelTypeName("x")(pos))
-                      ))(pos)
-                    )),
-                    None
-                  )(pos),
-                  ListLiteral(Seq(literal(1), literal(2), literal(3)))(pos)
+    parsesIn[Statements] { _ =>
+      _.toAstWith(
+        Statements(Seq(SingleQuery(Seq(Return(
+          distinct = false,
+          ReturnItems(
+            FreeProjection,
+            Seq(UnaliasedReturnItem(
+              ListComprehension(
+                ExtractScope(
+                  varFor("x"),
+                  Some(labelExpressionPredicate(
+                    varFor("n"),
+                    Disjunctions(Seq(
+                      Leaf(LabelOrRelTypeName("A")(pos)),
+                      Leaf(LabelOrRelTypeName("b")(pos)),
+                      Leaf(LabelOrRelTypeName("x")(pos))
+                    ))(pos)
+                  )),
+                  None
                 )(pos),
-                "[x IN [1,2,3] WHERE n:A | (b | x)]"
-              )(pos)),
-              None
-            )(pos),
-            None,
-            None,
-            None,
-            Set()
-          )(pos)))(pos)))
-        )
+                ListLiteral(Seq(literal(1), literal(2), literal(3)))(pos)
+              )(pos),
+              "[x IN [1,2,3] WHERE n:A | (b | x)]"
+            )(pos)),
+            None
+          )(pos),
+          None,
+          None,
+          None,
+          None,
+          Set()
+        )(pos)))(pos))),
+        prettifierRoundTrip = false
+      )
     }
   }
 
-  // JavaCc lookahead fails to parse this properly
   test("RETURN [x IN [1,2,3] WHERE n:A|B AND n:C|D | x]") {
-    parsesIn[Statements] {
-      case Cypher5JavaCc => _.withAnyFailure.withMessageStart("Invalid input '|'")
-      case _ => _.toAst(
-          Statements(Seq(SingleQuery(Seq(Return(
-            distinct = false,
-            ReturnItems(
-              includeExisting = false,
-              Seq(UnaliasedReturnItem(
-                ListComprehension(
-                  ExtractScope(
-                    varFor("x"),
-                    Some(And(
-                      labelExpressionPredicate(
-                        varFor("n"),
-                        Disjunctions(Vector(Leaf(LabelOrRelTypeName("A")(pos)), Leaf(LabelOrRelTypeName("B")(pos))))(
-                          pos
-                        )
-                      ),
-                      labelExpressionPredicate(
-                        varFor("n"),
-                        Disjunctions(Seq(Leaf(LabelOrRelTypeName("C")(pos)), Leaf(LabelOrRelTypeName("D")(pos))))(pos)
-                      )
-                    )(pos)),
-                    Some(varFor("x"))
-                  )(pos),
-                  ListLiteral(Seq(literal(1), literal(2), literal(3)))(pos)
-                )(pos),
-                "[x IN [1,2,3] WHERE n:A|B AND n:C|D | x]"
+    parsesTo[Statements](Statements(Seq(SingleQuery(Seq(Return(
+      distinct = false,
+      ReturnItems(
+        FreeProjection,
+        Seq(UnaliasedReturnItem(
+          ListComprehension(
+            ExtractScope(
+              varFor("x"),
+              Some(And(
+                labelExpressionPredicate(
+                  varFor("n"),
+                  Disjunctions(Vector(Leaf(LabelOrRelTypeName("A")(pos)), Leaf(LabelOrRelTypeName("B")(pos))))(
+                    pos
+                  )
+                ),
+                labelExpressionPredicate(
+                  varFor("n"),
+                  Disjunctions(Seq(Leaf(LabelOrRelTypeName("C")(pos)), Leaf(LabelOrRelTypeName("D")(pos))))(pos)
+                )
               )(pos)),
-              None
+              Some(varFor("x"))
             )(pos),
-            None,
-            None,
-            None,
-            Set()
-          )(pos)))(pos)))
-        )
-    }
+            ListLiteral(Seq(literal(1), literal(2), literal(3)))(pos)
+          )(pos),
+          "[x IN [1,2,3] WHERE n:A|B AND n:C|D | x]"
+        )(pos)),
+        None
+      )(pos),
+      None,
+      None,
+      None,
+      None,
+      Set()
+    )(pos)))(pos))))
   }
 
   test("[x IN [1,2,3] WHERE n:(A | x) | x]") {
@@ -1026,6 +1027,257 @@ class ExpressionLabelExpressionsParserTest extends AstParsingTestBase {
         )),
         Some(varFor("x"))
       )
+    }
+  }
+}
+
+class ExpressionLabelNameReservationParserTest extends AstParsingTestBase {
+
+  for {
+    (phrasesAfterIS, astPrototype) <- Seq(
+      ("NOT NULL", (lhs: Expression) => isNotNull(lhs)),
+      ("NULL", (lhs: Expression) => isNull(lhs)),
+      ("TYPED INT", (lhs: Expression) => isTyped(lhs, CTInteger)),
+      ("NORMALIZED", (lhs: Expression) => isNormalized(lhs, NFCNormalForm)),
+      ("NFC NORMALIZED", (lhs: Expression) => isNormalized(lhs, NFCNormalForm)),
+      ("NFD NORMALIZED", (lhs: Expression) => isNormalized(lhs, NFDNormalForm)),
+      ("NFKC NORMALIZED", (lhs: Expression) => isNormalized(lhs, NFKCNormalForm)),
+      ("NFKD NORMALIZED", (lhs: Expression) => isNormalized(lhs, NFKDNormalForm))
+    )
+    spacePosition <- Seq(phrasesAfterIS.indexOf(' '))
+    keywordAfterIS <- Seq(if (spacePosition > 0) phrasesAfterIS.take(phrasesAfterIS.indexOf(' ')) else phrasesAfterIS)
+  } yield {
+    test(s"n:$keywordAfterIS") {
+      parsesTo[Expression] {
+        labelExpressionPredicate(
+          varFor("n"),
+          labelOrRelTypeLeaf(keywordAfterIS)
+        )
+      }
+    }
+
+    test(s"n IS $phrasesAfterIS") {
+      parsesTo[Expression] {
+        astPrototype(
+          varFor("n")
+        )
+      }
+    }
+  }
+
+  test("RETURN NOT IS AND OR XOR IS NOT AS NULL") {
+    parsesIn[Statements] {
+      case Cypher5 => _.withAnyFailure
+      // ≥ Cypher25
+      case _ => _.toAst(
+          Statements(Seq(singleQuery(
+            return_(aliasedReturnItem(
+              or(
+                labelExpressionPredicate(varFor("NOT"), labelOrRelTypeLeaf("AND", containsIs = true)),
+                labelExpressionPredicate(varFor("XOR"), labelOrRelTypeLeaf("NOT", containsIs = true))
+              ),
+              "NULL"
+            ))
+          )))
+        )
+    }
+  }
+}
+
+class IsLabeledPredicateParserTest extends AstParsingTestBase {
+
+  // IS LABELED - basic form
+  test("n IS LABELED A") {
+    parsesIn[Expression] {
+      case Cypher5 => _.withAnyFailure
+      case _ => _.toAst(
+          labelExpressionPredicate(varFor("n"), labelOrRelTypeLeaf("A", containsIs = true))
+        )
+    }
+  }
+
+  // IS LABELED - conjunction
+  test("n IS LABELED A&B") {
+    parsesIn[Expression] {
+      case Cypher5 => _.withAnyFailure
+      case _ => _.toAst(
+          labelExpressionPredicate(
+            varFor("n"),
+            labelConjunctions(
+              Seq(labelOrRelTypeLeaf("A", containsIs = true), labelOrRelTypeLeaf("B", containsIs = true)),
+              containsIs = true
+            )
+          )
+        )
+    }
+  }
+
+  // IS LABELED - disjunction
+  test("n IS LABELED A|B") {
+    parsesIn[Expression] {
+      case Cypher5 => _.withAnyFailure
+      case _ => _.toAst(
+          labelExpressionPredicate(
+            varFor("n"),
+            labelDisjunctions(
+              Seq(labelOrRelTypeLeaf("A", containsIs = true), labelOrRelTypeLeaf("B", containsIs = true)),
+              containsIs = true
+            )
+          )
+        )
+    }
+  }
+
+  // IS LABELED - mixed precedence (& binds tighter than |)
+  test("n IS LABELED A&B|C") {
+    parsesIn[Expression] {
+      case Cypher5 => _.withAnyFailure
+      case _ => _.toAst(
+          labelExpressionPredicate(
+            varFor("n"),
+            labelDisjunctions(
+              Seq(
+                labelConjunctions(
+                  Seq(labelOrRelTypeLeaf("A", containsIs = true), labelOrRelTypeLeaf("B", containsIs = true)),
+                  containsIs = true
+                ),
+                labelOrRelTypeLeaf("C", containsIs = true)
+              ),
+              containsIs = true
+            )
+          )
+        )
+    }
+  }
+
+  // IS LABELED - with parentheses
+  test("n IS LABELED A&(B|C)") {
+    parsesIn[Expression] {
+      case Cypher5 => _.withAnyFailure
+      case _ => _.toAst(
+          labelExpressionPredicate(
+            varFor("n"),
+            labelConjunctions(
+              Seq(
+                labelOrRelTypeLeaf("A", containsIs = true),
+                labelDisjunctions(
+                  Seq(labelOrRelTypeLeaf("B", containsIs = true), labelOrRelTypeLeaf("C", containsIs = true)),
+                  containsIs = true
+                )
+              ),
+              containsIs = true
+            )
+          )
+        )
+    }
+  }
+
+  // IS LABELED - negation inside expression
+  test("n IS LABELED !A") {
+    parsesIn[Expression] {
+      case Cypher5 => _.withAnyFailure
+      case _ => _.toAst(
+          labelExpressionPredicate(
+            varFor("n"),
+            labelNegation(labelOrRelTypeLeaf("A", containsIs = true), containsIs = true)
+          )
+        )
+    }
+  }
+
+  // IS NOT LABELED - negates entire predicate
+  test("n IS NOT LABELED A") {
+    parsesIn[Expression] {
+      case Cypher5 => _.withAnyFailure
+      case _ => _.toAst(
+          labelExpressionPredicate(
+            varFor("n"),
+            labelNegation(labelOrRelTypeLeaf("A", containsIs = true), containsIs = true)
+          )
+        )
+    }
+  }
+
+  // IS NOT LABELED - conjunction (negates the whole conjunction)
+  test("n IS NOT LABELED A&B") {
+    parsesIn[Expression] {
+      case Cypher5 => _.withAnyFailure
+      case _ => _.toAst(
+          labelExpressionPredicate(
+            varFor("n"),
+            labelNegation(
+              labelConjunctions(
+                Seq(labelOrRelTypeLeaf("A", containsIs = true), labelOrRelTypeLeaf("B", containsIs = true)),
+                containsIs = true
+              ),
+              containsIs = true
+            )
+          )
+        )
+    }
+  }
+
+  // IS NOT shorthand - equivalent to IS NOT LABELED
+  test("RETURN n IS NOT A") {
+    parsesIn[Statements] {
+      case Cypher5 => _.withAnyFailure
+      case _ => _.toAst(
+          Statements(Seq(singleQuery(
+            return_(returnItem(
+              labelExpressionPredicate(
+                varFor("n"),
+                labelNegation(labelOrRelTypeLeaf("A", containsIs = true), containsIs = true)
+              ),
+              "n IS NOT A"
+            ))
+          )))
+        )
+    }
+  }
+
+  // IS NOT shorthand - conjunction
+  test("RETURN n IS NOT A&B") {
+    parsesIn[Statements] {
+      case Cypher5 => _.withAnyFailure
+      case _ => _.toAst(
+          Statements(Seq(singleQuery(
+            return_(returnItem(
+              labelExpressionPredicate(
+                varFor("n"),
+                labelNegation(
+                  labelConjunctions(
+                    Seq(labelOrRelTypeLeaf("A", containsIs = true), labelOrRelTypeLeaf("B", containsIs = true)),
+                    containsIs = true
+                  ),
+                  containsIs = true
+                )
+              ),
+              "n IS NOT A&B"
+            ))
+          )))
+        )
+    }
+  }
+
+  // LABELED as identifier (label name)
+  test("n IS LABELED") {
+    parses[Expression].toAst(
+      labelExpressionPredicate(varFor("n"), labelOrRelTypeLeaf("LABELED", containsIs = true))
+    )
+  }
+
+  // IS LABELED in RETURN clause with alias
+  test("RETURN n IS LABELED A AS hasA") {
+    parsesIn[Statements] {
+      case Cypher5 => _.withAnyFailure
+      case _ => _.toAst(
+          Statements(Seq(singleQuery(
+            return_(aliasedReturnItem(
+              labelExpressionPredicate(varFor("n"), labelOrRelTypeLeaf("A", containsIs = true)),
+              "hasA"
+            ))
+          )))
+        )
     }
   }
 }

@@ -16,6 +16,7 @@
  */
 package org.neo4j.cypher.internal.expressions
 
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.expressions.functions.Function
 import org.neo4j.cypher.internal.expressions.functions.FunctionWithName
 import org.neo4j.cypher.internal.util.symbols.CypherType
@@ -44,9 +45,11 @@ case class FunctionTypeSignature(
   deprecated: Boolean = false,
   deprecatedBy: Option[String] = None,
   internal: Boolean = false,
+  semanticFeature: Set[String] = Set.empty, // If a function is under a feature flag
   overrideDefaultAsString: Option[String] = None,
   overriddenArgumentTypeName: Option[Map[String, String]] = None,
-  argumentDescriptions: Map[String, String] = Map.empty
+  argumentDescriptions: Map[String, String] = Map.empty,
+  scopes: Set[CypherVersion] = CypherVersion.values().toSet
 ) extends TypeSignature {
 
   override def getSignatureAsString: String = {

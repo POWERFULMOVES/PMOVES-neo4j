@@ -38,12 +38,18 @@ import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_DOUBLE_ARRA
 import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_DURATION;
 import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_DURATION_ARRAY;
 import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_FLOAT;
+import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_FLOAT32_VECTOR;
+import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_FLOAT64_VECTOR;
 import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_FLOAT_ARRAY;
 import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_GEOGRAPHIC_POINT;
 import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_GEOGRAPHIC_POINT_3D;
 import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_GEOGRAPHIC_POINT_3D_ARRAY;
 import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_GEOGRAPHIC_POINT_ARRAY;
 import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_INT;
+import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_INT16_VECTOR;
+import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_INT32_VECTOR;
+import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_INT64_VECTOR;
+import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_INT8_VECTOR;
 import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_INT_ARRAY;
 import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_LOCAL_DATE_TIME;
 import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_LOCAL_DATE_TIME_ARRAY;
@@ -65,6 +71,10 @@ import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_STRING_BMP;
 import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_STRING_BMP_ARRAY;
 import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_TIME;
 import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_TIME_ARRAY;
+import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_UUID;
+import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_UUID_ARRAY;
+import static org.neo4j.values.storable.ExtremeValuesLibrary.EXTREME_VECTOR_ARRAY;
+import static org.neo4j.values.storable.ExtremeValuesLibrary.extremeFloat16Vector;
 
 import java.util.Arrays;
 
@@ -118,7 +128,20 @@ public enum ValueType {
             ValueRepresentation.GEOMETRY_ARRAY, PointArray.class, true, EXTREME_CARTESIAN_POINT_3D_ARRAY),
     GEOGRAPHIC_POINT_ARRAY(ValueRepresentation.GEOMETRY_ARRAY, PointArray.class, true, EXTREME_GEOGRAPHIC_POINT_ARRAY),
     GEOGRAPHIC_POINT_3D_ARRAY(
-            ValueRepresentation.GEOMETRY_ARRAY, PointArray.class, true, EXTREME_GEOGRAPHIC_POINT_3D_ARRAY);
+            ValueRepresentation.GEOMETRY_ARRAY, PointArray.class, true, EXTREME_GEOGRAPHIC_POINT_3D_ARRAY),
+    INT8_VECTOR(ValueRepresentation.INT8_VECTOR, Int8Vector.class, EXTREME_INT8_VECTOR),
+    INT16_VECTOR(ValueRepresentation.INT16_VECTOR, Int16Vector.class, EXTREME_INT16_VECTOR),
+    INT32_VECTOR(ValueRepresentation.INT32_VECTOR, Int32Vector.class, EXTREME_INT32_VECTOR),
+    INT64_VECTOR(ValueRepresentation.INT64_VECTOR, Int64Vector.class, EXTREME_INT64_VECTOR),
+    FLOAT16_VECTOR(
+            ValueRepresentation.FLOAT16_VECTOR, Float16Vector.class, extremeFloat16Vector(Float16Format.FLOAT16)),
+    BFLOAT16_VECTOR(
+            ValueRepresentation.BFLOAT16_VECTOR, BFloat16Vector.class, extremeFloat16Vector(Float16Format.BFLOAT16)),
+    FLOAT32_VECTOR(ValueRepresentation.FLOAT32_VECTOR, Float32Vector.class, EXTREME_FLOAT32_VECTOR),
+    FLOAT64_VECTOR(ValueRepresentation.FLOAT64_VECTOR, Float64Vector.class, EXTREME_FLOAT64_VECTOR),
+    VECTOR_ARRAY(ValueRepresentation.VECTOR_ARRAY, VectorArray.class, true, EXTREME_VECTOR_ARRAY),
+    UUID(ValueRepresentation.UUID, UUIDValue.class, EXTREME_UUID),
+    UUID_ARRAY(ValueRepresentation.UUID_ARRAY, UUIDArray.class, true, EXTREME_UUID_ARRAY);
 
     public final ValueRepresentation valueRepresentation;
     public final ValueGroup valueGroup;
@@ -146,7 +169,8 @@ public enum ValueType {
         return extremeValues;
     }
 
-    public static ValueType[] arrayTypes() {
-        return Arrays.stream(ValueType.values()).filter(t -> t.arrayType).toArray(ValueType[]::new);
-    }
+    public static final ValueType[] ALL_TYPES = ValueType.values();
+
+    public static final ValueType[] ARRAY_TYPES =
+            Arrays.stream(ALL_TYPES).filter(t -> t.arrayType).toArray(ValueType[]::new);
 }

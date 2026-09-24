@@ -25,6 +25,7 @@ import static org.neo4j.internal.counts.CountsKey.MAX_STRAY_TX_ID;
 import static org.neo4j.internal.counts.CountsKey.MIN_STRAY_TX_ID;
 import static org.neo4j.internal.counts.CountsKey.strayTxId;
 import static org.neo4j.io.IOUtils.closeAllUnchecked;
+import static org.neo4j.io.IOUtils.closeUnchecked;
 import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_ID;
 import static org.neo4j.util.Preconditions.checkState;
 import static org.neo4j.util.concurrent.OutOfOrderSequence.EMPTY_META;
@@ -62,16 +63,22 @@ import org.neo4j.index.internal.gbptree.ValueHolder;
 import org.neo4j.index.internal.gbptree.Writer;
 import org.neo4j.internal.counts.CountsHeader.Reader;
 import org.neo4j.internal.helpers.progress.ProgressMonitorFactory;
+import org.neo4j.io.async.AsyncBlockAccessor;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.PageCacheOpenOptions;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
+import org.neo4j.io.pagecache.tracing.FileFlushEvent.FileFlushEventProvider;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.impl.index.schema.ConsistencyCheckable;
+import org.neo4j.kernel.recovery.RecoveryStartupChecker;
 import org.neo4j.logging.InternalLogProvider;
 import org.neo4j.memory.MemoryTracker;
+import org.neo4j.storageengine.CheckpointableStore;
+import org.neo4j.util.VisibleForTesting;
 import org.neo4j.util.concurrent.ArrayQueueOutOfOrderSequence;
 import org.neo4j.util.concurrent.OutOfOrderSequence;
 
@@ -81,7 +88,7 @@ import org.neo4j.util.concurrent.OutOfOrderSequence;
  *
  * Updates that are {@link #updaterImpl(long, boolean, CursorContext) applied} are relative values (e.g. +10 or -5) and counts are read as their absolute values.
  * Multiple transactions can update counts concurrently where counts are CAS:ed to minimize contention.
- * Updates between {@link #checkpoint(FileFlushEvent, CursorContext) checkpoints} are kept in an internal {@link CountsChanges} map and only written
+ * Updates between {@link #checkpoint(FileFlushEventProvider, AsyncBlockAccessor, CursorContext) checkpoints} are kept in an internal {@link CountsChanges} map and only written
  * as part of a checkpoint. Checkpoint has a very short critical section where it switches over to a new {@link CountsChanges} instance
  * and also snapshots data about which transactions have applied before letting updaters continue to make changes while the checkpointing thread
  * writes the changes to the backing tree concurrently.
@@ -89,7 +96,7 @@ import org.neo4j.util.concurrent.OutOfOrderSequence;
  * Data flow wise updates are accumulated and written in each checkpoint. Reads are served from the tree or directly from {@link CountsChanges}
  * if there's changes to that particular key.
  */
-public class GBPTreeGenericCountsStore implements AutoCloseable, ConsistencyCheckable {
+public class GBPTreeGenericCountsStore implements AutoCloseable, ConsistencyCheckable, CheckpointableStore {
     public static final Monitor NO_MONITOR = txId -> {};
     private static final long NEEDS_REBUILDING_HIGH_ID = 0;
     private static final String OPEN_COUNT_STORE_TAG = "openCountStore";
@@ -107,6 +114,7 @@ public class GBPTreeGenericCountsStore implements AutoCloseable, ConsistencyChec
 
     protected final CountsLayout layout = new CountsLayout();
     private final Rebuilder rebuilder;
+    private final RecoveryStartupChecker recoveryStartupChecker;
     private final boolean needsRebuild;
     private final boolean readOnly;
     private final String name;
@@ -116,13 +124,14 @@ public class GBPTreeGenericCountsStore implements AutoCloseable, ConsistencyChec
     private final int highMarkCacheSize;
     protected volatile CountsChanges changes = createCountChanges();
     private TxIdInformation txIdInformation;
+    private final StoreFile storeFile;
     private final FileSystemAbstraction fileSystem;
     private final InternalLogProvider userLogProvider;
     private volatile boolean started;
 
     public GBPTreeGenericCountsStore(
             PageCache pageCache,
-            Path file,
+            StoreFile storeFile,
             FileSystemAbstraction fileSystem,
             RecoveryCleanupWorkCollector recoveryCollector,
             Rebuilder rebuilder,
@@ -134,8 +143,10 @@ public class GBPTreeGenericCountsStore implements AutoCloseable, ConsistencyChec
             InternalLogProvider userLogProvider,
             CursorContextFactory contextFactory,
             PageCacheTracer pageCacheTracer,
-            ImmutableSet<OpenOption> openOptions)
+            ImmutableSet<OpenOption> openOptions,
+            RecoveryStartupChecker recoveryStartupChecker)
             throws IOException {
+        this.storeFile = storeFile;
         this.fileSystem = fileSystem;
         this.userLogProvider = userLogProvider;
         this.readOnly = readOnly;
@@ -145,6 +156,7 @@ public class GBPTreeGenericCountsStore implements AutoCloseable, ConsistencyChec
         this.maxCacheSize = maxCacheSize;
         this.highMarkCacheSize = (int) (maxCacheSize * 0.8);
         this.rebuilder = rebuilder;
+        this.recoveryStartupChecker = recoveryStartupChecker;
 
         // First just read the header so that we can avoid creating it if this store is read-only
         Reader headerReader = CountsHeader.reader();
@@ -152,7 +164,7 @@ public class GBPTreeGenericCountsStore implements AutoCloseable, ConsistencyChec
         try {
             instantiatedTree = instantiateTree(
                     pageCache,
-                    file,
+                    storeFile,
                     recoveryCollector,
                     readOnly,
                     headerReader,
@@ -161,11 +173,11 @@ public class GBPTreeGenericCountsStore implements AutoCloseable, ConsistencyChec
                     openOptions);
         } catch (MetadataMismatchException e) {
             // Corrupt, delete and rebuild
-            fileSystem.deleteFileOrThrow(file);
+            storeFile.delete(fileSystem);
             headerReader = CountsHeader.reader();
             instantiatedTree = instantiateTree(
                     pageCache,
-                    file,
+                    storeFile,
                     recoveryCollector,
                     readOnly,
                     headerReader,
@@ -201,10 +213,10 @@ public class GBPTreeGenericCountsStore implements AutoCloseable, ConsistencyChec
 
     private GBPTree<CountsKey, CountsValue> instantiateTree(
             PageCache pageCache,
-            Path file,
+            StoreFile storeFile,
             RecoveryCleanupWorkCollector recoveryCollector,
             boolean readOnly,
-            CountsHeader.Reader headerReader,
+            Reader headerReader,
             CursorContextFactory contextFactory,
             PageCacheTracer pageCacheTracer,
             ImmutableSet<OpenOption> openOptions) {
@@ -212,7 +224,7 @@ public class GBPTreeGenericCountsStore implements AutoCloseable, ConsistencyChec
             return new GBPTree<>(
                     pageCache,
                     fileSystem,
-                    file,
+                    storeFile,
                     layout,
                     MultiRootGBPTree.NO_MONITOR,
                     headerReader,
@@ -226,7 +238,7 @@ public class GBPTreeGenericCountsStore implements AutoCloseable, ConsistencyChec
         } catch (TreeFileNotFoundException e) {
             throw new IllegalStateException(
                     "Counts store file could not be found, most likely this database needs to be recovered, file:"
-                            + file,
+                            + storeFile,
                     e);
         }
     }
@@ -247,7 +259,8 @@ public class GBPTreeGenericCountsStore implements AutoCloseable, ConsistencyChec
                     needsRebuild,
                     idSequence.getHighestGapFreeNumber(),
                     rebuilder.lastCommittedTxId());
-            try (CountUpdater updater = createDirectUpdater(false, cursorContext)) {
+            try (CountUpdater updater =
+                    new RecoveryAwareCountUpdater(createDirectUpdater(false, cursorContext), recoveryStartupChecker)) {
                 rebuilder.rebuild(updater, cursorContext, memoryTracker);
             } finally {
                 idSequence.set(rebuilder.lastCommittedTxId(), EMPTY_META);
@@ -268,20 +281,41 @@ public class GBPTreeGenericCountsStore implements AutoCloseable, ConsistencyChec
 
     @Override
     public void close() {
-        closeAllUnchecked(tree);
+        closeUnchecked(tree);
     }
 
     // === Writes ===
 
     protected CountUpdater updaterImpl(long txId, boolean isLast, CursorContext cursorContext) {
-        // In order to keep the cache limited then check if we need to flush to the tree
-        if (txId % 10 == 0) {
-            // Although it's somewhat costly to check map size so only do it every N transaction.
-            checkCacheSizeAndPotentiallyFlush(cursorContext);
-        }
+        maybeCheckCacheSizeAndPotentiallyFlush(txId, cursorContext);
 
         Lock lock = lock(this.lock.readLock());
 
+        if (txShouldBeIgnored(txId)) {
+            lock.unlock();
+            return null;
+        }
+        return new CountUpdater.WritingCountUpdater(
+                new MapWriter(key -> readCountFromTree(key, cursorContext), changes, idSequence, txId, isLast), lock);
+    }
+
+    public void noCountUpdate(long txId, CursorContext cursorContext) {
+        // In order to keep the cache limited then check if we need to flush to the tree
+        maybeCheckCacheSizeAndPotentiallyFlush(txId, cursorContext);
+
+        Lock lock = lock(this.lock.readLock());
+        try {
+            if (txShouldBeIgnored(txId)) {
+                return;
+            }
+
+            idSequence.offer(txId, EMPTY_META);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private boolean txShouldBeIgnored(long txId) {
         boolean alreadyApplied = txIdInformation.txIdIsAlreadyApplied(txId);
         // Why have this check below? Why should we not apply transactions before started when we have an initial counts
         // builder?
@@ -302,12 +336,18 @@ public class GBPTreeGenericCountsStore implements AutoCloseable, ConsistencyChec
         // so ignore these transactions.
         boolean inRecoveryOnEmptyCountsStore = needsRebuild && !started;
         if (alreadyApplied || inRecoveryOnEmptyCountsStore) {
-            lock.unlock();
             monitor.ignoredTransaction(txId);
-            return null;
+            return true;
         }
-        return new CountUpdater(
-                new MapWriter(key -> readCountFromTree(key, cursorContext), changes, idSequence, txId, isLast), lock);
+        return false;
+    }
+
+    private void maybeCheckCacheSizeAndPotentiallyFlush(long txId, CursorContext cursorContext) {
+        // In order to keep the cache limited then check if we need to flush to the tree
+        if (txId % 10 == 0) {
+            // Although it's somewhat costly to check map size so only do it every N transaction.
+            checkCacheSizeAndPotentiallyFlush(cursorContext);
+        }
     }
 
     /**
@@ -317,7 +357,7 @@ public class GBPTreeGenericCountsStore implements AutoCloseable, ConsistencyChec
     protected CountUpdater createDirectParallelUpdater(CursorContext cursorContext) {
         checkCacheSizeAndPotentiallyFlush(cursorContext);
         Lock lock = lock(this.lock.readLock());
-        return new CountUpdater(
+        return new CountUpdater.WritingCountUpdater(
                 new MapWriter(key -> readCountFromTree(key, cursorContext), changes, idSequence, -1, false), lock);
     }
 
@@ -341,7 +381,7 @@ public class GBPTreeGenericCountsStore implements AutoCloseable, ConsistencyChec
                             maxCacheSize,
                             userLogProvider)
                     : new TreeWriter(tree.writer(W_BATCHED_SINGLE_THREADED, cursorContext), userLogProvider);
-            CountUpdater updater = new CountUpdater(writer, lock);
+            CountUpdater updater = new CountUpdater.WritingCountUpdater(writer, lock);
             success = true;
             return updater;
         } finally {
@@ -351,7 +391,10 @@ public class GBPTreeGenericCountsStore implements AutoCloseable, ConsistencyChec
         }
     }
 
-    public void checkpoint(FileFlushEvent flushEvent, CursorContext cursorContext) throws IOException {
+    @Override
+    public void checkpoint(
+            FileFlushEventProvider flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext)
+            throws IOException {
         // Do an explicit read-only check here because in this store checkpoint implies also writing
         if (readOnly) {
             return;
@@ -377,11 +420,45 @@ public class GBPTreeGenericCountsStore implements AutoCloseable, ConsistencyChec
         // checkpoint does the final flushing or after since the checkpoint drains all writers.
         // The header is written after the writers have been drained which means the highest gap free
         // tx id is guaranteed to be the one belonging to the last written changes.
-        tree.checkpoint(CountsHeader.writer(this::getLastWrittenHighestGapFreeId), flushEvent, cursorContext);
+        try (FileFlushEvent fileFlushEvent = flushEvent.beginFileFlush()) {
+            tree.checkpoint(
+                    CountsHeader.writer(this::getLastWrittenHighestGapFreeId),
+                    fileFlushEvent,
+                    asyncBlockAccessor,
+                    cursorContext);
+        }
         writeIdSnapshotWithChanges = false;
     }
 
+    @Override
+    public long compact(
+            FileFlushEventProvider flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext)
+            throws IOException {
+        if (readOnly) {
+            return 0;
+        }
+
+        try (FileFlushEvent fileFlushEvent = flushEvent.beginFileFlush()) {
+            return tree.compact(fileFlushEvent, asyncBlockAccessor, cursorContext);
+        }
+    }
+
+    @Override
+    public StoreFile storeFile() {
+        return storeFile;
+    }
+
+    @VisibleForTesting
+    public void flush(CursorContext cursorContext) {
+        checkCacheSizeAndPotentiallyFlush(cursorContext, 0, 0);
+    }
+
     private void checkCacheSizeAndPotentiallyFlush(CursorContext cursorContext) {
+        checkCacheSizeAndPotentiallyFlush(cursorContext, highMarkCacheSize, maxCacheSize);
+    }
+
+    private void checkCacheSizeAndPotentiallyFlush(
+            CursorContext cursorContext, int highMarkCacheSize, int maxCacheSize) {
         int cacheSize = changes.size();
         if (cacheSize > highMarkCacheSize) {
             try (CriticalSection criticalSection = new CriticalSection(lock, responsibleForSwitch)) {
@@ -576,7 +653,7 @@ public class GBPTreeGenericCountsStore implements AutoCloseable, ConsistencyChec
      *
      * @param pageCache {@link PageCache} to use to map the counts store file into.
      * @param fileSystem
-     * @param file {@link Path} pointing out the counts store.
+     * @param storeFile {@link Path} pointing out the counts store.
      * @param out to print to.
      * @param databaseName name of the database tree belongs to.
      * @param name of the {@link GBPTree}.
@@ -588,7 +665,7 @@ public class GBPTreeGenericCountsStore implements AutoCloseable, ConsistencyChec
     protected static void dump(
             PageCache pageCache,
             FileSystemAbstraction fileSystem,
-            Path file,
+            StoreFile storeFile,
             PrintStream out,
             String databaseName,
             String name,
@@ -599,16 +676,16 @@ public class GBPTreeGenericCountsStore implements AutoCloseable, ConsistencyChec
             throws IOException {
         // First check if it even exists as we don't really want to create it as part of dumping it. readHeader will
         // throw if not found
-        CountsHeader.Reader headerReader = CountsHeader.reader();
+        Reader headerReader = CountsHeader.reader();
         try (var cursorContext = contextFactory.create("dump")) {
-            MultiRootGBPTree.readHeader(pageCache, file, headerReader, databaseName, cursorContext, openOptions);
+            MultiRootGBPTree.readHeader(pageCache, storeFile, headerReader, databaseName, cursorContext, openOptions);
         }
 
         // Now open it and dump its contents
         try (GBPTree<CountsKey, CountsValue> tree = new GBPTree<>(
                 pageCache,
                 fileSystem,
-                file,
+                storeFile,
                 new CountsLayout(),
                 MultiRootGBPTree.NO_MONITOR,
                 headerReader,
@@ -754,6 +831,27 @@ public class GBPTreeGenericCountsStore implements AutoCloseable, ConsistencyChec
 
         boolean hasExclusive() {
             return exclusive;
+        }
+    }
+
+    private static class RecoveryAwareCountUpdater implements CountUpdater {
+        private final CountUpdater delegate;
+        private final RecoveryStartupChecker recoveryStartupChecker;
+
+        RecoveryAwareCountUpdater(CountUpdater delegate, RecoveryStartupChecker recoveryStartupChecker) {
+            this.delegate = delegate;
+            this.recoveryStartupChecker = recoveryStartupChecker;
+        }
+
+        @Override
+        public boolean increment(CountsKey key, long delta) {
+            recoveryStartupChecker.checkIfCanceled();
+            return delegate.increment(key, delta);
+        }
+
+        @Override
+        public void close() {
+            delegate.close();
         }
     }
 }

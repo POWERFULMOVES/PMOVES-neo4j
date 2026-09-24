@@ -124,4 +124,36 @@ public interface WritableChannel extends WritableByteChannel, ChecksumWriter {
      * @throws IOException if I/O error occurs.
      */
     WritableChannel putVersion(byte version) throws IOException;
+
+    /**
+     * Buffer a content type to be written with the next write to this channel if the channel includes headers.
+     * Implementations may choose to ignore this value, furthermore some channels will validate that this value has
+     * been set before they will write data to the channel.
+     * @param contentType the content type byte for the next log entry.
+     * @return this channel, for fluent usage.
+     */
+    default WritableChannel putContentType(byte contentType) {
+        return this;
+    }
+
+    /**
+     * Buffer a term to be written with the next write to this channel if the channel includes headers.
+     * Implementations may choose to ignore this value.
+     * @param term the new term for the next log entry.
+     * @return this channel, for fluent usage.
+     */
+    default WritableChannel putTerm(long term) {
+        return this;
+    }
+
+    /**
+     * Write an append index represented by a {@code long} to this channel.
+     * <p>
+     * Implementations can keep append index information separate from the stream of data, so
+     * a call to this method will not always move the position one long.
+     *
+     * @return this channel, for fluent usage.
+     * @throws IOException if I/O error occurs.
+     */
+    WritableChannel putAppendIndex(long appendIndex) throws IOException;
 }

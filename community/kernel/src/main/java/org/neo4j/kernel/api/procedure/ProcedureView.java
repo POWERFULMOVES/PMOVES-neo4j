@@ -19,6 +19,7 @@
  */
 package org.neo4j.kernel.api.procedure;
 
+import java.util.Set;
 import java.util.stream.Stream;
 import org.neo4j.collection.ResourceRawIterator;
 import org.neo4j.function.ThrowingFunction;
@@ -36,7 +37,13 @@ import org.neo4j.values.AnyValue;
 public interface ProcedureView {
     ProcedureHandle procedure(QualifiedName name, QueryLanguage scope) throws ProcedureException;
 
+    ProcedureSignature procedureSignature(int id) throws ProcedureException;
+
+    UserFunctionSignature functionSignature(int id) throws ProcedureException;
+
     UserFunctionHandle function(QualifiedName name, QueryLanguage scope);
+
+    <T extends CallableUserFunction> boolean isFunctionInstanceOf(int id, Class<T> functionType);
 
     UserFunctionHandle aggregationFunction(QualifiedName name, QueryLanguage scope);
 
@@ -45,6 +52,8 @@ public interface ProcedureView {
     Stream<UserFunctionSignature> getAllNonAggregatingFunctions(QueryLanguage scope);
 
     Stream<UserFunctionSignature> getAllAggregatingFunctions(QueryLanguage scope);
+
+    Set<String> getAllShadowedNames(QueryLanguage scope);
 
     /* Note: The id-based functions have no concept of QueryLanguage.*/
 

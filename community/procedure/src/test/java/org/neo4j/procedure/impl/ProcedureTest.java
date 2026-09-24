@@ -20,11 +20,8 @@
 package org.neo4j.procedure.impl;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Fail.fail;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
@@ -69,8 +66,7 @@ import org.neo4j.values.storable.LongValue;
 import org.neo4j.values.storable.TextValue;
 import org.neo4j.values.storable.Values;
 
-@SuppressWarnings({"WeakerAccess", "unused"})
-public class ProcedureTest {
+class ProcedureTest {
     private ProcedureCompiler procedureCompiler;
     private ComponentRegistry components;
     private final DependencyResolver dependencyResolver = new Dependencies();
@@ -107,7 +103,7 @@ public class ProcedureTest {
         List<CallableProcedure> procedures = compile(SingleReadOnlyProcedure.class);
 
         // Then
-        assertEquals(1, procedures.size());
+        assertThat(procedures).hasSize(1);
         assertThat(procedures.get(0).signature())
                 .isEqualTo(procedureSignature(new QualifiedName("org", "neo4j", "procedure", "impl", "listCoolPeople"))
                         .out("name", Neo4jTypes.NTString)
@@ -134,7 +130,7 @@ public class ProcedureTest {
         List<CallableProcedure> procedures = compile(PrivateConstructorButNoProcedures.class);
 
         // Then
-        assertEquals(0, procedures.size());
+        assertThat(procedures).isEmpty();
     }
 
     @Test
@@ -162,20 +158,18 @@ public class ProcedureTest {
 
     @Test
     void shouldGiveHelpfulErrorOnConstructorThatRequiresArgument() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> compile(WeirdConstructorProcedure.class));
-        assertThat(exception.getMessage())
-                .isEqualTo(
+        assertThatThrownBy(() -> compile(WeirdConstructorProcedure.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(
                         "Unable to find a usable public no-argument constructor in the class `WeirdConstructorProcedure`. Please add a "
                                 + "valid, public constructor, recompile the class and try again.");
     }
 
     @Test
     void shouldGiveHelpfulErrorOnNoPublicConstructor() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> compile(PrivateConstructorProcedure.class));
-        assertThat(exception.getMessage())
-                .isEqualTo(
+        assertThatThrownBy(() -> compile(PrivateConstructorProcedure.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(
                         "Unable to find a usable public no-argument constructor in the class `PrivateConstructorProcedure`. Please add "
                                 + "a valid, public constructor, recompile the class and try again.");
     }
@@ -186,17 +180,17 @@ public class ProcedureTest {
         CallableProcedure proc = compile(ProcedureWithVoidOutput.class).get(0);
 
         // Then
-        assertEquals(0, proc.signature().outputSignature().size());
-        assertFalse(proc.apply(prepareContext(), new AnyValue[0], EMPTY_RESOURCE_TRACKER)
-                .hasNext());
+        assertThat(proc.signature().outputSignature()).isEmpty();
+        assertThat(proc.apply(prepareContext(), new AnyValue[0], EMPTY_RESOURCE_TRACKER)
+                        .hasNext())
+                .isFalse();
     }
 
     @Test
     void shouldGiveHelpfulErrorOnProcedureReturningInvalidRecordType() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> compile(ProcedureWithInvalidRecordOutput.class));
-        assertThat(exception.getMessage())
-                .isEqualTo(
+        assertThatThrownBy(() -> compile(ProcedureWithInvalidRecordOutput.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(
                         String.format("Procedures must return a Stream of records, where a record is a concrete class%n"
                                 + "that you define, with public non-final fields defining the fields in the record.%n"
                                 + "If you''d like your procedure to return `String`, you could define a record class like:%n"
@@ -208,10 +202,9 @@ public class ProcedureTest {
 
     @Test
     void shouldGiveHelpfulErrorOnContextAnnotatedStaticField() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> compile(ProcedureWithStaticContextAnnotatedField.class));
-        assertThat(exception.getMessage())
-                .isEqualTo(String.format(
+        assertThatThrownBy(() -> compile(ProcedureWithStaticContextAnnotatedField.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(String.format(
                         "The field `gdb` in the class named `ProcedureWithStaticContextAnnotatedField` is annotated as a @Context field,%n"
                                 + "but it is static. @Context fields must be public, non-final and non-static,%n"
                                 + "because they are reset each time a procedure is invoked."));
@@ -224,7 +217,7 @@ public class ProcedureTest {
                 compile(ProcedureWithNonStaticOutputRecord.class).get(0);
 
         // Then
-        assertEquals(1, proc.signature().outputSignature().size());
+        assertThat(proc.signature().outputSignature()).hasSize(1);
     }
 
     @Test
@@ -233,8 +226,7 @@ public class ProcedureTest {
         CallableProcedure proc = compile(ProcedureWithOverriddenName.class).get(0);
 
         // Then
-        assertEquals(
-                "org.mystuff.thisisActuallyTheName", proc.signature().name().toString());
+        assertThat(proc.signature().name()).hasToString("org.mystuff.thisisActuallyTheName");
     }
 
     @Test
@@ -243,7 +235,7 @@ public class ProcedureTest {
         CallableProcedure proc = compile(ProcedureWithSingleName.class).get(0);
 
         // Then
-        assertEquals("singleName", proc.signature().name().toString());
+        assertThat(proc.signature().name()).hasToString("singleName");
     }
 
     @Test
@@ -252,10 +244,9 @@ public class ProcedureTest {
         CallableProcedure proc =
                 compile(ProcedureThatThrowsNullMsgExceptionAtInvocation.class).get(0);
 
-        ProcedureException exception = assertThrows(
-                ProcedureException.class, () -> proc.apply(prepareContext(), new AnyValue[0], EMPTY_RESOURCE_TRACKER));
-        assertThat(exception.getMessage())
-                .isEqualTo(
+        assertThatThrownBy(() -> proc.apply(prepareContext(), new AnyValue[0], EMPTY_RESOURCE_TRACKER))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(
                         "Failed to invoke procedure `org.neo4j.procedure.impl.throwsAtInvocation`: Caused by: java.lang.IndexOutOfBoundsException");
     }
 
@@ -265,19 +256,22 @@ public class ProcedureTest {
         CallableProcedure proc =
                 compile(ProcedureThatThrowsNullMsgExceptionMidStream.class).get(0);
 
-        ProcedureException exception = assertThrows(ProcedureException.class, () -> {
-            RawIterator<AnyValue[], ProcedureException> stream =
-                    proc.apply(prepareContext(), new AnyValue[0], EMPTY_RESOURCE_TRACKER);
-            if (stream.hasNext()) {
-                stream.next();
-            }
-        });
-        assertThat(exception.getMessage())
-                .isEqualTo(
-                        "Failed to invoke procedure `org.neo4j.procedure.impl.throwsInStream`: Caused by: java.lang.IndexOutOfBoundsException");
-        // Expect that we get a suppressed exception from Stream.onClose (which also verifies that we actually call
-        // onClose on the first exception)
-        assertThat(exception.getSuppressed()[0]).hasRootCauseInstanceOf(ExceptionDuringClose.class);
+        assertThatThrownBy(() -> {
+                    RawIterator<AnyValue[], ProcedureException> stream =
+                            proc.apply(prepareContext(), new AnyValue[0], EMPTY_RESOURCE_TRACKER);
+                    if (stream.hasNext()) {
+                        stream.next();
+                    }
+                })
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(
+                        "Failed to invoke procedure `org.neo4j.procedure.impl.throwsInStream`: Caused by: java.lang.IndexOutOfBoundsException")
+                .satisfies(e -> {
+                    // Expect that we get a suppressed exception from Stream.onClose (which also verifies that we
+                    // actually call
+                    // onClose on the first exception)
+                    assertThat(e.getSuppressed()[0]).hasRootCauseInstanceOf(ExceptionDuringClose.class);
+                });
     }
 
     @Test
@@ -298,12 +292,16 @@ public class ProcedureTest {
             proc.apply(prepareContext(), new AnyValue[0], EMPTY_RESOURCE_TRACKER);
             switch (name) {
                 case "newProc":
-                    assertFalse(proc.signature().deprecated().isPresent(), "Should not be deprecated");
+                    assertThat(proc.signature().deprecated().isPresent())
+                            .as("Should not be deprecated")
+                            .isFalse();
                     break;
                 case "oldProc":
                 case "badProc":
-                    assertTrue(proc.signature().deprecated().isPresent(), "Should be deprecated");
-                    assertThat(proc.signature().deprecated().get()).isEqualTo("newProc");
+                    assertThat(proc.signature().deprecated().isPresent())
+                            .as("Should be deprecated")
+                            .isTrue();
+                    assertThat(proc.signature().deprecated()).contains("newProc");
                     break;
                 default:
                     fail("Unexpected procedure: " + name);
@@ -330,7 +328,7 @@ public class ProcedureTest {
                 proc.apply(prepareContext(), new AnyValue[0], EMPTY_RESOURCE_TRACKER);
 
         // Then
-        assertEquals(result.next()[0], stringValue("Bonnie"));
+        assertThat(result.next()[0]).isEqualTo(stringValue("Bonnie"));
     }
 
     @Test
@@ -349,7 +347,7 @@ public class ProcedureTest {
         verify(log)
                 .warn(
                         "The procedure 'org.neo4j.procedure.impl.listCoolPeople' is not on the allowlist and won't be loaded.");
-        assertThat(proc.isEmpty()).isTrue();
+        assertThat(proc).isEmpty();
     }
 
     @Test
@@ -367,7 +365,7 @@ public class ProcedureTest {
         // Then
         RawIterator<AnyValue[], ProcedureException> result =
                 proc.apply(prepareContext(), new AnyValue[0], EMPTY_RESOURCE_TRACKER);
-        assertEquals(result.next()[0], stringValue("Bonnie"));
+        assertThat(result.next()[0]).isEqualTo(stringValue("Bonnie"));
     }
 
     @Test
@@ -384,7 +382,7 @@ public class ProcedureTest {
         verify(log)
                 .warn(
                         "The procedure 'org.neo4j.procedure.impl.listCoolPeople' is not on the allowlist and won't be loaded.");
-        assertThat(proc.isEmpty()).isTrue();
+        assertThat(proc).isEmpty();
     }
 
     @Test
@@ -400,7 +398,7 @@ public class ProcedureTest {
 
         // Then
         assertThat(out.next()).isEqualTo(new AnyValue[] {longValue(42), stringValue("hello"), Values.TRUE});
-        assertFalse(out.hasNext());
+        assertThat(out.hasNext()).isFalse();
     }
 
     @Test

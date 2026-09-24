@@ -22,12 +22,10 @@ package org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands
 import org.neo4j.common.EntityType
 import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.AllIndexes
-import org.neo4j.cypher.internal.ast.CommandResultItem
 import org.neo4j.cypher.internal.ast.FulltextIndexes
 import org.neo4j.cypher.internal.ast.LookupIndexes
 import org.neo4j.cypher.internal.ast.PointIndexes
 import org.neo4j.cypher.internal.ast.RangeIndexes
-import org.neo4j.cypher.internal.ast.ShowColumn
 import org.neo4j.cypher.internal.ast.ShowIndexType
 import org.neo4j.cypher.internal.ast.ShowIndexesClause.createStatementColumn
 import org.neo4j.cypher.internal.ast.ShowIndexesClause.entityTypeColumn
@@ -47,10 +45,13 @@ import org.neo4j.cypher.internal.ast.ShowIndexesClause.trackedSinceColumn
 import org.neo4j.cypher.internal.ast.ShowIndexesClause.typeColumn
 import org.neo4j.cypher.internal.ast.TextIndexes
 import org.neo4j.cypher.internal.ast.VectorIndexes
+import org.neo4j.cypher.internal.logical.plans.CommandDefaultColumn
+import org.neo4j.cypher.internal.logical.plans.CommandYieldColumn
 import org.neo4j.cypher.internal.runtime.ClosingIterator
 import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.runtime.IndexInfo
 import org.neo4j.cypher.internal.runtime.QueryContext
+import org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands.ShowConstraintsCommand.constraintIsAddedInTransaction
 import org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands.ShowIndexesCommand.createIndexStatement
 import org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands.ShowSchemaCommandHelper.asEscapedString
 import org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands.ShowSchemaCommandHelper.barStringJoiner
@@ -65,12 +66,14 @@ import org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands.ShowS
 import org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands.ShowSchemaCommandHelper.propStringJoiner
 import org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands.ShowSchemaCommandHelper.relPropStringJoiner
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.QueryState
+import org.neo4j.exceptions.InternalException
 import org.neo4j.internal.schema.ConstraintDescriptor
 import org.neo4j.internal.schema.IndexConfig
 import org.neo4j.internal.schema.IndexDescriptor
 import org.neo4j.internal.schema.IndexProviderDescriptor
 import org.neo4j.internal.schema.IndexType
 import org.neo4j.internal.schema.SettingsAccessor.IndexConfigAccessor
+import org.neo4j.kernel.api.exceptions.InvalidArgumentsException
 import org.neo4j.kernel.api.impl.schema.vector.VectorIndexVersion
 import org.neo4j.values.AnyValue
 import org.neo4j.values.storable.Values
@@ -84,8 +87,8 @@ import scala.jdk.CollectionConverters.SeqHasAsJava
 // SHOW [ALL|FULLTEXT|LOOKUP|POINT|RANGE|TEXT|VECTOR] INDEX[ES] [WHERE clause|YIELD clause]
 case class ShowIndexesCommand(
   indexType: ShowIndexType,
-  columns: List[ShowColumn],
-  yieldColumns: List[CommandResultItem],
+  columns: List[CommandDefaultColumn],
+  yieldColumns: List[CommandYieldColumn],
   cypherVersion: CypherVersion
 ) extends Command(columns, yieldColumns) {
   private val returnCypher5Values: Boolean = cypherVersion == CypherVersion.Cypher5
@@ -94,6 +97,9 @@ case class ShowIndexesCommand(
     val ctx = state.query
     ctx.assertShowIndexAllowed()
     val constraintIdToName = ctx.getAllConstraints()
+      // Skip the constraint if it's added in the same transaction, as it doesn't have an id yet and getId will throw an error.
+      // The indexDescriptor will give back empty as its owning constraint id for these constraints so it's safe to just ignore them.
+      .filterNot { case (descriptor, _) => constraintIsAddedInTransaction(ctx, descriptor) }
       .map { case (descriptor, _) => descriptor.getId -> descriptor.getName }
     val indexes: Map[IndexDescriptor, IndexInfo] = ctx.getAllIndexes()
     val relevantIndexes = indexType match {
@@ -188,13 +194,13 @@ case class ShowIndexesCommand(
           case `trackedSinceColumn` => trackedSinceColumn -> trackedSince
           // The options for this index, shows index provider and config
           case `optionsColumn` =>
-            optionsColumn -> extractOptionsMap(indexType, provider, indexDescriptor.getIndexConfig)
+            optionsColumn -> extractOptionsMap(indexType, provider, indexDescriptor.getIndexConfig, cypherVersion)
           // Message of failure should the index be in a failed state
           case `failureMessageColumn` =>
             failureMessageColumn -> Values.stringValue(indexInfo.indexStatus.failureMessage)
           // The statement to recreate the index
           case `createStatementColumn` =>
-            createStatementColumn -> Values.stringValue(
+            createStatementColumn -> Values.stringOrNoValue(
               createIndexStatement(
                 indexDescriptor.getName,
                 indexType,
@@ -210,11 +216,14 @@ case class ShowIndexesCommand(
           case unknown =>
             // This match should cover all existing columns but we get scala warnings
             // on non-exhaustive match due to it being string values
-            throw new IllegalStateException(s"Missing case for column: $unknown")
+            throw InternalException.internalError(
+              this.getClass.getSimpleName,
+              s"Unknown column for show indexes. Missing case for column: $unknown.",
+              s"Missing case for column: $unknown"
+            )
         }.toMap[String, AnyValue]
     }
-    val updatedRows = updateRowsWithPotentiallyRenamedColumns(rows.toList)
-    ClosingIterator.apply(updatedRows.iterator)
+    ClosingIterator.apply(rows.iterator)
   }
 
   private def getIndexStatistics(
@@ -284,7 +293,8 @@ object ShowIndexesCommand {
             val predicate = if (returnCypher5Values) "IS RELATIONSHIP KEY" else "IS KEY"
             createRelConstraintCommand(name, labelsOrTypes, properties, predicate)
           case Some(_) =>
-            throw new IllegalArgumentException(
+            throw InvalidArgumentsException.internalError(
+              this.getClass.getSimpleName,
               "Expected an index or index backed constraint, found another constraint."
             )
           case None =>
@@ -293,7 +303,6 @@ object ShowIndexesCommand {
                 createNodeIndexCommand("RANGE", name, labelsOrTypes, properties)
               case EntityType.RELATIONSHIP =>
                 createRelIndexCommand("RANGE", name, labelsOrTypes, properties)
-              case _ => throw new IllegalArgumentException(s"Did not recognize entity type $entityType")
             }
         }
       case IndexType.FULLTEXT =>
@@ -320,7 +329,6 @@ object ShowIndexesCommand {
               s"EACH [$escapedRelProperties]",
               Some(optionsString)
             )
-          case _ => throw new IllegalArgumentException(s"Did not recognize entity type $entityType")
         }
       case IndexType.TEXT =>
         entityType match {
@@ -328,7 +336,6 @@ object ShowIndexesCommand {
             createNodeIndexCommand("TEXT", name, labelsOrTypes, properties)
           case EntityType.RELATIONSHIP =>
             createRelIndexCommand("TEXT", name, labelsOrTypes, properties)
-          case _ => throw new IllegalArgumentException(s"Did not recognize entity type $entityType")
         }
       case IndexType.POINT =>
         val pointConfig = configAsString(indexConfig)
@@ -339,20 +346,47 @@ object ShowIndexesCommand {
             createNodeIndexCommand("POINT", name, labelsOrTypes, properties, Some(optionsString))
           case EntityType.RELATIONSHIP =>
             createRelIndexCommand("POINT", name, labelsOrTypes, properties, Some(optionsString))
-          case _ => throw new IllegalArgumentException(s"Did not recognize entity type $entityType")
         }
       case IndexType.VECTOR =>
-        val settingsValidator = VectorIndexVersion.fromDescriptor(provider).indexSettingValidator
-        val vectorIndexConfig = settingsValidator.trustIsValidToVectorIndexConfig(new IndexConfigAccessor(indexConfig))
-        val vectorConfig = configAsString(vectorIndexConfig.config)
-        val optionsString = optionsAsString(vectorConfig)
+        if (returnCypher5Values && (labelsOrTypes.size > 1 || properties.size > 1)) null
+        else {
+          // Kernel only sees it as a single list with the vector property first
+          val (vectorProperty, additionalProperties) = (properties.head, properties.tail)
+          val labelsOrTypesWithBars = asEscapedString(labelsOrTypes, barStringJoiner)
+          val settingsValidator = VectorIndexVersion.fromDescriptor(provider).indexSettingValidator
+          val vectorIndexConfig =
+            settingsValidator.interpretAuthoritativeToTypedConfig(new IndexConfigAccessor(indexConfig))
+          val vectorConfig = configAsString(vectorIndexConfig.config)
+          val optionsString = optionsAsString(vectorConfig)
 
-        entityType match {
-          case EntityType.NODE =>
-            createNodeIndexCommand("VECTOR", name, labelsOrTypes, properties, Some(optionsString))
-          case EntityType.RELATIONSHIP =>
-            createRelIndexCommand("VECTOR", name, labelsOrTypes, properties, Some(optionsString))
-          case _ => throw new IllegalArgumentException(s"Did not recognize entity type $entityType")
+          entityType match {
+            case EntityType.NODE =>
+              val escapedNodeVectorProperties = asEscapedString(List(vectorProperty), propStringJoiner)
+              val escapedNodeAdditionalProperties = if (additionalProperties.nonEmpty)
+                Some(asEscapedString(additionalProperties, propStringJoiner))
+              else None
+              val additionalPropertiesString = escapedNodeAdditionalProperties.map(n => s" WITH [$n]").getOrElse("")
+              createIndexCommand(
+                "VECTOR",
+                name,
+                s"(n$labelsOrTypesWithBars)",
+                s"($escapedNodeVectorProperties)$additionalPropertiesString",
+                Some(optionsString)
+              )
+            case EntityType.RELATIONSHIP =>
+              val escapedRelVectorProperties = asEscapedString(List(vectorProperty), relPropStringJoiner)
+              val escapedRelAdditionalProperties = if (additionalProperties.nonEmpty)
+                Some(asEscapedString(additionalProperties, relPropStringJoiner))
+              else None
+              val additionalPropertiesString = escapedRelAdditionalProperties.map(n => s" WITH [$n]").getOrElse("")
+              createIndexCommand(
+                "VECTOR",
+                name,
+                s"()-[r$labelsOrTypesWithBars]-()",
+                s"($escapedRelVectorProperties)$additionalPropertiesString",
+                Some(optionsString)
+              )
+          }
         }
       case IndexType.LOOKUP =>
         entityType match {
@@ -360,9 +394,7 @@ object ShowIndexesCommand {
             createIndexCommand("LOOKUP", name, "(n)", "EACH labels(n)")
           case EntityType.RELATIONSHIP =>
             createIndexCommand("LOOKUP", name, "()-[r]-()", "EACH type(r)")
-          case _ => throw new IllegalArgumentException(s"Did not recognize entity type $entityType")
         }
-      case _ => throw new IllegalArgumentException(s"Did not recognize index type $indexType")
     }
   }
 }

@@ -41,17 +41,21 @@ import org.apache.commons.lang3.SystemUtils;
 import org.neo4j.configuration.BootloaderSettings;
 import org.neo4j.configuration.BufferingLog;
 import org.neo4j.configuration.Config;
+import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.configuration.connectors.HttpConnector;
 import org.neo4j.dbms.api.DatabaseManagementService;
 import org.neo4j.graphdb.TransactionFailureException;
 import org.neo4j.graphdb.config.Configuration;
 import org.neo4j.graphdb.facade.GraphDatabaseDependencies;
+import org.neo4j.internal.helpers.Exceptions;
 import org.neo4j.io.ByteUnit;
 import org.neo4j.io.fs.DefaultFileSystemAbstraction;
 import org.neo4j.io.os.OsBeanUtil;
 import org.neo4j.kernel.impl.pagecache.ConfiguringPageCacheFactory;
+import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.kernel.internal.Version;
+import org.neo4j.kernel.lifecycle.LifecycleException;
 import org.neo4j.logging.InternalLog;
 import org.neo4j.logging.log4j.Log4jLogProvider;
 import org.neo4j.logging.log4j.Neo4jLoggerContext;
@@ -60,6 +64,7 @@ import org.neo4j.memory.MachineMemory;
 import org.neo4j.server.logging.JULBridge;
 import org.neo4j.server.startup.Environment;
 import org.neo4j.server.startup.PidFileHelper;
+import org.neo4j.storageengine.api.StoreIdProvider;
 import org.neo4j.util.FeatureToggles;
 import org.neo4j.util.VisibleForTesting;
 import sun.misc.Signal;
@@ -73,6 +78,7 @@ public abstract class NeoBootstrapper implements Bootstrapper {
     public static final int INVALID_CONFIGURATION_ERROR_CODE = 3;
     public static final int LICENSE_NOT_ACCEPTED_ERROR_CODE = 4;
     private static final String NEO4J_SLF4J_PROVIDER = "org.neo4j.server.logging.slf4j.SLF4JLogBridge";
+    private static final String FAILED_TO_START_MESSAGE = "Failed to start Neo4j on %s.";
     private static final boolean USE_NEO4J_SLF4J_PROVIDER =
             FeatureToggles.flag(Bootstrapper.class, "useNeo4jSlf4jProvider", false);
 
@@ -121,17 +127,27 @@ public abstract class NeoBootstrapper implements Bootstrapper {
             Map<String, String> configOverrides,
             boolean expandCommands,
             boolean daemonMode) {
-        addShutdownHook();
-        installSignalHandlers();
-        SystemLogger.installErrorListener();
-
-        Config config = Config.newBuilder()
+        Config.Builder configBuilder = Config.newBuilder()
                 .commandExpansion(expandCommands)
                 .setDefaults(GraphDatabaseSettings.SERVER_DEFAULTS)
                 .fromFileNoThrow(configFile)
                 .setRaw(configOverrides)
-                .set(GraphDatabaseSettings.neo4j_home, homeDir.toAbsolutePath())
-                .build();
+                .set(GraphDatabaseSettings.neo4j_home, homeDir.toAbsolutePath());
+        if (configFile != null && configFile.getParent() != null) {
+            configBuilder.set(
+                    GraphDatabaseSettings.configuration_directory,
+                    configFile.getParent().toAbsolutePath());
+        }
+        Config config = configBuilder.build();
+
+        return start(homeDir, config, daemonMode);
+    }
+
+    @VisibleForTesting
+    public final int start(Path homeDir, Config config, boolean daemonMode) {
+        addShutdownHook();
+        installSignalHandlers();
+        SystemLogger.installErrorListener();
 
         HeapDumpDiagnostics.INSTANCE.START_TIME = Instant.now().toString();
         HeapDumpDiagnostics.INSTANCE.NEO4J_VERSION = Version.getNeo4jVersion();
@@ -176,33 +192,54 @@ public abstract class NeoBootstrapper implements Bootstrapper {
             SystemLogger.installStdRedirects(userLogProvider);
         }
 
-        try (daemonOut;
-                daemonErr) {
+        try (daemonOut) {
             serverAddress = config.get(HttpConnector.listen_address).toString();
             serverLocation = config.get(databases_root_path).toString();
 
             log.info("Starting...");
             databaseManagementService = createNeo(config, daemonMode, dependencies);
-            if (daemonMode) {
+            if (daemonErr != null) {
                 // Signal parent process we are ready to detach
                 daemonErr.println(Environment.FULLY_FLEDGED);
             }
             log.info("Started.");
+            Instant databaseCreationDate = getDatabaseCreationDate();
+            logOnLicenseEvaluation(homeDir, config, databaseCreationDate);
             return OK;
         } catch (ServerStartupException e) {
             e.describeTo(log);
+            String errMsg = format(FAILED_TO_START_MESSAGE, serverAddress);
+            daemonErrPrint(daemonErr, errMsg, e);
             return WEB_SERVER_STARTUP_ERROR_CODE;
         } catch (TransactionFailureException tfe) {
-            log.error(
-                    format(
-                            "Failed to start Neo4j on %s. Another process may be using databases at location: %s",
-                            serverAddress, serverLocation),
-                    tfe);
+            String errMsg = format(
+                    FAILED_TO_START_MESSAGE + "Another process may be using databases at location: %s",
+                    serverAddress,
+                    serverLocation);
+            log.error(errMsg, tfe);
+            daemonErrPrint(daemonErr, errMsg, tfe);
             return GRAPH_DATABASE_STARTUP_ERROR_CODE;
         } catch (Exception e) {
-            log.error(format("Failed to start Neo4j on %s.", serverAddress), e);
+            String errMsg = format(FAILED_TO_START_MESSAGE, serverAddress);
+            log.error(errMsg, e);
+            daemonErrPrint(daemonErr, errMsg, e);
             return WEB_SERVER_STARTUP_ERROR_CODE;
+        } finally {
+            // We handle this in the finally block, rather than by letting the try-with-resources do it automatically.
+            // This is because try-with-resources closes the underlying System.err stream before it can print the error.
+            if (daemonErr != null) {
+                daemonErr.close();
+            }
         }
+    }
+
+    protected Instant getDatabaseCreationDate() {
+        return Instant.ofEpochMilli(
+                ((GraphDatabaseAPI) databaseManagementService.database(GraphDatabaseSettings.SYSTEM_DATABASE_NAME))
+                        .getDependencyResolver()
+                        .resolveDependency(StoreIdProvider.class)
+                        .getStoreId()
+                        .getCreationTime());
     }
 
     private void writePidSilently() {
@@ -244,14 +281,12 @@ public abstract class NeoBootstrapper implements Bootstrapper {
         }
         long xmx = heapMemoryUsage.getMax();
         if (xmx > ByteUnit.mebiBytes(32000) && xmx < ByteUnit.gibiBytes(48) && !machineMemory.hasCompressedOOPS()) {
-            log.warn(
-                    """
+            log.warn("""
                     The JVM heap memory is currently set to %s, which has resulted in the disabling of compressed ordinary object pointers (OOPs) within the JVM. \
                     It is important to note that compressed OOPs are automatically disabled when heap memory exceeds approximately 32GB, though the exact threshold may vary depending on the platform and JVM version. \
-                    Using uncompressed OOPs can increase heap memory consumption by up to 50%, although the actual impact depends on the specific use case. \
+                    Using uncompressed OOPs can increase heap memory consumption by up to 50%%, although the actual impact depends on the specific use case. \
                     As a result, a larger heap may accommodate less data. To optimize memory utilization, it is recommended to configure the heap memory to either below 32GB or above 48GB.
-                    """,
-                    ByteUnit.bytesToString(xmx));
+                    """, ByteUnit.bytesToString(xmx));
         }
 
         return totalPhysicalMemory != OsBeanUtil.VALUE_UNAVAILABLE && pageCacheSize + xmx > totalPhysicalMemory;
@@ -293,6 +328,8 @@ public abstract class NeoBootstrapper implements Bootstrapper {
 
     protected abstract boolean checkLicenseAgreement(Path homeDir, Configuration config, boolean daemonMode);
 
+    protected abstract void logOnLicenseEvaluation(Path homeDir, Configuration config, Instant databaseCreationDate);
+
     private static Log4jLogProvider setupLogging(Config config, boolean daemonMode) {
         Path xmlConfig = config.get(GraphDatabaseSettings.user_logging_config_path);
         boolean allowDefaultXmlConfig = !config.isExplicitlySet(GraphDatabaseSettings.user_logging_config_path);
@@ -311,7 +348,7 @@ public abstract class NeoBootstrapper implements Bootstrapper {
         JULBridge.resetJUL();
         Logger.getLogger("").setLevel(Level.WARNING);
         JULBridge.forwardTo(userLogProvider);
-        setupSLF4JProvider(userLogProvider, List.of("org.eclipse.jetty"));
+        setupSLF4JProvider(userLogProvider, config.get(GraphDatabaseInternalSettings.slf4j_class_prefixes));
         return userLogProvider;
     }
 
@@ -399,6 +436,13 @@ public abstract class NeoBootstrapper implements Bootstrapper {
             userLogFileStream = outProvider;
             log = outProvider.getLog(getClass());
             startupLog.replayInto(log);
+        }
+    }
+
+    private void daemonErrPrint(PrintStream daemonErr, String errMsg, Exception e) {
+        if (daemonErr != null) {
+            daemonErr.println(errMsg);
+            daemonErr.println(Exceptions.findCauseOrSuppressed(e.getCause(), t -> !(t instanceof LifecycleException)));
         }
     }
 

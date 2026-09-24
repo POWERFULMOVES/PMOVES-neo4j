@@ -24,9 +24,10 @@ import org.neo4j.graphdb.schema.PropertyType;
 /**
  * Note: ordering and name (user description) is defined by CIP-100.
  */
-public enum SchemaValueType implements TypeRepresentation {
+public enum SchemaValueType implements ConstrainableType {
     BOOLEAN("BOOLEAN", Ordering.BOOLEAN_ORDER),
     STRING("STRING", Ordering.STRING_ORDER),
+    UUID("UUID", Ordering.UUID_ORDER),
     INTEGER("INTEGER", Ordering.INTEGER_ORDER),
     FLOAT("FLOAT", Ordering.FLOAT_ORDER),
     DATE("DATE", Ordering.DATE_ORDER),
@@ -47,7 +48,8 @@ public enum SchemaValueType implements TypeRepresentation {
     LIST_LOCAL_DATETIME("LIST<LOCAL DATETIME NOT NULL>", Ordering.LIST_LOCAL_DATETIME_ORDER),
     LIST_ZONED_DATETIME("LIST<ZONED DATETIME NOT NULL>", Ordering.LIST_ZONED_DATETIME_ORDER),
     LIST_DURATION("LIST<DURATION NOT NULL>", Ordering.LIST_DURATION_ORDER),
-    LIST_POINT("LIST<POINT NOT NULL>", Ordering.LIST_POINT_ORDER);
+    LIST_POINT("LIST<POINT NOT NULL>", Ordering.LIST_POINT_ORDER),
+    LIST_UUID("LIST<UUID NOT NULL>", Ordering.LIST_UUID_ORDER);
 
     private final String userDescription;
     private final Ordering order;
@@ -67,8 +69,13 @@ public enum SchemaValueType implements TypeRepresentation {
         return order;
     }
 
+    @Override
     public String serialize() {
         return this.name();
+    }
+
+    public static SchemaValueType deserialize(String s) throws IllegalArgumentException {
+        return SchemaValueType.valueOf(s);
     }
 
     @Override
@@ -79,6 +86,7 @@ public enum SchemaValueType implements TypeRepresentation {
     public static SchemaValueType fromPublicApi(PropertyType propertyType) {
         return switch (propertyType) {
             case BOOLEAN -> SchemaValueType.BOOLEAN;
+            case UUID -> SchemaValueType.UUID;
             case STRING -> SchemaValueType.STRING;
             case INTEGER -> SchemaValueType.INTEGER;
             case FLOAT -> SchemaValueType.FLOAT;
@@ -91,6 +99,7 @@ public enum SchemaValueType implements TypeRepresentation {
             case POINT -> SchemaValueType.POINT;
             case LIST_BOOLEAN_NOT_NULL -> SchemaValueType.LIST_BOOLEAN;
             case LIST_STRING_NOT_NULL -> SchemaValueType.LIST_STRING;
+            case LIST_UUID_NOT_NULL -> SchemaValueType.LIST_UUID;
             case LIST_INTEGER_NOT_NULL -> SchemaValueType.LIST_INTEGER;
             case LIST_FLOAT_NOT_NULL -> SchemaValueType.LIST_FLOAT;
             case LIST_DATE_NOT_NULL -> SchemaValueType.LIST_DATE;
@@ -100,13 +109,18 @@ public enum SchemaValueType implements TypeRepresentation {
             case LIST_ZONED_DATETIME_NOT_NULL -> SchemaValueType.LIST_ZONED_DATETIME;
             case LIST_DURATION_NOT_NULL -> SchemaValueType.LIST_DURATION;
             case LIST_POINT_NOT_NULL -> SchemaValueType.LIST_POINT;
+            case VECTOR, LIST_VECTOR_NOT_NULL ->
+                throw new IllegalArgumentException("Using PropertyType." + propertyType.name()
+                        + " is not supported via the API." + " Please use a Cypher statement instead.");
         };
     }
 
+    @Override
     public PropertyType toPublicApi() {
         return switch (this) {
             case BOOLEAN -> PropertyType.BOOLEAN;
             case STRING -> PropertyType.STRING;
+            case UUID -> PropertyType.UUID;
             case INTEGER -> PropertyType.INTEGER;
             case FLOAT -> PropertyType.FLOAT;
             case DURATION -> PropertyType.DURATION;
@@ -117,6 +131,7 @@ public enum SchemaValueType implements TypeRepresentation {
             case LOCAL_TIME -> PropertyType.LOCAL_TIME;
             case LIST_BOOLEAN -> PropertyType.LIST_BOOLEAN_NOT_NULL;
             case LIST_STRING -> PropertyType.LIST_STRING_NOT_NULL;
+            case LIST_UUID -> PropertyType.LIST_UUID_NOT_NULL;
             case LIST_INTEGER -> PropertyType.LIST_INTEGER_NOT_NULL;
             case LIST_FLOAT -> PropertyType.LIST_FLOAT_NOT_NULL;
             case LIST_DATE -> PropertyType.LIST_DATE_NOT_NULL;

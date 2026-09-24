@@ -46,7 +46,6 @@ import java.util.TreeSet;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -57,28 +56,29 @@ import org.neo4j.io.pagecache.PageCursor;
 import org.neo4j.io.pagecache.PageCursorUtil;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
 @SuppressWarnings("unused")
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 @ResourceLock(InternalTreeLogicTestBase.INDEX_RESOURCE)
 abstract class InternalTreeLogicTestBase<KEY, VALUE> {
     static final String INDEX_RESOURCE = "index";
     private static final int PAGE_SIZE = 256;
-    private static long stableGeneration = GenerationSafePointer.MIN_GENERATION;
-    private static long unstableGeneration = stableGeneration + 1;
+    static long stableGeneration = GenerationSafePointer.MIN_GENERATION;
+    static long unstableGeneration = stableGeneration + 1;
 
     @Inject
     private RandomSupport random;
 
-    private PageAwareByteArrayCursor cursor;
-    private PageAwareByteArrayCursor readCursor;
-    private SimpleIdProvider id;
+    PageAwareByteArrayCursor navigationCursor;
+    PageAwareByteArrayCursor cursor;
+    PageAwareByteArrayCursor readCursor;
+    SimpleIdProvider id;
 
     private ValueMerger<KEY, VALUE> adder;
     private InternalTreeLogic<KEY, VALUE> treeLogic;
     private VALUE dontCare;
-    private StructurePropagation<KEY> structurePropagation;
+    StructurePropagation<KEY> structurePropagation;
 
     private double ratioToKeepInLeftOnSplit = InternalTreeLogic.DEFAULT_SPLIT_RATIO;
 
@@ -100,11 +100,13 @@ abstract class InternalTreeLogicTestBase<KEY, VALUE> {
     void setUp() throws IOException {
         cursor = new PageAwareByteArrayCursor(PAGE_SIZE);
         readCursor = cursor.duplicate();
+        navigationCursor = cursor.duplicate();
         id = new SimpleIdProvider(cursor::duplicate);
 
         id.reset();
-        long newId = id.acquireNewId(stableGeneration, unstableGeneration, CursorCreator.bind(cursor));
+        long newId = id.acquireNewId(stableGeneration, CursorCreator.bind(cursor), NULL_CONTEXT);
         goTo(cursor, newId);
+        goTo(navigationCursor, newId);
         readCursor.next(newId);
 
         layout = getLayout();
@@ -1009,7 +1011,7 @@ abstract class InternalTreeLogicTestBase<KEY, VALUE> {
         // newRight contain all
         goToSuccessor(readCursor, oldRight);
         List<KEY> allKeysInNewRight = allLeafKeys(readCursor);
-        assertThat(allKeysInNewRight.size()).isEqualTo(allKeysInOldLeftAndOldRight.size());
+        assertThat(allKeysInNewRight).hasSize(allKeysInOldLeftAndOldRight.size());
         for (int index = 0; index < allKeysInOldLeftAndOldRight.size(); index++) {
             assertEqualsKey(allKeysInOldLeftAndOldRight.get(index), allKeysInNewRight.get(index));
         }
@@ -1254,7 +1256,7 @@ abstract class InternalTreeLogicTestBase<KEY, VALUE> {
                 assertThat(expectedKeys.remove(key)).isTrue();
             }
         }
-        assertThat(expectedKeys.isEmpty()).isTrue();
+        assertThat(expectedKeys).isEmpty();
     }
 
     /* CREATE NEW VERSION ON UPDATE */
@@ -1508,60 +1510,6 @@ abstract class InternalTreeLogicTestBase<KEY, VALUE> {
 
     @ParameterizedTest
     @MethodSource("generators")
-    void shouldCreateNewVersionWhenInsertInStableInternal(
-            String name, GenerationManager generationManager, boolean isCheckpointing) throws Exception {
-        assumeTrue(isCheckpointing, "No checkpointing, no successor");
-
-        // GIVEN
-        initialize();
-        long someHighMultiplier = 1000;
-        for (int i = 0; numberOfRootSplits < 2; i++) {
-            long seed = i * someHighMultiplier;
-            insert(key(seed), value(seed));
-        }
-        long rootAfterInitialData = root.id();
-        root.goTo(readCursor);
-        assertEquals(1, keyCount());
-        long leftInternal = childAt(readCursor, 0, stableGeneration, unstableGeneration);
-        long rightInternal = childAt(readCursor, 1, stableGeneration, unstableGeneration);
-        assertSiblings(leftInternal, rightInternal, TreeNodeUtil.NO_NODE_FLAG);
-        goTo(readCursor, leftInternal);
-        int leftInternalKeyCount = keyCount();
-        assertThat(TreeNodeUtil.isInternal(readCursor)).isTrue();
-        long leftLeaf = childAt(readCursor, 0, stableGeneration, unstableGeneration);
-        goTo(readCursor, leftLeaf);
-        KEY firstKeyInLeaf = keyAt(0, false);
-        long seedOfFirstKeyInLeaf = getSeed(firstKeyInLeaf);
-
-        // WHEN
-        generationManager.checkpoint();
-        long targetLastId =
-                id.lastId() + 3; /*one for successor in leaf, one for split leaf, one for successor in internal*/
-        for (int i = 0; id.lastId() < targetLastId; i++) {
-            insert(key(seedOfFirstKeyInLeaf + i), value(seedOfFirstKeyInLeaf + i));
-            assertThat(structurePropagation.hasRightKeyInsert).isFalse(); // there should be no root split
-        }
-
-        // THEN
-        // root hasn't been split further
-        assertThat(root.id()).isEqualTo(rootAfterInitialData);
-
-        // there's an successor to left internal w/ one more key in
-        root.goTo(readCursor);
-        long successorLeftInternal = id.lastId();
-        assertThat(childAt(readCursor, 0, stableGeneration, unstableGeneration)).isEqualTo(successorLeftInternal);
-        goTo(readCursor, successorLeftInternal);
-        int successorLeftInternalKeyCount = keyCount();
-        assertEquals(leftInternalKeyCount + 1, successorLeftInternalKeyCount);
-
-        // and left internal points to the successor
-        goTo(readCursor, leftInternal);
-        assertThat(successor(readCursor, stableGeneration, unstableGeneration)).isEqualTo(successorLeftInternal);
-        assertSiblings(successorLeftInternal, rightInternal, TreeNodeUtil.NO_NODE_FLAG);
-    }
-
-    @ParameterizedTest
-    @MethodSource("generators")
     void shouldOverwriteInheritedSuccessorOnSuccessor(
             String name, GenerationManager generationManager, boolean isCheckpointing) throws Exception {
         // GIVEN
@@ -1577,7 +1525,7 @@ abstract class InternalTreeLogicTestBase<KEY, VALUE> {
         generationManager.recovery();
         // start up on stable root
         goTo(cursor, originalNodeId);
-        treeLogic.initialize(cursor, InternalTreeLogic.DEFAULT_SPLIT_RATIO, StructureWriteLog.EMPTY);
+        treeLogic.initialize(navigationCursor, cursor, InternalTreeLogic.DEFAULT_SPLIT_RATIO, StructureWriteLog.EMPTY);
         // replay transaction TX1 will create a new successor
         insert(key(1L), value(10L));
         assertEquals(2, numberOfRootSuccessors);
@@ -1710,7 +1658,7 @@ abstract class InternalTreeLogicTestBase<KEY, VALUE> {
                 .contains(
                         "Index update aborted due to ending up on a tree node which isn't a leaf after moving cursor towards "
                                 + key
-                                + ", cursor is at pageId " + cursor.getCurrentPageId()
+                                + ", cursor is at pageId " + navigationCursor.getCurrentPageId()
                                 + ". This is most likely caused by an inconsistency " + "in the index.");
     }
 
@@ -1852,7 +1800,7 @@ abstract class InternalTreeLogicTestBase<KEY, VALUE> {
         return keys;
     }
 
-    private int keyCount(long nodeId) throws IOException {
+    int keyCount(long nodeId) throws IOException {
         long prevId = readCursor.getCurrentPageId();
         try {
             goTo(readCursor, nodeId);
@@ -1862,18 +1810,19 @@ abstract class InternalTreeLogicTestBase<KEY, VALUE> {
         }
     }
 
-    private int keyCount() {
+    int keyCount() {
         return TreeNodeUtil.keyCount(readCursor);
     }
 
-    void initialize() {
+    void initialize() throws IOException {
         leaf.initialize(cursor, DATA_LAYER_FLAG, stableGeneration, unstableGeneration);
         updateRoot();
     }
 
-    private void updateRoot() {
+    private void updateRoot() throws IOException {
         root = new Root(cursor.getCurrentPageId(), unstableGeneration);
-        treeLogic.initialize(cursor, ratioToKeepInLeftOnSplit, StructureWriteLog.EMPTY);
+        goTo(navigationCursor, cursor.getCurrentPageId());
+        treeLogic.initialize(navigationCursor, cursor, ratioToKeepInLeftOnSplit, StructureWriteLog.EMPTY);
     }
 
     private void assertSuccessorPointerNotCrashOrBroken() throws IOException {
@@ -1906,7 +1855,7 @@ abstract class InternalTreeLogicTestBase<KEY, VALUE> {
         assertThat(KeySearch.isHit(search)).isFalse();
     }
 
-    private void assertSiblings(long left, long middle, long right) throws IOException {
+    void assertSiblings(long left, long middle, long right) throws IOException {
         long origin = readCursor.getCurrentPageId();
         goTo(readCursor, middle);
         assertThat(rightSibling(readCursor, stableGeneration, unstableGeneration))
@@ -1944,14 +1893,15 @@ abstract class InternalTreeLogicTestBase<KEY, VALUE> {
         return layout.value(seed);
     }
 
-    private long getSeed(KEY key) {
+    long getSeed(KEY key) {
         return layout.keySeed(key);
     }
 
     private void newRootFromSplit(StructurePropagation<KEY> split) throws IOException {
         assertThat(split.hasRightKeyInsert).isTrue();
-        long rootId = id.acquireNewId(stableGeneration, unstableGeneration, CursorCreator.bind(cursor));
+        long rootId = id.acquireNewId(stableGeneration, CursorCreator.bind(cursor), NULL_CONTEXT);
         goTo(cursor, rootId);
+        goTo(navigationCursor, rootId);
         internal.initialize(cursor, DATA_LAYER_FLAG, stableGeneration, unstableGeneration);
         internal.setChildAt(cursor, split.midChild, 0, stableGeneration, unstableGeneration);
         internal.insertKeyAndRightChildAt(
@@ -1961,26 +1911,23 @@ abstract class InternalTreeLogicTestBase<KEY, VALUE> {
         updateRoot();
     }
 
-    private void assertSiblingOrderAndPointers(long... children) throws IOException {
+    void assertSiblingOrderAndPointers(long... children) throws IOException {
         long currentPageId = readCursor.getCurrentPageId();
         RightmostInChain rightmost = new RightmostInChain(null, true);
-        GenerationKeeper generationTarget = new GenerationKeeper();
         ThrowingConsistencyCheckVisitor visitor = new ThrowingConsistencyCheckVisitor();
         for (long child : children) {
             goTo(readCursor, child);
-            long leftSibling =
-                    TreeNodeUtil.leftSibling(readCursor, stableGeneration, unstableGeneration, generationTarget);
-            long leftSiblingGeneration = generationTarget.generation;
-            long rightSibling =
-                    TreeNodeUtil.rightSibling(readCursor, stableGeneration, unstableGeneration, generationTarget);
-            long rightSiblingGeneration = generationTarget.generation;
+            PointerWithGeneration leftSibling =
+                    TreeNodeUtil.leftSibling(readCursor, stableGeneration, unstableGeneration);
+            PointerWithGeneration rightSibling =
+                    TreeNodeUtil.rightSibling(readCursor, stableGeneration, unstableGeneration);
             rightmost.assertNext(
                     readCursor,
                     TreeNodeUtil.generation(readCursor),
-                    pointer(leftSibling),
-                    leftSiblingGeneration,
-                    pointer(rightSibling),
-                    rightSiblingGeneration,
+                    pointer(leftSibling.pointer()),
+                    leftSibling.generation(),
+                    pointer(rightSibling.pointer()),
+                    rightSibling.generation(),
                     visitor);
         }
         rightmost.assertLast(visitor);
@@ -2001,7 +1948,7 @@ abstract class InternalTreeLogicTestBase<KEY, VALUE> {
         }
     }
 
-    private KEY keyAt(int pos, boolean isInternal) {
+    KEY keyAt(int pos, boolean isInternal) {
         KEY into = layout.newKey();
         if (isInternal) {
             return internal.keyAt(readCursor, into, pos, NULL_CONTEXT);
@@ -2009,7 +1956,7 @@ abstract class InternalTreeLogicTestBase<KEY, VALUE> {
         return leaf.keyAt(readCursor, into, pos, NULL_CONTEXT);
     }
 
-    private VALUE valueAt(long nodeId, int pos) throws IOException {
+    VALUE valueAt(long nodeId, int pos) throws IOException {
         var readValue = new ValueHolder<>(layout.newValue());
         long prevId = readCursor.getCurrentPageId();
         try {
@@ -2033,7 +1980,6 @@ abstract class InternalTreeLogicTestBase<KEY, VALUE> {
         structurePropagation.hasRightKeyInsert = false;
         structurePropagation.hasMidChildUpdate = false;
         treeLogic.insert(
-                cursor,
                 structurePropagation,
                 key,
                 value,
@@ -2059,17 +2005,11 @@ abstract class InternalTreeLogicTestBase<KEY, VALUE> {
 
     private void remove(KEY key, VALUE into) throws IOException {
         treeLogic.remove(
-                cursor,
-                structurePropagation,
-                key,
-                new ValueHolder<>(into),
-                stableGeneration,
-                unstableGeneration,
-                NULL_CONTEXT);
+                structurePropagation, key, new ValueHolder<>(into), stableGeneration, unstableGeneration, NULL_CONTEXT);
         handleAfterChange();
     }
 
-    private interface GenerationManager {
+    interface GenerationManager {
         void checkpoint();
 
         void recovery();
@@ -2100,7 +2040,7 @@ abstract class InternalTreeLogicTestBase<KEY, VALUE> {
         };
     }
 
-    private static void goTo(PageCursor cursor, long pageId) throws IOException {
+    static void goTo(PageCursor cursor, long pageId) throws IOException {
         PageCursorUtil.goTo(cursor, "test", pointer(pageId));
     }
 
@@ -2114,20 +2054,23 @@ abstract class InternalTreeLogicTestBase<KEY, VALUE> {
         goToSuccessor(cursor);
     }
 
-    private long childAt(PageCursor cursor, int pos, long stableGeneration, long unstableGeneration) {
+    long childAt(PageCursor cursor, int pos, long stableGeneration, long unstableGeneration) {
         return pointer(internal.childAt(cursor, pos, stableGeneration, unstableGeneration));
     }
 
     private static long rightSibling(PageCursor cursor, long stableGeneration, long unstableGeneration) {
-        return pointer(TreeNodeUtil.rightSibling(cursor, stableGeneration, unstableGeneration));
+        return pointer(TreeNodeUtil.rightSibling(cursor, stableGeneration, unstableGeneration)
+                .pointer());
     }
 
     private static long leftSibling(PageCursor cursor, long stableGeneration, long unstableGeneration) {
-        return pointer(TreeNodeUtil.leftSibling(cursor, stableGeneration, unstableGeneration));
+        return pointer(TreeNodeUtil.leftSibling(cursor, stableGeneration, unstableGeneration)
+                .pointer());
     }
 
-    private static long successor(PageCursor cursor, long stableGeneration, long unstableGeneration) {
-        return pointer(TreeNodeUtil.successor(cursor, stableGeneration, unstableGeneration));
+    static long successor(PageCursor cursor, long stableGeneration, long unstableGeneration) {
+        return pointer(TreeNodeUtil.successor(cursor, stableGeneration, unstableGeneration)
+                .pointer());
     }
 
     private static long newestGeneration(PageCursor cursor, long stableGeneration, long unstableGeneration)
@@ -2136,7 +2079,8 @@ abstract class InternalTreeLogicTestBase<KEY, VALUE> {
         long successor = current;
         do {
             goTo(cursor, successor);
-            successor = pointer(TreeNodeUtil.successor(cursor, stableGeneration, unstableGeneration));
+            successor = pointer(TreeNodeUtil.successor(cursor, stableGeneration, unstableGeneration)
+                    .pointer());
         } while (successor != TreeNodeUtil.NO_NODE_FLAG);
         successor = cursor.getCurrentPageId();
         goTo(cursor, current);
@@ -2150,14 +2094,14 @@ abstract class InternalTreeLogicTestBase<KEY, VALUE> {
                 format("expected no not equal, key1=%s, key2=%s", key1.toString(), key2.toString()));
     }
 
-    private void assertEqualsKey(KEY expected, KEY actual) {
+    void assertEqualsKey(KEY expected, KEY actual) {
         assertEquals(
                 0,
                 layout.compare(expected, actual),
                 format("expected equal, expected=%s, actual=%s", expected, actual));
     }
 
-    private void assertEqualsValue(VALUE expected, VALUE actual) {
+    void assertEqualsValue(VALUE expected, VALUE actual) {
         assertEquals(
                 0,
                 layout.compareValue(expected, actual),

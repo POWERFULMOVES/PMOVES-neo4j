@@ -28,8 +28,8 @@ class OptionRendererTest extends CypherFunSuite {
 
   implicit val renderInts: OptionRenderer[Int] = OptionRenderer.create(value => s"the number $value")
   implicit val renderStrings: OptionRenderer[String] = OptionRenderer.create(value => s"text $value")
-  implicit val renderInner: OptionRenderer[MyInner] = OptionRenderer.derive[MyInner]
-  implicit val renderOuter: OptionRenderer[MyOuter] = OptionRenderer.derive[MyOuter]
+  implicit val renderInner: OptionRenderer[MyInner] = OptionRenderer.derived[MyInner]
+  implicit val renderOuter: OptionRenderer[MyOuter] = OptionRenderer.derived[MyOuter]
 
   test("Can render any case class") {
     renderOuter.render(MyOuter(MyInner("abc", "foo"), 123)) shouldEqual "text abc text foo the number 123"

@@ -35,6 +35,7 @@ import org.neo4j.cypher.internal.logical.plans.AbstractSemiApply
 import org.neo4j.cypher.internal.logical.plans.Aggregation
 import org.neo4j.cypher.internal.logical.plans.Anti
 import org.neo4j.cypher.internal.logical.plans.ApplyPlan
+import org.neo4j.cypher.internal.logical.plans.AssertSameNode
 import org.neo4j.cypher.internal.logical.plans.CacheProperties
 import org.neo4j.cypher.internal.logical.plans.CanGetValue
 import org.neo4j.cypher.internal.logical.plans.Eager
@@ -47,7 +48,6 @@ import org.neo4j.cypher.internal.logical.plans.OrderedAggregation
 import org.neo4j.cypher.internal.logical.plans.OrderedUnion
 import org.neo4j.cypher.internal.logical.plans.ProjectingPlan
 import org.neo4j.cypher.internal.logical.plans.RelationshipIndexLeafPlan
-import org.neo4j.cypher.internal.logical.plans.RemoteBatchProperties
 import org.neo4j.cypher.internal.logical.plans.RollUpApply
 import org.neo4j.cypher.internal.logical.plans.Selection
 import org.neo4j.cypher.internal.logical.plans.SetNodeProperties
@@ -261,13 +261,13 @@ case object PushdownPropertyReads {
                 //       the getValue behaviour will still be CanGetValue
                 //       instead of GetValue
                 .map(asProperty(indexPlan.idName))
-            case indexPlan: RelationshipIndexLeafPlan =>
+            case indexPlan: RelationshipIndexLeafPlan if indexPlan.idName.isDefined =>
               indexPlan.properties
                 .filter(_.getValueFromIndex == CanGetValue)
                 // NOTE: as we pushdown before inserting cached properties
                 //       the getValue behaviour will still be CanGetValue
                 //       instead of GetValue
-                .map(asProperty(indexPlan.idName))
+                .map(asProperty(indexPlan.idName.get))
 
             case SetProperty(_, variable: LogicalVariable, propertyKey, _) =>
               Seq(PushableProperty(variable, propertyKey))
@@ -326,8 +326,11 @@ case object PushdownPropertyReads {
     plan match {
 
       // Do _not_ pushdown from on top of these plans to the LHS or the RHS
-      case _: Union |
-        _: OrderedUnion =>
+      case _: Union
+        | _: OrderedUnion
+        // Plans below AssertSameNode are all NodeUniqueIndexSeek, so pushing reads below doesn't accomplish anything
+        // other than making rewriting to AssertingMultiNodeIndexSeek later more difficult
+        | _: AssertSameNode =>
         val newVariables = plan.availableSymbols
         val outgoingCardinality = effectiveCardinalities(plan.id)
         val outgoingVariableOptima =
@@ -459,7 +462,7 @@ case object PushdownPropertyReads {
         }
         dataBaseMode match {
           case DatabaseMode.SHARDED =>
-            RemoteBatchProperties(lp, copiedProperties)(attributes.copy(lp.id))
+            lp
           case _ =>
             CacheProperties(lp, copiedProperties)(attributes.copy(lp.id))
         }

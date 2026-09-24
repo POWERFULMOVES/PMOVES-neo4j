@@ -35,20 +35,24 @@ import org.neo4j.internal.schema.constraints.NodeLabelExistenceConstraintDescrip
 import org.neo4j.internal.schema.constraints.RelationshipEndpointLabelConstraintDescriptor;
 import org.neo4j.internal.schema.constraints.TypeConstraintDescriptor;
 import org.neo4j.io.pagecache.context.CursorContext;
+import org.neo4j.kernel.impl.newapi.FilteringNodeCursorWrapper;
+import org.neo4j.kernel.impl.newapi.FilteringRelationshipScanCursorWrapper;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.storageengine.api.StorageReader;
 import org.neo4j.storageengine.api.txstate.ReadableTransactionState;
 import org.neo4j.storageengine.api.txstate.TxStateVisitor;
 
 public interface ConstraintValidator {
-    void assertKeyConstraintAllowed(SchemaDescriptor descriptor) throws CreateConstraintFailureException;
+    void assertKeyConstraintAllowed(SchemaDescriptor descriptor, TokenNameLookup tokenNameLookup)
+            throws CreateConstraintFailureException;
 
     void validateNodeKeyConstraint(
             NodeLabelIndexCursor allNodes,
             NodeCursor nodeCursor,
             PropertyCursor propertyCursor,
             LabelSchemaDescriptor descriptor,
-            TokenNameLookup tokenNameLookup)
+            TokenNameLookup tokenNameLookup,
+            MemoryTracker memoryTracker)
             throws CreateConstraintFailureException;
 
     void validateRelKeyConstraint(
@@ -56,7 +60,8 @@ public interface ConstraintValidator {
             RelationshipScanCursor relCursor,
             PropertyCursor propertyCursor,
             RelationTypeSchemaDescriptor descriptor,
-            TokenNameLookup tokenNameLookup)
+            TokenNameLookup tokenNameLookup,
+            MemoryTracker memoryTracker)
             throws CreateConstraintFailureException;
 
     void validateNodePropertyExistenceConstraint(
@@ -65,15 +70,17 @@ public interface ConstraintValidator {
             PropertyCursor propertyCursor,
             LabelSchemaDescriptor descriptor,
             TokenNameLookup tokenNameLookup,
-            boolean isDependent)
+            boolean isDependent,
+            MemoryTracker memoryTracker)
             throws CreateConstraintFailureException;
 
     void validateRelationshipPropertyExistenceConstraint(
-            RelationshipScanCursor relationshipCursor,
+            FilteringRelationshipScanCursorWrapper relationshipCursor,
             PropertyCursor propertyCursor,
             RelationTypeSchemaDescriptor descriptor,
             TokenNameLookup tokenNameLookup,
-            boolean isDependent)
+            boolean isDependent,
+            MemoryTracker memoryTracker)
             throws CreateConstraintFailureException;
 
     void validateRelationshipPropertyExistenceConstraint(
@@ -81,7 +88,8 @@ public interface ConstraintValidator {
             PropertyCursor propertyCursor,
             RelationTypeSchemaDescriptor descriptor,
             TokenNameLookup tokenNameLookup,
-            boolean isDependent)
+            boolean isDependent,
+            MemoryTracker memoryTracker)
             throws CreateConstraintFailureException;
 
     TxStateVisitor decorateTxStateVisitor(
@@ -94,32 +102,36 @@ public interface ConstraintValidator {
             MemoryTracker memoryTracker);
 
     void validateNodePropertyExistenceConstraint(
-            NodeCursor nodeCursor,
+            FilteringNodeCursorWrapper nodeCursor,
             PropertyCursor propertyCursor,
             LabelSchemaDescriptor descriptor,
             TokenNameLookup tokenNameLookup,
-            boolean isDependent)
+            boolean isDependent,
+            MemoryTracker memoryTracker)
             throws CreateConstraintFailureException;
 
     void validateNodeKeyConstraint(
-            NodeCursor nodeCursor,
+            FilteringNodeCursorWrapper nodeCursor,
             PropertyCursor propertyCursor,
             LabelSchemaDescriptor descriptor,
-            TokenNameLookup tokenNameLookup)
+            TokenNameLookup tokenNameLookup,
+            MemoryTracker memoryTracker)
             throws CreateConstraintFailureException;
 
     void validateRelKeyConstraint(
-            RelationshipScanCursor relCursor,
+            FilteringRelationshipScanCursorWrapper relCursor,
             PropertyCursor propertyCursor,
             RelationTypeSchemaDescriptor descriptor,
-            TokenNameLookup tokenNameLookup)
+            TokenNameLookup tokenNameLookup,
+            MemoryTracker memoryTracker)
             throws CreateConstraintFailureException;
 
     void validateNodePropertyTypeConstraint(
-            NodeCursor nodeCursor,
+            FilteringNodeCursorWrapper nodeCursor,
             PropertyCursor propertyCursor,
             TypeConstraintDescriptor descriptor,
-            TokenNameLookup tokenNameLookup)
+            TokenNameLookup tokenNameLookup,
+            MemoryTracker memoryTracker)
             throws CreateConstraintFailureException;
 
     void validateNodePropertyTypeConstraint(
@@ -127,21 +139,24 @@ public interface ConstraintValidator {
             NodeCursor nodeCursor,
             PropertyCursor propertyCursor,
             TypeConstraintDescriptor descriptor,
-            TokenNameLookup tokenNameLookup)
+            TokenNameLookup tokenNameLookup,
+            MemoryTracker memoryTracker)
             throws CreateConstraintFailureException;
 
     void validateRelationshipPropertyTypeConstraint(
-            RelationshipScanCursor relationshipCursor,
+            FilteringRelationshipScanCursorWrapper relationshipCursor,
             PropertyCursor propertyCursor,
             TypeConstraintDescriptor descriptor,
-            TokenNameLookup tokenNameLookup)
+            TokenNameLookup tokenNameLookup,
+            MemoryTracker memoryTracker)
             throws CreateConstraintFailureException;
 
     void validateRelationshipPropertyTypeConstraint(
             RelationshipTypeIndexCursor allRelationships,
             PropertyCursor propertyCursor,
             TypeConstraintDescriptor descriptor,
-            TokenNameLookup tokenNameLookup)
+            TokenNameLookup tokenNameLookup,
+            MemoryTracker memoryTracker)
             throws CreateConstraintFailureException;
 
     /**

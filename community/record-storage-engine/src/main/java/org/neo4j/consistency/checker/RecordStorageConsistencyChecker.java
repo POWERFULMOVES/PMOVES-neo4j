@@ -25,6 +25,7 @@ import static org.neo4j.consistency.checker.ParallelExecution.DEFAULT_IDS_PER_CH
 import static org.neo4j.consistency.checker.SchemaChecker.moreDescriptiveRecordToStrings;
 import static org.neo4j.internal.helpers.collection.Iterators.resourceIterator;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -45,16 +46,17 @@ import org.neo4j.consistency.report.ConsistencyReporter;
 import org.neo4j.consistency.report.ConsistencySummaryStatistics;
 import org.neo4j.consistency.report.InconsistencyMessageLogger;
 import org.neo4j.consistency.report.InconsistencyReport;
-import org.neo4j.consistency.statistics.Counts;
 import org.neo4j.counts.CountsUpdater;
 import org.neo4j.graphdb.ResourceIterator;
 import org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector;
 import org.neo4j.internal.batchimport.cache.ByteArray;
 import org.neo4j.internal.counts.CountsBuilder;
 import org.neo4j.internal.counts.CountsStoreProvider;
-import org.neo4j.internal.counts.DegreeStoreProvider;
 import org.neo4j.internal.counts.DegreeUpdater;
 import org.neo4j.internal.counts.DegreesRebuilder;
+import org.neo4j.internal.counts.GBPTreeGenericCountsStore;
+import org.neo4j.internal.counts.GBPTreeRelationshipGroupDegreesStore;
+import org.neo4j.internal.counts.RelationshipGroupDegreesStore;
 import org.neo4j.internal.helpers.collection.LongRange;
 import org.neo4j.internal.helpers.progress.ProgressListener;
 import org.neo4j.internal.helpers.progress.ProgressMonitorFactory;
@@ -82,6 +84,7 @@ import org.neo4j.kernel.impl.api.index.IndexSamplingConfig;
 import org.neo4j.kernel.impl.index.schema.ConsistencyCheckable;
 import org.neo4j.kernel.impl.store.NeoStores;
 import org.neo4j.kernel.impl.store.cursor.CachedStoreCursors;
+import org.neo4j.kernel.recovery.RecoveryStartupChecker;
 import org.neo4j.logging.InternalLog;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.MemoryTracker;
@@ -116,6 +119,7 @@ public class RecordStorageConsistencyChecker implements AutoCloseable {
     private final ConsistencyFlags consistencyFlags;
     private final CursorContextFactory contextFactory;
     private final PageCacheTracer cacheTracer;
+    private final long lastCommittedTxId;
     private final CacheAccess cacheAccess;
     private final ConsistencyReporter reporter;
     private final CountsState observedCounts;
@@ -144,7 +148,8 @@ public class RecordStorageConsistencyChecker implements AutoCloseable {
             EntityBasedMemoryLimiter.Factory memoryLimit,
             MemoryTracker memoryTracker,
             CursorContextFactory contextFactory,
-            PageCacheTracer cacheTracer) {
+            PageCacheTracer cacheTracer,
+            long lastCommittedTxId) {
         this.fileSystem = fileSystem;
         this.databaseLayout = databaseLayout;
         this.pageCache = pageCache;
@@ -155,6 +160,7 @@ public class RecordStorageConsistencyChecker implements AutoCloseable {
         this.consistencyFlags = consistencyFlags;
         this.contextFactory = contextFactory;
         this.cacheTracer = cacheTracer;
+        this.lastCommittedTxId = lastCommittedTxId;
         int stopCountThreshold = config.get(consistency_checker_fail_fast_threshold);
         AtomicInteger stopCount = new AtomicInteger(0);
         ConsistencyReporter.Monitor monitor = ConsistencyReporter.NO_MONITOR;
@@ -180,7 +186,7 @@ public class RecordStorageConsistencyChecker implements AutoCloseable {
         RecordLoading recordLoading = new RecordLoading(neoStores);
         this.limiter = instantiateMemoryLimiter(memoryLimit);
         this.cacheAccessMemory = DefaultCacheAccess.defaultByteArray(limiter.rangeSize(), memoryTracker);
-        this.cacheAccess = new DefaultCacheAccess(cacheAccessMemory, Counts.NONE, numberOfThreads);
+        this.cacheAccess = new DefaultCacheAccess(cacheAccessMemory);
         this.observedCounts = new CountsState(neoStores, cacheAccess, memoryTracker);
         this.progress = progressFactory.multipleParts("Consistency check");
         this.indexAccessors = instantiateIndexAccessors(
@@ -425,12 +431,13 @@ public class RecordStorageConsistencyChecker implements AutoCloseable {
                                             CursorContext cursorContext,
                                             MemoryTracker memoryTracker) {
                                         throw new UnsupportedOperationException(
-                                                "Counts store needed rebuild, consistency checker will instead report broken or missing store");
+                                                "Counts store needed rebuild, consistency checker will instead report"
+                                                        + " broken or missing store");
                                     }
 
                                     @Override
                                     public long lastCommittedTxId() {
-                                        return neoStores.getMetaDataStore().getLastCommittedTransactionId();
+                                        return lastCommittedTxId;
                                     }
                                 },
                                 true,
@@ -453,42 +460,50 @@ public class RecordStorageConsistencyChecker implements AutoCloseable {
             return;
         }
 
-        try (var relationshipGroupDegrees = DegreeStoreProvider.getInstance()
-                .openDegreesStore(
-                        pageCache,
-                        fileSystem,
-                        databaseLayout,
-                        NullLogProvider.getInstance(),
-                        RecoveryCleanupWorkCollector.ignore(),
-                        Config.defaults(counts_store_max_cached_entries, 100),
-                        contextFactory,
-                        cacheTracer,
-                        new DegreesRebuilder() {
-                            @Override
-                            public void rebuild(
-                                    DegreeUpdater updater, CursorContext cursorContext, MemoryTracker memoryTracker) {
-                                throw new UnsupportedOperationException(
-                                        "Counts store needed rebuild, consistency checker will instead report broken or missing store");
-                            }
-
-                            @Override
-                            public long lastCommittedTxId() {
-                                return neoStores.getMetaDataStore().getLastCommittedTransactionId();
-                            }
-                        },
-                        neoStores.getOpenOptions(),
-                        true,
-                        VersionStorage.EMPTY_STORAGE)) {
+        try (var relationshipGroupDegrees = openRelationshipDegreesStore()) {
             consistencyCheckSingleCheckable(
                     report, ProgressListener.NONE, relationshipGroupDegrees, RecordType.RELATIONSHIP_GROUP);
         } catch (Exception e) {
             report.error(
-                    "Relationship group degrees is missing, broken or of an older format and will not be consistency checked");
+                    "Relationship group degrees is missing, broken or of an older format and will not be consistency"
+                            + " checked");
             summary.genericError("Relationship group degrees store is missing, broken or of an older format");
             context.error(
-                    "Relationship group degrees is missing, broken or of an older format and will not be consistency checked",
+                    "Relationship group degrees is missing, broken or of an older format and will not be consistency"
+                            + " checked",
                     e);
         }
+    }
+
+    private RelationshipGroupDegreesStore openRelationshipDegreesStore() throws IOException {
+        return new GBPTreeRelationshipGroupDegreesStore(
+                pageCache,
+                databaseLayout.relationshipGroupDegreesStore(),
+                fileSystem,
+                RecoveryCleanupWorkCollector.ignore(),
+                new DegreesRebuilder() {
+                    @Override
+                    public void rebuild(
+                            DegreeUpdater updater, CursorContext cursorContext, MemoryTracker memoryTracker) {
+                        throw new UnsupportedOperationException(
+                                "Counts store needed rebuild, consistency checker will instead report broken or"
+                                        + " missing store");
+                    }
+
+                    @Override
+                    public long lastCommittedTxId() {
+                        return lastCommittedTxId;
+                    }
+                },
+                true,
+                GBPTreeGenericCountsStore.NO_MONITOR,
+                databaseLayout.getDatabaseName(),
+                Config.defaults(counts_store_max_cached_entries, 100).get(counts_store_max_cached_entries),
+                NullLogProvider.getInstance(),
+                contextFactory,
+                cacheTracer,
+                neoStores.getOpenOptions(),
+                RecoveryStartupChecker.EMPTY_CHECKER);
     }
 
     private static TokenHolders safeLoadTokens(

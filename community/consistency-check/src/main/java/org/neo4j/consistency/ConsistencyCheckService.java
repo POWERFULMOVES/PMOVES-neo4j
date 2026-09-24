@@ -19,12 +19,12 @@
  */
 package org.neo4j.consistency;
 
+import static org.neo4j.configuration.GraphDatabaseSettings.db_format;
 import static org.neo4j.configuration.GraphDatabaseSettings.memory_tracking;
 import static org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker.readOnly;
 import static org.neo4j.io.ByteUnit.bytesToString;
 import static org.neo4j.io.ByteUnit.mebiBytes;
 import static org.neo4j.io.pagecache.context.CursorContextFactory.NULL_CONTEXT_FACTORY;
-import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
 import static org.neo4j.kernel.impl.factory.DbmsInfo.TOOL;
 import static org.neo4j.kernel.impl.index.schema.SchemaIndexExtensionLoader.instantiateExtensions;
 import static org.neo4j.kernel.lifecycle.LifecycleAdapter.onShutdown;
@@ -48,6 +48,7 @@ import org.neo4j.collection.Dependencies;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.consistency.checking.ConsistencyCheckIncompleteException;
+import org.neo4j.consistency.checking.ConsistencyCheckMonitor;
 import org.neo4j.consistency.checking.ConsistencyFlags;
 import org.neo4j.consistency.report.ConsistencySummaryStatistics;
 import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.HostedOnMode;
@@ -55,12 +56,14 @@ import org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector;
 import org.neo4j.internal.logging.LoggingReporterFactoryInvocationHandler;
 import org.neo4j.io.fs.DefaultFileSystemAbstraction;
 import org.neo4j.io.fs.FileSystemAbstraction;
+import org.neo4j.io.fs.FileSystemUtils;
 import org.neo4j.io.layout.CommonDatabaseStores;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.impl.muninn.VersionStorage;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.KernelVersionProviders;
 import org.neo4j.kernel.database.DatabaseTracers;
 import org.neo4j.kernel.impl.api.index.stats.IndexStatisticsStore;
 import org.neo4j.kernel.impl.index.schema.ConsistencyCheckable;
@@ -90,357 +93,105 @@ public class ConsistencyCheckService {
     private static final long DEFAULT_SMALL_MAX_OFF_HEAP_MEMORY = mebiBytes(80);
     private static final long MIN_OFF_HEAP_CACHING_MEMORY = mebiBytes(8);
 
-    private final Date timestamp;
-    private final DatabaseLayout layout;
-    private final Config config;
-    private final OutputStream progressOutput;
-    private final InternalLogProvider logProvider;
-    private final FileSystemAbstraction fileSystem;
-    private final PageCache pageCache;
-    private final boolean verbose;
-    private final Path reportPath;
-    private final ConsistencyFlags consistencyFlags;
-    private final PageCacheTracer pageCacheTracer;
-    private final CursorContextFactory contextFactory;
-    private final MemoryTracker memoryTracker;
-    private final long maxOffHeapMemory;
-    private final int numberOfThreads;
+    private Date timestamp = new Date();
+    private DatabaseLayout layout;
+    private Config config = Config.defaults();
+    private OutputStream progressOutput;
+    private InternalLogProvider logProvider = NullLogProvider.getInstance();
+    private FileSystemAbstraction fileSystem = new DefaultFileSystemAbstraction();
+    private PageCache pageCache;
+    private boolean verbose;
+    private Path reportPath;
+    private ConsistencyFlags consistencyFlags = ConsistencyFlags.ALL;
+    private PageCacheTracer pageCacheTracer = PageCacheTracer.NULL;
+    private CursorContextFactory contextFactory = NULL_CONTEXT_FACTORY;
+    private MemoryTracker memoryTracker = EmptyMemoryTracker.INSTANCE;
+    private long maxOffHeapMemory = DEFAULT_SMALL_MAX_OFF_HEAP_MEMORY;
+    private int numberOfThreads = Runtime.getRuntime().availableProcessors();
+    private ConsistencyCheckMonitor monitor = ConsistencyCheckMonitor.NO_MONITOR;
 
     public ConsistencyCheckService(DatabaseLayout layout) {
-        this(
-                new Date(),
-                layout,
-                Config.defaults(),
-                null,
-                NullLogProvider.getInstance(),
-                new DefaultFileSystemAbstraction(),
-                null,
-                false,
-                null,
-                ConsistencyFlags.ALL,
-                PageCacheTracer.NULL,
-                new CursorContextFactory(PageCacheTracer.NULL, EMPTY_CONTEXT_SUPPLIER),
-                EmptyMemoryTracker.INSTANCE,
-                DEFAULT_SMALL_MAX_OFF_HEAP_MEMORY,
-                Runtime.getRuntime().availableProcessors());
-    }
-
-    private ConsistencyCheckService(
-            Date timestamp,
-            DatabaseLayout layout,
-            Config config,
-            OutputStream progressOutput,
-            InternalLogProvider logProvider,
-            FileSystemAbstraction fileSystem,
-            PageCache pageCache,
-            boolean verbose,
-            Path reportPath,
-            ConsistencyFlags consistencyFlags,
-            PageCacheTracer pageCacheTracer,
-            CursorContextFactory contextFactory,
-            MemoryTracker memoryTracker,
-            long maxOffHeapMemory,
-            int numberOfThreads) {
-        this.timestamp = timestamp;
         this.layout = layout;
-        this.config = config;
-        this.progressOutput = progressOutput;
-        this.logProvider = logProvider;
-        this.fileSystem = fileSystem;
-        this.pageCache = pageCache;
-        this.verbose = verbose;
-        this.reportPath = reportPath;
-        this.consistencyFlags = consistencyFlags;
-        this.pageCacheTracer = pageCacheTracer;
-        this.contextFactory = contextFactory;
-        this.memoryTracker = memoryTracker;
-        this.maxOffHeapMemory = maxOffHeapMemory;
-        this.numberOfThreads = numberOfThreads;
     }
 
     public ConsistencyCheckService with(CursorContextFactory contextFactory) {
-        return new ConsistencyCheckService(
-                timestamp,
-                layout,
-                config,
-                progressOutput,
-                logProvider,
-                fileSystem,
-                pageCache,
-                verbose,
-                reportPath,
-                consistencyFlags,
-                pageCacheTracer,
-                contextFactory,
-                memoryTracker,
-                maxOffHeapMemory,
-                numberOfThreads);
+        this.contextFactory = contextFactory;
+        return this;
     }
 
     public ConsistencyCheckService with(Date timestamp) {
-        return new ConsistencyCheckService(
-                timestamp,
-                layout,
-                config,
-                progressOutput,
-                logProvider,
-                fileSystem,
-                pageCache,
-                verbose,
-                reportPath,
-                consistencyFlags,
-                pageCacheTracer,
-                contextFactory,
-                memoryTracker,
-                maxOffHeapMemory,
-                numberOfThreads);
+        this.timestamp = timestamp;
+        return this;
     }
 
     public ConsistencyCheckService with(DatabaseLayout layout) {
-        return new ConsistencyCheckService(
-                timestamp,
-                layout,
-                config,
-                progressOutput,
-                logProvider,
-                fileSystem,
-                pageCache,
-                verbose,
-                reportPath,
-                consistencyFlags,
-                pageCacheTracer,
-                contextFactory,
-                memoryTracker,
-                maxOffHeapMemory,
-                numberOfThreads);
+        this.layout = layout;
+        return this;
     }
 
     public ConsistencyCheckService with(Config config) {
-        return new ConsistencyCheckService(
-                timestamp,
-                layout,
-                config,
-                progressOutput,
-                logProvider,
-                fileSystem,
-                pageCache,
-                verbose,
-                reportPath,
-                consistencyFlags,
-                pageCacheTracer,
-                contextFactory,
-                memoryTracker,
-                maxOffHeapMemory,
-                numberOfThreads);
+        this.config = config;
+        return this;
     }
 
     public ConsistencyCheckService with(OutputStream progressOutput) {
-        return new ConsistencyCheckService(
-                timestamp,
-                layout,
-                config,
-                progressOutput,
-                logProvider,
-                fileSystem,
-                pageCache,
-                verbose,
-                reportPath,
-                consistencyFlags,
-                pageCacheTracer,
-                contextFactory,
-                memoryTracker,
-                maxOffHeapMemory,
-                numberOfThreads);
+        this.progressOutput = progressOutput;
+        return this;
     }
 
     public ConsistencyCheckService with(InternalLogProvider logProvider) {
-        return new ConsistencyCheckService(
-                timestamp,
-                layout,
-                config,
-                progressOutput,
-                logProvider,
-                fileSystem,
-                pageCache,
-                verbose,
-                reportPath,
-                consistencyFlags,
-                pageCacheTracer,
-                contextFactory,
-                memoryTracker,
-                maxOffHeapMemory,
-                numberOfThreads);
+        this.logProvider = logProvider;
+        return this;
     }
 
     public ConsistencyCheckService with(FileSystemAbstraction fileSystem) {
-        return new ConsistencyCheckService(
-                timestamp,
-                layout,
-                config,
-                progressOutput,
-                logProvider,
-                fileSystem,
-                pageCache,
-                verbose,
-                reportPath,
-                consistencyFlags,
-                pageCacheTracer,
-                contextFactory,
-                memoryTracker,
-                maxOffHeapMemory,
-                numberOfThreads);
+        this.fileSystem = fileSystem;
+        return this;
     }
 
     public ConsistencyCheckService with(PageCache pageCache) {
-        return new ConsistencyCheckService(
-                timestamp,
-                layout,
-                config,
-                progressOutput,
-                logProvider,
-                fileSystem,
-                pageCache,
-                verbose,
-                reportPath,
-                consistencyFlags,
-                pageCacheTracer,
-                contextFactory,
-                memoryTracker,
-                maxOffHeapMemory,
-                numberOfThreads);
+        this.pageCache = pageCache;
+        return this;
     }
 
     public ConsistencyCheckService verbose(boolean verbose) {
-        return new ConsistencyCheckService(
-                timestamp,
-                layout,
-                config,
-                progressOutput,
-                logProvider,
-                fileSystem,
-                pageCache,
-                verbose,
-                reportPath,
-                consistencyFlags,
-                pageCacheTracer,
-                contextFactory,
-                memoryTracker,
-                maxOffHeapMemory,
-                numberOfThreads);
+        this.verbose = verbose;
+        return this;
     }
 
     public ConsistencyCheckService with(Path reportPath) {
-        return new ConsistencyCheckService(
-                timestamp,
-                layout,
-                config,
-                progressOutput,
-                logProvider,
-                fileSystem,
-                pageCache,
-                verbose,
-                reportPath,
-                consistencyFlags,
-                pageCacheTracer,
-                contextFactory,
-                memoryTracker,
-                maxOffHeapMemory,
-                numberOfThreads);
+        this.reportPath = reportPath;
+        return this;
     }
 
     public ConsistencyCheckService with(ConsistencyFlags consistencyFlags) {
-        return new ConsistencyCheckService(
-                timestamp,
-                layout,
-                config,
-                progressOutput,
-                logProvider,
-                fileSystem,
-                pageCache,
-                verbose,
-                reportPath,
-                consistencyFlags,
-                pageCacheTracer,
-                contextFactory,
-                memoryTracker,
-                maxOffHeapMemory,
-                numberOfThreads);
+        this.consistencyFlags = consistencyFlags;
+        return this;
     }
 
     public ConsistencyCheckService with(PageCacheTracer pageCacheTracer) {
-        return new ConsistencyCheckService(
-                timestamp,
-                layout,
-                config,
-                progressOutput,
-                logProvider,
-                fileSystem,
-                pageCache,
-                verbose,
-                reportPath,
-                consistencyFlags,
-                pageCacheTracer,
-                contextFactory,
-                memoryTracker,
-                maxOffHeapMemory,
-                numberOfThreads);
+        this.pageCacheTracer = pageCacheTracer;
+        return this;
     }
 
     public ConsistencyCheckService with(MemoryTracker memoryTracker) {
-        return new ConsistencyCheckService(
-                timestamp,
-                layout,
-                config,
-                progressOutput,
-                logProvider,
-                fileSystem,
-                pageCache,
-                verbose,
-                reportPath,
-                consistencyFlags,
-                pageCacheTracer,
-                contextFactory,
-                memoryTracker,
-                maxOffHeapMemory,
-                numberOfThreads);
+        this.memoryTracker = memoryTracker;
+        return this;
     }
 
     public ConsistencyCheckService withMaxOffHeapMemory(long maxOffHeapMemory) {
-        return new ConsistencyCheckService(
-                timestamp,
-                layout,
-                config,
-                progressOutput,
-                logProvider,
-                fileSystem,
-                pageCache,
-                verbose,
-                reportPath,
-                consistencyFlags,
-                pageCacheTracer,
-                contextFactory,
-                memoryTracker,
-                maxOffHeapMemory,
-                numberOfThreads);
+        this.maxOffHeapMemory = maxOffHeapMemory;
+        return this;
     }
 
     public ConsistencyCheckService withNumberOfThreads(int numberOfThreads) {
-        return new ConsistencyCheckService(
-                timestamp,
-                layout,
-                config,
-                progressOutput,
-                logProvider,
-                fileSystem,
-                pageCache,
-                verbose,
-                reportPath,
-                consistencyFlags,
-                pageCacheTracer,
-                contextFactory,
-                memoryTracker,
-                maxOffHeapMemory,
-                numberOfThreads);
+        this.numberOfThreads = numberOfThreads;
+        return this;
+    }
+
+    public ConsistencyCheckService with(ConsistencyCheckMonitor monitor) {
+        this.monitor = monitor;
+        return this;
     }
 
     public Result runFullConsistencyCheck() throws ConsistencyCheckIncompleteException {
@@ -484,17 +235,16 @@ public class ConsistencyCheckService {
             // instantiate the inconsistencies report logging
             final var outLog = logProvider.getLog(getClass());
             final var reportFile = chooseReportFile(config);
-            final var reportLogProvider = new Log4jLogProvider(createLoggerFromXmlConfig(
-                    fileSystem,
-                    newTemporaryXmlConfigBuilder(fileSystem)
-                            .withLogger(newLoggerBuilder(ROOT_LOGGER, reportFile)
-                                    .withLevel(Level.INFO)
-                                    .createOnDemand()
-                                    .withCategory(false)
-                                    .build())
-                            .create(),
-                    false,
-                    config::configStringLookup));
+            Path logConfig = newTemporaryXmlConfigBuilder(fileSystem)
+                    .withLogger(newLoggerBuilder(ROOT_LOGGER, reportFile)
+                            .withLevel(Level.INFO)
+                            .createOnDemand()
+                            .withCategory(false)
+                            .build())
+                    .create();
+            life.add(onShutdown(() -> FileSystemUtils.deleteFile(fileSystem, logConfig)));
+            final var reportLogProvider = new Log4jLogProvider(
+                    createLoggerFromXmlConfig(fileSystem, logConfig, false, config::configStringLookup));
             life.add(onShutdown(reportLogProvider::close));
             final var reportFileLog = reportLogProvider.getLog(getClass());
             final var reportLog = new DuplicatingLog(outLog, reportFileLog);
@@ -503,6 +253,7 @@ public class ConsistencyCheckService {
                 String format = storageEngineFactory
                         .retrieveStoreId(fileSystem, databaseLayout, pageCache, cursorContext)
                         .getFormatName();
+                config.set(db_format, format);
                 String databaseName = databaseLayout.getDatabaseName();
                 if (storageEngineFactory.isDeprecated(format)) {
                     outLog.warn(DeprecatedFormatWarning.getFormatWarning(databaseName, format));
@@ -541,6 +292,7 @@ public class ConsistencyCheckService {
             final var indexProviders = life.add(StaticIndexProviderMapFactory.create(
                     life,
                     config,
+                    KernelVersionProviders.latestFromConfig(config),
                     pageCache,
                     fileSystem,
                     new SimpleLogService(logProvider),
@@ -561,7 +313,9 @@ public class ConsistencyCheckService {
 
             if (consistencyFlags.checkIndexes()
                     && consistencyFlags.checkStructure()
-                    && fileSystem.fileExists(databaseLayout.pathForStore(CommonDatabaseStores.INDEX_STATISTICS))) {
+                    && databaseLayout
+                            .pathForStore(CommonDatabaseStores.INDEX_STATISTICS)
+                            .exists(fileSystem)) {
                 var openOptions =
                         storageEngineFactory.getStoreOpenOptions(fileSystem, pageCache, databaseLayout, contextFactory);
                 final var statisticsStore = new IndexStatisticsStore(
@@ -597,7 +351,8 @@ public class ConsistencyCheckService {
                     contextFactory,
                     pageCacheTracer,
                     logTailExtractor.getTailMetadata(databaseLayout, memoryTracker),
-                    memoryTracker);
+                    memoryTracker,
+                    monitor);
 
             if (!summary.isConsistent()) {
                 reportLog.warn("Inconsistencies found: " + summary);
@@ -728,8 +483,7 @@ public class ConsistencyCheckService {
                 Optional.empty(),
                 memoryTracker,
                 DatabaseTracers.EMPTY)) {
-            throw new IllegalStateException(
-                    """
+            throw new IllegalStateException("""
                     Active logical log detected, this might be a source of inconsistencies.
                     Please recover database.
                     To perform recovery please start database in single mode and perform clean shutdown.""");
@@ -782,6 +536,11 @@ public class ConsistencyCheckService {
 
         public ConsistencySummaryStatistics summary() {
             return summary;
+        }
+
+        @Override
+        public String toString() {
+            return "Result{" + "successful=" + successful + ", reportFile=" + reportFile + ", summary=" + summary + '}';
         }
     }
 }

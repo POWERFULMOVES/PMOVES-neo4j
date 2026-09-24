@@ -16,6 +16,7 @@
  */
 package org.neo4j.cypher.internal.ast.test.util
 
+import org.antlr.v4.runtime.Vocabulary
 import org.neo4j.cypher.internal.ast.CallClause
 import org.neo4j.cypher.internal.ast.Clause
 import org.neo4j.cypher.internal.ast.Match
@@ -23,11 +24,9 @@ import org.neo4j.cypher.internal.ast.Statement
 import org.neo4j.cypher.internal.ast.Statements
 import org.neo4j.cypher.internal.ast.SubqueryCall
 import org.neo4j.cypher.internal.ast.UseGraph
-import org.neo4j.cypher.internal.ast.factory.neo4j.Neo4jASTExceptionFactory
-import org.neo4j.cypher.internal.ast.factory.neo4j.Neo4jASTFactory
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
 import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher25
 import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
 import org.neo4j.cypher.internal.ast.test.util.AstParsing.ParseFailure
 import org.neo4j.cypher.internal.ast.test.util.AstParsing.ParseResult
 import org.neo4j.cypher.internal.ast.test.util.AstParsing.ParseResults
@@ -52,16 +51,12 @@ import org.neo4j.cypher.internal.expressions.RelationshipPattern
 import org.neo4j.cypher.internal.expressions.StringLiteral
 import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.parser.AstRuleCtx
-import org.neo4j.cypher.internal.parser.common.ast.factory.ParameterType
-import org.neo4j.cypher.internal.parser.javacc.Cypher
-import org.neo4j.cypher.internal.parser.javacc.CypherCharStream
 import org.neo4j.cypher.internal.parser.v25.Cypher25Parser
 import org.neo4j.cypher.internal.parser.v25.ast.factory.Cypher25AstParser
 import org.neo4j.cypher.internal.parser.v5.Cypher5Parser
 import org.neo4j.cypher.internal.parser.v5.ast.factory.Cypher5AstParser
 import org.neo4j.cypher.internal.util.ASTNode
 import org.neo4j.cypher.internal.util.Neo4jCypherExceptionFactory
-import org.neo4j.cypher.internal.util.OpenCypherExceptionFactory
 import org.neo4j.internal.helpers.Exceptions
 
 import scala.reflect.ClassTag
@@ -73,7 +68,9 @@ import scala.util.Try
 trait AstParsing extends Parsers.Implicit {
 
   def parseAst[T <: ASTNode : ClassTag](cypher: String)(implicit parsers: Parsers[T]): ParseResults[T] = {
-    ParseResults[T](cypher, ParserInTest.AllParsers.map(p => p -> parseAst[T](p, cypher)).toMap)
+    val result = ParseResults[T](cypher, ParserInTest.AllParsers.map(p => p -> parseAst[T](p, cypher)).toMap)
+    // if (LogParserTestQueries.enable) LogParserTestQueries.log(result)
+    result
   }
 
   private def parseAst[T <: ASTNode : ClassTag](
@@ -81,36 +78,51 @@ trait AstParsing extends Parsers.Implicit {
     cypher: String
   )(implicit parsers: Parsers[T]): ParseResult = {
     Try(parsers.parse(parser, cypher)) match {
-      case Success(ast)       => ParseSuccess(ast)
-      case Failure(throwable) => ParseFailure(throwable)
+      case Success(ast)       => ParseSuccess(ast)(parser, cypher)
+      case Failure(throwable) => ParseFailure(throwable)(parser, cypher)
     }
   }
 }
 
 object AstParsing extends AstParsing {
-  sealed trait ParserInTest
+
+  sealed trait ParserInTest {
+    def vocabulary: Vocabulary
+  }
 
   object ParserInTest {
-    val AllParsers: Seq[ParserInTest] = Seq(Cypher5, Cypher25, Cypher5JavaCc)
+    val AllParsers: Seq[ParserInTest] = Seq(Cypher25, Cypher5)
   }
-  case object Cypher5JavaCc extends ParserInTest
-  case object Cypher5 extends ParserInTest
-  case object Cypher25 extends ParserInTest
+
+  case object Cypher5 extends ParserInTest {
+    override def vocabulary: Vocabulary = Cypher5Parser.VOCABULARY
+  }
+
+  case object Cypher25 extends ParserInTest {
+    override def vocabulary: Vocabulary = Cypher25Parser.VOCABULARY
+  }
 
   case class ParseResults[T](cypher: String, result: Map[ParserInTest, ParseResult]) {
     def apply(parser: ParserInTest): ParseResult = result(parser)
   }
 
   sealed trait ParseResult {
+    def parser: ParserInTest
+    def query: String
 
     def toTry: Try[Any] = this match {
       case ParseSuccess(ast) => Success(ast)
       case f: ParseFailure   => Failure(f.throwable)
     }
   }
-  case class ParseSuccess[T](ast: T) extends ParseResult
+  case class ParseSuccess[T](ast: T)(override val parser: ParserInTest, override val query: String) extends ParseResult
 
-  case class ParseFailure(throwable: Throwable) extends ParseResult {
+  case class ParseFailure(
+    throwable: Throwable
+  )(
+    override val parser: ParserInTest,
+    override val query: String
+  ) extends ParseResult {
     override def toString: String = s"Failed parsing:\n${Exceptions.stringify(throwable)}"
   }
 }
@@ -147,7 +159,7 @@ trait ParserFactory {
   def quantifiedPath(): Parser[QuantifiedPath]
 }
 
-case class Parsers[T <: ASTNode] private (parsers: Map[ParserInTest, Parser[T]]) {
+case class Parsers[T <: ASTNode](parsers: Map[ParserInTest, Parser[T]]) {
   def parse(parser: ParserInTest, cypher: String): T = parsers(parser).parse(cypher)
 }
 
@@ -183,8 +195,7 @@ object Parsers {
 
   private val factories = Map[ParserInTest, ParserFactory](
     Cypher5 -> Cypher5Factory,
-    Cypher25 -> Cypher25Factory,
-    Cypher5JavaCc -> Cypher5JavaCcFactory
+    Cypher25 -> new Cypher25Factory()
   )
 
   private def from[T <: ASTNode](f: ParserFactory => Parser[T]): Parsers[T] =
@@ -193,7 +204,7 @@ object Parsers {
   private object Cypher5Factory extends ParserFactory {
 
     private def parse[T <: ASTNode](f: Cypher5Parser => AstRuleCtx): Parser[T] = (cypher: String) => {
-      new Cypher5AstParser(cypher, Neo4jCypherExceptionFactory(cypher, None), None).parse(f)
+      new Cypher5AstParser(cypher, Neo4jCypherExceptionFactory(cypher, None), None, Seq()).parse(f)
     }
     override def statements(): Parser[Statements] = parse(_.statements())
     override def statement(): Parser[Statement] = parse(_.statement())
@@ -222,10 +233,10 @@ object Parsers {
     override def quantifiedPath(): Parser[QuantifiedPath] = parse(_.parenthesizedPath())
   }
 
-  private object Cypher25Factory extends ParserFactory {
+  class Cypher25Factory(semanticFeatures: Seq[SemanticFeature] = Seq.empty) extends ParserFactory {
 
     private def parse[T <: ASTNode](f: Cypher25Parser => AstRuleCtx): Parser[T] = (cypher: String) => {
-      new Cypher25AstParser(cypher, Neo4jCypherExceptionFactory(cypher, None), None).parse(f)
+      new Cypher25AstParser(cypher, Neo4jCypherExceptionFactory(cypher, None), None, semanticFeatures).parse(f)
     }
     override def statements(): Parser[Statements] = parse(_.statements())
     override def statement(): Parser[Statement] = parse(_.statement())
@@ -253,61 +264,52 @@ object Parsers {
     override def literal(): Parser[Literal] = parse(_.literal())
     override def quantifiedPath(): Parser[QuantifiedPath] = parse(_.parenthesizedPath())
   }
+}
 
-  private object Cypher5JavaCcFactory extends ParserFactory {
+/*
 
-    // ParserFactory is only really needed to create the Parser type alias above without writing down all 30+ type parameters
-    trait JavaCcParserFactory[P] {
-      type Type = P
-      def apply(q: String): P
+// Hack to dump parser test queries
+// 1. Set enable = true
+// 2. Run all parser tests.
+// 3. All queries and their results will be written to a temp file (search for "Writing parser test queries" in output)
+
+case class LogConf(mapper: ObjectMapper, path: Path)
+
+object LogParserTestQueries {
+  final val enable = true
+  var conf: LogConf = _
+  val newLine = "\n".getBytes
+
+  def log[AstClass <: ASTNode](result: ParseResults[AstClass])(implicit astCt: ClassTag[AstClass]): Unit = if (enable) {
+    if (conf == null) {
+      conf = LogConf(new ObjectMapper(), Files.createTempFile("parser-test-queries", ".jsonl"))
+      System.err.println("Writing parser test queries to file: " + conf.path)
     }
+    Files.write(
+      conf.path,
+      conf.mapper.writeValueAsBytes(toJson(result)),
+      StandardOpenOption.WRITE,
+      StandardOpenOption.APPEND
+    )
+    Files.write(conf.path, newLine, StandardOpenOption.WRITE, StandardOpenOption.APPEND)
+  }
 
-    object JavaCcParserFactory {
-      def apply[P](f: String => P): JavaCcParserFactory[P] = q => f(q)
+  private def toJson[AstClass <: ASTNode](
+    result: ParseResults[AstClass]
+  )(implicit astCt: ClassTag[AstClass]): ObjectNode = {
+    val parseResults = conf.mapper.createArrayNode()
+    result.result.foreach { case (parser, parseResult) =>
+      val parseTry = parseResult.toTry
+      val resultNode = conf.mapper.createObjectNode()
+        .put("parser", parser.getClass.getSimpleName)
+        .put("isSuccess", parseTry.isSuccess)
+      parseTry.failed.foreach(t => resultNode.put("error", t.getMessage))
+      parseResults.add(resultNode)
     }
-
-    // noinspection TypeAnnotation
-    val factory = JavaCcParserFactory { (cypher: String) =>
-      val charStream = new CypherCharStream(cypher)
-      val astExceptionFactory = new Neo4jASTExceptionFactory(OpenCypherExceptionFactory(None))
-      val astFactory = new Neo4jASTFactory(cypher, astExceptionFactory, null)
-      new Cypher(astFactory, astExceptionFactory, charStream)
-    }
-    type JavaCcParser = factory.Type
-
-    private def parse[T <: ASTNode](f: JavaCcParser => T): Parser[T] =
-      (cypher: String) => f.apply(factory.apply(cypher))
-
-    override def statements(): Parser[Statements] = parse(_.Statements())
-    override def statement(): Parser[Statement] = parse(_.Statement())
-    override def expression(): Parser[Expression] = parse(_.Expression())
-    override def callClause(): Parser[CallClause] = parse(_.CallClause().asInstanceOf[CallClause])
-    override def matchClause(): Parser[Match] = parse(_.MatchClause().asInstanceOf[Match])
-    override def caseExpression(): Parser[CaseExpression] = parse(_.CaseExpression().asInstanceOf[CaseExpression])
-    override def clause(): Parser[Clause] = parse(_.Clause())
-    override def functionInvocation(): Parser[FunctionInvocation] = parse(_.FunctionInvocation(false))
-
-    override def listComprehension(): Parser[ListComprehension] =
-      parse(_.ListComprehension().asInstanceOf[ListComprehension])
-    override def map(): Parser[MapExpression] = parse(_.MapLiteral().asInstanceOf[MapExpression])
-    override def mapProjection(): Parser[MapProjection] = parse(_.MapProjection().asInstanceOf[MapProjection])
-    override def nodePattern(): Parser[NodePattern] = parse(_.NodePattern())
-    override def numberLiteral(): Parser[NumberLiteral] = parse(_.NumberLiteral().asInstanceOf[NumberLiteral])
-    override def parameter(): Parser[Parameter] = parse(_.Parameter(ParameterType.ANY))
-
-    override def parenthesizedPath(): Parser[ParenthesizedPath] =
-      parse(_.ParenthesizedPath().asInstanceOf[ParenthesizedPath])
-
-    override def patternComprehension(): Parser[PatternComprehension] =
-      parse(_.PatternComprehension().asInstanceOf[PatternComprehension])
-    override def quantifier(): Parser[GraphPatternQuantifier] = parse(_.Quantifier())
-    override def relationshipPattern(): Parser[RelationshipPattern] = parse(_.RelationshipPattern())
-    override def pattern(): Parser[PatternPart] = parse(_.Pattern())
-    override def useClause(): Parser[UseGraph] = parse(_.UseClause())
-    override def stringLiteral(): Parser[StringLiteral] = parse(_.StringLiteral().asInstanceOf[StringLiteral])
-    override def subqueryClause(): Parser[SubqueryCall] = parse(_.SubqueryClause().asInstanceOf[SubqueryCall])
-    override def variable(): Parser[Variable] = parse(_.Variable())
-    override def literal(): Parser[Literal] = parse(_.Expression().asInstanceOf[Literal])
-    override def quantifiedPath(): Parser[QuantifiedPath] = parse(_.ParenthesizedPath().asInstanceOf[QuantifiedPath])
+    conf.mapper.createObjectNode()
+      .put("cypher", result.cypher)
+      .put("targetAst", astCt.runtimeClass.getSimpleName)
+      .set("parseResults", parseResults)
   }
 }
+ */

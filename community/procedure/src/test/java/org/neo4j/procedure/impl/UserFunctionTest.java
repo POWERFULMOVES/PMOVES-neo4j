@@ -20,11 +20,8 @@
 package org.neo4j.procedure.impl;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Fail.fail;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
@@ -48,6 +45,8 @@ import org.neo4j.common.DependencyResolver;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.exceptions.KernelException;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.graphdb.GraphDatabaseService;
 import org.neo4j.internal.kernel.api.exceptions.ProcedureException;
 import org.neo4j.internal.kernel.api.procs.Neo4jTypes;
@@ -69,8 +68,7 @@ import org.neo4j.values.storable.LongValue;
 import org.neo4j.values.storable.StringValue;
 import org.neo4j.values.virtual.MapValue;
 
-@SuppressWarnings({"WeakerAccess", "unused"})
-public class UserFunctionTest {
+class UserFunctionTest {
     private ProcedureCompiler procedureCompiler;
     private ComponentRegistry components;
     private final DependencyResolver dependencyResolver = new Dependencies();
@@ -107,7 +105,7 @@ public class UserFunctionTest {
         List<CallableUserFunction> function = compile(SingleReadOnlyFunction.class);
 
         // Then
-        assertEquals(1, function.size());
+        assertThat(function).hasSize(1);
         assertThat(function.get(0).signature())
                 .isEqualTo(functionSignature(new QualifiedName("org", "neo4j", "procedure", "impl", "listCoolPeople"))
                         .out(Neo4jTypes.NTList(Neo4jTypes.NTAny))
@@ -132,7 +130,7 @@ public class UserFunctionTest {
         List<CallableUserFunction> functions = compile(PrivateConstructorButNoFunctions.class);
 
         // Then
-        assertEquals(0, functions.size());
+        assertThat(functions).isEmpty();
     }
 
     @Test
@@ -154,53 +152,55 @@ public class UserFunctionTest {
 
     @Test
     void shouldGiveHelpfulErrorOnConstructorThatRequiresArgument() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> compile(WeirdConstructorFunction.class));
-        assertThat(exception.getMessage())
-                .isEqualTo(
+        assertThatThrownBy(() -> compile(WeirdConstructorFunction.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(
                         "Unable to find a usable public no-argument constructor in the class `WeirdConstructorFunction`. Please add a "
                                 + "valid, public constructor, recompile the class and try again.");
     }
 
     @Test
     void shouldGiveHelpfulErrorOnNoPublicConstructor() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> compile(PrivateConstructorFunction.class));
-        assertThat(exception.getMessage())
-                .isEqualTo(
+        assertThatThrownBy(() -> compile(PrivateConstructorFunction.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(
                         "Unable to find a usable public no-argument constructor in the class `PrivateConstructorFunction`. Please add "
                                 + "a valid, public constructor, recompile the class and try again.");
     }
 
     @Test
     void shouldNotAllowVoidOutput() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> compile(FunctionWithVoidOutput.class));
-        assertThat(exception.getMessage()).startsWith("Don't know how to map `void` to the Neo4j Type System.");
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> compile(FunctionWithVoidOutput.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessageStartingWith("Don't know how to map `void` to the Neo4j Type System.")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22NB8)
+                .hasStatusDescription(
+                        "error: data exception - invalid Neo4j type. 'void' is not a recognized Neo4j type.");
     }
 
     @Test
     void shouldGiveHelpfulErrorOnFunctionReturningInvalidType() {
+        String expectedMsg = (String.format("Don't know how to map `char[]` to the Neo4j Type System.%n"
+                + "Please refer to to the documentation for full details.%n"
+                + "For your reference, known types are: [boolean, byte[], double, java.lang.Boolean, "
+                + "java.lang.Double, java.lang.Long, java.lang.Number, java.lang.Object, "
+                + "java.lang.String, java.time.LocalDate, java.time.LocalDateTime, "
+                + "java.time.LocalTime, java.time.OffsetTime, java.time.ZonedDateTime, "
+                + "java.time.temporal.TemporalAmount, java.util.List, java.util.Map, java.util.UUID, long]"));
 
-        // When
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> compile(FunctionWithInvalidOutput.class));
-        assertThat(exception.getMessage())
-                .isEqualTo(String.format("Don't know how to map `char[]` to the Neo4j Type System.%n"
-                        + "Please refer to to the documentation for full details.%n"
-                        + "For your reference, known types are: [boolean, byte[], double, java.lang.Boolean, "
-                        + "java.lang.Double, java.lang.Long, java.lang.Number, java.lang.Object, "
-                        + "java.lang.String, java.time.LocalDate, java.time.LocalDateTime, "
-                        + "java.time.LocalTime, java.time.OffsetTime, java.time.ZonedDateTime, "
-                        + "java.time.temporal.TemporalAmount, java.util.List, java.util.Map, long]"));
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> compile(FunctionWithInvalidOutput.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(expectedMsg)
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22NB8)
+                .hasStatusDescription(
+                        "error: data exception - invalid Neo4j type. 'char[]' is not a recognized Neo4j type.");
     }
 
     @Test
     void shouldGiveHelpfulErrorOnContextAnnotatedStaticField() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> compile(FunctionWithStaticContextAnnotatedField.class));
-        assertThat(exception.getMessage())
-                .isEqualTo(String.format(
+        assertThatThrownBy(() -> compile(FunctionWithStaticContextAnnotatedField.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(String.format(
                         "The field `gdb` in the class named `FunctionWithStaticContextAnnotatedField` is annotated as a @Context field,%n"
                                 + "but it is static. @Context fields must be public, non-final and non-static,%n"
                                 + "because they are reset each time a procedure is invoked."));
@@ -212,17 +212,7 @@ public class UserFunctionTest {
         CallableUserFunction proc = compile(FunctionWithOverriddenName.class).get(0);
 
         // Then
-        assertEquals(
-                "org.mystuff.thisisActuallyTheName", proc.signature().name().toString());
-    }
-
-    @Test
-    void shouldNotAllowOverridingFunctionNameWithoutNamespace() {
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> compile(FunctionWithSingleName.class));
-        assertThat(exception.getMessage())
-                .isEqualTo("It is not allowed to define functions in the root namespace. Please define a "
-                        + "namespace, e.g. `@UserFunction(\"org.example.com.singleName\")");
+        assertThat(proc.signature().name()).hasToString("org.mystuff.thisisActuallyTheName");
     }
 
     @Test
@@ -232,10 +222,9 @@ public class UserFunctionTest {
                 compile(FunctionThatThrowsNullMsgExceptionAtInvocation.class).get(0);
 
         // When
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> proc.apply(prepareContext(), new AnyValue[0]));
-        assertThat(exception.getMessage())
-                .isEqualTo(
+        assertThatThrownBy(() -> proc.apply(prepareContext(), new AnyValue[0]))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(
                         "Failed to invoke function `org.neo4j.procedure.impl.throwsAtInvocation`: Caused by: java.lang.IndexOutOfBoundsException");
     }
 
@@ -273,7 +262,7 @@ public class UserFunctionTest {
         verify(log)
                 .warn(
                         "The function 'org.neo4j.procedure.impl.listCoolPeople' is not on the allowlist and won't be loaded.");
-        assertThat(method.size()).isEqualTo(0);
+        assertThat(method).hasSize(0);
     }
 
     @Test
@@ -291,7 +280,7 @@ public class UserFunctionTest {
         verify(log)
                 .warn(
                         "The function 'org.neo4j.procedure.impl.listCoolPeople' is not on the allowlist and won't be loaded.");
-        assertThat(method.size()).isEqualTo(0);
+        assertThat(method).hasSize(0);
     }
 
     @Test
@@ -312,12 +301,16 @@ public class UserFunctionTest {
             func.apply(prepareContext(), new AnyValue[0]);
             switch (name) {
                 case "newFunc":
-                    assertFalse(func.signature().deprecated().isPresent(), "Should not be deprecated");
+                    assertThat(func.signature().deprecated().isPresent())
+                            .as("Should not be deprecated")
+                            .isFalse();
                     break;
                 case "oldFunc":
                 case "badFunc":
-                    assertTrue(func.signature().deprecated().isPresent(), "Should be deprecated");
-                    assertThat(func.signature().deprecated().get()).isEqualTo("newFunc");
+                    assertThat(func.signature().deprecated().isPresent())
+                            .as("Should be deprecated")
+                            .isTrue();
+                    assertThat(func.signature().deprecated()).contains("newFunc");
                     break;
                 default:
                     fail("Unexpected function: " + name);

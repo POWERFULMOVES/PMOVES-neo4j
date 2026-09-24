@@ -23,6 +23,7 @@ import static org.neo4j.util.Preconditions.checkArgument;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
+import java.util.Arrays;
 import org.assertj.core.api.InstanceOfAssertFactory;
 
 /**
@@ -57,6 +58,16 @@ public final class ByteBufAssertions extends ReferenceCountedAssertions<ByteBufA
 
         if (this.actual.isDirect()) {
             failWithMessage("Expected buffer to be backed by heap memory");
+        }
+
+        return this;
+    }
+
+    public ByteBufAssertions hasReadableBytes() {
+        this.isNotNull();
+
+        if (!this.actual.isReadable()) {
+            failWithMessage("Expected buffer to have remaining readable bytes");
         }
 
         return this;
@@ -102,6 +113,8 @@ public final class ByteBufAssertions extends ReferenceCountedAssertions<ByteBufA
                         ByteBufUtil.hexDump(this.actual));
             }
 
+            // skip the remaining bytes to simulate a read
+            this.actual.skipBytes(expected.readableBytes());
             return this;
         }
 
@@ -216,6 +229,24 @@ public final class ByteBufAssertions extends ReferenceCountedAssertions<ByteBufA
         if (actual != expected) {
             failWithActualExpectedAndMessage(
                     actual, expected, "Expected long <0x%016> but got <0x%016>", expected, actual);
+        }
+
+        return this;
+    }
+
+    public ByteBufAssertions containsBytes(byte[] expected) {
+        this.isNotNull();
+
+        var actual = new byte[expected.length];
+        this.actual.readBytes(actual);
+
+        if (!Arrays.equals(expected, actual)) {
+            failWithActualExpectedAndMessage(
+                    actual,
+                    expected,
+                    "Expected bytes <%s> but got <%s>",
+                    Arrays.toString(expected),
+                    Arrays.toString(actual));
         }
 
         return this;

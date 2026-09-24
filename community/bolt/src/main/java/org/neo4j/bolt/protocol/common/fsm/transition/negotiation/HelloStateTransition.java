@@ -19,15 +19,18 @@
  */
 package org.neo4j.bolt.protocol.common.fsm.transition.negotiation;
 
+import java.util.Objects;
 import org.neo4j.bolt.fsm.Context;
 import org.neo4j.bolt.fsm.error.StateMachineException;
 import org.neo4j.bolt.fsm.state.StateReference;
 import org.neo4j.bolt.fsm.state.transition.AbstractStateTransition;
 import org.neo4j.bolt.negotiation.message.ProtocolCapability;
+import org.neo4j.bolt.protocol.common.connector.connection.Feature;
 import org.neo4j.bolt.protocol.common.fsm.States;
+import org.neo4j.bolt.protocol.common.fsm.error.CapabilityViolationStateTransitionException;
 import org.neo4j.bolt.protocol.common.fsm.response.ResponseHandler;
 import org.neo4j.bolt.protocol.common.fsm.transition.authentication.AuthenticationStateTransition;
-import org.neo4j.bolt.protocol.common.message.request.authentication.HelloMessage;
+import org.neo4j.boltmessages.request.authentication.HelloMessage;
 import org.neo4j.kernel.internal.Version;
 import org.neo4j.values.storable.Values;
 import org.neo4j.values.virtual.ListValueBuilder;
@@ -55,11 +58,19 @@ public final class HelloStateTransition extends AbstractStateTransition<HelloMes
     @Override
     public StateReference process(Context ctx, HelloMessage message, ResponseHandler handler)
             throws StateMachineException {
-        var features = message.features();
+        var features = message.features().stream()
+                .map(Feature::findFeatureById)
+                .filter(Objects::nonNull)
+                .toList();
         var userAgent = message.userAgent();
         var routingContext = message.routingContext();
         var notificationsConfig = message.notificationsConfig();
         var boltAgent = message.boltAgent();
+
+        if (routingContext.isServerRoutingEnabled()
+                && ctx.connection().connector().localQueryExecutionOnly()) {
+            throw new CapabilityViolationStateTransitionException("Routing is not supported on this connector");
+        }
 
         var enabledFeatures =
                 ctx.connection().negotiate(features, userAgent, routingContext, notificationsConfig, boltAgent);
@@ -74,7 +85,7 @@ public final class HelloStateTransition extends AbstractStateTransition<HelloMes
         handler.onMetadata("connection_id", Values.stringValue(ctx.connection().id()));
         handler.onMetadata("server", Values.stringValue("Neo4j/" + Version.getNeo4jVersion()));
 
-        if (ctx.connection().hasSelectedCapability(ProtocolCapability.HANDSHAKE_V2)) {
+        if (ctx.connection().hasSelectedProtocolCapability(ProtocolCapability.HANDSHAKE_V2)) {
             handler.onMetadata(
                     "protocol_version",
                     Values.stringValue(ctx.connection().protocol().version().toString()));

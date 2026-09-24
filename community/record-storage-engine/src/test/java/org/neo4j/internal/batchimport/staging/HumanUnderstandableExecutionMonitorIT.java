@@ -46,20 +46,20 @@ import org.neo4j.batchimport.api.input.IdType;
 import org.neo4j.batchimport.api.input.Input;
 import org.neo4j.collection.Dependencies;
 import org.neo4j.csv.reader.Extractors;
+import org.neo4j.importer.SchemaCommandSource.ResolvedSchemaCommands;
 import org.neo4j.internal.batchimport.DataStatistics;
 import org.neo4j.internal.batchimport.DefaultAdditionalIds;
 import org.neo4j.internal.batchimport.NodeDegreeCountStage;
 import org.neo4j.internal.batchimport.ParallelBatchImporter;
-import org.neo4j.internal.batchimport.cache.PageCacheArrayFactoryMonitor;
 import org.neo4j.internal.batchimport.cache.idmapping.IdMappers;
 import org.neo4j.internal.batchimport.input.DataGeneratorInput;
 import org.neo4j.internal.batchimport.input.Groups;
 import org.neo4j.internal.batchimport.store.BatchingNeoStores;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseLayout;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.store.NodeStore;
 import org.neo4j.kernel.impl.store.RelationshipStore;
-import org.neo4j.kernel.impl.transaction.log.EmptyLogTailMetadata;
 import org.neo4j.logging.internal.NullLogService;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.scheduler.JobScheduler;
@@ -71,6 +71,8 @@ import org.neo4j.test.extension.Neo4jLayoutExtension;
 import org.neo4j.test.extension.RandomExtension;
 import org.neo4j.test.extension.testdirectory.TestDirectorySupportExtension;
 import org.neo4j.test.scheduler.ThreadPoolJobScheduler;
+import org.neo4j.values.storable.RandomValues;
+import org.neo4j.wal.EmptyLogTailMetadata;
 
 @Neo4jLayoutExtension
 @ExtendWith({RandomExtension.class, DefaultFileSystemExtension.class, TestDirectorySupportExtension.class})
@@ -103,9 +105,11 @@ class HumanUnderstandableExecutionMonitorIT {
                 dataDistribution,
                 idType,
                 random.seed(),
+                RandomValues.DEFAULT_CONFIGURATION,
                 bareboneNodeHeader(idType, group, extractors),
                 bareboneRelationshipHeader(idType, group, extractors),
-                groups);
+                groups,
+                ResolvedSchemaCommands.of());
 
         // when
         try (JobScheduler jobScheduler = new ThreadPoolJobScheduler()) {
@@ -125,7 +129,8 @@ class HumanUnderstandableExecutionMonitorIT {
                             LogFilesInitializer.NULL,
                             IndexImporterFactory.EMPTY,
                             EmptyMemoryTracker.INSTANCE,
-                            NULL_CONTEXT_FACTORY)
+                            NULL_CONTEXT_FACTORY,
+                            DatabaseCreationOptions.EMPTY_CREATION_OPTIONS)
                     .doImport(input);
 
             // then
@@ -148,7 +153,6 @@ class HumanUnderstandableExecutionMonitorIT {
         when(neoStores.getRelationshipStore()).thenReturn(relationshipStore);
         dependencies.satisfyDependency(neoStores);
         dependencies.satisfyDependency(IdMappers.actual());
-        dependencies.satisfyDependency(mock(PageCacheArrayFactoryMonitor.class));
         dependencies.satisfyDependency(new DataStatistics(10, 10, new DataStatistics.RelationshipTypeCount[0]));
         monitor.initialize(dependencies);
 

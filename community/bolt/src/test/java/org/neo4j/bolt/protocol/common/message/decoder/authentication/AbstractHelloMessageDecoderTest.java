@@ -20,6 +20,7 @@
 package org.neo4j.bolt.protocol.common.message.decoder.authentication;
 
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.neo4j.bolt.testing.util.ErrorUtil.useNewMessage;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
@@ -31,12 +32,15 @@ import org.mockito.Mockito;
 import org.neo4j.bolt.protocol.common.connector.connection.Feature;
 import org.neo4j.bolt.protocol.common.message.decoder.MessageDecoder;
 import org.neo4j.bolt.protocol.common.message.decoder.NonEmptyMessageDecoderTest;
-import org.neo4j.bolt.protocol.common.message.request.authentication.HelloMessage;
-import org.neo4j.bolt.protocol.common.message.request.connection.RoutingContext;
 import org.neo4j.bolt.testing.mock.ConnectionMockFactory;
+import org.neo4j.boltmessages.request.authentication.HelloMessage;
+import org.neo4j.boltmessages.request.connection.RoutingContext;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.packstream.error.reader.PackstreamReaderException;
 import org.neo4j.packstream.error.struct.IllegalStructArgumentException;
 import org.neo4j.packstream.io.PackstreamBuf;
+import org.neo4j.packstream.io.value.AbstractPackstreamValueReader;
 import org.neo4j.packstream.io.value.PackstreamValueReader;
 import org.neo4j.packstream.struct.StructHeader;
 import org.neo4j.values.storable.Values;
@@ -83,7 +87,7 @@ public abstract class AbstractHelloMessageDecoderTest<D extends MessageDecoder<H
     @Test
     protected void shouldReadMessageWithoutRoutingContext() throws PackstreamReaderException {
         var buf = PackstreamBuf.allocUnpooled();
-        var reader = Mockito.mock(PackstreamValueReader.class);
+        var reader = Mockito.mock(AbstractPackstreamValueReader.class);
 
         var meta = new MapValueBuilder();
         this.appendRequiredFields(meta);
@@ -109,7 +113,7 @@ public abstract class AbstractHelloMessageDecoderTest<D extends MessageDecoder<H
     @Test
     protected void shouldReadMessageWithPatchOptions() throws PackstreamReaderException {
         var buf = PackstreamBuf.allocUnpooled();
-        var reader = Mockito.mock(PackstreamValueReader.class);
+        var reader = Mockito.mock(AbstractPackstreamValueReader.class);
 
         var meta = new MapValueBuilder();
         this.appendRequiredFields(meta);
@@ -124,7 +128,7 @@ public abstract class AbstractHelloMessageDecoderTest<D extends MessageDecoder<H
 
         Assertions.assertThat(msg).isNotNull();
         Assertions.assertThat(msg.userAgent()).isEqualTo("Example/1.0 (+https://github.com/neo4j)");
-        Assertions.assertThat(msg.features()).isEqualTo(List.of(Feature.UTC_DATETIME));
+        Assertions.assertThat(msg.features()).isEqualTo(List.of(Feature.UTC_DATETIME.getId()));
 
         Assertions.assertThat(msg)
                 .asInstanceOf(InstanceOfAssertFactories.type(HelloMessage.class))
@@ -137,7 +141,7 @@ public abstract class AbstractHelloMessageDecoderTest<D extends MessageDecoder<H
     @Test
     void shouldIgnoreUnknownPatchOptions() throws PackstreamReaderException {
         var buf = PackstreamBuf.allocUnpooled();
-        var reader = Mockito.mock(PackstreamValueReader.class);
+        var reader = Mockito.mock(AbstractPackstreamValueReader.class);
 
         var meta = new MapValueBuilder();
         this.appendRequiredFields(meta);
@@ -165,8 +169,8 @@ public abstract class AbstractHelloMessageDecoderTest<D extends MessageDecoder<H
     @Test
     protected void shouldFailWithIllegalStructArgumentWhenInvalidArgumentIsPassed() throws PackstreamReaderException {
         var buf = PackstreamBuf.allocUnpooled().writeInt(42);
-        var reader = Mockito.mock(PackstreamValueReader.class);
-        var ex = new PackstreamReaderException("Something went kaput :(");
+        var reader = Mockito.mock(AbstractPackstreamValueReader.class);
+        var ex = PackstreamReaderException.internalError(this.getClass().getSimpleName(), "Something went kaput :(");
 
         Mockito.doThrow(ex).when(reader).readPrimitiveMap(Mockito.anyLong());
 
@@ -175,7 +179,8 @@ public abstract class AbstractHelloMessageDecoderTest<D extends MessageDecoder<H
 
         assertThatExceptionOfType(IllegalStructArgumentException.class)
                 .isThrownBy(() -> this.getDecoder().read(connection, buf, new StructHeader(1, (short) 0x42)))
-                .withMessage("Illegal value for field \"extra\": Something went kaput :(")
+                .withMessage(useNewMessage("08N06: General network protocol error.")
+                        .whenLegacyFallbackTo("Illegal value for field \"extra\": Something went kaput :("))
                 .withCause(ex);
     }
 
@@ -183,7 +188,7 @@ public abstract class AbstractHelloMessageDecoderTest<D extends MessageDecoder<H
     protected void shouldFailWithIllegalStructArgumentWhenInvalidMetadataEntryIsPassed()
             throws PackstreamReaderException {
         var buf = PackstreamBuf.allocUnpooled();
-        var reader = Mockito.mock(PackstreamValueReader.class);
+        var reader = Mockito.mock(AbstractPackstreamValueReader.class);
 
         var meta = new MapValueBuilder();
         meta.add("user_agent", Values.longValue(42));
@@ -196,13 +201,14 @@ public abstract class AbstractHelloMessageDecoderTest<D extends MessageDecoder<H
 
         assertThatExceptionOfType(IllegalStructArgumentException.class)
                 .isThrownBy(() -> this.getDecoder().read(connection, buf, new StructHeader(1, (short) 0x42)))
-                .withMessage("Illegal value for field \"user_agent\": Expected string");
+                .withMessage(useNewMessage("08N06: General network protocol error.")
+                        .whenLegacyFallbackTo("Illegal value for field \"user_agent\": Expected string"));
     }
 
     @Test
     protected void shouldFailWithIllegalStructArgumentWhenUserAgentIsOmitted() throws PackstreamReaderException {
         var buf = PackstreamBuf.allocUnpooled();
-        var reader = Mockito.mock(PackstreamValueReader.class);
+        var reader = Mockito.mock(AbstractPackstreamValueReader.class);
 
         var meta = new MapValueBuilder();
         meta.add("scheme", Values.stringValue("none"));
@@ -212,8 +218,20 @@ public abstract class AbstractHelloMessageDecoderTest<D extends MessageDecoder<H
         var connection =
                 ConnectionMockFactory.newFactory().withValueReader(reader).build();
 
-        assertThatExceptionOfType(IllegalStructArgumentException.class)
-                .isThrownBy(() -> this.getDecoder().read(connection, buf, new StructHeader(1, (short) 0x42)))
-                .withMessage("Illegal value for field \"user_agent\": Expected value to be non-null");
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(
+                        () -> this.getDecoder().read(connection, buf, new StructHeader(1, (short) 0x42)))
+                .isInstanceOf(IllegalStructArgumentException.class)
+                .hasMessage(useNewMessage("08N06: General network protocol error.")
+                        .whenLegacyFallbackTo("Illegal value for field \"user_agent\": Expected value to be non-null"))
+                .hasNoCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_08N06)
+                .hasStatusDescription("error: connection exception - protocol error. General network protocol error.")
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N05)
+                .hasStatusDescription(
+                        "error: data exception - input failed validation. Invalid input 'null' for field 'user_agent'.")
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22004)
+                .hasStatusDescription("error: data exception - null value not allowed");
     }
 }

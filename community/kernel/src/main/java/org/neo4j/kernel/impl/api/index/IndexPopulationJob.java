@@ -32,10 +32,16 @@ import org.neo4j.internal.kernel.api.IndexMonitor;
 import org.neo4j.internal.kernel.api.InternalIndexState;
 import org.neo4j.internal.kernel.api.PopulationProgress;
 import org.neo4j.internal.schema.IndexDescriptor;
+import org.neo4j.internal.schema.IndexRef;
+import org.neo4j.internal.schema.StorageEngineIndexingBehaviour;
 import org.neo4j.io.memory.ByteBufferFactory;
 import org.neo4j.io.memory.UnsafeDirectByteBufferAllocator;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.context.FixedVersionContextSupplier;
+import org.neo4j.io.pagecache.context.VersionContext;
+import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.io.pagecache.tracing.cursor.PageCursorTracer;
 import org.neo4j.kernel.api.index.IndexPopulator;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.memory.ThreadSafePeakMemoryTracker;
@@ -55,6 +61,8 @@ public class IndexPopulationJob implements Runnable {
     private final IndexMonitor monitor;
     private final CursorContextFactory contextFactory;
     private final MemoryTracker memoryTracker;
+    private final boolean multiversion;
+    private final StorageEngineIndexingBehaviour storageEngineIndexingBehaviour;
     private final ByteBufferFactory bufferFactory;
     private final ThreadSafePeakMemoryTracker memoryAllocationTracker;
     private final MultipleIndexPopulator multiPopulator;
@@ -84,11 +92,15 @@ public class IndexPopulationJob implements Runnable {
             String databaseName,
             Subject subject,
             EntityType populatedEntityType,
-            Config config) {
+            Config config,
+            boolean multiversion,
+            StorageEngineIndexingBehaviour storageEngineIndexingBehaviour) {
         this.multiPopulator = multiPopulator;
         this.monitor = monitor;
         this.contextFactory = contextFactory;
         this.memoryTracker = memoryTracker;
+        this.multiversion = multiversion;
+        this.storageEngineIndexingBehaviour = storageEngineIndexingBehaviour;
         this.memoryAllocationTracker = new ThreadSafePeakMemoryTracker();
         this.bufferFactory = new ByteBufferFactory(
                 UnsafeDirectByteBufferAllocator::new,
@@ -119,8 +131,16 @@ public class IndexPopulationJob implements Runnable {
      */
     @Override
     public void run() {
+        doRun(false);
+    }
+
+    public void runOnEmptyStore() {
+        doRun(true);
+    }
+
+    private void doRun(boolean emptyStore) {
+        var indexDescriptors = multiPopulator.indexDescriptors();
         try (var cursorContext = contextFactory.create(INDEX_POPULATION_TAG)) {
-            var indexDescriptors = multiPopulator.indexDescriptors();
             monitor.indexPopulationJobStarting(indexDescriptors);
             if (!multiPopulator.hasPopulators() || stopped) { // Don't start if asked to stop
                 return;
@@ -132,16 +152,28 @@ public class IndexPopulationJob implements Runnable {
             try {
                 multiPopulator.create(cursorContext);
                 multiPopulator.resetIndexCounts(cursorContext);
+                // in mvcc we need to wait for some concurrent transactions to complete in order to build consitent
+                // index and to not break isolation guarantees
+                boolean waitForConcurrentTransactions = multiversion && !emptyStore;
+                if (waitForConcurrentTransactions) {
+                    multiPopulator.awaitHorizonBeforeScan();
+                }
 
                 monitor.indexPopulationScanStarting(indexDescriptors);
-                indexAllEntities(contextFactory);
-                monitor.indexPopulationScanComplete();
+                multiPopulator.refreshVisibility(cursorContext);
+                monitor.indexPopulationScanStartingAfterVisibilityUpdate(indexDescriptors);
+                if (storageEngineIndexingBehaviour.hasProperties() || willPopulateTokenIndex()) {
+                    indexAllEntities(new FixedCursorContextFactory(cursorContext));
+                } else {
+                    monitor.indexPopulationScanSkipped(indexDescriptors);
+                }
+                monitor.indexPopulationScanComplete(indexDescriptors);
                 if (stopped) {
                     multiPopulator.stop(cursorContext);
                     // We remain in POPULATING state
                     return;
                 }
-                multiPopulator.flipAfterStoreScan(cursorContext);
+                multiPopulator.flipAfterStoreScan(cursorContext, waitForConcurrentTransactions);
             } catch (Throwable t) {
                 multiPopulator.cancel(t, cursorContext);
             }
@@ -151,9 +183,13 @@ public class IndexPopulationJob implements Runnable {
                     "Failed to close resources in IndexPopulationJob",
                     multiPopulator::close,
                     bufferFactory::close,
-                    () -> monitor.populationJobCompleted(memoryAllocationTracker.peakMemoryUsage()),
+                    () -> monitor.populationJobCompleted(memoryAllocationTracker.peakMemoryUsage(), indexDescriptors),
                     doneSignal::countDown);
         }
+    }
+
+    private boolean willPopulateTokenIndex() {
+        return populatedIndexes.stream().anyMatch(IndexRef::isTokenIndex);
     }
 
     private void indexAllEntities(CursorContextFactory contextFactory) {
@@ -179,6 +215,7 @@ public class IndexPopulationJob implements Runnable {
      */
     public void stop() {
         stopped = true;
+        multiPopulator.notifyPopulationJobStopped();
         // Stop the population
         if (storeScan != null) {
             storeScan.stop();
@@ -211,10 +248,11 @@ public class IndexPopulationJob implements Runnable {
      * A transaction happened that produced the given updates. Let this job incorporate its data,
      * feeding it to the {@link IndexPopulator}.
      *
-     * @param update {@link IndexEntryUpdate} to queue.
+     * @param update        {@link IndexEntryUpdate} to queue.
+     * @param cursorContext
      */
-    public void update(IndexEntryUpdate<?> update) {
-        multiPopulator.queueConcurrentUpdate(update);
+    public void queueConcurrentUpdate(IndexEntryUpdate update, CursorContext cursorContext) {
+        multiPopulator.queueConcurrentUpdate(update, cursorContext);
     }
 
     @Override
@@ -254,6 +292,10 @@ public class IndexPopulationJob implements Runnable {
 
     public MemoryTracker getMemoryTracker() {
         return memoryTracker;
+    }
+
+    public long populationHorizon() {
+        return multiPopulator.populationHorison();
     }
 
     public JobMonitoringParams getMonitoringParams() {
@@ -300,10 +342,34 @@ public class IndexPopulationJob implements Runnable {
         }
 
         if (populatedIndexes.size() == 1) {
-            var index = populatedIndexes.get(0);
+            var index = populatedIndexes.getFirst();
             return "Population of index '" + index.getName() + "'";
         }
 
         return "Population of " + populatedIndexes.size() + " '" + populatedEntityType + "' indexes";
+    }
+
+    private static class FixedCursorContextFactory extends CursorContextFactory {
+        private final CursorContext cursorContext;
+
+        public FixedCursorContextFactory(CursorContext cursorContext) {
+            super(PageCacheTracer.NULL, FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER);
+            this.cursorContext = cursorContext;
+        }
+
+        @Override
+        public CursorContext create(String tag) {
+            return cursorContext.createRelatedContext(tag);
+        }
+
+        @Override
+        public CursorContext create(String tag, VersionContext versionContext) {
+            return cursorContext.createRelatedContext(tag);
+        }
+
+        @Override
+        public CursorContext create(PageCursorTracer cursorTracer) {
+            throw new UnsupportedOperationException("This operation is not supported");
+        }
     }
 }

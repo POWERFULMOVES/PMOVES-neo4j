@@ -20,7 +20,7 @@
 package org.neo4j.internal.batchimport.cache.idmapping.string;
 
 import java.nio.charset.StandardCharsets;
-import org.neo4j.hashing.WyHash;
+import org.neo4j.hashing.RapidHash;
 
 /**
  * Encodes String into a long with very small chance of collision, i.e. two different Strings encoded into
@@ -33,11 +33,12 @@ public class StringEncoder implements Encoder {
 
     @Override
     public long encode(Object any) {
-        byte[] bytes = convertToString(any).getBytes(StandardCharsets.UTF_8);
-        return WyHash.hash(bytes, 0, bytes.length) & ID_BITS | 1; // We cannot return 0 because that is a special value
+        byte[] key = convertToString(any).getBytes(StandardCharsets.UTF_8);
+        long hash = RapidHash.create().hash(key, 0, key.length) & ID_BITS;
+        return hash != 0 ? hash : 1; // We cannot return 0 because that is a special value
     }
 
-    private String convertToString(Object any) {
+    private static String convertToString(Object any) {
         if (any instanceof String string) {
             return string;
         }

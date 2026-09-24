@@ -20,19 +20,10 @@
 package org.neo4j.gis.spatial.index;
 
 import java.util.Arrays;
+import java.util.Objects;
 
-public class Envelope {
-    static final double MAXIMAL_ENVELOPE_SIDE_RATIO = 100_000;
-
-    protected final double[] min;
-    protected final double[] max;
-
-    /**
-     * Copy constructor
-     */
-    public Envelope(Envelope e) {
-        this(e.min, e.max);
-    }
+public record Envelope(double[] min, double[] max) {
+    static final double MAXIMAL_ENVELOPE_SIDE_RATIO = 100_000.0;
 
     /**
      * General constructor for the n-dimensional case
@@ -41,7 +32,7 @@ public class Envelope {
         this.min = Arrays.copyOf(min, min.length);
         this.max = Arrays.copyOf(max, max.length);
         if (!isValid(min, max)) {
-            throw new IllegalArgumentException("Invalid envelope created " + toString());
+            throw new IllegalArgumentException("Invalid envelope created " + this);
         }
     }
 
@@ -50,6 +41,13 @@ public class Envelope {
      */
     public Envelope(double xmin, double xmax, double ymin, double ymax) {
         this(new double[] {xmin, ymin}, new double[] {xmax, ymax});
+    }
+
+    /**
+     * Copy constructor
+     */
+    public Envelope(Envelope e) {
+        this(e.min, e.max);
     }
 
     /**
@@ -64,21 +62,13 @@ public class Envelope {
             diffs[i] = to[i] - from[i];
             highestDiff = Math.max(highestDiff, diffs[i]);
         }
-        final double mindiff = highestDiff / MAXIMAL_ENVELOPE_SIDE_RATIO;
+        double mindiff = highestDiff / MAXIMAL_ENVELOPE_SIDE_RATIO;
         for (int i = 0; i < from.length; i++) {
             if (diffs[i] < mindiff) {
                 to[i] = from[i] + mindiff;
             }
         }
         return new Envelope(from, to);
-    }
-
-    public double[] getMin() {
-        return min;
-    }
-
-    public double[] getMax() {
-        return max;
     }
 
     public double getMin(int dimension) {
@@ -168,16 +158,7 @@ public class Envelope {
 
     @Override
     public int hashCode() {
-        int result = 1;
-        for (double element : min) {
-            long bits = Double.doubleToLongBits(element);
-            result = 31 * result + (int) (bits ^ (bits >>> 32));
-        }
-        for (double element : max) {
-            long bits = Double.doubleToLongBits(element);
-            result = 31 * result + (int) (bits ^ (bits >>> 32));
-        }
-        return result;
+        return Objects.hash(Arrays.hashCode(this.min), Arrays.hashCode(this.max));
     }
 
     /**
@@ -281,14 +262,14 @@ public class Envelope {
             sb.append("null");
         } else {
             for (double val : vals) {
-                if (sb.length() > 0) {
+                if (!sb.isEmpty()) {
                     sb.append(',');
                 } else {
                     sb.append('(');
                 }
                 sb.append(val);
             }
-            if (sb.length() > 0) {
+            if (!sb.isEmpty()) {
                 sb.append(')');
             }
         }

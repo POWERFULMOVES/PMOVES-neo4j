@@ -23,9 +23,6 @@ import static java.util.Collections.emptyIterator;
 import static java.util.Collections.singletonList;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doReturn;
@@ -57,10 +54,11 @@ import java.util.function.IntSupplier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.stubbing.Answer;
+import org.neo4j.capabilities.CapabilitiesService;
 import org.neo4j.common.DependencyResolver;
-import org.neo4j.common.Edition;
 import org.neo4j.common.EntityType;
 import org.neo4j.configuration.Config;
+import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.configuration.SettingImpl;
 import org.neo4j.configuration.SettingValueParsers;
 import org.neo4j.dbms.database.SystemGraphComponent;
@@ -68,10 +66,13 @@ import org.neo4j.dbms.database.SystemGraphComponent.Status;
 import org.neo4j.dbms.database.SystemGraphComponents;
 import org.neo4j.dbms.database.SystemGraphComponents.UpgradeChecker;
 import org.neo4j.dbms.database.TestSystemGraphComponent;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.Path;
 import org.neo4j.graphdb.Relationship;
 import org.neo4j.graphdb.Transaction;
+import org.neo4j.graphdb.config.Configuration;
 import org.neo4j.graphdb.config.Setting;
 import org.neo4j.internal.helpers.collection.Iterators;
 import org.neo4j.internal.kernel.api.InternalIndexState;
@@ -101,7 +102,9 @@ import org.neo4j.logging.InternalLog;
 import org.neo4j.logging.Log;
 import org.neo4j.procedure.impl.GlobalProceduresRegistry;
 import org.neo4j.procedure.impl.ProcedureConfig;
+import org.neo4j.procedure.impl.memory.ProcedureMemoryProvider;
 import org.neo4j.procedure.impl.temporal.TemporalFunction;
+import org.neo4j.procedure.memory.ProcedureMemory;
 import org.neo4j.time.Clocks;
 import org.neo4j.token.api.NamedToken;
 import org.neo4j.values.AnyValue;
@@ -120,6 +123,8 @@ class BuiltInProceduresTest {
     private final KernelTransaction tx = mock(KernelTransaction.class);
     private final ProcedureCallContext callContext = mock(ProcedureCallContext.class);
     private final DependencyResolver resolver = mock(DependencyResolver.class);
+    private final Configuration configuration = mock(Configuration.class);
+    private final CapabilitiesService capabilitiesService = mock(CapabilitiesService.class);
     private final GraphDatabaseAPI graphDatabaseAPI = mock(GraphDatabaseAPI.class);
     private final IndexingService indexingService = mock(IndexingService.class);
     private final Clock clock = Clocks.tickOnAccessClock(Instant.now(), Duration.ofSeconds(1));
@@ -137,6 +142,7 @@ class BuiltInProceduresTest {
         procs.registerComponent(SecurityContext.class, Context::securityContext, true);
         procs.registerComponent(ProcedureCallContext.class, Context::procedureCallContext, true);
         procs.registerComponent(SystemGraphComponents.class, ctx -> systemGraphComponents, false);
+        procs.registerComponent(ProcedureMemory.class, new ProcedureMemoryProvider(), true);
 
         procs.registerComponent(Log.class, ctx -> log, false);
         procs.registerType(Node.class, NTNode);
@@ -145,10 +151,9 @@ class BuiltInProceduresTest {
 
         doReturn(clock).when(resolver).resolveDependency(Clock.class);
 
-        var builtins = SpecialBuiltInProcedures.from("1.3.37", Edition.COMMUNITY.toString());
-        for (var proc : builtins.get()) {
-            procs.register(proc);
-        }
+        SpecialBuiltInProcedures.get().install(procs);
+        procs.registerComponent(
+                SpdBuiltInProcedures.class, context -> SpdBuiltInProcedures.COMMUNITY_EDITION_IMPL, false);
         procs.registerProcedure(BuiltInProcedures.class);
         procs.registerProcedure(BuiltInDbmsProcedures.class);
 
@@ -187,20 +192,25 @@ class BuiltInProceduresTest {
         when(read.countsForRelationship(anyInt(), anyInt(), anyInt())).thenReturn(1L);
         when(schemaReadCore.indexGetState(any(IndexDescriptor.class))).thenReturn(InternalIndexState.ONLINE);
 
+        when(configuration.get(GraphDatabaseInternalSettings.custom_kernel_version))
+                .thenReturn("1.3.37");
+        when(resolver.resolveDependency(Configuration.class)).thenReturn(configuration);
+        when(resolver.resolveDependency(CapabilitiesService.class)).thenReturn(capabilitiesService);
         when(graphDatabaseAPI.dbmsInfo()).thenReturn(DbmsInfo.ENTERPRISE);
     }
 
     @Test
     void lookupComponentProviders() {
         var view = procs.getCurrentView();
-        assertNotNull(view.lookupComponentProvider(Transaction.class, true));
-        assertNotNull(view.lookupComponentProvider(Transaction.class, false));
+        assertThat(view.lookupComponentProvider(Transaction.class, true)).isNotNull();
+        assertThat(view.lookupComponentProvider(Transaction.class, false)).isNotNull();
 
-        assertNull(view.lookupComponentProvider(Statement.class, true));
-        assertNull(view.lookupComponentProvider(Statement.class, false));
+        assertThat(view.lookupComponentProvider(Statement.class, true)).isNull();
+        assertThat(view.lookupComponentProvider(Statement.class, false)).isNull();
 
-        assertNull(view.lookupComponentProvider(DependencyResolver.class, true));
-        assertNotNull(view.lookupComponentProvider(DependencyResolver.class, false));
+        assertThat(view.lookupComponentProvider(DependencyResolver.class, true)).isNull();
+        assertThat(view.lookupComponentProvider(DependencyResolver.class, false))
+                .isNotNull();
     }
 
     @Test
@@ -233,7 +243,7 @@ class BuiltInProceduresTest {
     @Test
     void shouldListSystemComponents() throws Throwable {
         // When/Then
-        assertThat(call("dbms.components")).contains(record("Neo4j Kernel", singletonList("1.3.37"), "community"));
+        assertThat(call("dbms.components")).contains(record("Neo4j Kernel", singletonList("1.3.37"), "enterprise"));
     }
 
     @Test
@@ -243,7 +253,7 @@ class BuiltInProceduresTest {
         when(tokens.labelsGetAllTokens()).thenThrow(runtimeException);
 
         // When
-        assertThrows(ProcedureException.class, () -> call("db.labels"));
+        assertThatThrownBy(() -> call("db.labels")).isInstanceOf(ProcedureException.class);
     }
 
     @Test
@@ -253,7 +263,7 @@ class BuiltInProceduresTest {
         when(tokens.propertyKeyGetAllTokens()).thenThrow(runtimeException);
 
         // When
-        assertThrows(ProcedureException.class, () -> call("db.propertyKeys"));
+        assertThatThrownBy(() -> call("db.propertyKeys")).isInstanceOf(ProcedureException.class);
     }
 
     @Test
@@ -263,7 +273,7 @@ class BuiltInProceduresTest {
         when(tokens.relationshipTypesGetAllTokens()).thenThrow(runtimeException);
 
         // When
-        assertThrows(ProcedureException.class, () -> call("db.relationshipTypes"));
+        assertThatThrownBy(() -> call("db.relationshipTypes")).isInstanceOf(ProcedureException.class);
     }
 
     @Test
@@ -394,10 +404,13 @@ class BuiltInProceduresTest {
         when(resolver.resolveDependency(Config.class)).thenReturn(config);
         when(callContext.isSystemDatabase()).thenReturn(false);
 
-        assertThatThrownBy(() -> call("dbms.upgradeStatus"))
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> call("dbms.upgradeStatus"))
                 .isInstanceOf(ProcedureException.class)
                 .hasMessage(
-                        "This is an administration command and it should be executed against the system database: dbms.upgradeStatus");
+                        "This is an administration command and it should be executed against the system database: dbms.upgradeStatus")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_51N28)
+                .hasStatusDescription(
+                        "error: system configuration or operation exception - not supported by this database. This Cypher command must be executed against the database `system`.");
     }
 
     @Test
@@ -450,10 +463,13 @@ class BuiltInProceduresTest {
 
         when(callContext.isSystemDatabase()).thenReturn(false);
 
-        assertThatThrownBy(() -> call("dbms.upgrade"))
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> call("dbms.upgrade"))
                 .isInstanceOf(ProcedureException.class)
                 .hasMessage(
-                        "This is an administration command and it should be executed against the system database: dbms.upgrade");
+                        "This is an administration command and it should be executed against the system database: dbms.upgrade")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_51N28)
+                .hasStatusDescription(
+                        "error: system configuration or operation exception - not supported by this database. This Cypher command must be executed against the database `system`.");
     }
 
     @Test

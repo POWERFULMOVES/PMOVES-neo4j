@@ -20,15 +20,18 @@
 package org.neo4j.storemigration;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.AUTH_ID_PROPERTY;
+import static org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.AUTH_LABEL;
+import static org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.AUTH_PROVIDER_PROPERTY;
+import static org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_ID_PROPERTY;
+import static org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_LABEL;
+import static org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_NAME_PROPERTY;
 import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DATABASE_LABEL;
 import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DATABASE_NAME_LABEL;
+import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DISPLAY_NAME_PROPERTY;
 import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.NAMESPACE_PROPERTY;
 import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.NAME_PROPERTY;
 import static org.neo4j.graphdb.schema.IndexType.LOOKUP;
-import static org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.AUTH_ID;
-import static org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.AUTH_LABEL;
-import static org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.AUTH_PROVIDER;
-import static org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.USER_LABEL;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -51,6 +54,7 @@ import org.neo4j.internal.helpers.collection.Iterables;
 import org.neo4j.kernel.ZippedStore;
 import org.neo4j.kernel.ZippedStoreCommunity;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
+import org.neo4j.test.extension.SkipOnSpd;
 import picocli.CommandLine;
 
 public class DatabaseMigrationCommunityIT extends DatabaseMigrationITBase {
@@ -90,6 +94,7 @@ public class DatabaseMigrationCommunityIT extends DatabaseMigrationITBase {
     }
 
     @Test
+    @SkipOnSpd(reason = "SPD doesn't run community")
     public void shouldSelectCommunityVersionOfMigrateCommand() {
         ExecutionContext executionContext = new ExecutionContext(Path.of("hej"), Path.of("something"));
         CommandLine commandLine = AdminTool.getCommandLine(executionContext);
@@ -101,13 +106,15 @@ public class DatabaseMigrationCommunityIT extends DatabaseMigrationITBase {
 
     @ParameterizedTest
     @MethodSource("migrations")
+    @SkipOnSpd(reason = "We don't support pre 5.0 migrations for system (subset of input requires it)")
     void shouldMigrateDatabase(ZippedStore zippedStore, String toRecordFormat)
             throws IOException, ConsistencyCheckIncompleteException {
-        doShouldMigrateDatabase(zippedStore, toRecordFormat, false);
+        doShouldMigrateDatabase(zippedStore, toRecordFormat);
     }
 
     @ParameterizedTest
     @MethodSource("systemDbMigrations")
+    @SkipOnSpd(reason = "We don't support pre 5.0 migrations for system")
     void shouldMigrateSystemDatabase(SystemDbMigration systemDbMigration)
             throws IOException, ConsistencyCheckIncompleteException {
         doShouldMigrateSystemDatabase(systemDbMigration);
@@ -115,6 +122,7 @@ public class DatabaseMigrationCommunityIT extends DatabaseMigrationITBase {
 
     @ParameterizedTest
     @MethodSource("systemDbMigrations")
+    @SkipOnSpd(reason = "We don't support pre 5.0 migrations for system")
     void shouldMigrateSystemDatabaseAndOthers(SystemDbMigration systemDbMigration)
             throws IOException, ConsistencyCheckIncompleteException {
         doShouldMigrateSystemDatabaseAndOthers(systemDbMigration);
@@ -131,18 +139,20 @@ public class DatabaseMigrationCommunityIT extends DatabaseMigrationITBase {
             List<ConstraintDefinition> constraints =
                     Iterables.asList(tx.schema().getConstraints());
             verifyHasUniqueConstraint(constraints, DATABASE_NAME_LABEL, NAME_PROPERTY, NAMESPACE_PROPERTY);
+            verifyHasUniqueConstraint(constraints, DATABASE_NAME_LABEL, DISPLAY_NAME_PROPERTY);
             verifyHasUniqueConstraint(constraints, DATABASE_LABEL, NAME_PROPERTY);
-            verifyHasUniqueConstraint(constraints, USER_LABEL, "id");
-            verifyHasUniqueConstraint(constraints, USER_LABEL, "name");
-            verifyHasUniqueConstraint(constraints, AUTH_LABEL, AUTH_ID, AUTH_PROVIDER);
-            assertThat(constraints).hasSize(5);
+            verifyHasUniqueConstraint(constraints, USER_LABEL, USER_ID_PROPERTY);
+            verifyHasUniqueConstraint(constraints, USER_LABEL, USER_NAME_PROPERTY);
+            verifyHasUniqueConstraint(constraints, AUTH_LABEL, AUTH_ID_PROPERTY, AUTH_PROVIDER_PROPERTY);
+            assertThat(constraints).hasSize(6);
 
             List<IndexDefinition> indexes = Iterables.asList(tx.schema().getIndexes());
             verifyHasIndex(indexes, DATABASE_NAME_LABEL, NAME_PROPERTY, NAMESPACE_PROPERTY);
+            verifyHasIndex(indexes, DATABASE_NAME_LABEL, DISPLAY_NAME_PROPERTY);
             verifyHasIndex(indexes, DATABASE_LABEL, NAME_PROPERTY);
-            verifyHasIndex(indexes, USER_LABEL, "id");
-            verifyHasIndex(indexes, USER_LABEL, "name");
-            verifyHasIndex(indexes, AUTH_LABEL, AUTH_ID, AUTH_PROVIDER);
+            verifyHasIndex(indexes, USER_LABEL, USER_ID_PROPERTY);
+            verifyHasIndex(indexes, USER_LABEL, USER_NAME_PROPERTY);
+            verifyHasIndex(indexes, AUTH_LABEL, AUTH_ID_PROPERTY, AUTH_PROVIDER_PROPERTY);
 
             assertThat(indexes).anySatisfy(indexDefinition -> {
                 assertThat(indexDefinition.getIndexType()).isEqualTo(LOOKUP);
@@ -154,9 +164,9 @@ public class DatabaseMigrationCommunityIT extends DatabaseMigrationITBase {
                     assertThat(indexDefinition.getIndexType()).isEqualTo(LOOKUP);
                     assertThat(indexDefinition.isRelationshipIndex()).isEqualTo(true);
                 });
-                assertThat(indexes).hasSize(7);
+                assertThat(indexes).hasSize(8);
             } else {
-                assertThat(indexes).hasSize(6);
+                assertThat(indexes).hasSize(7);
             }
             tx.commit();
         }

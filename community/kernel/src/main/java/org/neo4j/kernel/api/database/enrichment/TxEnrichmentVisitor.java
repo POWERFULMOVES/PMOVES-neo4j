@@ -28,9 +28,10 @@ import java.util.Objects;
 import org.eclipse.collections.api.IntIterable;
 import org.eclipse.collections.api.factory.primitive.IntObjectMaps;
 import org.eclipse.collections.api.factory.primitive.IntSets;
+import org.eclipse.collections.api.map.primitive.MutableIntObjectMap;
 import org.eclipse.collections.api.set.primitive.IntSet;
-import org.eclipse.collections.api.set.primitive.LongSet;
 import org.eclipse.collections.api.set.primitive.MutableIntSet;
+import org.eclipse.collections.api.tuple.primitive.IntObjectPair;
 import org.neo4j.collection.trackable.HeapTrackingArrayList;
 import org.neo4j.collection.trackable.HeapTrackingCollections;
 import org.neo4j.collection.trackable.HeapTrackingLongIntHashMap;
@@ -104,6 +105,7 @@ public class TxEnrichmentVisitor extends TxStateVisitor.Delegator implements Enr
 
     public static final int NO_MORE_PROPERTIES = Integer.MIN_VALUE;
 
+    public static final byte NO_MARKER = 0b000;
     public static final byte ADDED_MARKER = 0b001;
     public static final byte MODIFIED_MARKER = 0b010;
     public static final byte DELETED_MARKER = 0b100;
@@ -121,14 +123,14 @@ public class TxEnrichmentVisitor extends TxStateVisitor.Delegator implements Enr
 
     public static final long NODE_SIZE = LABELS_CHANGE_OFFSET + Integer.BYTES;
 
-    private final CaptureMode captureMode;
+    protected final CaptureMode captureMode;
     private final String serverId;
     private final KernelVersion kernelVersion;
     private final EnrichmentCommandFactory enrichmentCommandFactory;
-    private final ReadableTransactionState txState;
+    protected final ReadableTransactionState txState;
     private final long lastTransactionIdWhenStarted;
-    private final StorageReader store;
-    private final MemoryTracker memoryTracker;
+    protected final StorageReader store;
+    protected final MemoryTracker memoryTracker;
 
     private final WriteEnrichmentChannel participantsChannel;
     private final WriteEnrichmentChannel detailsChannel;
@@ -137,11 +139,11 @@ public class TxEnrichmentVisitor extends TxStateVisitor.Delegator implements Enr
     private final ValuesChannel metadataChannel;
 
     private final HeapTrackingArrayList<Participant> participants;
-    private final HeapTrackingLongIntHashMap nodePositions;
+    protected final HeapTrackingLongIntHashMap nodePositions;
     private final HeapTrackingLongIntHashMap relationshipPositions;
-    private final StorageNodeCursor nodeCursor;
+    protected final StorageNodeCursor nodeCursor;
     private final StorageRelationshipScanCursor relCursor;
-    private final StoragePropertyCursor propertiesCursor;
+    protected final StoragePropertyCursor propertiesCursor;
 
     public TxEnrichmentVisitor(
             TxStateVisitor parent,
@@ -209,73 +211,83 @@ public class TxEnrichmentVisitor extends TxStateVisitor.Delegator implements Enr
     public void visitRelationshipModifications(RelationshipModifications modifications)
             throws ConstraintValidationException {
         super.visitRelationshipModifications(modifications);
-        modifications.creations().forEach((id, type, start, end, added, changed, removed) -> {
-            final var startPos = captureNodeState(start, DeltaType.STATE, txState.nodeIsModifiedInThisBatch(start));
-            final var endPos = captureNodeState(end, DeltaType.STATE, txState.nodeIsModifiedInThisBatch(end));
-            setRelationshipChangeType(id, DeltaType.ADDED, type, startPos, endPos);
-            captureRelTypeConstraints(id, type);
-            setRelationshipChangeDelta(id, ChangeType.PROPERTIES_STATE, captureRelationshipState(added));
-        });
+        modifications
+                .creations()
+                .forEach((id, type, start, end, added, removed) ->
+                        visitCreatedRelationship(id, type, start, end, added));
 
-        modifications.deletions().forEach((id, type, start, end, added, changed, removed) -> {
-            final var startPos = captureNodeState(start, DeltaType.STATE, txState.nodeIsModifiedInThisBatch(start));
-            final var endPos = captureNodeState(end, DeltaType.STATE, txState.nodeIsModifiedInThisBatch(end));
-            setRelationshipChangeType(id, DeltaType.DELETED, type, startPos, endPos);
-            captureRelTypeConstraints(id, type);
-            captureRelationshipState(id, type, start, end, PropertySelection.ALL_PROPERTIES);
-        });
+        modifications
+                .deletions()
+                .forEach((id, type, start, end, added, removed) -> visitDeletedRelationship(id, type, start, end));
 
-        modifications.updates().forEach((id, type, startNode, endNode, added, changed, removed) -> {
-            checkState(!relationshipPositions.containsKey(id), "Already tracking the relationship: " + id);
+        modifications.updates().forEach(this::visitUpdatedRelationship);
+    }
 
-            final var startPos =
-                    captureNodeState(startNode, DeltaType.STATE, txState.nodeIsModifiedInThisBatch(startNode));
-            final var endPos = captureNodeState(endNode, DeltaType.STATE, txState.nodeIsModifiedInThisBatch(endNode));
-            setRelationshipChangeType(id, DeltaType.MODIFIED, type, startPos, endPos);
+    protected void visitCreatedRelationship(long id, int type, long start, long end, Iterable<StorageProperty> added) {
+        final var startPos = captureNodeState(start, DeltaType.STATE, txState.nodeIsModifiedInThisBatch(start));
+        final var endPos = captureNodeState(end, DeltaType.STATE, txState.nodeIsModifiedInThisBatch(end));
+        setRelationshipChangeType(id, DeltaType.ADDED, type, startPos, endPos);
+        captureRelTypeConstraints(id, type);
+        setRelationshipChangeDelta(id, ChangeType.PROPERTIES_STATE, captureRelationshipState(added));
+    }
 
-            // always capture constraints - so don't inline this
-            final var constraintProps = captureRelTypeConstraints(id, type);
-            final var selection =
-                    (captureMode == CaptureMode.FULL) ? PropertySelection.ALL_PROPERTIES : selection(constraintProps);
-            captureRelationshipState(id, type, startNode, endNode, selection);
+    protected void visitDeletedRelationship(long id, int type, long start, long end) {
+        final var startPos = captureNodeState(start, DeltaType.STATE, txState.nodeIsModifiedInThisBatch(start));
+        final var endPos = captureNodeState(end, DeltaType.STATE, txState.nodeIsModifiedInThisBatch(end));
+        setRelationshipChangeType(id, DeltaType.DELETED, type, startPos, endPos);
+        captureRelTypeConstraints(id, type);
+        captureRelationshipState(id, type, start, end, PropertySelection.ALL_PROPERTIES);
+    }
 
-            final var position = changesChannel.size();
-            relCursor.single(id, startNode, type, endNode);
+    protected void visitUpdatedRelationship(
+            long id, int type, long startNode, long endNode, Iterable<StorageProperty> added, IntIterable removed) {
+        checkState(!relationshipPositions.containsKey(id), "Already tracking the relationship: " + id);
 
-            final var changesFlag = entityProperties(relCursor, added, changed, removed);
-            if (changesFlag == 0) {
-                setRelationshipChangeDelta(id, ChangeType.PROPERTIES_CHANGE, UNKNOWN_POSITION);
-            } else {
-                changesChannel.put(position, changesFlag);
-                setRelationshipChangeDelta(id, ChangeType.PROPERTIES_CHANGE, position);
-            }
-        });
+        final var startPos = captureNodeState(startNode, DeltaType.STATE, txState.nodeIsModifiedInThisBatch(startNode));
+        final var endPos = captureNodeState(endNode, DeltaType.STATE, txState.nodeIsModifiedInThisBatch(endNode));
+        setRelationshipChangeType(id, DeltaType.MODIFIED, type, startPos, endPos);
+
+        // always capture constraints - so don't inline this
+        final var constraintProps = captureRelTypeConstraints(id, type);
+        final var selection =
+                (captureMode == CaptureMode.FULL) ? PropertySelection.ALL_PROPERTIES : selection(constraintProps);
+        captureRelationshipState(id, type, startNode, endNode, selection);
+
+        final var position = changesChannel.size();
+        relCursor.single(id, startNode, type, endNode);
+
+        final var changesFlag = entityProperties(relCursor, added, removed);
+        if (changesFlag == 0) {
+            setRelationshipChangeDelta(id, ChangeType.PROPERTIES_CHANGE, UNKNOWN_POSITION);
+        } else {
+            changesChannel.put(position, changesFlag);
+            setRelationshipChangeDelta(id, ChangeType.PROPERTIES_CHANGE, position);
+        }
     }
 
     @Override
-    public void visitNodeLabelChanges(long id, LongSet added, LongSet removed) throws ConstraintValidationException {
+    public void visitNodeLabelChanges(long id, IntSet added, IntSet removed) throws ConstraintValidationException {
         super.visitNodeLabelChanges(id, added, removed);
         captureNodeState(id, DeltaType.MODIFIED, true);
 
         final var position = changesChannel.size();
         final var addedInThisBatch = txState.nodeIsAddedInThisBatch(id);
         if (addedInThisBatch) {
-            final var labels = toIntArray(added);
+            final var labels = added.toArray();
             addLabels(labels);
             captureLabelConstraints(id, labels);
         } else {
-            addLabels(toIntArray(added));
-            addLabels(toIntArray(removed));
+            addLabels(added.toArray());
+            addLabels(removed.toArray());
         }
 
         setNodeChangeDelta(id, addedInThisBatch ? ChangeType.LABELS_STATE : ChangeType.LABELS_CHANGE, position);
     }
 
     @Override
-    public void visitNodePropertyChanges(
-            long id, Iterable<StorageProperty> added, Iterable<StorageProperty> changed, IntIterable removed)
+    public void visitNodePropertyChanges(long id, Iterable<StorageProperty> added, IntIterable removed)
             throws ConstraintValidationException {
-        super.visitNodePropertyChanges(id, added, changed, removed);
+        super.visitNodePropertyChanges(id, added, removed);
         captureNodeState(id, DeltaType.MODIFIED, true);
 
         if (txState.nodeIsAddedInThisBatch(id)) {
@@ -284,7 +296,7 @@ public class TxEnrichmentVisitor extends TxStateVisitor.Delegator implements Enr
             final var position = changesChannel.size();
             nodeCursor.single(id);
 
-            final var changesFlag = entityProperties(nodeCursor, added, changed, removed);
+            final var changesFlag = entityProperties(nodeCursor, added, removed);
             if (changesFlag == 0) {
                 setNodeChangeDelta(id, ChangeType.PROPERTIES_CHANGE, UNKNOWN_POSITION);
             } else {
@@ -295,15 +307,11 @@ public class TxEnrichmentVisitor extends TxStateVisitor.Delegator implements Enr
     }
 
     private byte entityProperties(
-            StorageEntityCursor entityCursor,
-            Iterable<StorageProperty> added,
-            Iterable<StorageProperty> changed,
-            IntIterable removed) {
+            StorageEntityCursor entityCursor, Iterable<StorageProperty> added, IntIterable removed) {
         var changesFlag = (byte) 0;
         if (entityCursor.next()) {
-            changesFlag |= entityPropertyAdditions(added) ? ADDED_MARKER : 0;
-            changesFlag |= entityPropertyChanges(entityCursor, changed, changesFlag > 0) ? MODIFIED_MARKER : 0;
-            changesFlag |= entityPropertyDeletes(entityCursor, removed, changesFlag > 0) ? DELETED_MARKER : 0;
+            changesFlag |= entityPropertyAdditionsAndChanges(entityCursor, added);
+            changesFlag |= entityPropertyDeletes(entityCursor, removed, changesFlag != NO_MARKER);
         }
 
         return changesFlag;
@@ -333,6 +341,12 @@ public class TxEnrichmentVisitor extends TxStateVisitor.Delegator implements Enr
         }
 
         return null;
+    }
+
+    @Override
+    public void finishVisit() throws KernelException {
+        ensureParticipantsWritten();
+        super.finishVisit();
     }
 
     @Override
@@ -468,8 +482,7 @@ public class TxEnrichmentVisitor extends TxStateVisitor.Delegator implements Enr
                     selection = selection(constraintProps);
                 }
 
-                setNodeChangeDelta(
-                        id, ChangeType.PROPERTIES_STATE, addPropertiesFromCursor(EntityType.NODE, selection));
+                setNodeChangeDelta(id, ChangeType.PROPERTIES_STATE, addPropertiesFromCursor(nodeCursor, selection));
             }
         }
 
@@ -513,8 +526,7 @@ public class TxEnrichmentVisitor extends TxStateVisitor.Delegator implements Enr
             long id, int type, long startNode, long endNode, PropertySelection selection) {
         relCursor.single(id, startNode, type, endNode);
         if (relCursor.next()) {
-            setRelationshipChangeDelta(
-                    id, ChangeType.PROPERTIES_STATE, addPropertiesFromCursor(EntityType.RELATIONSHIP, selection));
+            setRelationshipChangeDelta(id, ChangeType.PROPERTIES_STATE, addPropertiesFromCursor(relCursor, selection));
         }
     }
 
@@ -574,16 +586,12 @@ public class TxEnrichmentVisitor extends TxStateVisitor.Delegator implements Enr
         return position;
     }
 
-    private int addPropertiesFromCursor(EntityType entityType, PropertySelection selection) {
+    private int addPropertiesFromCursor(StorageEntityCursor cursor, PropertySelection selection) {
         if (selection == null) {
             return UNKNOWN_POSITION;
         }
 
-        if (entityType == EntityType.NODE) {
-            propertiesCursor.initNodeProperties(nodeCursor, selection);
-        } else {
-            propertiesCursor.initRelationshipProperties(relCursor, selection);
-        }
+        cursor.properties(propertiesCursor, selection);
 
         final var position = changesChannel.size();
         var captured = 0;
@@ -616,66 +624,60 @@ public class TxEnrichmentVisitor extends TxStateVisitor.Delegator implements Enr
         return position;
     }
 
-    private boolean entityPropertyAdditions(Iterable<StorageProperty> properties) {
-        var captured = 0;
-        for (var property : properties) {
-            if (captured == 0) {
-                changesChannel.put((byte) 0);
-            }
-
-            changesChannel.putInt(property.propertyKeyId());
-            changesChannel.putInt(valuesChannel.write(property.value()));
-            captured++;
+    private byte entityPropertyAdditionsAndChanges(StorageEntityCursor cursor, Iterable<StorageProperty> properties) {
+        MutableIntObjectMap<Value> newValues = IntObjectMaps.mutable.empty();
+        for (StorageProperty property : properties) {
+            newValues.put(property.propertyKeyId(), property.value());
         }
 
-        if (captured > 0) {
-            changesChannel.putInt(NO_MORE_PROPERTIES);
-            return true;
+        byte marker = NO_MARKER;
+        if (newValues.isEmpty()) {
+            return marker;
         }
 
-        return false;
-    }
-
-    private boolean entityPropertyChanges(
-            StorageEntityCursor cursor, Iterable<StorageProperty> properties, boolean addedChangesMarker) {
-        var captured = 0;
-        final var propertyValues = IntObjectMaps.mutable.<Value>empty();
-        for (var property : properties) {
-            propertyValues.put(property.propertyKeyId(), property.value());
-        }
-
-        if (propertyValues.isEmpty()) {
-            return false;
-        }
-
+        MutableIntObjectMap<Value> prevValues = IntObjectMaps.mutable.empty();
         cursor.properties(
-                propertiesCursor,
-                PropertySelection.selection(propertyValues.keySet().toArray()));
+                propertiesCursor, PropertySelection.selection(newValues.keySet().toArray()));
         while (propertiesCursor.next()) {
-            if (captured == 0 && !addedChangesMarker) {
-                changesChannel.put((byte) 0);
+            prevValues.put(propertiesCursor.propertyKey(), propertiesCursor.propertyValue());
+        }
+
+        changesChannel.put((byte) 0);
+
+        int added = 0;
+        for (StorageProperty property : properties) {
+            if (!prevValues.containsKey(property.propertyKeyId())) {
+                added++;
+                changesChannel.putInt(property.propertyKeyId());
+                changesChannel.putInt(valuesChannel.write(property.value()));
             }
-
-            final var propertyId = propertiesCursor.propertyKey();
-            changesChannel.putInt(propertyId);
-            changesChannel.putInt(valuesChannel.write(propertiesCursor.propertyValue()));
-            changesChannel.putInt(valuesChannel.write(propertyValues.get(propertyId)));
-            captured++;
         }
-
-        if (captured > 0) {
+        if (added > 0) {
             changesChannel.putInt(NO_MORE_PROPERTIES);
-            return true;
+            marker |= ADDED_MARKER;
         }
 
-        return false;
+        int changed = 0;
+        for (IntObjectPair<Value> prevValue : prevValues.keyValuesView()) {
+            changesChannel.putInt(prevValue.getOne());
+            changesChannel.putInt(valuesChannel.write(prevValue.getTwo()));
+            changesChannel.putInt(valuesChannel.write(newValues.get(prevValue.getOne())));
+            changed++;
+        }
+
+        if (changed > 0) {
+            changesChannel.putInt(NO_MORE_PROPERTIES);
+            marker |= MODIFIED_MARKER;
+        }
+
+        return marker;
     }
 
-    private boolean entityPropertyDeletes(
-            StorageEntityCursor cursor, IntIterable properties, boolean addedChangesMarker) {
+    private byte entityPropertyDeletes(StorageEntityCursor cursor, IntIterable properties, boolean addedChangesMarker) {
         final var propertyIds = properties.toArray();
+        byte marker = NO_MARKER;
         if (propertyIds.length == 0) {
-            return false;
+            return marker;
         }
 
         var captured = 0;
@@ -692,10 +694,10 @@ public class TxEnrichmentVisitor extends TxStateVisitor.Delegator implements Enr
 
         if (captured > 0) {
             changesChannel.putInt(NO_MORE_PROPERTIES);
-            return true;
+            marker |= DELETED_MARKER;
         }
 
-        return false;
+        return marker;
     }
 
     private Participant createParticipant(EntityType entityType, DeltaType deltaType, long id, int position) {
@@ -717,21 +719,9 @@ public class TxEnrichmentVisitor extends TxStateVisitor.Delegator implements Enr
         return DeltaType.BY_ID.get(flag);
     }
 
-    private static int[] toIntArray(LongSet ids) {
-        return toIntArray(ids.toSortedArray());
-    }
-
     private static int[] toSortedIntArray(int[] data) {
         Arrays.sort(data);
         return data;
-    }
-
-    private static int[] toIntArray(long[] sorted) {
-        final var tokens = new int[sorted.length];
-        for (var i = 0; i < tokens.length; i++) {
-            tokens[i] = (int) sorted[i];
-        }
-        return tokens;
     }
 
     private static class ValuesChannel {

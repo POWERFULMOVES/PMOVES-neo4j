@@ -25,7 +25,9 @@ import static org.neo4j.graphdb.RelationshipType.withName;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.kernel.impl.api.FlatRelationshipModifications.singleCreate;
 import static org.neo4j.lock.ResourceLocker.IGNORE;
+import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
 
+import java.time.Duration;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
 import java.util.function.ToLongFunction;
@@ -34,6 +36,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.graphdb.Transaction;
 import org.neo4j.internal.id.IdGenerator;
@@ -76,6 +79,7 @@ public class CommandCreationContextIT {
     @ExtensionCallback
     void configure(TestDatabaseManagementServiceBuilder builder) {
         builder.setConfig(GraphDatabaseSettings.db_format, FormatFamily.ALIGNED.name());
+        builder.setConfig(GraphDatabaseInternalSettings.id_controller_maintenance_interval, Duration.ZERO);
     }
 
     @BeforeEach
@@ -98,7 +102,7 @@ public class CommandCreationContextIT {
             ToLongFunction<CommandCreationContext> idReservation) {
         try (var cursorContext = contextFactory.create("trackPageCacheAccessOnIdReservation")) {
             prepareIdGenerator(storeProvider.apply(neoStores).getIdGenerator());
-            try (var creationContext = storageEngine.newCommandCreationContext(false)) {
+            try (var creationContext = storageEngine.newCommandCreationContext(false, INSTANCE)) {
                 creationContext.initialize(
                         kernelVersionProvider,
                         cursorContext,
@@ -107,7 +111,7 @@ public class CommandCreationContextIT {
                         ResourceLocker.IGNORE,
                         () -> LockTracer.NONE);
                 idReservation.applyAsLong(creationContext);
-                assertThat(cursorContext.getCursorTracer().pins()).isEqualTo(1);
+                assertThat(cursorContext.getCursorTracer().pins()).isEqualTo(2);
             }
         }
     }
@@ -116,7 +120,7 @@ public class CommandCreationContextIT {
     @MethodSource("commandOperations")
     void trackMemoryAllocationInCommandCreationContext(BiConsumer<TransactionRecordState, ContextHolder> operation) {
         var memoryTracker = new LocalMemoryTracker();
-        try (var commandCreationContext = storageEngine.newCommandCreationContext(false);
+        try (var commandCreationContext = storageEngine.newCommandCreationContext(false, INSTANCE);
                 var storeCursors = storageEngine.createStorageCursors(NULL_CONTEXT)) {
             commandCreationContext.initialize(
                     kernelVersionProvider,

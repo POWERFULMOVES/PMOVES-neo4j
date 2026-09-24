@@ -51,7 +51,6 @@ import org.neo4j.graphdb.Relationship;
 import org.neo4j.graphdb.RelationshipType;
 import org.neo4j.graphdb.ResourceIterator;
 import org.neo4j.graphdb.StringSearchMode;
-import org.neo4j.internal.kernel.api.CloseListener;
 import org.neo4j.internal.kernel.api.Cursor;
 import org.neo4j.internal.kernel.api.CursorFactory;
 import org.neo4j.internal.kernel.api.IndexReadSession;
@@ -59,7 +58,9 @@ import org.neo4j.internal.kernel.api.InternalIndexState;
 import org.neo4j.internal.kernel.api.KernelReadTracer;
 import org.neo4j.internal.kernel.api.NodeCursor;
 import org.neo4j.internal.kernel.api.NodeIndexCursor;
+import org.neo4j.internal.kernel.api.NodeLabelIndexCursor;
 import org.neo4j.internal.kernel.api.NodeValueIndexCursor;
+import org.neo4j.internal.kernel.api.PropertyCursor;
 import org.neo4j.internal.kernel.api.PropertyIndexQuery;
 import org.neo4j.internal.kernel.api.QueryContext;
 import org.neo4j.internal.kernel.api.Read;
@@ -77,6 +78,7 @@ import org.neo4j.internal.schema.IndexQuery;
 import org.neo4j.internal.schema.IndexType;
 import org.neo4j.internal.schema.SchemaDescriptor;
 import org.neo4j.internal.schema.SchemaDescriptors;
+import org.neo4j.io.IOUtils;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.kernel.api.ResourceMonitor;
 import org.neo4j.kernel.impl.api.TokenAccess;
@@ -86,6 +88,7 @@ import org.neo4j.kernel.impl.coreapi.internal.TrackedCursorIterator;
 import org.neo4j.kernel.impl.newapi.CursorPredicates;
 import org.neo4j.kernel.impl.newapi.FilteringNodeCursorWrapper;
 import org.neo4j.kernel.impl.newapi.FilteringRelationshipScanCursorWrapper;
+import org.neo4j.lang.CloseListener;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.token.api.TokenConstants;
 import org.neo4j.values.ElementIdMapper;
@@ -96,7 +99,9 @@ public abstract class DataLookup {
     public Node getNodeById(long id) {
         if (id < 0 || !dataRead().nodeExists(id)) {
             throw new NotFoundException(
-                    format("Node %d not found", id), new EntityNotFoundException(EntityType.NODE, valueOf(id)));
+                    format("Node %d not found", id),
+                    EntityNotFoundException.internalError(
+                            this.getClass().getSimpleName(), EntityType.NODE, valueOf(id)));
         }
 
         return newNodeEntity(id);
@@ -106,7 +111,8 @@ public abstract class DataLookup {
         long nodeId = elementIdMapper().nodeId(elementId);
         if (!dataRead().nodeExists(nodeId)) {
             throw new NotFoundException(
-                    format("Node %s not found.", elementId), new EntityNotFoundException(EntityType.NODE, elementId));
+                    format("Node %s not found.", elementId),
+                    EntityNotFoundException.internalError(this.getClass().getSimpleName(), EntityType.NODE, elementId));
         }
         return newNodeEntity(nodeId);
     }
@@ -214,13 +220,15 @@ public abstract class DataLookup {
         if (id < 0) {
             throw new NotFoundException(
                     format("Relationship with %d not found", id),
-                    new EntityNotFoundException(EntityType.RELATIONSHIP, valueOf(id)));
+                    EntityNotFoundException.internalError(
+                            this.getClass().getSimpleName(), EntityType.RELATIONSHIP, valueOf(id)));
         }
 
         if (!dataRead().relationshipExists(id)) {
             throw new NotFoundException(
                     format("Relationship with %d not found", id),
-                    new EntityNotFoundException(EntityType.RELATIONSHIP, valueOf(id)));
+                    EntityNotFoundException.internalError(
+                            this.getClass().getSimpleName(), EntityType.RELATIONSHIP, valueOf(id)));
         }
         return newRelationshipEntity(id);
     }
@@ -230,7 +238,8 @@ public abstract class DataLookup {
         if (!dataRead().relationshipExists(relationshipId)) {
             throw new NotFoundException(
                     format("Relationship %s not found.", elementId),
-                    new EntityNotFoundException(EntityType.RELATIONSHIP, elementId));
+                    EntityNotFoundException.internalError(
+                            this.getClass().getSimpleName(), EntityType.RELATIONSHIP, elementId));
         }
         return newRelationshipEntity(relationshipId);
     }
@@ -418,9 +427,10 @@ public abstract class DataLookup {
         var index = findUsableMatchingIndex(SchemaDescriptors.ANY_TOKEN_NODE_SCHEMA_DESCRIPTOR, query);
 
         if (index != IndexDescriptor.NO_INDEX) {
+            NodeLabelIndexCursor cursor = null;
             try {
                 var session = dataRead().tokenReadSession(index);
-                var cursor = cursors().allocateNodeLabelIndexCursor(cursorContext(), memoryTracker());
+                cursor = cursors().allocateNodeLabelIndexCursor(cursorContext(), memoryTracker());
                 dataRead().nodeLabelScan(session, cursor, unconstrained(), query, cursorContext());
                 return new TrackedCursorIterator<>(
                         cursor,
@@ -429,6 +439,9 @@ public abstract class DataLookup {
                         resourceMonitor());
             } catch (KernelException e) {
                 // ignore, fallback to all node scan
+                if (cursor != null) {
+                    cursor.close();
+                }
             }
         }
 
@@ -491,13 +504,16 @@ public abstract class DataLookup {
         var index = findUsableMatchingIndex(SchemaDescriptors.ANY_TOKEN_NODE_SCHEMA_DESCRIPTOR, tokenQuery);
 
         if (index != IndexDescriptor.NO_INDEX) {
+            NodeLabelIndexCursor cursor = null;
+            NodeCursor nodeCursor = null;
+            PropertyCursor propertyCursor = null;
             try {
                 var session = dataRead().tokenReadSession(index);
-                var cursor = cursors().allocateNodeLabelIndexCursor(cursorContext(), memoryTracker());
+                cursor = cursors().allocateNodeLabelIndexCursor(cursorContext(), memoryTracker());
                 dataRead().nodeLabelScan(session, cursor, unconstrained(), tokenQuery, cursorContext());
 
-                var nodeCursor = cursors().allocateNodeCursor(cursorContext(), memoryTracker());
-                var propertyCursor = cursors().allocatePropertyCursor(cursorContext(), memoryTracker());
+                nodeCursor = cursors().allocateNodeCursor(cursorContext(), memoryTracker());
+                propertyCursor = cursors().allocatePropertyCursor(cursorContext(), memoryTracker());
 
                 return new NodeLabelPropertyIterator(
                         dataRead(),
@@ -509,6 +525,7 @@ public abstract class DataLookup {
                         queries);
             } catch (KernelException e) {
                 // ignore, fallback to all node scan
+                IOUtils.closeAllUnchecked(cursor, nodeCursor, propertyCursor);
             }
         }
         return getNodesByLabelAndPropertyViaAllNodesScan(labelId, queries);
@@ -931,13 +948,13 @@ public abstract class DataLookup {
         }
 
         @Override
-        public void setToken(int token) {
-            originalCursor.setToken(token);
+        public void setTrackingHandle(int handle) {
+            originalCursor.setTrackingHandle(handle);
         }
 
         @Override
-        public int getToken() {
-            return originalCursor.getToken();
+        public int getTrackingHandle() {
+            return originalCursor.getTrackingHandle();
         }
 
         @Override

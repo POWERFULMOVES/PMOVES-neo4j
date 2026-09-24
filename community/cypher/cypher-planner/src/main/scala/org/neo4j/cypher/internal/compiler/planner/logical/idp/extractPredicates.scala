@@ -19,15 +19,20 @@
  */
 package org.neo4j.cypher.internal.compiler.planner.logical.idp
 
+import org.neo4j.cypher.internal.compiler.planner.logical.idp.expandSolverStep.VariableList
 import org.neo4j.cypher.internal.compiler.planner.logical.idp.extractPredicates.AllRelationships
 import org.neo4j.cypher.internal.compiler.planner.logical.idp.extractPredicates.NoRelationships
 import org.neo4j.cypher.internal.compiler.planner.logical.idp.extractPredicates.NodesFunctionArguments
 import org.neo4j.cypher.internal.compiler.planner.logical.idp.extractPredicates.RelationshipsFunctionArguments
 import org.neo4j.cypher.internal.expressions.AllIterablePredicate
+import org.neo4j.cypher.internal.expressions.AllReducePredicate
+import org.neo4j.cypher.internal.expressions.AllReduceSingletonPredicate
+import org.neo4j.cypher.internal.expressions.Ands
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.FilterScope
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
-import org.neo4j.cypher.internal.expressions.FunctionName
+import org.neo4j.cypher.internal.expressions.IsRepeatAcyclic
+import org.neo4j.cypher.internal.expressions.IsRepeatTrailUnique
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.MultiRelationshipPathStep
 import org.neo4j.cypher.internal.expressions.NilPathStep
@@ -36,6 +41,7 @@ import org.neo4j.cypher.internal.expressions.NoneIterablePredicate
 import org.neo4j.cypher.internal.expressions.Not
 import org.neo4j.cypher.internal.expressions.PathExpression
 import org.neo4j.cypher.internal.expressions.Unique
+import org.neo4j.cypher.internal.expressions.UniqueNodes
 import org.neo4j.cypher.internal.expressions.VarLengthLowerBound
 import org.neo4j.cypher.internal.expressions.VarLengthUpperBound
 import org.neo4j.cypher.internal.expressions.Variable
@@ -43,6 +49,8 @@ import org.neo4j.cypher.internal.expressions.VariableGrouping
 import org.neo4j.cypher.internal.ir.VarPatternLength
 import org.neo4j.cypher.internal.ir.ast.ForAllRepetitions
 import org.neo4j.cypher.internal.logical.plans.Expand.VariablePredicate
+import org.neo4j.cypher.internal.util.FunctionName
+import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.collection.immutable.ListSet
 
 object extractPredicates {
@@ -258,7 +266,7 @@ object extractPredicates {
   object NodesFunctionArguments {
 
     def unapplySeq(f: FunctionInvocation): Option[IndexedSeq[Expression]] = f match {
-      case FunctionInvocation(FunctionName(_, fname), false, args, _, _)
+      case FunctionInvocation(FunctionName(_, fname), false, args, _, _, _, _)
         if fname.equalsIgnoreCase("nodes") => Some(args)
       case _ => None
     }
@@ -267,7 +275,7 @@ object extractPredicates {
   object RelationshipsFunctionArguments {
 
     def unapplySeq(f: FunctionInvocation): Option[IndexedSeq[Expression]] = f match {
-      case FunctionInvocation(FunctionName(_, fname), false, args, _, _)
+      case FunctionInvocation(FunctionName(_, fname), false, args, _, _, _, _)
         if fname.equalsIgnoreCase("relationships") => Some(args)
       case _ => None
     }
@@ -410,21 +418,28 @@ object extractShortestPathPredicates {
 
 /**
  * During MoveQuantifiedPathPatternPredicates we move inner QPP predicates from their pre-filter position to their post-filter
- * position. [[extractQPPPredicates]] works for QPPs as [[extractPredicates]] works for var-length relationships.
+ * position. [[extractQppPredicates]] works for QPPs as [[extractPredicates]] works for var-length relationships.
  * For any of these post-filter predicates that could not be solved up to this point, the goal is to move as many of
  * these post-filter predicates back to their pre-filter positions and solve them during the planning of the inner QPP.
  * Planning these post-filter predicates in the inner QPP plan is much faster as it can potentially short-circuit the
  * expansion of the QPP.
  */
-object extractQPPPredicates {
+object extractQppPredicates {
 
+  /**
+   * @param insideRepeat whether the pre-filter position is on the RHS of a Repeat.
+   *                     Thus, whether Unique may be extracted into an IsRepeatTrailUnique.
+   * @param repeatStartNode the startNode of Repeat. This can be None when `insideRepeat` = false
+   */
   def apply(
     predicates: Seq[Expression],
     availableLocalSymbols: Set[VariableGrouping],
-    availableNonLocalSymbols: Set[LogicalVariable]
+    availableNonLocalSymbols: Set[LogicalVariable],
+    insideRepeat: Boolean,
+    repeatStartNode: Option[LogicalVariable]
   ): ExtractedPredicates = {
     val solvables = filterSolvablePredicates(predicates, availableLocalSymbols, availableNonLocalSymbols)
-    val extracted = getExtractablePredicates(solvables, availableLocalSymbols)
+    val extracted = getExtractablePredicates(solvables, availableLocalSymbols, insideRepeat, repeatStartNode)
     val requiredSymbols = getRequiredNonLocalSymbols(extracted, availableLocalSymbols)
     ExtractedPredicates(requiredSymbols, extracted)
   }
@@ -453,11 +468,15 @@ object extractQPPPredicates {
    *
    * @param predicates            Potentially extractable predicates
    * @param availableLocalSymbols Local symbol mappings used for swapping variable references in extracted predicates
+   * @param insideRepeat          Whether the predicates will be used in the RHS of a Repeat
+   * @param startNode             The inner group variable of the QPP from where processing starts
    * @return                      Extracted predicates
    */
   private def getExtractablePredicates(
     predicates: Seq[Expression],
-    availableLocalSymbols: Set[VariableGrouping]
+    availableLocalSymbols: Set[VariableGrouping],
+    insideRepeat: Boolean,
+    startNode: Option[LogicalVariable]
   ): Seq[ExtractedPredicate] = {
     val availableLocalSymbolsMapping = availableLocalSymbols
       .map(g => g.group -> g.singleton)
@@ -475,6 +494,63 @@ object extractQPPPredicates {
         // only extract if this predicate is actually on this QPP
         if availableLocalSymbolsMapping.contains(far.groupVariableAnchor) =>
         ExtractedPredicate(far, far.originalInnerPredicate)
+
+      case unique @ Unique(VariableList(variables))
+        if insideRepeat && variables.forall(availableLocalSymbolsMapping.contains) =>
+        val extractedPredicates: Set[Expression] = variables
+          .map(availableLocalSymbolsMapping)
+          .map(relVar =>
+            IsRepeatTrailUnique(relVar.asInstanceOf[Variable])(InputPosition.NONE)
+          )
+        ExtractedPredicate(unique, Ands.create(extractedPredicates))
+
+      case uniqueNodes @ UniqueNodes(VariableList(nodeVariables), maybeRelationshipVariables)
+        if insideRepeat && nodeVariables.forall(availableLocalSymbolsMapping.contains) && startNode.nonEmpty =>
+        val uniqueVariables = nodeVariables - startNode.get
+        val extractedPredicates: Set[Expression] = uniqueVariables
+          .map(availableLocalSymbolsMapping)
+          .map(nodeVar =>
+            IsRepeatAcyclic(nodeVar.asInstanceOf[Variable])(InputPosition.NONE)
+          )
+        val extractedRelationshipPredicates = maybeRelationshipVariables match {
+          case Some(VariableList(relationshipVariables)) => relationshipVariables
+              .map(availableLocalSymbolsMapping)
+              .map(relVar =>
+                IsRepeatTrailUnique(relVar.asInstanceOf[Variable])(InputPosition.NONE)
+              )
+          case _ => Seq.empty
+        }
+        ExtractedPredicate(uniqueNodes, Ands.create(extractedPredicates ++ extractedRelationshipPredicates))
+
+      case allReduce @ AllReducePredicate(scope, _, listVariable: LogicalVariable)
+        if availableLocalSymbolsMapping.contains(
+          listVariable
+        ) && !(allReduce.init.dependencies ++ allReduce.predicate.dependencies ++ allReduce.reductionStep.dependencies).exists(
+          availableLocalSymbolsMapping.contains
+        ) =>
+        val singletonVariableInQpp = availableLocalSymbolsMapping(listVariable)
+        val newReductionStep =
+          scope.reductionStepScope
+            .reductionStep
+            .replaceAllOccurrencesBy(
+              allReduce.reductionStepVariable,
+              singletonVariableInQpp
+            )
+        val newPredicate =
+          scope.reductionStepScope
+            .predicate
+            .replaceAllOccurrencesBy(
+              allReduce.reductionStepVariable,
+              singletonVariableInQpp
+            )
+        ExtractedPredicate(
+          allReduce,
+          AllReduceSingletonPredicate(
+            scope.accumulator,
+            newReductionStep,
+            newPredicate
+          )(allReduce.position)
+        )
     }
   }
 

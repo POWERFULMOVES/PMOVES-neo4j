@@ -19,11 +19,9 @@
  */
 package org.neo4j.cypher.internal.compiler.helpers
 
-import org.neo4j.cypher.internal.compiler.helpers.IterableHelper.RichIterableOnce
 import org.neo4j.cypher.internal.compiler.helpers.PropertyAccessHelper.PropertyAccess
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
-import org.neo4j.cypher.internal.expressions.FunctionName
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.Property
 import org.neo4j.cypher.internal.expressions.PropertyKeyName
@@ -32,6 +30,8 @@ import org.neo4j.cypher.internal.expressions.functions.Max
 import org.neo4j.cypher.internal.expressions.functions.Min
 import org.neo4j.cypher.internal.expressions.functions.PercentileCont
 import org.neo4j.cypher.internal.expressions.functions.PercentileDisc
+import org.neo4j.cypher.internal.util.FunctionName
+import org.neo4j.cypher.internal.util.IterableHelper.RichIterableOnce
 
 import java.util.Locale
 
@@ -53,8 +53,8 @@ object AggregationHelper {
 
   def hasInterestingOrder(function: FunctionInvocation): Boolean = {
     function match {
-      case FunctionInvocation(_, true, _, _, _) => true
-      case FunctionInvocation(FunctionName(_, name), _, _, _, _)
+      case FunctionInvocation(_, true, _, _, _, _, _) => true
+      case FunctionInvocation(FunctionName(_, name), _, _, _, _, _, _)
         if {
           val nameLower = name.toLowerCase(Locale.ROOT)
           nameLower == PercentileCont.name.toLowerCase(Locale.ROOT) ||
@@ -71,7 +71,7 @@ object AggregationHelper {
     groupingExpressions.isEmpty &&
     aggregationExpressions.size == 1 &&
     aggregationExpressions.values.exists {
-      case FunctionInvocation(FunctionName(_, name), _, _, _, _) =>
+      case FunctionInvocation(FunctionName(_, name), _, _, _, _, _, _) =>
         val nameLower = name.toLowerCase(Locale.ROOT)
         nameLower == Min.name.toLowerCase(Locale.ROOT) || nameLower == Max.name.toLowerCase(Locale.ROOT)
       case _ => false
@@ -117,7 +117,7 @@ object AggregationHelper {
       property: Option[Property]
     ): Option[Property] = {
       expression match {
-        case FunctionInvocation(_, _, Seq(expr, _*), _, _) =>
+        case FunctionInvocation(_, _, Seq(expr, _*), _, _, _, _) =>
           // Cannot handle a function inside an aggregation
           if (expr.isInstanceOf[FunctionInvocation])
             None

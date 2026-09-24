@@ -17,6 +17,7 @@
 
 package org.neo4j.cypher.internal.parser.v5.ast.factory
 
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.AdministrationCommand.NATIVE_AUTH
 import org.neo4j.cypher.internal.ast.AlterDatabase
 import org.neo4j.cypher.internal.ast.AlterLocalDatabaseAlias
@@ -97,6 +98,7 @@ import org.neo4j.cypher.internal.parser.ast.util.Util.pos
 import org.neo4j.cypher.internal.parser.ast.util.Util.rangePos
 import org.neo4j.cypher.internal.parser.v5.Cypher5Parser
 import org.neo4j.cypher.internal.parser.v5.Cypher5ParserListener
+import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.symbols.CTString
 
 import java.nio.charset.StandardCharsets
@@ -109,8 +111,8 @@ trait DdlBuilder extends Cypher5ParserListener {
   override def exitCommandOptions(ctx: Cypher5Parser.CommandOptionsContext): Unit = {
     val map = ctx.mapOrParameter().ast[Either[Map[String, Expression], Parameter]]()
     ctx.ast = map match {
-      case Left(m)  => OptionsMap(m)
-      case Right(p) => OptionsParam(p)
+      case Left(m)  => OptionsMap(m)(InputPosition.NONE)
+      case Right(p) => OptionsParam(p)(InputPosition.NONE)
     }
   }
 
@@ -172,7 +174,7 @@ trait DdlBuilder extends Cypher5ParserListener {
     ctx: Cypher5Parser.DropConstraintContext
   ): Unit = {
     val p = pos(ctx.getParent)
-    val constraintName = ctx.symbolicNameOrStringParameter()
+    val constraintName = ctx.commandNameExpression()
     if (constraintName != null) {
       ctx.ast = DropConstraintOnName(constraintName.ast(), ctx.EXISTS() != null)(p)
     } else {
@@ -183,9 +185,12 @@ trait DdlBuilder extends Cypher5ParserListener {
   final override def exitDropIndex(
     ctx: Cypher5Parser.DropIndexContext
   ): Unit = {
-    val indexName = ctx.symbolicNameOrStringParameter()
+    val indexName = ctx.commandNameExpression()
     if (indexName != null)
-      ctx.ast = DropIndexOnName(indexName.ast[Either[String, Parameter]](), ctx.EXISTS() != null)(pos(ctx.getParent))
+      ctx.ast = DropIndexOnName(
+        indexName.ast[Expression](),
+        ctx.EXISTS() != null
+      )(pos(ctx.getParent))
     else {
       // old drop index by schema, errors in SyntaxChecker
     }
@@ -420,7 +425,7 @@ trait DdlBuilder extends Cypher5ParserListener {
       ctx.COMPOSITE() != null,
       aliasAction,
       additionalAction,
-      astOpt[WaitUntilComplete](ctx.waitClause(), NoWait)
+      astOpt[WaitUntilComplete](ctx.waitClause(), NoWait()(InputPosition.NONE))
     )(pos(ctx.getParent))
   }
 
@@ -436,19 +441,42 @@ trait DdlBuilder extends Cypher5ParserListener {
     ctx: Cypher5Parser.AlterDatabaseContext
   ): Unit = {
     val dbName = ctx.symbolicAliasNameOrParameter().ast[DatabaseName]()
-    val waitUntilComplete = astOpt[WaitUntilComplete](ctx.waitClause(), NoWait)
+    val waitUntilComplete = astOpt[WaitUntilComplete](ctx.waitClause(), NoWait()(InputPosition.NONE))
     ctx.ast = if (!ctx.REMOVE().isEmpty) {
       val optionsToRemove = Set.from(astSeq[String](ctx.symbolicNameString()))
-      AlterDatabase(dbName, ctx.EXISTS() != null, None, None, NoOptions, optionsToRemove, waitUntilComplete)(
+      AlterDatabase(
+        dbName,
+        ctx.EXISTS() != null,
+        None,
+        None,
+        NoOptions,
+        optionsToRemove,
+        waitUntilComplete,
+        None,
+        None,
+        None
+      )(
         pos(ctx.getParent)
       )
     } else {
       val access = astOptFromList(ctx.alterDatabaseAccess(), None)
       val topology = astOptFromList(ctx.alterDatabaseTopology(), None)
+      val defaultLanguage = astOptFromList[CypherVersion](ctx.defaultLanguageSpecification(), None)
       val options =
         if (ctx.alterDatabaseOption().isEmpty) NoOptions
-        else OptionsMap(astSeq[Map[String, Expression]](ctx.alterDatabaseOption()).reduce(_ ++ _))
-      AlterDatabase(dbName, ctx.EXISTS() != null, access, topology, options, Set.empty, waitUntilComplete)(
+        else OptionsMap(astSeq[Map[String, Expression]](ctx.alterDatabaseOption()).reduce(_ ++ _))(InputPosition.NONE)
+      AlterDatabase(
+        dbName,
+        ctx.EXISTS() != null,
+        access,
+        topology,
+        options,
+        Set.empty,
+        waitUntilComplete,
+        defaultLanguage,
+        None,
+        None
+      )(
         pos(ctx.getParent)
       )
     }
@@ -479,6 +507,12 @@ trait DdlBuilder extends Cypher5ParserListener {
     ctx.ast = ctx.uIntOrIntParameter().ast()
   }
 
+  final override def exitDefaultLanguageSpecification(ctx: Cypher5Parser.DefaultLanguageSpecificationContext): Unit = {
+    CypherVersion.values().find(v => v.versionName.equals(ctx.UNSIGNED_DECIMAL_INTEGER().getText)).foreach(cv =>
+      ctx.ast = cv
+    )
+  }
+
   final override def exitAlterDatabaseOption(ctx: Cypher5Parser.AlterDatabaseOptionContext): Unit = {
     ctx.ast = Map((ctx.symbolicNameString().ast[String], ctx.expression().ast[Expression]))
   }
@@ -488,7 +522,7 @@ trait DdlBuilder extends Cypher5ParserListener {
   ): Unit = {
     ctx.ast = StartDatabase(
       ctx.symbolicAliasNameOrParameter().ast(),
-      astOpt[WaitUntilComplete](ctx.waitClause(), NoWait)
+      astOpt[WaitUntilComplete](ctx.waitClause(), NoWait()(InputPosition.NONE))
     )(pos(ctx))
   }
 
@@ -497,7 +531,7 @@ trait DdlBuilder extends Cypher5ParserListener {
   ): Unit = {
     ctx.ast = StopDatabase(
       ctx.symbolicAliasNameOrParameter().ast(),
-      astOpt[WaitUntilComplete](ctx.waitClause(), NoWait)
+      astOpt[WaitUntilComplete](ctx.waitClause(), NoWait()(InputPosition.NONE))
     )(pos(ctx))
   }
 
@@ -505,10 +539,10 @@ trait DdlBuilder extends Cypher5ParserListener {
     ctx: Cypher5Parser.WaitClauseContext
   ): Unit = {
     ctx.ast = nodeChild(ctx, 0).getSymbol.getType match {
-      case Cypher5Parser.NOWAIT => NoWait
+      case Cypher5Parser.NOWAIT => NoWait()(pos(ctx))
       case Cypher5Parser.WAIT => ctx.UNSIGNED_DECIMAL_INTEGER() match {
-          case null    => IndefiniteWait
-          case seconds => TimeoutAfter(seconds.getText.toLong)
+          case null    => IndefiniteWait()(pos(ctx))
+          case seconds => TimeoutAfter(seconds.getText)(pos(ctx.UNSIGNED_DECIMAL_INTEGER()))
         }
     }
   }
@@ -540,20 +574,23 @@ trait DdlBuilder extends Cypher5ParserListener {
     val password = astOptFromList[Expression](ctx.alterAliasPassword(), None)
     val driverSettings = astOptFromList[Either[Map[String, Expression], Parameter]](ctx.alterAliasDriver(), None)
     val properties = astOptFromList[Either[Map[String, Expression], Parameter]](ctx.alterAliasProperties(), None)
-    ctx.ast = if (url.isEmpty && username.isEmpty && password.isEmpty && driverSettings.isEmpty) {
-      AlterLocalDatabaseAlias(aliasName, targetName, ctx.EXISTS() != null, properties)(pos(ctx.getParent))
-    } else {
-      AlterRemoteDatabaseAlias(
-        aliasName,
-        targetName,
-        ctx.EXISTS() != null,
-        url,
-        username,
-        password,
-        driverSettings,
-        properties
-      )(pos(ctx.getParent))
-    }
+    val defaultLanguage = astOptFromList[CypherVersion](ctx.defaultLanguageSpecification(), None)
+    ctx.ast =
+      if (url.isEmpty && username.isEmpty && password.isEmpty && driverSettings.isEmpty && defaultLanguage.isEmpty) {
+        AlterLocalDatabaseAlias(aliasName, targetName, ctx.EXISTS() != null, properties)(pos(ctx.getParent))
+      } else {
+        AlterRemoteDatabaseAlias(
+          aliasName,
+          targetName,
+          ctx.EXISTS() != null,
+          url,
+          username,
+          password,
+          driverSettings,
+          properties,
+          defaultLanguage
+        )(pos(ctx.getParent))
+      }
   }
 
   override def exitAlterAliasTarget(ctx: Cypher5Parser.AlterAliasTargetContext): Unit = {
@@ -579,16 +616,6 @@ trait DdlBuilder extends Cypher5ParserListener {
   }
 
   // General symbolic names/string contexts
-
-  final override def exitSymbolicNameOrStringParameter(
-    ctx: Cypher5Parser.SymbolicNameOrStringParameterContext
-  ): Unit = {
-    ctx.ast = if (ctx.symbolicNameString() != null) {
-      Left(ctx.symbolicNameString().ast[String]())
-    } else {
-      Right(ctx.parameter().ast[Parameter]())
-    }
-  }
 
   final override def exitCommandNameExpression(
     ctx: Cypher5Parser.CommandNameExpressionContext

@@ -20,6 +20,7 @@
 package org.neo4j.packstream.io;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.DynamicTest.dynamicTest;
@@ -34,6 +35,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
+import static org.neo4j.bolt.testing.util.ErrorUtil.useNewMessage;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
@@ -136,7 +138,7 @@ class PackstreamBufReadTest {
             var buffer = mock(ByteBuf.class);
             var wrapped = PackstreamBuf.wrap(buffer);
 
-            assertThat(wrapped.getTarget()).isSameAs(buffer);
+            assertThat(wrapped.raw()).isSameAs(buffer);
         }
 
         {
@@ -146,7 +148,7 @@ class PackstreamBufReadTest {
 
             var wrapped = PackstreamBuf.wrapRetained(buffer);
 
-            assertThat(wrapped.getTarget()).isSameAs(buffer);
+            assertThat(wrapped.raw()).isSameAs(buffer);
         }
     }
 
@@ -172,16 +174,16 @@ class PackstreamBufReadTest {
 
     @Test
     void wrapShouldFailWithNullPointerWhenNullIsGiven() {
-        var ex = assertThrows(NullPointerException.class, () -> PackstreamBuf.wrap(null));
-
-        assertThat(ex).hasMessage("delegate cannot be null");
+        assertThatThrownBy(() -> PackstreamBuf.wrap(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("delegate cannot be null");
     }
 
     @Test
     void wrapRetainedShouldFailWithNullPointerWhenNullIsGiven() {
-        var ex = assertThrows(NullPointerException.class, () -> PackstreamBuf.wrapRetained(null));
-
-        assertThat(ex).hasMessage("delegate cannot be null");
+        assertThatThrownBy(() -> PackstreamBuf.wrapRetained(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("delegate cannot be null");
     }
 
     @TestFactory
@@ -195,7 +197,7 @@ class PackstreamBufReadTest {
 
                     assertThat(markerA).isEqualTo(marker.getValue());
 
-                    assertThat(buf.getTarget().isReadable()).isFalse();
+                    assertThat(buf.raw().isReadable()).isFalse();
                 }));
     }
 
@@ -212,7 +214,7 @@ class PackstreamBufReadTest {
 
                         assertThat(actual).isSameAs(expected);
 
-                        assertThat(buf.getTarget().isReadable()).isFalse();
+                        assertThat(buf.raw().isReadable()).isFalse();
                     });
                 }));
     }
@@ -222,7 +224,8 @@ class PackstreamBufReadTest {
         return Stream.of(TypeMarker.values())
                 .filter(marker -> marker != TypeMarker.RESERVED)
                 .map(expected -> dynamicTest(
-                        expected.name(), () -> getVariations(expected).forEach(valid -> {
+                        expected.name(),
+                        () -> getVariations(expected).forEach(valid -> {
                             var buf = prepareBuffer(b -> b.writeByte(valid));
 
                             try {
@@ -236,7 +239,7 @@ class PackstreamBufReadTest {
                                     assertThat(mb).isEqualTo(valid);
                                 }
 
-                                assertThat(buf.getTarget().isReadable()).isFalse();
+                                assertThat(buf.raw().isReadable()).isFalse();
                             } catch (UnexpectedTypeMarkerException ex) {
                                 throw new AssertionError(String.format("Failed to decode variation 0x%02X", valid), ex);
                             }
@@ -246,9 +249,11 @@ class PackstreamBufReadTest {
     @TestFactory
     Stream<DynamicTest> readExpectedTypeMarkerShouldFailWithUnexpectedTypeMarker() {
         return getValidMarkers()
-                .map(expected -> dynamicTest(expected.name(), () -> getValidMarkers(expected)
-                        .forEach(invalid -> assertThrowsUnexpectedTypeMarker(
-                                expected, invalid, buf -> buf.readExpectedMarker(expected)))));
+                .map(expected -> dynamicTest(
+                        expected.name(),
+                        () -> getValidMarkers(expected)
+                                .forEach(invalid -> assertThrowsUnexpectedTypeMarker(
+                                        expected, invalid, buf -> buf.readExpectedMarker(expected)))));
     }
 
     @TestFactory
@@ -266,16 +271,18 @@ class PackstreamBufReadTest {
 
                     assertThat(actual).isEqualTo(42);
 
-                    assertThat(buf.getTarget().isReadable()).isFalse();
+                    assertThat(buf.raw().isReadable()).isFalse();
                 }));
     }
 
     @TestFactory
     Stream<DynamicTest> readLengthPrefixMarkerShouldFailWithUnexpectedType() {
         return getValidTypes()
-                .map(expected -> dynamicTest(expected.name(), () -> getValidMarkers(expected)
-                        .forEach(invalid -> assertThrowsUnexpectedType(
-                                expected, invalid, buf -> buf.readLengthPrefixMarker(expected, -1)))));
+                .map(expected -> dynamicTest(
+                        expected.name(),
+                        () -> getValidMarkers(expected)
+                                .forEach(invalid -> assertThrowsUnexpectedType(
+                                        expected, invalid, buf -> buf.readLengthPrefixMarker(expected, -1)))));
     }
 
     @TestFactory
@@ -308,7 +315,7 @@ class PackstreamBufReadTest {
 
                     assertThat(mb).isEqualTo(marker.getValue());
 
-                    assertThat(buf.getTarget().readableBytes()).isEqualTo(1);
+                    assertThat(buf.raw().readableBytes()).isEqualTo(1);
                 }));
     }
 
@@ -323,7 +330,7 @@ class PackstreamBufReadTest {
 
                     assertThat(mb).isEqualTo(marker);
 
-                    assertThat(buf.getTarget().readableBytes()).isEqualTo(1);
+                    assertThat(buf.raw().readableBytes()).isEqualTo(1);
                 }));
     }
 
@@ -333,7 +340,7 @@ class PackstreamBufReadTest {
 
         assertSame(buf, buf.readNull());
 
-        assertThat(buf.getTarget().isReadable()).isFalse();
+        assertThat(buf.raw().isReadable()).isFalse();
     }
 
     @TestFactory
@@ -546,24 +553,25 @@ class PackstreamBufReadTest {
     }
 
     @TestFactory
-    Stream<DynamicTest> shouldReadFloat() {
+    Stream<DynamicTest> shouldReadFloat64() {
         return DoubleStream.of(0.125, 0.25, 0.5, 1, 2, 4, 8)
                 .mapToObj(expected -> dynamicTest(String.format("%.2f", expected), () -> {
                     var buf = prepareBuffer(
                             b -> b.writeByte(TypeMarker.FLOAT64.getValue()).writeDouble(expected));
 
-                    var actual = buf.readFloat();
+                    var actual = buf.readFloat64();
 
                     assertThat(actual).isEqualTo(expected);
                 }));
     }
 
     @TestFactory
-    Stream<DynamicTest> readFloatShouldFailWithUnexpectedTypeMarker() {
+    Stream<DynamicTest> readFloat64ShouldFailWithUnexpectedTypeMarker() {
         return getValidMarkers(TypeMarker.FLOAT64)
                 .map(invalid -> dynamicTest(
                         invalid.name(),
-                        () -> assertThrowsUnexpectedTypeMarker(TypeMarker.FLOAT64, invalid, PackstreamBuf::readFloat)));
+                        () -> assertThrowsUnexpectedTypeMarker(
+                                TypeMarker.FLOAT64, invalid, PackstreamBuf::readFloat64)));
     }
 
     @TestFactory
@@ -1414,11 +1422,15 @@ class PackstreamBufReadTest {
                 b -> b.writeByte(TypeMarker.TINY_STRUCT.getValue()).writeByte(0x42));
 
         when(registry.getReader(any())).thenReturn(Optional.of(reader));
-        when(reader.read(isNull(), eq(buf), any())).thenThrow(new PackstreamReaderException("Test Exception"));
+        when(reader.read(isNull(), eq(buf), any()))
+                .thenThrow(
+                        PackstreamReaderException.internalError(this.getClass().getSimpleName(), "Test Exception"));
 
         var ex = assertThrows(PackstreamReaderException.class, () -> buf.readStruct(null, registry));
 
-        assertThat(ex.getMessage()).isEqualTo("Test Exception");
+        assertThat(ex.getMessage())
+                .isEqualTo(useNewMessage("50N00: Internal exception raised PackstreamBufReadTest: Test Exception")
+                        .whenLegacyFallbackTo("Test Exception"));
 
         verify(registry).getReader(notNull());
         verifyNoMoreInteractions(registry);

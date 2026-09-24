@@ -24,6 +24,7 @@ import static org.eclipse.collections.api.factory.Sets.immutable;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.neo4j.internal.id.IdController.MAINTENANCE_ALL;
 import static org.neo4j.internal.id.IdSlotDistribution.SINGLE_IDS;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
@@ -32,8 +33,6 @@ import static org.neo4j.test.Race.throwing;
 import java.io.IOException;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
-import java.util.Collection;
-import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -59,6 +58,7 @@ import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.lifecycle.LifeSupport;
 import org.neo4j.memory.GlobalMemoryGroupTracker;
@@ -102,7 +102,7 @@ class BufferingIdGeneratorFactoryTest {
         Config config = Config.defaults(GraphDatabaseInternalSettings.buffered_ids_offload, offHeap);
         bufferingIdGeneratorFactory.initialize(
                 fs,
-                directory.file("tmp-ids"),
+                new StoreFile(directory.file("tmp-ids")),
                 config,
                 boundaries,
                 boundaries,
@@ -110,7 +110,7 @@ class BufferingIdGeneratorFactoryTest {
                 dbMemoryPool.getPoolMemoryTracker());
         idGenerator = bufferingIdGeneratorFactory.open(
                 pageCache,
-                Path.of("doesnt-matter"),
+                new StoreFile(Path.of("doesnt-matter")),
                 TestIdType.TEST,
                 () -> 0L,
                 Integer.MAX_VALUE,
@@ -136,12 +136,12 @@ class BufferingIdGeneratorFactoryTest {
         actual.markers.get(TestIdType.TEST).verifyNoMoreMarks();
 
         // after some maintenance and transaction still not closed
-        bufferingIdGeneratorFactory.maintenance(NULL_CONTEXT);
+        bufferingIdGeneratorFactory.maintenance(MAINTENANCE_ALL, NULL_CONTEXT);
         actual.markers.get(TestIdType.TEST).verifyNoMoreMarks();
 
         // although after transactions have all closed
         boundaries.setMostRecentlyReturnedSnapshotToAllClosed();
-        bufferingIdGeneratorFactory.maintenance(NULL_CONTEXT);
+        bufferingIdGeneratorFactory.maintenance(MAINTENANCE_ALL, NULL_CONTEXT);
 
         // THEN
         actual.markers.get(TestIdType.TEST).verifyFreed(7, 2);
@@ -165,7 +165,7 @@ class BufferingIdGeneratorFactoryTest {
         });
         Deque<IdController.TransactionSnapshot> conditions = new ConcurrentLinkedDeque<>();
         race.addContestant(throwing(() -> {
-            bufferingIdGeneratorFactory.maintenance(NULL_CONTEXT);
+            bufferingIdGeneratorFactory.maintenance(MAINTENANCE_ALL, NULL_CONTEXT);
             if (boundaries.mostRecentlyReturned == null) {
                 return;
             }
@@ -195,10 +195,10 @@ class BufferingIdGeneratorFactoryTest {
             boundaries.enable(condition);
         }
         boundaries.automaticallyEnableConditions = true;
-        bufferingIdGeneratorFactory.maintenance(NULL_CONTEXT);
+        bufferingIdGeneratorFactory.maintenance(MAINTENANCE_ALL, NULL_CONTEXT);
         // the second maintenance call is because the first call will guarantee that the queued buffers will be freed,
         // making room to queue the last deleted IDs from the ID generator in the second call.
-        bufferingIdGeneratorFactory.maintenance(NULL_CONTEXT);
+        bufferingIdGeneratorFactory.maintenance(MAINTENANCE_ALL, NULL_CONTEXT);
         for (long id = 0; id < nextId.get(); id++) {
             actual.markers.get(TestIdType.TEST).verifyFreed(id, 1);
         }
@@ -220,7 +220,7 @@ class BufferingIdGeneratorFactoryTest {
         assertThat(dbMemoryPool.usedHeap()).isGreaterThan(heapSizeBeforeDeleting);
         // maintenance where transactions are still open. Here the buffered IDs should have been written to the page
         // cache and the heap usage freed
-        bufferingIdGeneratorFactory.maintenance(NULL_CONTEXT);
+        bufferingIdGeneratorFactory.maintenance(MAINTENANCE_ALL, NULL_CONTEXT);
         if (offHeap) {
             assertThat(dbMemoryPool.usedHeap()).isEqualTo(heapSizeBeforeDeleting);
         } else {
@@ -228,7 +228,7 @@ class BufferingIdGeneratorFactoryTest {
         }
         // maintenance where transactions are closed and i.e. the buffered IDs gets released
         boundaries.setMostRecentlyReturnedSnapshotToAllClosed();
-        bufferingIdGeneratorFactory.maintenance(NULL_CONTEXT);
+        bufferingIdGeneratorFactory.maintenance(MAINTENANCE_ALL, NULL_CONTEXT);
 
         // then heap usage should go down again
         assertThat(dbMemoryPool.usedHeap()).isEqualTo(heapSizeBeforeDeleting);
@@ -237,7 +237,7 @@ class BufferingIdGeneratorFactoryTest {
     private static class ControllableSnapshotSupplier
             implements Supplier<IdController.TransactionSnapshot>,
                     IdController.IdFreeCondition,
-                    IdController.TransactionIdVisibilityBoundary {
+                    IdController.VisibilityHorizonVisibilityBoundary {
         boolean automaticallyEnableConditions;
         volatile IdController.TransactionSnapshot mostRecentlyReturned;
         private final Set<IdController.TransactionSnapshot> enabledSnapshots = new HashSet<>();
@@ -265,7 +265,12 @@ class BufferingIdGeneratorFactoryTest {
         }
 
         @Override
-        public long oldestObservableHorizon() {
+        public long oldestCleanupHorizon() {
+            return 9;
+        }
+
+        @Override
+        public long oldestVisibilityHorizon() {
             return 9;
         }
     }
@@ -277,7 +282,7 @@ class BufferingIdGeneratorFactoryTest {
         @Override
         public IdGenerator open(
                 PageCache pageCache,
-                Path filename,
+                StoreFile storeFile,
                 IdType idType,
                 LongSupplier highIdScanner,
                 long maxId,
@@ -299,7 +304,7 @@ class BufferingIdGeneratorFactoryTest {
         @Override
         public IdGenerator create(
                 PageCache pageCache,
-                Path filename,
+                StoreFile storeFile,
                 IdType idType,
                 long highId,
                 boolean throwIfFileExists,
@@ -311,7 +316,7 @@ class BufferingIdGeneratorFactoryTest {
                 IdSlotDistribution slotDistribution) {
             return open(
                     pageCache,
-                    filename,
+                    storeFile,
                     idType,
                     () -> highId,
                     maxId,
@@ -336,11 +341,6 @@ class BufferingIdGeneratorFactoryTest {
         public void clearCache(boolean allocationEnabled, CursorContext cursorContext) {
             // no-op
         }
-
-        @Override
-        public Collection<Path> listIdFiles() {
-            return Collections.emptyList();
-        }
     }
 
     private static class MockedMarker implements IdGenerator.TransactionalMarker, IdGenerator.ContextualMarker {
@@ -355,8 +355,13 @@ class BufferingIdGeneratorFactoryTest {
         }
 
         @Override
-        public void markDeleted(long id, int numberOfIds) {
+        public void markDeleted(long id, int numberOfIds, boolean bridgeOnDelete) {
             deleted.add(Pair.of(id, numberOfIds));
+        }
+
+        @Override
+        public void markDeleted(long id, int numberOfIds) {
+            markDeleted(id, numberOfIds, false);
         }
 
         @Override
@@ -366,7 +371,12 @@ class BufferingIdGeneratorFactoryTest {
 
         @Override
         public void markDeletedAndFree(long id, int numberOfIds) {
-            markDeleted(id, numberOfIds);
+            markDeleted(id, numberOfIds, false);
+        }
+
+        @Override
+        public void markDeletedAndFree(long id, int numberOfIds, boolean bridgeOnDelete) {
+            markDeleted(id, numberOfIds, bridgeOnDelete);
             markFree(id, numberOfIds);
         }
 

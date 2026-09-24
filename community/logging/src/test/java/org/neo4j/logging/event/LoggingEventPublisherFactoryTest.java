@@ -19,7 +19,6 @@
  */
 package org.neo4j.logging.event;
 
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -44,15 +43,15 @@ class LoggingEventPublisherFactoryTest {
 
     @Test
     void shouldCreateLogForNamespece() {
-        LoggingEventPublisherFactory.debugLogEventPublisher(logProvider, TEST_NAMESPACE);
+        LoggingEventPublisherFactory.eventLogger(logProvider, TEST_NAMESPACE);
         verify(logProvider).getLog(TEST_NAMESPACE.getName());
     }
 
     @Test
     void logLinesShouldBeIdenticalIfSameNamespace() {
 
-        var eventPublisher1 = LoggingEventPublisherFactory.debugLogEventPublisher(logProvider, TEST_NAMESPACE);
-        var eventPublisher2 = LoggingEventPublisherFactory.debugLogEventPublisher(logProvider, TEST_NAMESPACE);
+        var eventPublisher1 = LoggingEventPublisherFactory.eventLogger(logProvider, TEST_NAMESPACE);
+        var eventPublisher2 = LoggingEventPublisherFactory.eventLogger(logProvider, TEST_NAMESPACE);
 
         eventPublisher1.publish(Type.Info, "hello", Parameters.of("param", TEST_NAMESPACE));
         eventPublisher2.publish(Type.Info, "hello", Parameters.of("param", TEST_NAMESPACE));
@@ -60,12 +59,5 @@ class LoggingEventPublisherFactoryTest {
         verify(logProvider, times(2)).getLog(TEST_NAMESPACE.getName());
 
         verify(log, times(2)).info("[Event] %s %s", "hello", Parameters.of("param", TEST_NAMESPACE));
-    }
-
-    @Test
-    void shouldCreateUserLogPublisher() {
-        var eventPublisher1 = LoggingEventPublisherFactory.userLogEventPublisher(logProvider);
-        eventPublisher1.publish(TestEvents.START);
-        verify(log, times(1)).info(anyString(), any(Type.class), anyString(), anyString(), any());
     }
 }

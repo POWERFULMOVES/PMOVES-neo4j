@@ -20,11 +20,11 @@ import org.neo4j.cypher.internal.util.InputPosition
 
 case class StringType(isNullable: Boolean)(val position: InputPosition) extends CypherType {
   override val parentType: CypherType = CTAny
-  override val toString: String = if (isNullable) "String" else "String!"
+  override val toClassString: String = "String"
   override val toCypherTypeString: String = "STRING"
   override def sortOrder: Int = CypherTypeOrder.STRING.id
 
-  override def hasValueRepresentation: Boolean = true
+  override def couldBeStoredInProperty: Boolean = true
 
   override def withIsNullable(isNullable: Boolean): StringType = this.copy(isNullable = isNullable)(position)
 

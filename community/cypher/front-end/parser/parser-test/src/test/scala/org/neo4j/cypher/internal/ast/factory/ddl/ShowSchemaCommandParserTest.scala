@@ -36,7 +36,6 @@ import org.neo4j.cypher.internal.ast.RelKeyConstraints
 import org.neo4j.cypher.internal.ast.RelPropExistsConstraints
 import org.neo4j.cypher.internal.ast.RelPropTypeConstraints
 import org.neo4j.cypher.internal.ast.RelUniqueConstraints
-import org.neo4j.cypher.internal.ast.ShowConstraintType
 import org.neo4j.cypher.internal.ast.ShowConstraintsClause
 import org.neo4j.cypher.internal.ast.ShowIndexesClause
 import org.neo4j.cypher.internal.ast.Statements
@@ -44,7 +43,6 @@ import org.neo4j.cypher.internal.ast.TextIndexes
 import org.neo4j.cypher.internal.ast.UniqueConstraints
 import org.neo4j.cypher.internal.ast.VectorIndexes
 import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
 import org.neo4j.cypher.internal.expressions.AllIterablePredicate
 import org.neo4j.cypher.internal.util.symbols.IntegerType
 
@@ -60,7 +58,8 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
           AllIndexes,
           None,
           List.empty,
-          yieldAll = false
+          yieldAll = false,
+          None
         )(defaultPos))
       )
     }
@@ -71,7 +70,8 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
           AllIndexes,
           None,
           List.empty,
-          yieldAll = false
+          yieldAll = false,
+          None
         )(defaultPos))
       )
     }
@@ -82,7 +82,8 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
           RangeIndexes,
           None,
           List.empty,
-          yieldAll = false
+          yieldAll = false,
+          None
         )(defaultPos))
       )
     }
@@ -94,7 +95,8 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
             FulltextIndexes,
             None,
             List.empty,
-            yieldAll = false
+            yieldAll = false,
+            None
           )(defaultPos)
         )
       )
@@ -106,7 +108,8 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
           TextIndexes,
           None,
           List.empty,
-          yieldAll = false
+          yieldAll = false,
+          None
         )(defaultPos))
       )
     }
@@ -117,7 +120,8 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
           PointIndexes,
           None,
           List.empty,
-          yieldAll = false
+          yieldAll = false,
+          None
         )(defaultPos))
       )
     }
@@ -129,7 +133,8 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
             VectorIndexes,
             None,
             List.empty,
-            yieldAll = false
+            yieldAll = false,
+            None
           )(defaultPos)
         )
       )
@@ -142,18 +147,20 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
             LookupIndexes,
             None,
             List.empty,
-            yieldAll = false
+            yieldAll = false,
+            None
           )(defaultPos)
         )
       )
     }
 
     test(s"USE db SHOW $indexKeyword") {
-      assertAst(
-        singleQuery(
-          use(List("db")),
-          ShowIndexesClause(AllIndexes, None, List.empty, yieldAll = false)(pos)
-        ),
+      assertAstVersionBased(
+        cypher5 =>
+          singleQuery(
+            use(List("db"), !cypher5),
+            ShowIndexesClause(AllIndexes, None, List.empty, yieldAll = false, None)(pos)
+          ),
         comparePosition = false
       )
     }
@@ -167,7 +174,8 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
         AllIndexes,
         Some(where(equals(varFor("uniqueness"), literalString("UNIQUE")))),
         List.empty,
-        yieldAll = false
+        yieldAll = false,
+        None
       )(pos)),
       comparePosition = false
     )
@@ -180,9 +188,9 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
           AllIndexes,
           None,
           List(commandResultItem("populationPercent")),
-          yieldAll = false
-        )(pos),
-        withFromYield(returnAllItems.withDefaultOrderOnColumns(List("populationPercent")))
+          yieldAll = false,
+          Some(withFromYield(returnAllItems.withDefaultOrderOnColumns(List("populationPercent"))))
+        )(pos)
       ),
       comparePosition = false
     )
@@ -195,9 +203,9 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
           PointIndexes,
           None,
           List(commandResultItem("populationPercent")),
-          yieldAll = false
-        )(pos),
-        withFromYield(returnAllItems.withDefaultOrderOnColumns(List("populationPercent")))
+          yieldAll = false,
+          Some(withFromYield(returnAllItems.withDefaultOrderOnColumns(List("populationPercent"))))
+        )(pos)
       ),
       comparePosition = false
     )
@@ -206,8 +214,7 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
   test("SHOW ALL INDEXES YIELD *") {
     assertAst(
       singleQuery(
-        ShowIndexesClause(AllIndexes, None, List.empty, yieldAll = true)(pos),
-        withFromYield(returnAllItems)
+        ShowIndexesClause(AllIndexes, None, List.empty, yieldAll = true, Some(withFromYield(returnAllItems)))(pos)
       ),
       comparePosition = false
     )
@@ -216,8 +223,13 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
   test("SHOW INDEXES YIELD * ORDER BY name SKIP 2 LIMIT 5") {
     assertAst(
       singleQuery(
-        ShowIndexesClause(AllIndexes, None, List.empty, yieldAll = true)(pos),
-        withFromYield(returnAllItems, Some(orderBy(sortItem(varFor("name")))), Some(skip(2)), Some(limit(5)))
+        ShowIndexesClause(
+          AllIndexes,
+          None,
+          List.empty,
+          yieldAll = true,
+          Some(withFromYield(returnAllItems, Some(orderBy(sortItem(varFor("name")))), Some(skip(2)), Some(limit(5))))
+        )(pos)
       ),
       comparePosition = false
     )
@@ -226,29 +238,37 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
   test("SHOW RANGE INDEXES YIELD * ORDER BY name SKIP 2 LIMIT 5") {
     assertAst(
       singleQuery(
-        ShowIndexesClause(RangeIndexes, None, List.empty, yieldAll = true)(pos),
-        withFromYield(returnAllItems, Some(orderBy(sortItem(varFor("name")))), Some(skip(2)), Some(limit(5)))
+        ShowIndexesClause(
+          RangeIndexes,
+          None,
+          List.empty,
+          yieldAll = true,
+          Some(withFromYield(returnAllItems, Some(orderBy(sortItem(varFor("name")))), Some(skip(2)), Some(limit(5))))
+        )(pos)
       ),
       comparePosition = false
     )
   }
 
   test("USE db SHOW FULLTEXT INDEXES YIELD name, populationPercent AS pp WHERE pp < 50.0 RETURN name") {
-    assertAst(
-      singleQuery(
-        use(List("db")),
-        ShowIndexesClause(
-          FulltextIndexes,
-          None,
-          List(commandResultItem("name"), commandResultItem("populationPercent", Some("pp"))),
-          yieldAll = false
-        )(pos),
-        withFromYield(
-          returnAllItems.withDefaultOrderOnColumns(List("name", "pp")),
-          where = Some(where(lessThan(varFor("pp"), literalFloat(50.0))))
+    assertAstVersionBased(
+      cypher5 =>
+        singleQuery(
+          use(List("db"), !cypher5),
+          ShowIndexesClause(
+            FulltextIndexes,
+            None,
+            List(commandResultItem("name"), commandResultItem("populationPercent", Some("pp"))),
+            yieldAll = false,
+            Some(
+              withFromYield(
+                returnAllItems.withDefaultOrderOnColumns(List("name", "pp")),
+                where = Some(where(lessThan(varFor("pp"), literalFloat(50.0))))
+              )
+            )
+          )(pos),
+          return_(variableReturnItem("name"))
         ),
-        return_(variableReturnItem("name"))
-      ),
       comparePosition = false
     )
   }
@@ -256,24 +276,27 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
   test(
     "USE db SHOW VECTOR INDEXES YIELD name, populationPercent AS pp ORDER BY pp SKIP 2 LIMIT 5 WHERE pp < 50.0 RETURN name"
   ) {
-    assertAst(
-      singleQuery(
-        use(List("db")),
-        ShowIndexesClause(
-          VectorIndexes,
-          None,
-          List(commandResultItem("name"), commandResultItem("populationPercent", Some("pp"))),
-          yieldAll = false
-        )(pos),
-        withFromYield(
-          returnAllItems.withDefaultOrderOnColumns(List("name", "pp")),
-          Some(orderBy(sortItem(varFor("pp")))),
-          Some(skip(2)),
-          Some(limit(5)),
-          Some(where(lessThan(varFor("pp"), literalFloat(50.0))))
+    assertAstVersionBased(
+      cypher5 =>
+        singleQuery(
+          use(List("db"), !cypher5),
+          ShowIndexesClause(
+            VectorIndexes,
+            None,
+            List(commandResultItem("name"), commandResultItem("populationPercent", Some("pp"))),
+            yieldAll = false,
+            Some(
+              withFromYield(
+                returnAllItems.withDefaultOrderOnColumns(List("name", "pp")),
+                Some(orderBy(sortItem(varFor("pp")))),
+                Some(skip(2)),
+                Some(limit(5)),
+                Some(where(lessThan(varFor("pp"), literalFloat(50.0))))
+              )
+            )
+          )(pos),
+          return_(variableReturnItem("name"))
         ),
-        return_(variableReturnItem("name"))
-      ),
       comparePosition = false
     )
   }
@@ -281,24 +304,27 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
   test(
     "USE db SHOW VECTOR INDEXES YIELD name, populationPercent AS pp ORDER BY pp OFFSET 2 LIMIT 5 WHERE pp < 50.0 RETURN name"
   ) {
-    assertAst(
-      singleQuery(
-        use(List("db")),
-        ShowIndexesClause(
-          VectorIndexes,
-          None,
-          List(commandResultItem("name"), commandResultItem("populationPercent", Some("pp"))),
-          yieldAll = false
-        )(pos),
-        withFromYield(
-          returnAllItems.withDefaultOrderOnColumns(List("name", "pp")),
-          Some(orderBy(sortItem(varFor("pp")))),
-          Some(skip(2)),
-          Some(limit(5)),
-          Some(where(lessThan(varFor("pp"), literalFloat(50.0))))
+    assertAstVersionBased(
+      cypher5 =>
+        singleQuery(
+          use(List("db"), !cypher5),
+          ShowIndexesClause(
+            VectorIndexes,
+            None,
+            List(commandResultItem("name"), commandResultItem("populationPercent", Some("pp"))),
+            yieldAll = false,
+            Some(
+              withFromYield(
+                returnAllItems.withDefaultOrderOnColumns(List("name", "pp")),
+                Some(orderBy(sortItem(varFor("pp")))),
+                Some(skip(2)),
+                Some(limit(5)),
+                Some(where(lessThan(varFor("pp"), literalFloat(50.0))))
+              )
+            )
+          )(pos),
+          return_(variableReturnItem("name"))
         ),
-        return_(variableReturnItem("name"))
-      ),
       comparePosition = false
     )
   }
@@ -310,9 +336,9 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
           AllIndexes,
           None,
           List(commandResultItem("name", Some("INDEX")), commandResultItem("type", Some("OUTPUT"))),
-          yieldAll = false
-        )(pos),
-        withFromYield(returnAllItems.withDefaultOrderOnColumns(List("INDEX", "OUTPUT")))
+          yieldAll = false,
+          Some(withFromYield(returnAllItems.withDefaultOrderOnColumns(List("INDEX", "OUTPUT"))))
+        )(pos)
       ),
       comparePosition = false
     )
@@ -325,9 +351,9 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
           TextIndexes,
           None,
           List(commandResultItem("name", Some("INDEX")), commandResultItem("type", Some("OUTPUT"))),
-          yieldAll = false
-        )(pos),
-        withFromYield(returnAllItems.withDefaultOrderOnColumns(List("INDEX", "OUTPUT")))
+          yieldAll = false,
+          Some(withFromYield(returnAllItems.withDefaultOrderOnColumns(List("INDEX", "OUTPUT"))))
+        )(pos)
       ),
       comparePosition = false
     )
@@ -339,7 +365,8 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
         LookupIndexes,
         Some(where(equals(varFor("name"), literalString("GRANT")))),
         List.empty,
-        yieldAll = false
+        yieldAll = false,
+        None
       )(pos)),
       comparePosition = false
     )
@@ -351,13 +378,13 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
         AllIndexes,
         None,
         List(commandResultItem("a")),
-        yieldAll = false
-      )(pos),
-      withFromYield(
-        returnAllItems.withDefaultOrderOnColumns(List("a")),
-        Some(orderBy(sortItem(varFor("a")))),
-        where = Some(where(equals(varFor("a"), literalInt(1))))
-      )
+        yieldAll = false,
+        Some(withFromYield(
+          returnAllItems.withDefaultOrderOnColumns(List("a")),
+          Some(orderBy(sortItem(varFor("a")))),
+          where = Some(where(equals(varFor("a"), literalInt(1))))
+        ))
+      )(pos)
     ))
   }
 
@@ -367,13 +394,13 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
         AllIndexes,
         None,
         List(commandResultItem("a", Some("b"))),
-        yieldAll = false
-      )(pos),
-      withFromYield(
-        returnAllItems.withDefaultOrderOnColumns(List("b")),
-        Some(orderBy(sortItem(varFor("b")))),
-        where = Some(where(equals(varFor("b"), literalInt(1))))
-      )
+        yieldAll = false,
+        Some(withFromYield(
+          returnAllItems.withDefaultOrderOnColumns(List("b")),
+          Some(orderBy(sortItem(varFor("b")))),
+          where = Some(where(equals(varFor("b"), literalInt(1))))
+        ))
+      )(pos)
     ))
   }
 
@@ -383,13 +410,13 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
         AllIndexes,
         None,
         List(commandResultItem("a", Some("b"))),
-        yieldAll = false
-      )(pos),
-      withFromYield(
-        returnAllItems.withDefaultOrderOnColumns(List("b")),
-        Some(orderBy(sortItem(varFor("b")))),
-        where = Some(where(equals(varFor("b"), literalInt(1))))
-      )
+        yieldAll = false,
+        Some(withFromYield(
+          returnAllItems.withDefaultOrderOnColumns(List("b")),
+          Some(orderBy(sortItem(varFor("b")))),
+          where = Some(where(equals(varFor("b"), literalInt(1))))
+        ))
+      )(pos)
     ))
   }
 
@@ -399,13 +426,13 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
         AllIndexes,
         None,
         List(commandResultItem("a")),
-        yieldAll = false
-      )(pos),
-      withFromYield(
-        returnAllItems.withDefaultOrderOnColumns(List("a")),
-        Some(orderBy(sortItem(simpleExistsExpression(patternForMatch(nodePat(Some("a"))), None)))),
-        where = Some(where(simpleExistsExpression(patternForMatch(nodePat(Some("a"))), None)))
-      )
+        yieldAll = false,
+        Some(withFromYield(
+          returnAllItems.withDefaultOrderOnColumns(List("a")),
+          Some(orderBy(sortItem(simpleExistsExpression(patternForMatch(nodePat(Some("a"))), None)))),
+          where = Some(where(simpleExistsExpression(patternForMatch(nodePat(Some("a"))), None)))
+        ))
+      )(pos)
     ))
   }
 
@@ -415,13 +442,13 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
         AllIndexes,
         None,
         List(commandResultItem("a")),
-        yieldAll = false
-      )(pos),
-      withFromYield(
-        returnAllItems.withDefaultOrderOnColumns(List("a")),
-        Some(orderBy(sortItem(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))),
-        where = Some(where(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))
-      )
+        yieldAll = false,
+        Some(withFromYield(
+          returnAllItems.withDefaultOrderOnColumns(List("a")),
+          Some(orderBy(sortItem(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))),
+          where = Some(where(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))
+        ))
+      )(pos)
     ))
   }
 
@@ -431,13 +458,13 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
         AllIndexes,
         None,
         List(commandResultItem("a", Some("b"))),
-        yieldAll = false
-      )(pos),
-      withFromYield(
-        returnAllItems.withDefaultOrderOnColumns(List("b")),
-        Some(orderBy(sortItem(simpleCountExpression(patternForMatch(nodePat(Some("b"))), None)))),
-        where = Some(where(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))
-      )
+        yieldAll = false,
+        Some(withFromYield(
+          returnAllItems.withDefaultOrderOnColumns(List("b")),
+          Some(orderBy(sortItem(simpleCountExpression(patternForMatch(nodePat(Some("b"))), None)))),
+          where = Some(where(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))
+        ))
+      )(pos)
     ))
   }
 
@@ -447,16 +474,16 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
         AllIndexes,
         None,
         List(commandResultItem("a", Some("b"))),
-        yieldAll = false
-      )(pos),
-      withFromYield(
-        returnAllItems.withDefaultOrderOnColumns(List("b")),
-        Some(orderBy(sortItem(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))),
-        where = Some(where(notEquals(
-          simpleCollectExpression(patternForMatch(nodePat(Some("b"))), None, return_(returnItem(varFor("b"), "a"))),
-          listOf()
-        )))
-      )
+        yieldAll = false,
+        Some(withFromYield(
+          returnAllItems.withDefaultOrderOnColumns(List("b")),
+          Some(orderBy(sortItem(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))),
+          where = Some(where(notEquals(
+            simpleCollectExpression(patternForMatch(nodePat(Some("b"))), None, return_(returnItem(varFor("b"), "a"))),
+            listOf()
+          )))
+        ))
+      )(pos)
     ))
   }
 
@@ -466,13 +493,13 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
         AllIndexes,
         None,
         List(commandResultItem("a", Some("b"))),
-        yieldAll = false
-      )(pos),
-      withFromYield(
-        returnAllItems.withDefaultOrderOnColumns(List("b")),
-        Some(orderBy(sortItem(add(varFor("b"), simpleCountExpression(patternForMatch(nodePat()), None))))),
-        where = Some(where(or(varFor("b"), simpleExistsExpression(patternForMatch(nodePat()), None))))
-      )
+        yieldAll = false,
+        Some(withFromYield(
+          returnAllItems.withDefaultOrderOnColumns(List("b")),
+          Some(orderBy(sortItem(add(varFor("b"), simpleCountExpression(patternForMatch(nodePat()), None))))),
+          where = Some(where(or(varFor("b"), simpleExistsExpression(patternForMatch(nodePat()), None))))
+        ))
+      )(pos)
     ))
   }
 
@@ -482,20 +509,20 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
         AllIndexes,
         None,
         List(commandResultItem("a", Some("b"))),
-        yieldAll = false
-      )(pos),
-      withFromYield(
-        returnAllItems.withDefaultOrderOnColumns(List("b")),
-        Some(orderBy(sortItem(add(varFor("b"), simpleExistsExpression(patternForMatch(nodePat()), None))))),
-        where = Some(where(or(
-          varFor("b"),
-          AllIterablePredicate(
-            varFor("x"),
-            listOfInt(1, 2),
-            Some(isTyped(varFor("x"), IntegerType(isNullable = true)(pos)))
-          )(pos)
-        )))
-      )
+        yieldAll = false,
+        Some(withFromYield(
+          returnAllItems.withDefaultOrderOnColumns(List("b")),
+          Some(orderBy(sortItem(add(varFor("b"), simpleExistsExpression(patternForMatch(nodePat()), None))))),
+          where = Some(where(or(
+            varFor("b"),
+            AllIterablePredicate(
+              varFor("x"),
+              listOfInt(1, 2),
+              Some(isTyped(varFor("x"), IntegerType(isNullable = true)(pos)))
+            )(pos)
+          )))
+        ))
+      )(pos)
     ))
   }
 
@@ -508,16 +535,82 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
           commandResultItem("name", Some("options")),
           commandResultItem("options", Some("name"))
         ),
-        yieldAll = false
-      )(pos),
-      withFromYield(
-        returnAllItems.withDefaultOrderOnColumns(List("options", "name")),
-        where = Some(where(
-          greaterThan(size(varFor("options")), literalInt(0))
+        yieldAll = false,
+        Some(withFromYield(
+          returnAllItems.withDefaultOrderOnColumns(List("options", "name")),
+          where = Some(where(
+            greaterThan(size(varFor("options")), literalInt(0))
+          ))
         ))
-      ),
+      )(pos),
       return_(aliasedReturnItem("options", "name"))
     ))
+  }
+
+  test(
+    "SHOW INDEXES YIELD name RETURN name ORDER BY name"
+  ) {
+    assertAst(
+      singleQuery(
+        ShowIndexesClause(
+          AllIndexes,
+          None,
+          List(commandResultItem("name")),
+          yieldAll = false,
+          Some(withFromYield(returnAllItems.withDefaultOrderOnColumns(List("name"))))
+        )(pos),
+        return_(orderBy(sortItem(varFor("name"))), variableReturnItem("name"))
+      ),
+      comparePosition = false
+    )
+  }
+
+  test("SHOW INDEXES WHERE uniqueness = 'UNIQUE' RETURN *") {
+    parsesIn[Statements] {
+      case Cypher5 => _.withSyntaxErrorContaining("Invalid input 'RETURN'")
+      case _ => _.toAstPositioned(Statements(Seq(singleQuery(
+          ShowIndexesClause(
+            AllIndexes,
+            Some(where(equals(varFor("uniqueness"), literalString("UNIQUE")))),
+            List.empty,
+            yieldAll = false,
+            None
+          )(pos),
+          returnAll
+        ))))
+    }
+  }
+
+  test("SHOW INDEXES WHERE true RETURN *") {
+    parsesIn[Statements] {
+      case Cypher5 => _.withSyntaxErrorContaining("Invalid input 'RETURN'")
+      case _ => _.toAstPositioned(Statements(Seq(singleQuery(
+          ShowIndexesClause(
+            AllIndexes,
+            Some(where(trueLiteral)),
+            List.empty,
+            yieldAll = false,
+            None
+          )(pos),
+          returnAll
+        ))))
+    }
+  }
+
+  test("SHOW INDEXES RETURN *") {
+    parsesIn[Statements] {
+      case Cypher5 => _.withSyntaxErrorContaining("Invalid input 'RETURN'")
+      case _ => _.toAstPositioned(Statements(Seq(singleQuery(
+          ShowIndexesClause(
+            AllIndexes,
+            None,
+            List.empty,
+            yieldAll = false,
+            None
+          )(pos),
+          returnAll
+        ))))
+    }
   }
 
   // Negative tests for show indexes
@@ -531,26 +624,11 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
   }
 
   test("SHOW ALL RANGE INDEXES") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          """Invalid input 'RANGE': expected
-            |  "CONSTRAINT"
-            |  "CONSTRAINTS"
-            |  "FUNCTION"
-            |  "FUNCTIONS"
-            |  "INDEX"
-            |  "INDEXES"
-            |  "PRIVILEGE"
-            |  "PRIVILEGES"
-            |  "ROLE"
-            |  "ROLES" (line 1, column 10 (offset: 9))""".stripMargin
-        )
-      case _ => _.withSyntaxError(
-          """|Invalid input 'RANGE': expected 'CONSTRAINT', 'CONSTRAINTS', 'FUNCTION', 'FUNCTIONS', 'INDEX', 'INDEXES', 'PRIVILEGE', 'PRIVILEGES', 'ROLE' or 'ROLES' (line 1, column 10 (offset: 9))
-             |"SHOW ALL RANGE INDEXES"
-             |          ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """|Invalid input 'RANGE': expected 'CONSTRAINT', 'CONSTRAINTS', 'FUNCTION', 'FUNCTIONS', 'INDEX', 'INDEXES', 'PRIVILEGE', 'PRIVILEGES', 'ROLE' or 'ROLES' (line 1, column 10 (offset: 9))
+         |"SHOW ALL RANGE INDEXES"
+         |          ^""".stripMargin
+    )
   }
 
   test("SHOW INDEX YIELD") {
@@ -565,15 +643,7 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
     failsParsing[Statements]
   }
 
-  test("SHOW INDEXES WHERE uniqueness = 'UNIQUE' RETURN *") {
-    failsParsing[Statements]
-  }
-
   test("SHOW INDEXES YIELD a b RETURN *") {
-    failsParsing[Statements]
-  }
-
-  test("SHOW INDEXES RETURN *") {
     failsParsing[Statements]
   }
 
@@ -591,14 +661,13 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
 
   test("SHOW UNKNOWN INDEXES") {
     failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("""Invalid input 'UNKNOWN': expected""")
       case Cypher5 => _.withSyntaxError(
           """Invalid input 'UNKNOWN': expected 'ALIAS', 'ALIASES', 'ALL', 'BTREE', 'CONSTRAINT', 'CONSTRAINTS', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', 'EXIST', 'EXISTENCE', 'EXISTS', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', 'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', 'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'CURRENT USER', 'USERS' or 'VECTOR' (line 1, column 6 (offset: 5))
             |"SHOW UNKNOWN INDEXES"
             |      ^""".stripMargin
         )
       case _ => _.withSyntaxError(
-          """Invalid input 'UNKNOWN': expected 'ALIAS', 'ALIASES', 'ALL', 'CONSTRAINT', 'CONSTRAINTS', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', 'EXIST', 'EXISTENCE', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', 'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', 'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'CURRENT USER', 'USERS' or 'VECTOR' (line 1, column 6 (offset: 5))
+          """Invalid input 'UNKNOWN': expected 'ALIAS', 'ALIASES', 'ALL', 'AUTH', 'CONSTRAINT', 'CONSTRAINTS', 'CURRENT', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', 'EXIST', 'EXISTENCE', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', 'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', 'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'USERS' or 'VECTOR' (line 1, column 6 (offset: 5))
             |"SHOW UNKNOWN INDEXES"
             |      ^""".stripMargin
         )
@@ -606,14 +675,27 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
   }
 
   test("SHOW BUILT IN INDEXES") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.withMessageStart("""Invalid input 'INDEXES': expected "FUNCTION" or "FUNCTIONS"""")
-      case _ => _.withSyntaxError(
-          """Invalid input 'INDEXES': expected 'FUNCTION' or 'FUNCTIONS' (line 1, column 15 (offset: 14))
-            |"SHOW BUILT IN INDEXES"
-            |               ^""".stripMargin
-        )
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'INDEXES': expected 'FUNCTION' or 'FUNCTIONS' (line 1, column 15 (offset: 14))
+        |"SHOW BUILT IN INDEXES"
+        |               ^""".stripMargin
+    )
+  }
+
+  for {
+    prefix <- Seq("USE neo4j", "")
+  } {
+    test(s"$prefix SHOW INDEXES RETURN name2 YIELD name2") {
+      failsParsing[Statements].in {
+        case Cypher5 => _.withSyntaxErrorContaining(
+            "Invalid input 'RETURN': expected 'BRIEF', 'VERBOSE', 'WHERE', 'YIELD' or <EOF>"
+          )
+        case _ => _.withSyntaxErrorContaining(
+            "Invalid input 'YIELD': expected an expression, ',', 'AS', 'GROUP BY', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', " +
+              "'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'FOREACH', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NEXT', " +
+              "'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SHOW', 'SKIP', 'TERMINATE', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF>"
+          )
+      }
     }
   }
 
@@ -636,26 +718,11 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
   }
 
   test("SHOW ALL BTREE INDEXES") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          """Invalid input 'BTREE': expected
-            |  "CONSTRAINT"
-            |  "CONSTRAINTS"
-            |  "FUNCTION"
-            |  "FUNCTIONS"
-            |  "INDEX"
-            |  "INDEXES"
-            |  "PRIVILEGE"
-            |  "PRIVILEGES"
-            |  "ROLE"
-            |  "ROLES" (line 1, column 10 (offset: 9))""".stripMargin
-        )
-      case _ => _.withSyntaxError(
-          """|Invalid input 'BTREE': expected 'CONSTRAINT', 'CONSTRAINTS', 'FUNCTION', 'FUNCTIONS', 'INDEX', 'INDEXES', 'PRIVILEGE', 'PRIVILEGES', 'ROLE' or 'ROLES' (line 1, column 10 (offset: 9))
-             |"SHOW ALL BTREE INDEXES"
-             |          ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """|Invalid input 'BTREE': expected 'CONSTRAINT', 'CONSTRAINTS', 'FUNCTION', 'FUNCTIONS', 'INDEX', 'INDEXES', 'PRIVILEGE', 'PRIVILEGES', 'ROLE' or 'ROLES' (line 1, column 10 (offset: 9))
+         |"SHOW ALL BTREE INDEXES"
+         |          ^""".stripMargin
+    )
   }
 
   test("SHOW INDEXES BRIEF") {
@@ -691,26 +758,17 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
   }
 
   test("SHOW INDEX OUTPUT") {
-    failsParsing[Statements]
-      .in {
-        case Cypher5JavaCc =>
-          _.withMessage(
-            """Invalid input 'OUTPUT': expected
-              |  "BRIEF"
-              |  "SHOW"
-              |  "TERMINATE"
-              |  "VERBOSE"
-              |  "WHERE"
-              |  "YIELD"
-              |  <EOF> (line 1, column 12 (offset: 11))""".stripMargin
-          )
-        case Cypher5 =>
-          _.withSyntaxErrorContaining(
-            "Invalid input 'OUTPUT': expected 'BRIEF', 'SHOW', 'TERMINATE', 'VERBOSE', 'WHERE', 'YIELD' or <EOF>"
-          )
-        case _ =>
-          _.withSyntaxErrorContaining("Invalid input 'OUTPUT': expected 'SHOW', 'TERMINATE', 'WHERE', 'YIELD' or <EOF>")
-      }
+    failsParsing[Statements].in {
+      case Cypher5 => _.withSyntaxErrorContaining(
+          "Invalid input 'OUTPUT': expected 'BRIEF', 'VERBOSE', 'WHERE', 'YIELD' or <EOF>"
+        )
+      case _ =>
+        _.withSyntaxErrorContaining(
+          "Invalid input 'OUTPUT': expected 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', " +
+            "'FINISH', 'FOR', 'FOREACH', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NEXT', 'NODETACH', 'OFFSET', 'OPTIONAL', " +
+            "'REMOVE', 'RETURN', 'SET', 'SHOW', 'SKIP', 'TERMINATE', 'UNION', 'UNWIND', 'USE', 'WHERE', 'WITH', 'YIELD' or <EOF>"
+        )
+    }
   }
 
   test("SHOW INDEX VERBOSE BRIEF OUTPUT") {
@@ -860,34 +918,32 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
           }
 
           test(s"SHOW $constraintTypeKeyword $constraintKeyword") {
-            assertAstVersionBased(
-              constraintType =>
-                singleQuery(ShowConstraintsClause(
-                  constraintType,
-                  None,
-                  List.empty,
-                  yieldAll = false
-                )(defaultPos)),
-              constraintType,
-              cypher5ConstraintType,
-              comparePosition = true
+            assertAstVersionBased(fromCypher5 =>
+              singleQuery(ShowConstraintsClause(
+                if (fromCypher5) cypher5ConstraintType else constraintType,
+                None,
+                List.empty,
+                yieldAll = false,
+                None,
+                fromCypher5
+              )(defaultPos))
             )
           }
 
           test(s"USE db SHOW $constraintTypeKeyword $constraintKeyword") {
             assertAstVersionBased(
-              constraintType =>
+              fromCypher5 =>
                 singleQuery(
-                  use(List("db")),
+                  use(List("db"), !fromCypher5),
                   ShowConstraintsClause(
-                    constraintType,
+                    if (fromCypher5) cypher5ConstraintType else constraintType,
                     None,
                     List.empty,
-                    yieldAll = false
+                    yieldAll = false,
+                    None,
+                    fromCypher5
                   )(pos)
                 ),
-              constraintType,
-              cypher5ConstraintType,
               comparePosition = false
             )
           }
@@ -899,20 +955,16 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
           test(s"SHOW $constraintTypeKeyword $constraintKeyword") {
             val errorKeyword = constraintTypeKeyword.split(" ").last
             parsesIn[Statements] {
-              case Cypher5JavaCc =>
-                _.withSyntaxErrorContaining(
-                  s"""Invalid input '$errorKeyword': expected "EXIST", "EXISTENCE" or "TYPE" (line"""
-                )
-              case Cypher5 =>
-                _.withSyntaxErrorContaining(
+              case Cypher5 => _.withSyntaxErrorContaining(
                   s"Invalid input '$errorKeyword': expected 'EXIST', 'EXISTENCE' or 'TYPE' (line"
                 )
-              case _ =>
-                _.toAst(statementToStatements(singleQuery(ShowConstraintsClause(
+              case _ => _.toAst(statementToStatements(singleQuery(ShowConstraintsClause(
                   constraintType,
                   None,
                   List.empty,
-                  yieldAll = false
+                  yieldAll = false,
+                  None,
+                  returnCypher5Columns = false
                 )(defaultPos))))
             }
           }
@@ -920,22 +972,18 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
           test(s"USE db SHOW $constraintTypeKeyword $constraintKeyword") {
             val errorKeyword = constraintTypeKeyword.split(" ").last
             parsesIn[Statements] {
-              case Cypher5JavaCc =>
-                _.withSyntaxErrorContaining(
-                  s"""Invalid input '$errorKeyword': expected "EXIST", "EXISTENCE" or "TYPE" (line"""
-                )
-              case Cypher5 =>
-                _.withSyntaxErrorContaining(
+              case Cypher5 => _.withSyntaxErrorContaining(
                   s"Invalid input '$errorKeyword': expected 'EXIST', 'EXISTENCE' or 'TYPE' (line"
                 )
-              case _ =>
-                _.toAst(statementToStatements(singleQuery(
-                  use(List("db")),
+              case _ => _.toAst(statementToStatements(singleQuery(
+                  use(List("db"), resolveStrictly = true),
                   ShowConstraintsClause(
                     constraintType,
                     None,
                     List.empty,
-                    yieldAll = false
+                    yieldAll = false,
+                    None,
+                    returnCypher5Columns = false
                   )(pos)
                 )))
             }
@@ -946,87 +994,92 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
   // Show constraints filtering
 
   test("SHOW CONSTRAINT WHERE entityType = 'RELATIONSHIP'") {
-    assertAst(
-      singleQuery(ShowConstraintsClause(
-        AllConstraints,
-        Some(where(equals(varFor("entityType"), literalString("RELATIONSHIP")))),
-        List.empty,
-        yieldAll = false
-      )(pos)),
+    assertAstVersionBased(
+      fromCypher5 =>
+        singleQuery(ShowConstraintsClause(
+          AllConstraints,
+          Some(where(equals(varFor("entityType"), literalString("RELATIONSHIP")))),
+          List.empty,
+          yieldAll = false,
+          None,
+          fromCypher5
+        )(pos)),
       comparePosition = false
     )
   }
 
   test("SHOW REL PROPERTY EXISTENCE CONSTRAINTS YIELD labelsOrTypes") {
     assertAstVersionBased(
-      constraintType =>
+      fromCypher5 =>
         singleQuery(
           ShowConstraintsClause(
-            constraintType,
+            if (fromCypher5) RelPropExistsConstraints.cypher5 else RelPropExistsConstraints.cypher25,
             None,
             List(commandResultItem("labelsOrTypes")),
-            yieldAll = false
-          )(pos),
-          withFromYield(returnAllItems.withDefaultOrderOnColumns(List("labelsOrTypes")))
+            yieldAll = false,
+            Some(withFromYield(returnAllItems.withDefaultOrderOnColumns(List("labelsOrTypes")))),
+            fromCypher5
+          )(pos)
         ),
-      RelPropExistsConstraints.cypher25,
-      RelPropExistsConstraints.cypher5,
       comparePosition = false
     )
   }
 
   test("SHOW UNIQUE CONSTRAINTS YIELD *") {
     assertAstVersionBased(
-      constraintType =>
+      fromCypher5 =>
         singleQuery(
           ShowConstraintsClause(
-            constraintType,
+            if (fromCypher5) UniqueConstraints.cypher5 else UniqueConstraints.cypher25,
             None,
             List.empty,
-            yieldAll = true
-          )(pos),
-          withFromYield(returnAllItems)
+            yieldAll = true,
+            Some(withFromYield(returnAllItems)),
+            fromCypher5
+          )(pos)
         ),
-      UniqueConstraints.cypher25,
-      UniqueConstraints.cypher5,
       comparePosition = false
     )
   }
 
   test("SHOW CONSTRAINTS YIELD * ORDER BY name SKIP 2 LIMIT 5") {
-    assertAst(
-      singleQuery(
-        ShowConstraintsClause(
-          AllConstraints,
-          None,
-          List.empty,
-          yieldAll = true
-        )(pos),
-        withFromYield(returnAllItems, Some(orderBy(sortItem(varFor("name")))), Some(skip(2)), Some(limit(5)))
-      ),
+    assertAstVersionBased(
+      fromCypher5 =>
+        singleQuery(
+          ShowConstraintsClause(
+            AllConstraints,
+            None,
+            List.empty,
+            yieldAll = true,
+            Some(withFromYield(returnAllItems, Some(orderBy(sortItem(varFor("name")))), Some(skip(2)), Some(limit(5)))),
+            fromCypher5
+          )(pos)
+        ),
       comparePosition = false
     )
   }
 
   test("USE db SHOW NODE KEY CONSTRAINTS YIELD name, properties AS pp WHERE size(pp) > 1 RETURN name") {
-    assertAst(
-      singleQuery(
-        use(List("db")),
-        ShowConstraintsClause(
-          NodeKeyConstraints,
-          None,
-          List(
-            commandResultItem("name"),
-            commandResultItem("properties", Some("pp"))
-          ),
-          yieldAll = false
-        )(pos),
-        withFromYield(
-          returnAllItems.withDefaultOrderOnColumns(List("name", "pp")),
-          where = Some(where(greaterThan(function("size", varFor("pp")), literalInt(1))))
+    assertAstVersionBased(
+      fromCypher5 =>
+        singleQuery(
+          use(List("db"), !fromCypher5),
+          ShowConstraintsClause(
+            NodeKeyConstraints,
+            None,
+            List(
+              commandResultItem("name"),
+              commandResultItem("properties", Some("pp"))
+            ),
+            yieldAll = false,
+            Some(withFromYield(
+              returnAllItems.withDefaultOrderOnColumns(List("name", "pp")),
+              where = Some(where(greaterThan(function("size", varFor("pp")), literalInt(1))))
+            )),
+            fromCypher5
+          )(pos),
+          return_(variableReturnItem("name"))
         ),
-        return_(variableReturnItem("name"))
-      ),
       comparePosition = false
     )
   }
@@ -1034,238 +1087,255 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
   test(
     "USE db SHOW CONSTRAINTS YIELD name, populationPercent AS pp ORDER BY pp SKIP 2 LIMIT 5 WHERE pp < 50.0 RETURN name"
   ) {
-    assertAst(
-      singleQuery(
-        use(List("db")),
-        ShowConstraintsClause(
-          AllConstraints,
-          None,
-          List(
-            commandResultItem("name"),
-            commandResultItem("populationPercent", Some("pp"))
-          ),
-          yieldAll = false
-        )(pos),
-        withFromYield(
-          returnAllItems.withDefaultOrderOnColumns(List("name", "pp")),
-          Some(orderBy(sortItem(varFor("pp")))),
-          Some(skip(2)),
-          Some(limit(5)),
-          Some(where(lessThan(varFor("pp"), literalFloat(50.0))))
+    assertAstVersionBased(
+      fromCypher5 =>
+        singleQuery(
+          use(List("db"), !fromCypher5),
+          ShowConstraintsClause(
+            AllConstraints,
+            None,
+            List(
+              commandResultItem("name"),
+              commandResultItem("populationPercent", Some("pp"))
+            ),
+            yieldAll = false,
+            Some(withFromYield(
+              returnAllItems.withDefaultOrderOnColumns(List("name", "pp")),
+              Some(orderBy(sortItem(varFor("pp")))),
+              Some(skip(2)),
+              Some(limit(5)),
+              Some(where(lessThan(varFor("pp"), literalFloat(50.0))))
+            )),
+            fromCypher5
+          )(pos),
+          return_(variableReturnItem("name"))
         ),
-        return_(variableReturnItem("name"))
-      ),
       comparePosition = false
     )
   }
 
   test("SHOW PROPERTY EXISTENCE CONSTRAINTS YIELD name AS CONSTRAINT, type AS OUTPUT") {
     assertAstVersionBased(
-      constraintType =>
+      fromCypher5 =>
         singleQuery(
           ShowConstraintsClause(
-            constraintType,
+            if (fromCypher5) PropExistsConstraints.cypher5 else PropExistsConstraints.cypher25,
             None,
             List(
               commandResultItem("name", Some("CONSTRAINT")),
               commandResultItem("type", Some("OUTPUT"))
             ),
-            yieldAll = false
-          )(pos),
-          withFromYield(returnAllItems.withDefaultOrderOnColumns(List("CONSTRAINT", "OUTPUT")))
+            yieldAll = false,
+            Some(withFromYield(returnAllItems.withDefaultOrderOnColumns(List("CONSTRAINT", "OUTPUT")))),
+            fromCypher5
+          )(pos)
         ),
-      PropExistsConstraints.cypher25,
-      PropExistsConstraints.cypher5,
       comparePosition = false
     )
   }
 
   test("SHOW NODE EXIST CONSTRAINTS WHERE name = 'GRANT'") {
-    assertAst(
-      singleQuery(ShowConstraintsClause(
-        NodeAllExistsConstraints,
-        Some(where(equals(varFor("name"), literalString("GRANT")))),
-        List.empty,
-        yieldAll = false
-      )(pos)),
+    assertAstVersionBased(
+      fromCypher5 =>
+        singleQuery(ShowConstraintsClause(
+          NodeAllExistsConstraints,
+          Some(where(equals(varFor("name"), literalString("GRANT")))),
+          List.empty,
+          yieldAll = false,
+          None,
+          fromCypher5
+        )(pos)),
       comparePosition = false
     )
   }
 
   test("SHOW CONSTRAINTS YIELD a ORDER BY a WHERE a = 1") {
-    assertAst(
+    assertAstVersionBased(fromCypher5 =>
       singleQuery(
         ShowConstraintsClause(
           AllConstraints,
           None,
           List(commandResultItem("a")),
-          yieldAll = false
-        )(pos),
-        withFromYield(
-          returnAllItems.withDefaultOrderOnColumns(List("a")),
-          Some(orderBy(sortItem(varFor("a")))),
-          where = Some(where(equals(varFor("a"), literalInt(1))))
-        )
+          yieldAll = false,
+          Some(withFromYield(
+            returnAllItems.withDefaultOrderOnColumns(List("a")),
+            Some(orderBy(sortItem(varFor("a")))),
+            where = Some(where(equals(varFor("a"), literalInt(1))))
+          )),
+          fromCypher5
+        )(pos)
       )
     )
   }
 
   test("SHOW CONSTRAINTS YIELD a AS b ORDER BY b WHERE b = 1") {
-    assertAst(
+    assertAstVersionBased(fromCypher5 =>
       singleQuery(
         ShowConstraintsClause(
           AllConstraints,
           None,
           List(commandResultItem("a", Some("b"))),
-          yieldAll = false
-        )(pos),
-        withFromYield(
-          returnAllItems.withDefaultOrderOnColumns(List("b")),
-          Some(orderBy(sortItem(varFor("b")))),
-          where = Some(where(equals(varFor("b"), literalInt(1))))
-        )
+          yieldAll = false,
+          Some(withFromYield(
+            returnAllItems.withDefaultOrderOnColumns(List("b")),
+            Some(orderBy(sortItem(varFor("b")))),
+            where = Some(where(equals(varFor("b"), literalInt(1))))
+          )),
+          fromCypher5
+        )(pos)
       )
     )
   }
 
   test("SHOW CONSTRAINTS YIELD a AS b ORDER BY a WHERE a = 1") {
-    assertAst(
+    assertAstVersionBased(fromCypher5 =>
       singleQuery(
         ShowConstraintsClause(
           AllConstraints,
           None,
           List(commandResultItem("a", Some("b"))),
-          yieldAll = false
-        )(pos),
-        withFromYield(
-          returnAllItems.withDefaultOrderOnColumns(List("b")),
-          Some(orderBy(sortItem(varFor("b")))),
-          where = Some(where(equals(varFor("b"), literalInt(1))))
-        )
+          yieldAll = false,
+          Some(withFromYield(
+            returnAllItems.withDefaultOrderOnColumns(List("b")),
+            Some(orderBy(sortItem(varFor("b")))),
+            where = Some(where(equals(varFor("b"), literalInt(1))))
+          )),
+          fromCypher5
+        )(pos)
       )
     )
   }
 
   test("SHOW CONSTRAINTS YIELD a ORDER BY EXISTS { (a) } WHERE EXISTS { (a) }") {
-    assertAst(
+    assertAstVersionBased(fromCypher5 =>
       singleQuery(
         ShowConstraintsClause(
           AllConstraints,
           None,
           List(commandResultItem("a")),
-          yieldAll = false
-        )(pos),
-        withFromYield(
-          returnAllItems.withDefaultOrderOnColumns(List("a")),
-          Some(orderBy(sortItem(simpleExistsExpression(patternForMatch(nodePat(Some("a"))), None)))),
-          where = Some(where(simpleExistsExpression(patternForMatch(nodePat(Some("a"))), None)))
-        )
+          yieldAll = false,
+          Some(withFromYield(
+            returnAllItems.withDefaultOrderOnColumns(List("a")),
+            Some(orderBy(sortItem(simpleExistsExpression(patternForMatch(nodePat(Some("a"))), None)))),
+            where = Some(where(simpleExistsExpression(patternForMatch(nodePat(Some("a"))), None)))
+          )),
+          fromCypher5
+        )(pos)
       )
     )
   }
 
   test("SHOW CONSTRAINTS YIELD a ORDER BY EXISTS { (b) } WHERE EXISTS { (b) }") {
-    assertAst(
+    assertAstVersionBased(fromCypher5 =>
       singleQuery(
         ShowConstraintsClause(
           AllConstraints,
           None,
           List(commandResultItem("a")),
-          yieldAll = false
-        )(pos),
-        withFromYield(
-          returnAllItems.withDefaultOrderOnColumns(List("a")),
-          Some(orderBy(sortItem(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))),
-          where = Some(where(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))
-        )
+          yieldAll = false,
+          Some(withFromYield(
+            returnAllItems.withDefaultOrderOnColumns(List("a")),
+            Some(orderBy(sortItem(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))),
+            where = Some(where(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))
+          )),
+          fromCypher5
+        )(pos)
       )
     )
   }
 
   test("SHOW CONSTRAINTS YIELD a AS b ORDER BY COUNT { (b) } WHERE EXISTS { (b) }") {
-    assertAst(
+    assertAstVersionBased(fromCypher5 =>
       singleQuery(
         ShowConstraintsClause(
           AllConstraints,
           None,
           List(commandResultItem("a", Some("b"))),
-          yieldAll = false
-        )(pos),
-        withFromYield(
-          returnAllItems.withDefaultOrderOnColumns(List("b")),
-          Some(orderBy(sortItem(simpleCountExpression(patternForMatch(nodePat(Some("b"))), None)))),
-          where = Some(where(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))
-        )
+          yieldAll = false,
+          Some(withFromYield(
+            returnAllItems.withDefaultOrderOnColumns(List("b")),
+            Some(orderBy(sortItem(simpleCountExpression(patternForMatch(nodePat(Some("b"))), None)))),
+            where = Some(where(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))
+          )),
+          fromCypher5
+        )(pos)
       )
     )
   }
 
   test("SHOW CONSTRAINTS YIELD a AS b ORDER BY EXISTS { (a) } WHERE COLLECT { MATCH (a) RETURN a } <> []") {
-    assertAst(
+    assertAstVersionBased(fromCypher5 =>
       singleQuery(
         ShowConstraintsClause(
           AllConstraints,
           None,
           List(commandResultItem("a", Some("b"))),
-          yieldAll = false
-        )(pos),
-        withFromYield(
-          returnAllItems.withDefaultOrderOnColumns(List("b")),
-          Some(orderBy(sortItem(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))),
-          where = Some(where(notEquals(
-            simpleCollectExpression(patternForMatch(nodePat(Some("b"))), None, return_(returnItem(varFor("b"), "a"))),
-            listOf()
-          )))
-        )
+          yieldAll = false,
+          Some(withFromYield(
+            returnAllItems.withDefaultOrderOnColumns(List("b")),
+            Some(orderBy(sortItem(simpleExistsExpression(patternForMatch(nodePat(Some("b"))), None)))),
+            where = Some(where(notEquals(
+              simpleCollectExpression(
+                patternForMatch(nodePat(Some("b"))),
+                None,
+                return_(returnItem(varFor("b"), "a"))
+              ),
+              listOf()
+            )))
+          )),
+          fromCypher5
+        )(pos)
       )
     )
   }
 
   test("SHOW CONSTRAINTS YIELD a AS b ORDER BY b + COUNT { () } WHERE b OR EXISTS { () }") {
-    assertAst(
+    assertAstVersionBased(fromCypher5 =>
       singleQuery(
         ShowConstraintsClause(
           AllConstraints,
           None,
           List(commandResultItem("a", Some("b"))),
-          yieldAll = false
-        )(pos),
-        withFromYield(
-          returnAllItems.withDefaultOrderOnColumns(List("b")),
-          Some(orderBy(sortItem(add(varFor("b"), simpleCountExpression(patternForMatch(nodePat()), None))))),
-          where = Some(where(or(varFor("b"), simpleExistsExpression(patternForMatch(nodePat()), None))))
-        )
+          yieldAll = false,
+          Some(withFromYield(
+            returnAllItems.withDefaultOrderOnColumns(List("b")),
+            Some(orderBy(sortItem(add(varFor("b"), simpleCountExpression(patternForMatch(nodePat()), None))))),
+            where = Some(where(or(varFor("b"), simpleExistsExpression(patternForMatch(nodePat()), None))))
+          )),
+          fromCypher5
+        )(pos)
       )
     )
   }
 
   test("SHOW CONSTRAINTS YIELD a AS b ORDER BY a + EXISTS { () } WHERE a OR ALL (x IN [1, 2] WHERE x IS :: INT)") {
-    assertAst(
+    assertAstVersionBased(fromCypher5 =>
       singleQuery(
         ShowConstraintsClause(
           AllConstraints,
           None,
           List(commandResultItem("a", Some("b"))),
-          yieldAll = false
-        )(pos),
-        withFromYield(
-          returnAllItems.withDefaultOrderOnColumns(List("b")),
-          Some(orderBy(sortItem(add(varFor("b"), simpleExistsExpression(patternForMatch(nodePat()), None))))),
-          where = Some(where(or(
-            varFor("b"),
-            AllIterablePredicate(
-              varFor("x"),
-              listOfInt(1, 2),
-              Some(isTyped(varFor("x"), IntegerType(isNullable = true)(pos)))
-            )(pos)
-          )))
-        )
+          yieldAll = false,
+          Some(withFromYield(
+            returnAllItems.withDefaultOrderOnColumns(List("b")),
+            Some(orderBy(sortItem(add(varFor("b"), simpleExistsExpression(patternForMatch(nodePat()), None))))),
+            where = Some(where(or(
+              varFor("b"),
+              AllIterablePredicate(
+                varFor("x"),
+                listOfInt(1, 2),
+                Some(isTyped(varFor("x"), IntegerType(isNullable = true)(pos)))
+              )(pos)
+            )))
+          )),
+          fromCypher5
+        )(pos)
       )
     )
   }
 
   test("SHOW CONSTRAINTS YIELD name as options, properties as name where size(name) > 0 RETURN options as name") {
-    assertAst(
+    assertAstVersionBased(fromCypher5 =>
       singleQuery(
         ShowConstraintsClause(
           AllConstraints,
@@ -1274,17 +1344,89 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
             commandResultItem("name", Some("options")),
             commandResultItem("properties", Some("name"))
           ),
-          yieldAll = false
+          yieldAll = false,
+          Some(withFromYield(
+            returnAllItems.withDefaultOrderOnColumns(List("options", "name")),
+            where = Some(where(
+              greaterThan(size(varFor("name")), literalInt(0))
+            ))
+          )),
+          fromCypher5
         )(pos),
-        withFromYield(
-          returnAllItems.withDefaultOrderOnColumns(List("options", "name")),
-          where = Some(where(
-            greaterThan(size(varFor("name")), literalInt(0))
-          ))
-        ),
         return_(aliasedReturnItem("options", "name"))
       )
     )
+  }
+
+  test(
+    "SHOW CONSTRAINTS YIELD name RETURN name ORDER BY name"
+  ) {
+    assertAstVersionBased(
+      fromCypher5 =>
+        singleQuery(
+          ShowConstraintsClause(
+            AllConstraints,
+            None,
+            List(commandResultItem("name")),
+            yieldAll = false,
+            Some(withFromYield(returnAllItems.withDefaultOrderOnColumns(List("name")))),
+            fromCypher5
+          )(pos),
+          return_(orderBy(sortItem(varFor("name"))), variableReturnItem("name"))
+        ),
+      comparePosition = false
+    )
+  }
+
+  test("SHOW CONSTRAINTS WHERE entityType = 'NODE' RETURN *") {
+    parsesIn[Statements] {
+      case Cypher5 => _.withSyntaxErrorContaining("Invalid input 'RETURN'")
+      case _ => _.toAstPositioned(Statements(Seq(singleQuery(
+          ShowConstraintsClause(
+            AllConstraints,
+            Some(where(equals(varFor("entityType"), literalString("NODE")))),
+            List.empty,
+            yieldAll = false,
+            None,
+            returnCypher5Columns = false
+          )(pos),
+          returnAll
+        ))))
+    }
+  }
+
+  test("SHOW CONSTRAINTS WHERE true RETURN *") {
+    parsesIn[Statements] {
+      case Cypher5 => _.withSyntaxErrorContaining("Invalid input 'RETURN'")
+      case _ => _.toAstPositioned(Statements(Seq(singleQuery(
+          ShowConstraintsClause(
+            AllConstraints,
+            Some(where(trueLiteral)),
+            List.empty,
+            yieldAll = false,
+            None,
+            returnCypher5Columns = false
+          )(pos),
+          returnAll
+        ))))
+    }
+  }
+
+  test("SHOW EXISTENCE CONSTRAINT RETURN *") {
+    parsesIn[Statements] {
+      case Cypher5 => _.withSyntaxErrorContaining("Invalid input 'RETURN'")
+      case _ => _.toAstPositioned(Statements(Seq(singleQuery(
+          ShowConstraintsClause(
+            AllExistsConstraints,
+            None,
+            List.empty,
+            yieldAll = false,
+            None,
+            returnCypher5Columns = false
+          )(pos),
+          returnAll
+        ))))
+    }
   }
 
   // Negative tests for show constraints
@@ -1299,64 +1441,13 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
 
   test("SHOW NODES EXIST CONSTRAINTS") {
     failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          """Invalid input 'NODES': expected
-            |  "ALIAS"
-            |  "ALIASES"
-            |  "ALL"
-            |  "BTREE"
-            |  "BUILT"
-            |  "CONSTRAINT"
-            |  "CONSTRAINTS"
-            |  "CURRENT"
-            |  "DATABASE"
-            |  "DATABASES"
-            |  "DEFAULT"
-            |  "EXIST"
-            |  "EXISTENCE"
-            |  "EXISTS"
-            |  "FULLTEXT"
-            |  "FUNCTION"
-            |  "FUNCTIONS"
-            |  "HOME"
-            |  "INDEX"
-            |  "INDEXES"
-            |  "KEY"
-            |  "LOOKUP"
-            |  "NODE"
-            |  "POINT"
-            |  "POPULATED"
-            |  "PRIVILEGE"
-            |  "PRIVILEGES"
-            |  "PROCEDURE"
-            |  "PROCEDURES"
-            |  "PROPERTY"
-            |  "RANGE"
-            |  "REL"
-            |  "RELATIONSHIP"
-            |  "ROLE"
-            |  "ROLES"
-            |  "SERVER"
-            |  "SERVERS"
-            |  "SETTING"
-            |  "SETTINGS"
-            |  "SUPPORTED"
-            |  "TEXT"
-            |  "TRANSACTION"
-            |  "TRANSACTIONS"
-            |  "UNIQUE"
-            |  "UNIQUENESS"
-            |  "USER"
-            |  "USERS"
-            |  "VECTOR" (line 1, column 6 (offset: 5))""".stripMargin
-        )
       case Cypher5 => _.withSyntaxError(
           """|Invalid input 'NODES': expected 'ALIAS', 'ALIASES', 'ALL', 'BTREE', 'CONSTRAINT', 'CONSTRAINTS', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', 'EXIST', 'EXISTENCE', 'EXISTS', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', 'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', 'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'CURRENT USER', 'USERS' or 'VECTOR' (line 1, column 6 (offset: 5))
              |"SHOW NODES EXIST CONSTRAINTS"
              |      ^""".stripMargin
         )
       case _ => _.withSyntaxError(
-          """|Invalid input 'NODES': expected 'ALIAS', 'ALIASES', 'ALL', 'CONSTRAINT', 'CONSTRAINTS', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', 'EXIST', 'EXISTENCE', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', 'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', 'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'CURRENT USER', 'USERS' or 'VECTOR' (line 1, column 6 (offset: 5))
+          """|Invalid input 'NODES': expected 'ALIAS', 'ALIASES', 'ALL', 'AUTH', 'CONSTRAINT', 'CONSTRAINTS', 'CURRENT', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', 'EXIST', 'EXISTENCE', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', 'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', 'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'USERS' or 'VECTOR' (line 1, column 6 (offset: 5))
              |"SHOW NODES EXIST CONSTRAINTS"
              |      ^""".stripMargin
         )
@@ -1369,64 +1460,13 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
 
   test("SHOW RELATIONSHIPS EXIST CONSTRAINTS") {
     failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          """Invalid input 'RELATIONSHIPS': expected
-            |  "ALIAS"
-            |  "ALIASES"
-            |  "ALL"
-            |  "BTREE"
-            |  "BUILT"
-            |  "CONSTRAINT"
-            |  "CONSTRAINTS"
-            |  "CURRENT"
-            |  "DATABASE"
-            |  "DATABASES"
-            |  "DEFAULT"
-            |  "EXIST"
-            |  "EXISTENCE"
-            |  "EXISTS"
-            |  "FULLTEXT"
-            |  "FUNCTION"
-            |  "FUNCTIONS"
-            |  "HOME"
-            |  "INDEX"
-            |  "INDEXES"
-            |  "KEY"
-            |  "LOOKUP"
-            |  "NODE"
-            |  "POINT"
-            |  "POPULATED"
-            |  "PRIVILEGE"
-            |  "PRIVILEGES"
-            |  "PROCEDURE"
-            |  "PROCEDURES"
-            |  "PROPERTY"
-            |  "RANGE"
-            |  "REL"
-            |  "RELATIONSHIP"
-            |  "ROLE"
-            |  "ROLES"
-            |  "SERVER"
-            |  "SERVERS"
-            |  "SETTING"
-            |  "SETTINGS"
-            |  "SUPPORTED"
-            |  "TEXT"
-            |  "TRANSACTION"
-            |  "TRANSACTIONS"
-            |  "UNIQUE"
-            |  "UNIQUENESS"
-            |  "USER"
-            |  "USERS"
-            |  "VECTOR" (line 1, column 6 (offset: 5))""".stripMargin
-        )
       case Cypher5 => _.withSyntaxError(
           """|Invalid input 'RELATIONSHIPS': expected 'ALIAS', 'ALIASES', 'ALL', 'BTREE', 'CONSTRAINT', 'CONSTRAINTS', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', 'EXIST', 'EXISTENCE', 'EXISTS', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', 'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', 'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'CURRENT USER', 'USERS' or 'VECTOR' (line 1, column 6 (offset: 5))
              |"SHOW RELATIONSHIPS EXIST CONSTRAINTS"
              |      ^""".stripMargin
         )
       case _ => _.withSyntaxError(
-          """|Invalid input 'RELATIONSHIPS': expected 'ALIAS', 'ALIASES', 'ALL', 'CONSTRAINT', 'CONSTRAINTS', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', 'EXIST', 'EXISTENCE', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', 'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', 'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'CURRENT USER', 'USERS' or 'VECTOR' (line 1, column 6 (offset: 5))
+          """|Invalid input 'RELATIONSHIPS': expected 'ALIAS', 'ALIASES', 'ALL', 'AUTH', 'CONSTRAINT', 'CONSTRAINTS', 'CURRENT', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', 'EXIST', 'EXISTENCE', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', 'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', 'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'USERS' or 'VECTOR' (line 1, column 6 (offset: 5))
              |"SHOW RELATIONSHIPS EXIST CONSTRAINTS"
              |      ^""".stripMargin
         )
@@ -1481,28 +1521,19 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
     failsParsing[Statements]
   }
 
-  test("SHOW CONSTRAINTS WHERE entityType = 'NODE' RETURN *") {
-    failsParsing[Statements]
-  }
-
   test("SHOW CONSTRAINTS YIELD a b RETURN *") {
-    failsParsing[Statements]
-  }
-
-  test("SHOW EXISTENCE CONSTRAINT RETURN *") {
     failsParsing[Statements]
   }
 
   test("SHOW UNKNOWN CONSTRAINTS") {
     failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'UNKNOWN': expected")
       case Cypher5 => _.withSyntaxError(
           """|Invalid input 'UNKNOWN': expected 'ALIAS', 'ALIASES', 'ALL', 'BTREE', 'CONSTRAINT', 'CONSTRAINTS', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', 'EXIST', 'EXISTENCE', 'EXISTS', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', 'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', 'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'CURRENT USER', 'USERS' or 'VECTOR' (line 1, column 6 (offset: 5))
              |"SHOW UNKNOWN CONSTRAINTS"
              |      ^""".stripMargin
         )
       case _ => _.withSyntaxError(
-          """|Invalid input 'UNKNOWN': expected 'ALIAS', 'ALIASES', 'ALL', 'CONSTRAINT', 'CONSTRAINTS', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', 'EXIST', 'EXISTENCE', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', 'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', 'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'CURRENT USER', 'USERS' or 'VECTOR' (line 1, column 6 (offset: 5))
+          """|Invalid input 'UNKNOWN': expected 'ALIAS', 'ALIASES', 'ALL', 'AUTH', 'CONSTRAINT', 'CONSTRAINTS', 'CURRENT', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', 'EXIST', 'EXISTENCE', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', 'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', 'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'USERS' or 'VECTOR' (line 1, column 6 (offset: 5))
              |"SHOW UNKNOWN CONSTRAINTS"
              |      ^""".stripMargin
         )
@@ -1510,13 +1541,27 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
   }
 
   test("SHOW BUILT IN CONSTRAINTS") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("""Invalid input 'CONSTRAINTS': expected "FUNCTION" or "FUNCTIONS"""")
-      case _ => _.withSyntaxError(
-          """Invalid input 'CONSTRAINTS': expected 'FUNCTION' or 'FUNCTIONS' (line 1, column 15 (offset: 14))
-            |"SHOW BUILT IN CONSTRAINTS"
-            |               ^""".stripMargin
-        )
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'CONSTRAINTS': expected 'FUNCTION' or 'FUNCTIONS' (line 1, column 15 (offset: 14))
+        |"SHOW BUILT IN CONSTRAINTS"
+        |               ^""".stripMargin
+    )
+  }
+
+  for {
+    prefix <- Seq("USE neo4j", "")
+  } {
+    test(s"$prefix SHOW CONSTRAINTS RETURN name2 YIELD name2") {
+      failsParsing[Statements].in {
+        case Cypher5 => _.withSyntaxErrorContaining(
+            "Invalid input 'RETURN': expected 'BRIEF', 'VERBOSE', 'WHERE', 'YIELD' or <EOF>"
+          )
+        case _ => _.withSyntaxErrorContaining(
+            "Invalid input 'YIELD': expected an expression, ',', 'AS', 'GROUP BY', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', " +
+              "'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'FOREACH', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NEXT', " +
+              "'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SHOW', 'SKIP', 'TERMINATE', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF>"
+          )
+      }
     }
   }
 
@@ -1527,81 +1572,63 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
 
   removedConstraintTypes.foreach(constraintTypeKeyword => {
     test(s"SHOW $constraintTypeKeyword CONSTRAINT") {
-      failsParsing[Statements]
-        .in {
-          case Cypher5JavaCc | Cypher5 =>
-            _.withSyntaxErrorContaining(
-              "`SHOW CONSTRAINTS` no longer allows the `EXISTS` keyword, please use `EXIST` or `PROPERTY EXISTENCE` instead."
-            )
-          case _ =>
-            // Expected will differ depending on type
-            _.withSyntaxErrorContaining("Invalid input 'EXISTS': expected ")
-        }
+      failsParsing[Statements].in {
+        case Cypher5 => _.withOldSyntax(
+            "`SHOW CONSTRAINTS` no longer allows the `EXISTS` keyword, please use `EXIST` or `PROPERTY EXISTENCE` instead."
+          )
+        case _ => // Expected will differ depending on type
+          _.withSyntaxErrorContaining("Invalid input 'EXISTS': expected ")
+      }
     }
 
     test(s"USE db SHOW $constraintTypeKeyword CONSTRAINTS") {
-      failsParsing[Statements]
-        .in {
-          case Cypher5JavaCc | Cypher5 =>
-            _.withSyntaxErrorContaining(
-              "`SHOW CONSTRAINTS` no longer allows the `EXISTS` keyword, please use `EXIST` or `PROPERTY EXISTENCE` instead."
-            )
-          case _ =>
-            // Expected will differ depending on type
-            _.withSyntaxErrorContaining("Invalid input 'EXISTS': expected ")
-        }
+      failsParsing[Statements].in {
+        case Cypher5 => _.withOldSyntax(
+            "`SHOW CONSTRAINTS` no longer allows the `EXISTS` keyword, please use `EXIST` or `PROPERTY EXISTENCE` instead."
+          )
+        case _ => // Expected will differ depending on type
+          _.withSyntaxErrorContaining("Invalid input 'EXISTS': expected ")
+      }
     }
 
     test(s"SHOW $constraintTypeKeyword CONSTRAINT BRIEF") {
-      failsParsing[Statements]
-        .in {
-          case Cypher5JavaCc | Cypher5 =>
-            _.withSyntaxErrorContaining(
-              "`SHOW CONSTRAINTS` no longer allows the `EXISTS` keyword, please use `EXIST` or `PROPERTY EXISTENCE` instead."
-            )
-          case _ =>
-            // Expected will differ depending on type
-            _.withSyntaxErrorContaining("Invalid input 'EXISTS': expected ")
-        }
+      failsParsing[Statements].in {
+        case Cypher5 => _.withOldSyntax(
+            "`SHOW CONSTRAINTS` no longer allows the `EXISTS` keyword, please use `EXIST` or `PROPERTY EXISTENCE` instead."
+          )
+        case _ => // Expected will differ depending on type
+          _.withSyntaxErrorContaining("Invalid input 'EXISTS': expected ")
+      }
     }
 
     test(s"SHOW $constraintTypeKeyword CONSTRAINTS BRIEF OUTPUT") {
-      failsParsing[Statements]
-        .in {
-          case Cypher5JavaCc | Cypher5 =>
-            _.withSyntaxErrorContaining(
-              "`SHOW CONSTRAINTS` no longer allows the `EXISTS` keyword, please use `EXIST` or `PROPERTY EXISTENCE` instead."
-            )
-          case _ =>
-            // Expected will differ depending on type
-            _.withSyntaxErrorContaining("Invalid input 'EXISTS': expected ")
-        }
+      failsParsing[Statements].in {
+        case Cypher5 => _.withOldSyntax(
+            "`SHOW CONSTRAINTS` no longer allows the `EXISTS` keyword, please use `EXIST` or `PROPERTY EXISTENCE` instead."
+          )
+        case _ => // Expected will differ depending on type
+          _.withSyntaxErrorContaining("Invalid input 'EXISTS': expected ")
+      }
     }
 
     test(s"SHOW $constraintTypeKeyword CONSTRAINTS VERBOSE") {
-      failsParsing[Statements]
-        .in {
-          case Cypher5JavaCc | Cypher5 =>
-            _.withSyntaxErrorContaining(
-              "`SHOW CONSTRAINTS` no longer allows the `EXISTS` keyword, please use `EXIST` or `PROPERTY EXISTENCE` instead."
-            )
-          case _ =>
-            // Expected will differ depending on type
-            _.withSyntaxErrorContaining("Invalid input 'EXISTS': expected ")
-        }
+      failsParsing[Statements].in {
+        case Cypher5 => _.withOldSyntax(
+            "`SHOW CONSTRAINTS` no longer allows the `EXISTS` keyword, please use `EXIST` or `PROPERTY EXISTENCE` instead."
+          )
+        case _ => // Expected will differ depending on type
+          _.withSyntaxErrorContaining("Invalid input 'EXISTS': expected ")
+      }
     }
 
     test(s"SHOW $constraintTypeKeyword CONSTRAINT VERBOSE OUTPUT") {
-      failsParsing[Statements]
-        .in {
-          case Cypher5JavaCc | Cypher5 =>
-            _.withSyntaxErrorContaining(
-              "`SHOW CONSTRAINTS` no longer allows the `EXISTS` keyword, please use `EXIST` or `PROPERTY EXISTENCE` instead."
-            )
-          case _ =>
-            // Expected will differ depending on type
-            _.withSyntaxErrorContaining("Invalid input 'EXISTS': expected ")
-        }
+      failsParsing[Statements].in {
+        case Cypher5 => _.withOldSyntax(
+            "`SHOW CONSTRAINTS` no longer allows the `EXISTS` keyword, please use `EXIST` or `PROPERTY EXISTENCE` instead."
+          )
+        case _ => // Expected will differ depending on type
+          _.withSyntaxErrorContaining("Invalid input 'EXISTS': expected ")
+      }
     }
   })
 
@@ -1618,22 +1645,11 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
   }
 
   test("SHOW REL EXISTS CONSTRAINTS") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          """Invalid input 'EXISTS': expected
-            |  "EXIST"
-            |  "EXISTENCE"
-            |  "KEY"
-            |  "PROPERTY"
-            |  "UNIQUE"
-            |  "UNIQUENESS" (line 1, column 10 (offset: 9))""".stripMargin
-        )
-      case _ => _.withSyntaxError(
-          """Invalid input 'EXISTS': expected 'EXIST', 'EXISTENCE', 'KEY', 'PROPERTY', 'UNIQUE' or 'UNIQUENESS' (line 1, column 10 (offset: 9))
-            |"SHOW REL EXISTS CONSTRAINTS"
-            |          ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'EXISTS': expected 'EXIST', 'EXISTENCE', 'KEY', 'PROPERTY', 'UNIQUE' or 'UNIQUENESS' (line 1, column 10 (offset: 9))
+        |"SHOW REL EXISTS CONSTRAINTS"
+        |          ^""".stripMargin
+    )
   }
 
   test("SHOW EXISTS CONSTRAINT WHERE name = 'foo'") {
@@ -1722,26 +1738,17 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
   }
 
   test("SHOW CONSTRAINTS OUTPUT") {
-    failsParsing[Statements]
-      .in {
-        case Cypher5JavaCc =>
-          _.withMessage(
-            """Invalid input 'OUTPUT': expected
-              |  "BRIEF"
-              |  "SHOW"
-              |  "TERMINATE"
-              |  "VERBOSE"
-              |  "WHERE"
-              |  "YIELD"
-              |  <EOF> (line 1, column 18 (offset: 17))""".stripMargin
-          )
-        case Cypher5 =>
-          _.withSyntaxErrorContaining(
-            "Invalid input 'OUTPUT': expected 'BRIEF', 'SHOW', 'TERMINATE', 'VERBOSE', 'WHERE', 'YIELD' or <EOF>"
-          )
-        case _ =>
-          _.withSyntaxErrorContaining("Invalid input 'OUTPUT': expected 'SHOW', 'TERMINATE', 'WHERE', 'YIELD' or <EOF>")
-      }
+    failsParsing[Statements].in {
+      case Cypher5 => _.withSyntaxErrorContaining(
+          "Invalid input 'OUTPUT': expected 'BRIEF', 'VERBOSE', 'WHERE', 'YIELD' or <EOF>"
+        )
+      case _ =>
+        _.withSyntaxErrorContaining(
+          "Invalid input 'OUTPUT': expected 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', " +
+            "'FINISH', 'FOR', 'FOREACH', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NEXT', 'NODETACH', 'OFFSET', 'OPTIONAL', " +
+            "'REMOVE', 'RETURN', 'SET', 'SHOW', 'SKIP', 'TERMINATE', 'UNION', 'UNWIND', 'USE', 'WHERE', 'WITH', 'YIELD' or <EOF>"
+        )
+    }
   }
 
   test("SHOW CONSTRAINTS VERBOSE BRIEF OUTPUT") {
@@ -1772,216 +1779,71 @@ class ShowSchemaCommandParserTest extends AdministrationAndSchemaCommandParserTe
     assertFailsOnBriefVerbosePreviouslyAllowed("SHOW CONSTRAINTS", "VERBOSE")
   }
 
-  // Invalid clause order tests for indexes and constraints
-
-  for {
-    prefix <- Seq("USE neo4j", "")
-    entity <- Seq("INDEXES", "CONSTRAINTS")
-  } {
-    test(s"$prefix SHOW $entity YIELD * WITH * MATCH (n) RETURN n") {
-      // Can't parse WITH after SHOW
-      failsParsing[Statements].in {
-        case Cypher5JavaCc => _.withMessageStart("Invalid input 'WITH': expected")
-        case _ => _.withSyntaxErrorContaining(
-            """Invalid input 'WITH': expected 'ORDER BY'""".stripMargin
-          )
-      }
-    }
-
-    test(s"$prefix UNWIND range(1,10) as b SHOW $entity YIELD * RETURN *") {
-      // Can't parse SHOW  after UNWIND
-      failsParsing[Statements].in {
-        case Cypher5JavaCc => _.withMessageStart("Invalid input 'SHOW': expected")
-        case _ => _.withSyntaxErrorContaining(
-            """Invalid input 'SHOW': expected 'FOREACH', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF>""".stripMargin
-          )
-      }
-    }
-
-    test(s"$prefix SHOW $entity WITH name, type RETURN *") {
-      // Can't parse WITH after SHOW
-      failsParsing[Statements].in {
-        case Cypher5JavaCc => _.withMessageStart("Invalid input 'WITH': expected")
-        case Cypher5 => _.withSyntaxErrorContaining(
-            """Invalid input 'WITH': expected 'BRIEF', 'SHOW', 'TERMINATE', 'VERBOSE', 'WHERE', 'YIELD' or <EOF>"""
-          )
-        case _ => _.withSyntaxErrorContaining(
-            """Invalid input 'WITH': expected 'SHOW', 'TERMINATE', 'WHERE', 'YIELD' or <EOF>"""
-          )
-      }
-    }
-
-    test(s"$prefix WITH 'n' as n SHOW $entity YIELD name RETURN name as numIndexes") {
-      failsParsing[Statements].in {
-        case Cypher5JavaCc => _.withMessageStart("Invalid input 'SHOW': expected")
-        case _ => _.withSyntaxErrorContaining(
-            """Invalid input 'SHOW': expected 'FOREACH', ',', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WHERE', 'WITH' or <EOF>"""
-          )
-      }
-    }
-
-    test(s"$prefix SHOW $entity RETURN name as numIndexes") {
-      failsParsing[Statements].in {
-        case Cypher5JavaCc => _.withMessageStart("Invalid input 'RETURN': expected")
-        case Cypher5 => _.withSyntaxErrorContaining(
-            """Invalid input 'RETURN': expected 'BRIEF', 'SHOW', 'TERMINATE', 'VERBOSE', 'WHERE', 'YIELD' or <EOF>"""
-          )
-        case _ => _.withSyntaxErrorContaining(
-            """Invalid input 'RETURN': expected 'SHOW', 'TERMINATE', 'WHERE', 'YIELD' or <EOF>"""
-          )
-      }
-    }
-
-    test(s"$prefix SHOW $entity WITH 1 as c RETURN name as numIndexes") {
-      failsParsing[Statements].in {
-        case Cypher5JavaCc => _.withMessageStart("Invalid input 'WITH': expected")
-        case Cypher5 => _.withSyntaxErrorContaining(
-            """Invalid input 'WITH': expected 'BRIEF', 'SHOW', 'TERMINATE', 'VERBOSE', 'WHERE', 'YIELD' or <EOF>"""
-          )
-        case _ => _.withSyntaxErrorContaining(
-            """Invalid input 'WITH': expected 'SHOW', 'TERMINATE', 'WHERE', 'YIELD' or <EOF>"""
-          )
-      }
-    }
-
-    test(s"$prefix SHOW $entity WITH 1 as c") {
-      failsParsing[Statements].in {
-        case Cypher5JavaCc => _.withMessageStart("Invalid input 'WITH': expected")
-        case Cypher5 => _.withSyntaxErrorContaining(
-            """Invalid input 'WITH': expected 'BRIEF', 'SHOW', 'TERMINATE', 'VERBOSE', 'WHERE', 'YIELD' or <EOF>"""
-          )
-        case _ => _.withSyntaxErrorContaining(
-            """Invalid input 'WITH': expected 'SHOW', 'TERMINATE', 'WHERE', 'YIELD' or <EOF>"""
-          )
-      }
-    }
-
-    test(s"$prefix SHOW $entity YIELD a WITH a RETURN a") {
-      failsParsing[Statements].in {
-        case Cypher5JavaCc => _.withMessageStart("Invalid input 'WITH': expected")
-        case _ => _.withSyntaxErrorContaining(
-            """Invalid input 'WITH': expected ',', 'AS', 'ORDER BY', 'LIMIT', 'OFFSET', 'RETURN', 'SHOW', 'SKIP', 'TERMINATE', 'WHERE' or <EOF>"""
-          )
-      }
-    }
-
-    test(s"$prefix SHOW $entity YIELD as UNWIND as as a RETURN a") {
-      failsParsing[Statements].in {
-        case Cypher5JavaCc => _.withMessageStart("Invalid input 'UNWIND': expected")
-        case _ => _.withSyntaxErrorContaining(
-            """Invalid input 'UNWIND': expected ',', 'AS', 'ORDER BY', 'LIMIT', 'OFFSET', 'RETURN', 'SHOW', 'SKIP', 'TERMINATE', 'WHERE' or <EOF>"""
-          )
-      }
-    }
-
-    test(s"$prefix SHOW $entity RETURN name2 YIELD name2") {
-      failsParsing[Statements].in {
-        case Cypher5JavaCc => _.withMessageStart("Invalid input 'RETURN': expected")
-        case Cypher5 => _.withSyntaxErrorContaining(
-            """Invalid input 'RETURN': expected 'BRIEF', 'SHOW', 'TERMINATE', 'VERBOSE', 'WHERE', 'YIELD' or <EOF>"""
-          )
-        case _ => _.withSyntaxErrorContaining(
-            """Invalid input 'RETURN': expected 'SHOW', 'TERMINATE', 'WHERE', 'YIELD' or <EOF>"""
-          )
-      }
-    }
-  }
-
   // Help methods
-
-  private def assertAstVersionBased(
-    expected: ShowConstraintType => Statements,
-    constraintType: ShowConstraintType,
-    constraintTypeCypher5: ShowConstraintType,
-    comparePosition: Boolean
-  ) =
-    if (comparePosition)
-      parsesIn[Statements] {
-        case Cypher5 | Cypher5JavaCc => _.toAstPositioned(expected(constraintTypeCypher5))
-        case _                       => _.toAstPositioned(expected(constraintType))
-      }
-    else
-      parsesIn[Statements] {
-        case Cypher5 | Cypher5JavaCc => _.toAst(expected(constraintTypeCypher5))
-        case _                       => _.toAst(expected(constraintType))
-      }
 
   private def assertFailsOnBriefVerbosePreviouslyAllowed(
     command: String,
     keyword: String,
     failOnBtree: Boolean = false
   ) = {
-    failsParsing[Statements]
-      .in {
-        case Cypher5JavaCc | Cypher5 =>
-          _.withSyntaxErrorContaining(
-            s"""`$command` no longer allows the `BRIEF` and `VERBOSE` keywords,
-               |please omit `BRIEF` and use `YIELD *` instead of `VERBOSE`.""".stripMargin
-          )
-        case _ if failOnBtree =>
-          _.withSyntaxErrorContaining(
-            "Invalid input 'BTREE': expected 'ALIAS', 'ALIASES', 'ALL', 'CONSTRAINT', 'CONSTRAINTS', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', " +
-              "'EXIST', 'EXISTENCE', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', " +
-              "'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', " +
-              "'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'CURRENT USER', 'USERS' or 'VECTOR'"
-          )
-        case _ =>
-          _.withSyntaxErrorContaining(
-            s"Invalid input '$keyword': expected 'SHOW', 'TERMINATE', 'WHERE', 'YIELD' or <EOF>"
-          )
-      }
+    failsParsing[Statements].in {
+      case Cypher5 => _.withOldSyntax(
+          s"""`$command` no longer allows the `BRIEF` and `VERBOSE` keywords,
+             |please omit `BRIEF` and use `YIELD *` instead of `VERBOSE`.""".stripMargin
+        )
+      case _ if failOnBtree =>
+        _.withSyntaxErrorContaining(
+          "Invalid input 'BTREE': expected 'ALIAS', 'ALIASES', 'ALL', 'AUTH', 'CONSTRAINT', 'CONSTRAINTS', 'CURRENT', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', " +
+            "'EXIST', 'EXISTENCE', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', " +
+            "'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', " +
+            "'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'USERS' or 'VECTOR'"
+        )
+      case _ => _.withSyntaxErrorContaining(
+          s"Invalid input '$keyword': expected 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'FOREACH', " +
+            "'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NEXT', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SHOW', 'SKIP', 'TERMINATE', " +
+            "'UNION', 'UNWIND', 'USE', 'WHERE', 'WITH', 'YIELD' or <EOF>"
+        )
+    }
   }
 
   private def assertFailsOnBriefVerboseNeverAllowed(keyword: String) = {
-    failsParsing[Statements]
-      .in {
-        case Cypher5JavaCc =>
-          _.withMessageStart(
-            s"""Invalid input '$keyword': expected
-               |  "SHOW"
-               |  "TERMINATE"
-               |  "WHERE"
-               |  "YIELD"
-               |  <EOF> (line""".stripMargin
-          )
-        case _ =>
-          _.withSyntaxErrorContaining(
-            s"Invalid input '$keyword': expected 'SHOW', 'TERMINATE', 'WHERE', 'YIELD' or <EOF>"
-          )
-      }
+    failsParsing[Statements].in {
+      case Cypher5 =>
+        _.withSyntaxErrorContaining(
+          s"Invalid input '$keyword': expected 'WHERE', 'YIELD' or <EOF>"
+        )
+      case _ =>
+        _.withSyntaxErrorContaining(
+          s"Invalid input '$keyword': expected 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'FOREACH', " +
+            "'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NEXT', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SHOW', 'SKIP', 'TERMINATE', " +
+            "'UNION', 'UNWIND', 'USE', 'WHERE', 'WITH', 'YIELD' or <EOF>"
+        )
+    }
   }
 
   private def assertFailsOnBriefVerboseWhenIntroducedInCypher25(keyword: String, constraintTypeKeyword: String) = {
     val errorKeyword = constraintTypeKeyword.split(" ").last
-    failsParsing[Statements]
-      .in {
-        case Cypher5JavaCc =>
-          _.withSyntaxErrorContaining(
-            s"""Invalid input '$errorKeyword': expected "EXIST", "EXISTENCE" or "TYPE" (line"""
-          )
-        case Cypher5 =>
-          _.withSyntaxErrorContaining(
-            s"Invalid input '$errorKeyword': expected 'EXIST', 'EXISTENCE' or 'TYPE' (line"
-          )
-        case _ =>
-          _.withSyntaxErrorContaining(
-            s"Invalid input '$keyword': expected 'SHOW', 'TERMINATE', 'WHERE', 'YIELD' or <EOF>"
-          )
-      }
+    failsParsing[Statements].in {
+      case Cypher5 => _.withSyntaxErrorContaining(
+          s"Invalid input '$errorKeyword': expected 'EXIST', 'EXISTENCE' or 'TYPE' (line"
+        )
+      case _ => _.withSyntaxErrorContaining(
+          s"Invalid input '$keyword': expected 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'FOREACH', " +
+            "'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NEXT', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SHOW', 'SKIP', 'TERMINATE', " +
+            "'UNION', 'UNWIND', 'USE', 'WHERE', 'WITH', 'YIELD' or <EOF>"
+        )
+    }
   }
 
   private def assertFailsOnBtree() = {
-    failsParsing[Statements]
-      .in {
-        case Cypher5JavaCc | Cypher5 =>
-          _.withSyntaxErrorContaining("Invalid index type b-tree, please omit the `BTREE` filter.")
-        case _ =>
-          _.withSyntaxErrorContaining(
-            "Invalid input 'BTREE': expected 'ALIAS', 'ALIASES', 'ALL', 'CONSTRAINT', 'CONSTRAINTS', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', " +
-              "'EXIST', 'EXISTENCE', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', " +
-              "'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', " +
-              "'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'CURRENT USER', 'USERS' or 'VECTOR'"
-          )
-      }
+    failsParsing[Statements].in {
+      case Cypher5 => _.withOldSyntax("Invalid index type b-tree, please omit the `BTREE` filter.")
+      case _ => _.withSyntaxErrorContaining(
+          "Invalid input 'BTREE': expected 'ALIAS', 'ALIASES', 'ALL', 'AUTH', 'CONSTRAINT', 'CONSTRAINTS', 'CURRENT', 'DATABASE', 'DEFAULT DATABASE', 'HOME DATABASE', 'DATABASES', " +
+            "'EXIST', 'EXISTENCE', 'FULLTEXT', 'FUNCTION', 'FUNCTIONS', 'BUILT IN', 'INDEX', 'INDEXES', 'KEY', 'LOOKUP', 'NODE', 'POINT', 'POPULATED', 'PRIVILEGE', 'PRIVILEGES', " +
+            "'PROCEDURE', 'PROCEDURES', 'PROPERTY', 'RANGE', 'REL', 'RELATIONSHIP', 'ROLE', 'ROLES', 'SERVER', 'SERVERS', 'SETTING', 'SETTINGS', 'SUPPORTED', 'TEXT', " +
+            "'TRANSACTION', 'TRANSACTIONS', 'UNIQUE', 'UNIQUENESS', 'USER', 'USERS' or 'VECTOR'"
+        )
+    }
   }
 }

@@ -24,6 +24,7 @@ import static org.neo4j.storageengine.AppendIndexProvider.UNKNOWN_APPEND_INDEX;
 import static org.neo4j.storageengine.api.TransactionApplicationMode.INTERNAL;
 import static org.neo4j.storageengine.api.TransactionIdStore.BASE_CHUNK_ID;
 import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_CONSENSUS_INDEX;
+import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_TX_ID;
 
 import java.util.List;
 import org.apache.commons.lang3.mutable.MutableLong;
@@ -38,6 +39,7 @@ import org.neo4j.kernel.KernelVersionProvider;
 import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.impl.api.KernelTransactionImplementation;
 import org.neo4j.kernel.impl.api.LeaseClient;
+import org.neo4j.kernel.impl.api.StorageCommands;
 import org.neo4j.kernel.impl.api.TransactionClockContext;
 import org.neo4j.kernel.impl.api.TransactionCommitProcess;
 import org.neo4j.kernel.impl.api.chunk.ChunkMetadata;
@@ -47,9 +49,9 @@ import org.neo4j.kernel.impl.api.chunk.TransactionRollbackProcess;
 import org.neo4j.kernel.impl.api.transaction.serial.SerialExecutionGuard;
 import org.neo4j.kernel.impl.api.txid.TransactionIdGenerator;
 import org.neo4j.kernel.impl.locking.LockManager;
-import org.neo4j.kernel.impl.transaction.log.TransactionCommitmentFactory;
 import org.neo4j.kernel.impl.transaction.tracing.TransactionRollbackEvent;
 import org.neo4j.kernel.impl.transaction.tracing.TransactionWriteEvent;
+import org.neo4j.lock.Lock;
 import org.neo4j.lock.LockTracer;
 import org.neo4j.logging.Log;
 import org.neo4j.logging.LogProvider;
@@ -61,12 +63,14 @@ import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.storageengine.api.txstate.validation.TransactionConflictException;
 import org.neo4j.storageengine.api.txstate.validation.TransactionValidator;
 import org.neo4j.storageengine.api.txstate.validation.ValidationLockDumper;
+import org.neo4j.wal.TransactionCommitmentFactory;
 
 public final class ChunkCommitter implements TransactionCommitter {
     private final KernelTransactionImplementation ktx;
     private int chunkNumber = BASE_CHUNK_ID;
     private long previousBatchAppendIndex = UNKNOWN_APPEND_INDEX;
     private KernelVersion kernelVersion;
+    private Lock raftUpgradeBarrierEntered;
     private ChunkedTransaction transactionPayload;
     private final TransactionCommitmentFactory commitmentFactory;
     private final KernelVersionProvider kernelVersionProvider;
@@ -122,7 +126,7 @@ public final class ChunkCommitter implements TransactionCommitter {
             LeaseClient leaseClient,
             CursorContext cursorContext,
             MemoryTracker memoryTracker,
-            KernelTransaction.KernelTransactionMonitor kernelTransactionMonitor,
+            KernelTransaction.Monitor monitor,
             LockTracer lockTracer,
             long commitTime,
             long startTimeMillis,
@@ -132,7 +136,15 @@ public final class ChunkCommitter implements TransactionCommitter {
             throws KernelException {
         LockManager.Client lockClient = ktx.lockClient();
         try {
-            List<StorageCommand> extractedCommands = ktx.extractCommands(memoryTracker);
+            if (raftUpgradeBarrierEntered == null) {
+                // Hold the upgrade barrier from the moment we capture the version in commands until this transaction
+                // has finished appending all its chunks (released in reset()), so a concurrent version upgrade cannot
+                // be ordered before a later chunk of this (now old-version) transaction.
+                raftUpgradeBarrierEntered = ktx.enterRaftUpgradeBarrier();
+            }
+            StorageCommands storageCommands = ktx.extractCommands(memoryTracker);
+            List<StorageCommand> extractedCommands = storageCommands.commands();
+            assert storageCommands.leases().size() == 0 : "LeaseMap not implemented for chunked transactions";
             if (!extractedCommands.isEmpty() || (commit && transactionPayload != null)) {
                 serialExecutionGuard.check();
                 if (kernelVersion == null) {
@@ -165,18 +177,23 @@ public final class ChunkCommitter implements TransactionCommitter {
 
                     ChunkedCommandBatch chunk = new ChunkedCommandBatch(extractedCommands, chunkMetadata);
                     transaction.init(chunk);
-                    commitProcess.commit(transaction, transactionWriteEvent, mode);
+                    commitProcess.commit(transaction, transactionWriteEvent, mode, memoryTracker);
 
                     // transaction chunk commit completed
                     transactionPayload = transaction;
 
                     validationLockDumper.dumpLocks(
-                            transactionValidator, lockClient, chunkNumber, transactionPayload.transactionId());
+                            lockClient, chunkNumber, transactionPayload.transactionId(), memoryTracker);
                     transactionWriteEvent.chunkAppended(
-                            chunkNumber, ktx.getTransactionSequenceNumber(), transactionPayload.transactionId());
+                            chunkNumber,
+                            ktx.getTransactionSequenceNumber(),
+                            transactionPayload.transactionId(),
+                            transactionPayload.lastBatchAppendIndex());
                 } catch (TransactionConflictException tce) {
+                    dumpLocks(lockClient, memoryTracker);
                     throw tce;
                 } catch (Exception e) {
+                    dumpLocks(lockClient, memoryTracker);
                     log.debug("Transaction chunk commit failure.", e);
                     throw e;
                 }
@@ -189,6 +206,11 @@ public final class ChunkCommitter implements TransactionCommitter {
         }
     }
 
+    private void dumpLocks(LockManager.Client lockClient, MemoryTracker memoryTracker) {
+        long txId = transactionPayload != null ? transactionPayload.transactionId() : UNKNOWN_TX_ID;
+        validationLockDumper.dumpLocks(lockClient, chunkNumber, txId, memoryTracker);
+    }
+
     @Override
     public void rollback(TransactionRollbackEvent rollbackEvent) {
         if (transactionPayload != null) {
@@ -196,7 +218,7 @@ public final class ChunkCommitter implements TransactionCommitter {
                 validateCurrentKernelVersion();
                 prepareRollBackEntry();
                 if (isSingleInstance()) {
-                    chunkedRollbackProcess.rollbackChunks(transactionPayload, rollbackEvent);
+                    chunkedRollbackProcess.rollbackChunks(transactionPayload, rollbackEvent, ktx.memoryTracker());
                 }
                 writeRollbackEntry(rollbackEvent);
             } catch (Exception e) {
@@ -227,7 +249,7 @@ public final class ChunkCommitter implements TransactionCommitter {
     private void writeRollbackEntry(TransactionRollbackEvent transactionRollbackEvent)
             throws TransactionFailureException {
         try (var writeEvent = transactionRollbackEvent.beginRollbackWriteEvent()) {
-            commitProcess.commit(transactionPayload, writeEvent, INTERNAL);
+            commitProcess.commit(transactionPayload, writeEvent, INTERNAL, ktx.memoryTracker());
         }
     }
 
@@ -236,7 +258,7 @@ public final class ChunkCommitter implements TransactionCommitter {
                 false,
                 true,
                 true,
-                UNKNOWN_APPEND_INDEX,
+                previousBatchAppendIndex,
                 chunkNumber,
                 new MutableLong(UNKNOWN_CONSENSUS_INDEX),
                 new MutableLong(UNKNOWN_APPEND_INDEX),
@@ -250,16 +272,19 @@ public final class ChunkCommitter implements TransactionCommitter {
         transactionPayload.init(chunk);
     }
 
-    // kernel version can be updated by upgrade listener and for now we only fail to commit such
-    // transactions.
     private void validateCurrentKernelVersion() {
         if (kernelVersion != kernelVersionProvider.kernelVersion()) {
-            throw new UnsupportedOperationException("We do not support upgrade during chunked transaction.");
+            throw new UnsupportedOperationException(
+                    "Kernel version changed while running chunked transaction. Please check kernel version upgrade path.");
         }
     }
 
     @Override
     public void reset() {
+        if (raftUpgradeBarrierEntered != null) {
+            raftUpgradeBarrierEntered.close();
+            raftUpgradeBarrierEntered = null;
+        }
         chunkNumber = BASE_CHUNK_ID;
         kernelVersion = null;
         transactionPayload = null;

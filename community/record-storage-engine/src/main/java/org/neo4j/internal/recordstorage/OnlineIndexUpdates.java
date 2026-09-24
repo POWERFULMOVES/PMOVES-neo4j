@@ -23,9 +23,7 @@ import static org.neo4j.internal.recordstorage.Command.Mode.CREATE;
 import static org.neo4j.internal.recordstorage.Command.Mode.DELETE;
 import static org.neo4j.io.IOUtils.closeAllUnchecked;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Iterator;
+import java.io.IOException;
 import org.neo4j.common.EntityType;
 import org.neo4j.internal.recordstorage.Command.NodeCommand;
 import org.neo4j.internal.recordstorage.Command.PropertyCommand;
@@ -40,13 +38,12 @@ import org.neo4j.kernel.impl.store.NodeLabelsField;
 import org.neo4j.kernel.impl.store.NodeStore;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.storageengine.api.EntityUpdates;
-import org.neo4j.storageengine.api.IndexEntryUpdate;
 import org.neo4j.storageengine.api.StorageNodeCursor;
 import org.neo4j.storageengine.api.StorageReader;
 import org.neo4j.storageengine.api.StorageRelationshipScanCursor;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
+import org.neo4j.storageengine.util.IndexUpdatesWorkSync;
 import org.neo4j.token.api.TokenConstants;
-import org.neo4j.util.VisibleForTesting;
 
 /**
  * Derives logical index updates from physical records, provided by {@link NodeCommand node commands},
@@ -55,10 +52,10 @@ import org.neo4j.util.VisibleForTesting;
  * properties matching existing and online indexes; in that case the properties for that node needs to be read
  * from store since the commands in that transaction cannot itself provide enough information.
  *
- * One instance can be {@link IndexUpdates#feed(Cursor, Cursor, CommandSelector) fed} data about
- * multiple transactions, to be {@link #iterator() accessed} later.
+ * One instance can be {@link OnlineIndexUpdates#feed(Cursor, Cursor, CommandSelector) fed} data about
+ * multiple transactions, to be {@link #apply()} applied} later.
  */
-public class OnlineIndexUpdates implements IndexUpdates {
+public class OnlineIndexUpdates implements AutoCloseable {
     private final NodeStore nodeStore;
     private final SchemaCache schemaCache;
     private final PropertyPhysicalToLogicalConverter converter;
@@ -66,7 +63,8 @@ public class OnlineIndexUpdates implements IndexUpdates {
     private final CursorContext cursorContext;
     private final MemoryTracker memoryTracker;
     private final StoreCursors storeCursors;
-    private final Collection<IndexEntryUpdate<IndexDescriptor>> updates = new ArrayList<>();
+    private final IndexUpdatesWorkSync updatesSync;
+    private IndexUpdatesWorkSync.Batch updates;
     private StorageNodeCursor nodeCursor;
     private StorageRelationshipScanCursor relationshipCursor;
 
@@ -77,7 +75,8 @@ public class OnlineIndexUpdates implements IndexUpdates {
             StorageReader reader,
             CursorContext cursorContext,
             MemoryTracker memoryTracker,
-            StoreCursors storeCursors) {
+            StoreCursors storeCursors,
+            IndexUpdatesWorkSync updatesSync) {
         this.nodeStore = nodeStore;
         this.schemaCache = schemaCache;
         this.converter = converter;
@@ -85,14 +84,17 @@ public class OnlineIndexUpdates implements IndexUpdates {
         this.cursorContext = cursorContext;
         this.memoryTracker = memoryTracker;
         this.storeCursors = storeCursors;
+        this.updatesSync = updatesSync;
+        this.updates = updatesSync.newBatch(cursorContext);
     }
 
-    @Override
-    public Iterator<IndexEntryUpdate<IndexDescriptor>> iterator() {
-        return updates.iterator();
-    }
-
-    @Override
+    /**
+     * Feeds updates raw material in the form of node/property commands, to create updates from.
+     *
+     * @param nodeCommands         node data
+     * @param relationshipCommands relationship data
+     * @param commandSelector selects before/after records for each command
+     */
     public void feed(
             EntityCommandGrouper<NodeCommand>.Cursor nodeCommands,
             EntityCommandGrouper<RelationshipCommand>.Cursor relationshipCommands,
@@ -110,9 +112,10 @@ public class OnlineIndexUpdates implements IndexUpdates {
         }
     }
 
-    @Override
-    public boolean hasUpdates() {
-        return !updates.isEmpty();
+    public void apply() throws IOException {
+        IndexUpdatesWorkSync.Batch updatesToApply = updates;
+        updates = updatesSync.newBatch(cursorContext);
+        updatesToApply.close();
     }
 
     private void gatherUpdatesFor(
@@ -149,7 +152,7 @@ public class OnlineIndexUpdates implements IndexUpdates {
         entityUpdates
                 .valueUpdatesForIndexKeys(
                         relatedIndexes, reader, entityType, cursorContext, storeCursors, memoryTracker)
-                .forEach(updates::add);
+                .forEach(updates::indexUpdate);
     }
 
     private EntityUpdates gatherUpdatesFromCommandsForNode(
@@ -199,7 +202,7 @@ public class OnlineIndexUpdates implements IndexUpdates {
     private void eagerlyGatherTokenIndexUpdates(EntityUpdates entityUpdates, EntityType entityType) {
         IndexDescriptor relatedToken =
                 schemaCache.indexForSchemaAndType(SchemaDescriptors.forAnyEntityTokens(entityType), IndexType.LOOKUP);
-        entityUpdates.tokenUpdateForIndexKey(relatedToken).ifPresent(updates::add);
+        entityUpdates.tokenUpdateForIndexKey(relatedToken).ifPresent(updates::indexUpdate);
     }
 
     private static boolean providesCompleteListOfProperties(Command entityCommand) {
@@ -257,17 +260,7 @@ public class OnlineIndexUpdates implements IndexUpdates {
 
     @Override
     public void close() {
-        closeAllUnchecked(nodeCursor, relationshipCursor, reader);
-    }
-
-    @Override
-    public void reset() {
-        updates.clear();
-    }
-
-    @VisibleForTesting
-    protected Collection<IndexEntryUpdate<IndexDescriptor>> getUpdates() {
-        return updates;
+        closeAllUnchecked(updates, nodeCursor, relationshipCursor, reader);
     }
 
     @Override

@@ -29,6 +29,7 @@ import org.neo4j.internal.kernel.api.InternalIndexState;
 import org.neo4j.internal.kernel.api.PopulationProgress;
 import org.neo4j.internal.kernel.api.exceptions.schema.IndexNotFoundKernelException;
 import org.neo4j.internal.schema.IndexDescriptor;
+import org.neo4j.io.async.AsyncBlockAccessor;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.kernel.api.index.IndexUpdater;
@@ -58,18 +59,20 @@ public class PopulatingIndexProxy implements IndexProxy {
     @Override
     public IndexUpdater newUpdater(final IndexUpdateMode mode, CursorContext cursorContext, boolean parallel) {
         return switch (mode) {
-            case ONLINE, RECOVERY -> new PopulatingIndexUpdater() {
-                @Override
-                public void process(IndexEntryUpdate<?> update) {
-                    job.update(update);
-                }
-            };
-            default -> new PopulatingIndexUpdater() {
-                @Override
-                public void process(IndexEntryUpdate<?> update) {
-                    throw new IllegalArgumentException("Unsupported update mode: " + mode);
-                }
-            };
+            case ONLINE, RECOVERY ->
+                new PopulatingIndexUpdater() {
+                    @Override
+                    public void process(IndexEntryUpdate update) {
+                        job.queueConcurrentUpdate(update, cursorContext);
+                    }
+                };
+            default ->
+                new PopulatingIndexUpdater() {
+                    @Override
+                    public void process(IndexEntryUpdate update) {
+                        throw new IllegalArgumentException("Unsupported update mode: " + mode);
+                    }
+                };
         };
     }
 
@@ -89,8 +92,13 @@ public class PopulatingIndexProxy implements IndexProxy {
     }
 
     @Override
-    public void force(FileFlushEvent flushEvent, CursorContext cursorContext) {
+    public void force(FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext) {
         // Ignored... this isn't called from the outside while we're populating the index.
+    }
+
+    @Override
+    public long compact(FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext) {
+        return 0;
     }
 
     @Override
@@ -105,12 +113,12 @@ public class PopulatingIndexProxy implements IndexProxy {
 
     @Override
     public ValueIndexReader newValueReader() throws IndexNotFoundKernelException {
-        throw IndexNotFoundKernelException.indexIsStillPopulating(String.valueOf(job));
+        throw IndexNotFoundKernelException.indexIsStillPopulating(String.valueOf(job), indexDescriptor.getName());
     }
 
     @Override
     public TokenIndexReader newTokenReader() throws IndexNotFoundKernelException {
-        throw IndexNotFoundKernelException.indexIsStillPopulating(String.valueOf(job));
+        throw IndexNotFoundKernelException.indexIsStillPopulating(String.valueOf(job), indexDescriptor.getName());
     }
 
     @Override

@@ -16,34 +16,48 @@
  */
 package org.neo4j.cypher.internal.ast
 
+import org.neo4j.cypher.internal.CypherVersion
+import org.neo4j.cypher.internal.ast.ConditionalQueryWhen.msg
 import org.neo4j.cypher.internal.ast.ReturnItems.ReturnVariables
 import org.neo4j.cypher.internal.ast.Union.UnionMapping
+import org.neo4j.cypher.internal.ast.prettifier.ExpressionStringifier
 import org.neo4j.cypher.internal.ast.semantics.Scope
+import org.neo4j.cypher.internal.ast.semantics.Scope.DeclarationsAndDependencies
 import org.neo4j.cypher.internal.ast.semantics.SemanticAnalysisTooling
+import org.neo4j.cypher.internal.ast.semantics.SemanticAnalysisToolingErrorWithGqlInfo
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheck
+import org.neo4j.cypher.internal.ast.semantics.SemanticCheck.fromFunctionWithContext
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheck.fromState
+import org.neo4j.cypher.internal.ast.semantics.SemanticCheck.mapState
+import org.neo4j.cypher.internal.ast.semantics.SemanticCheck.setState
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheck.success
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheck.when
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheckContext
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheckResult
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheckable
 import org.neo4j.cypher.internal.ast.semantics.SemanticError
+import org.neo4j.cypher.internal.ast.semantics.SemanticExpressionCheck
 import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
 import org.neo4j.cypher.internal.ast.semantics.SemanticState
+import org.neo4j.cypher.internal.ast.semantics.SemanticState.ScopeZipper
 import org.neo4j.cypher.internal.ast.semantics.Symbol
+import org.neo4j.cypher.internal.ast.semantics._
+import org.neo4j.cypher.internal.ast.semantics.iterableOnceSemanticChecking
+import org.neo4j.cypher.internal.ast.semantics.liftSemanticErrorDef
 import org.neo4j.cypher.internal.expressions.Expression
-import org.neo4j.cypher.internal.expressions.ExpressionWithComputedDependencies
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.Variable
+import org.neo4j.cypher.internal.notification.SubqueryVariableShadowing
+import org.neo4j.cypher.internal.util.ASTNode
 import org.neo4j.cypher.internal.util.InputPosition
-import org.neo4j.cypher.internal.util.Rewriter
-import org.neo4j.cypher.internal.util.SubqueryVariableShadowing
-import org.neo4j.cypher.internal.util.topDown
+import org.neo4j.cypher.internal.util.helpers.LazyVal
+import org.neo4j.cypher.internal.util.symbols.CTBoolean
 import org.neo4j.gqlstatus.GqlHelper
+import org.neo4j.kernel.database.NamedDatabaseId.SYSTEM_DATABASE_NAME
 
-sealed trait Query extends Statement with SemanticCheckable with SemanticAnalysisTooling {
-  def containsUpdates: Boolean
-  def returnColumns: List[LogicalVariable] = returnVariables.explicitVariables.toList
+import scala.annotation.tailrec
+
+sealed trait QueryUtils {
 
   /**
    * All variables that are explicitly listed to be returned from this statement.
@@ -52,24 +66,93 @@ sealed trait Query extends Statement with SemanticCheckable with SemanticAnalysi
   def returnVariables: ReturnVariables
 
   /**
+   * All variables that are explicitly listed to be returned from this statement.
+   */
+  def returnColumns: List[LogicalVariable] = returnVariables.explicitVariables.toList
+
+  /**
+   * True iff this query part ends with a return clause.
+   */
+  def isReturning: Boolean
+
+  /**
    * Given the root scope for this query part,
    * looks up the final scope after the last clause
    */
   def finalScope(scope: Scope): Scope
 
   /**
-   * Check this query part if it starts with an importing WITH
+   * Semantic check for when this `Query` is the body of local callable, and imports
+   * local callable parameters as variables from the `outer` scope
    */
-  def checkImportingWith: SemanticCheck
+  def semanticCheckInLocalCallableBodyContext(
+    outer: SemanticState,
+    current: SemanticState,
+    optional: Boolean
+  ): SemanticCheck
 
   /**
    * Semantic check for when this `Query` is in a subquery, and might import
    * variables from the `outer` scope
    */
-  def semanticCheckInSubqueryContext(outer: SemanticState, current: SemanticState): SemanticCheck
-  def semanticCheckImportingWithSubQueryContext(outer: SemanticState): SemanticCheck
+  def semanticCheckInSubqueryContext(outer: SemanticState, current: SemanticState, optional: Boolean): SemanticCheck
 
-  def returnVariableCheck(outer: SemanticState): SemanticCheck
+  def semanticCheckImportingWithSubQueryContext(outer: SemanticState, optional: Boolean): SemanticCheck
+
+  /**
+   * Exists and Count can omit the Return Statement
+   * Count still requires it for Distinct Unions as in this case the count
+   * changes based on which rows are distinct vs not
+   */
+  def semanticCheckInSubqueryExpressionContext(
+    canOmitReturn: Boolean,
+    outer: SemanticState,
+    context: UnaliasedNotAllowed = ImportingWithSubqueryCall
+  ): SemanticCheck
+
+  /**
+   * Semantic check for when this `Query` is enclosed in outer context
+   */
+  def semanticCheckInContext(context: UnaliasedNotAllowed): SemanticCheck
+
+  def importValuesFromRecordedFinalScope(query: Query): SemanticCheck = { (state: SemanticState) =>
+    val scopeToImportFrom = state.scope(query).getOrElse(Scope.empty)
+    SemanticCheckResult.success(state
+      .importValuesFromScope(finalScope(scopeToImportFrom))
+      .importValuesFromScope(scopeToImportFrom))
+  }
+
+}
+
+sealed trait ResultEmitter extends Product
+
+object ResultEmitter {
+  case class SingleClause(clause: Clause) extends ResultEmitter
+
+  case class OrEmitter(emitters: Seq[ResultEmitter]) extends ResultEmitter
+
+  case class AndEmitter(emitters: Seq[ResultEmitter]) extends ResultEmitter
+}
+
+sealed trait Query extends Statement with SemanticCheckable with SemanticAnalysisTooling with QueryUtils {
+  def containsUpdates: Boolean
+
+  /**
+   * All Return clauses contained within this statement.
+   */
+  def getReturns: Seq[Return]
+
+  /**
+   * True iff this query part ends with a finish clause.
+   */
+  def endsWithFinish: Boolean
+
+  /**
+   * Check this query part if it starts with an importing WITH
+   */
+  def checkImportingWith(optional: Boolean): SemanticCheck
+
+  def invalidImportingWith: Seq[SemanticError]
 
   /**
    * True if this query part starts with an importing WITH (has incoming arguments)
@@ -77,39 +160,66 @@ sealed trait Query extends Statement with SemanticCheckable with SemanticAnalysi
   def isCorrelated: Boolean
 
   /**
-   * True iff this query part ends with a return clause.
+   * Returns names of variables imported using importing WITH
    */
-  def isReturning: Boolean
+  def importColumns: Seq[LogicalVariable]
 
-  def getReturns: Seq[Return]
-
-  /**
-   * True iff this query part ends with a finish clause.
-   */
-  def endsWithFinish: Boolean
-  def importColumns: Seq[String]
+  def getImportingWithItems: Seq[ReturnItem]
 
   /**
-   * Exists and Count can omit the Return Statement
-   * Count still requires it for Distinct Unions as in this case the count
-   * changes based on which rows are distinct vs not
+   * Returns the query stripped from importing WITH responsible for top-level importing and a USE graph clause.
+   *
+   * Example:
+   *
+   * USE neo4j
+   * WITH x
+   * RETURN x AS y
+   * UNION
+   * USE neo4j
+   * WITH x
+   * CALL { USE neo4j WITH x RETURN x AS y }
+   * RETURN y
+   *
+   * returns as
+   *
+   * RETURN x AS y
+   * UNION
+   * CALL { WITH x RETURN x AS y }
+   * RETURN y
    */
-  def semanticCheckInSubqueryExpressionContext(canOmitReturn: Boolean): SemanticCheck
+  def withoutImportingWithAndGraphSelection: Option[Query]
+
+  def getGraphSelections: Seq[GraphSelection]
 
   /**
    * Return a copy of this query where the mapping function f is applied
-   * to each single query, regardless if this a single query or a union query.
+   * to each returning single query, regardless if this a single query or a union query.
    */
   def mapEachSingleQuery(f: SingleQuery => SingleQuery): Query
+
+  /**
+   * This collects the Return, FINISH, or update clauses that define the result or no result emitted by this query.
+   */
+  def getEmittingResultClauses: ResultEmitter
+
+  final protected def checkNoDefineAndCallInTransactions: SemanticCheck = {
+    val containsLocalDefinitions = folder.treeExists {
+      case _: QueryWithLocalDefinitions => true
+    }
+    if (!containsLocalDefinitions) {
+      SemanticCheck.success
+    } else {
+      SubqueryCall.findTransactionalSubquery(this).foldSemanticCheck { subqueryCall =>
+        SemanticCheck.error(SemanticError.invalidUseOfDefineAndCIT(subqueryCall.position))
+      }
+    }
+  }
 }
 
-case class SingleQuery(clauses: Seq[Clause])(val position: InputPosition) extends Query
-    with SemanticAnalysisTooling {
-  assert(clauses.nonEmpty)
+sealed trait PartQuery extends Query {
+  def clauses: Seq[Clause]
 
-  lazy val partitionedClauses: SingleQuery.PartitionedClauses = SingleQuery.partitionClauses(clauses)
-
-  override def mapEachSingleQuery(f: SingleQuery => SingleQuery): Query = f(this)
+  def singleQuery: SingleQuery
 
   override def containsUpdates: Boolean =
     clauses.exists {
@@ -128,15 +238,6 @@ case class SingleQuery(clauses: Seq[Clause])(val position: InputPosition) extend
     }
   }
 
-  /**
-   * The query is correlated if it imports variables from a parent query, this can happen if:
-   *   - it contains an importing `WITH` clause (in first position or in second position right after a `USE` clause), or
-   *   - it starts with a dynamic `USE` clause where the graph reference depends on a variable when invoking `graph.byName` or `graph.byElementId` (in a composite query).
-   */
-  override def isCorrelated: Boolean =
-    partitionedClauses.importingWith.isDefined ||
-      partitionedClauses.initialGraphSelection.exists(_.graphReference.dependencies.nonEmpty)
-
   override def isReturning: Boolean = clauses.last match {
     case _: Return => true
     case _         => false
@@ -147,29 +248,76 @@ case class SingleQuery(clauses: Seq[Clause])(val position: InputPosition) extend
     case _         => false
   }
 
-  override def importColumns: Seq[String] = partitionedClauses.importingWith match {
-    case Some(w) => w.returnItems.items.map(_.name)
-    case _       => Seq.empty
+  override def finalScope(scope: Scope): Scope =
+    if (scope.children.size < 1) Scope.empty else scope.children.last
+
+  override def withoutImportingWithAndGraphSelection: Option[PartQuery]
+
+  override def getGraphSelections: Seq[GraphSelection]
+}
+
+case class SingleQuery(clauses: Seq[Clause])(val position: InputPosition) extends PartQuery {
+  assert(clauses.nonEmpty)
+
+  override def singleQuery: SingleQuery = this
+
+  private val getCommandClauses: Seq[CommandClause] =
+    clauses.filter(_.isInstanceOf[CommandClause]).map(_.asInstanceOf[CommandClause])
+
+  override def mapEachSingleQuery(f: SingleQuery => SingleQuery): Query = f(this)
+
+  override def getEmittingResultClauses: ResultEmitter = ResultEmitter.SingleClause(clauses.last)
+
+  private val partitionedClausesLazy: LazyVal[SingleQuery.PartitionedClauses] =
+    LazyVal(SingleQuery.partitionClauses(clauses))
+  def partitionedClauses: SingleQuery.PartitionedClauses = partitionedClausesLazy.value
+
+  /**
+   * The query is correlated if it imports variables from a parent query, this can happen if:
+   *   - it contains an importing `WITH` clause (in first position or in second position right after a `USE` clause), or
+   *   - it starts with a dynamic `USE` clause where the graph reference depends on a variable when invoking `graph.byName` or `graph.byElementId` (in a composite query).
+   */
+  override def isCorrelated: Boolean =
+    partitionedClauses.importingWith.isDefined ||
+      partitionedClauses.initialGraphSelection.exists(_.graphReference.dependencies.nonEmpty)
+
+  override def importColumns: Seq[LogicalVariable] = partitionedClauses.importingWith match {
+    case Some(w) => w.returnItems.items.map(item =>
+        item.alias getOrElse { Variable(item.name)(item.position, Variable.isIsolatedDefault) }
+      )
+    case _ => Seq.empty
   }
+
+  override def getImportingWithItems: Seq[ReturnItem] =
+    partitionedClauses.importingWith.toSeq.flatMap(_.returnItems.items)
+
+  override def withoutImportingWithAndGraphSelection: Option[SingleQuery] = {
+    Option.when(
+      partitionedClauses.clausesExceptImportingWithAndInitialGraphSelection.nonEmpty
+    )(SingleQuery(partitionedClauses.clausesExceptImportingWithAndInitialGraphSelection)(position))
+  }
+
+  override def getGraphSelections: Seq[GraphSelection] =
+    partitionedClauses.initialGraphSelection.toSeq
 
   private def leadingNonImportingWith: Option[With] =
     if (partitionedClauses.importingWith.isDefined)
       None
     else
       partitionedClauses.clausesExceptImportingWithAndLeadingGraphSelection.headOption match {
-        case Some(nonImportingWith: With) => Some(nonImportingWith)
-        case _                            => None
+        case Some(nonImportingWith @ With(_, _, _, _, _, _, _, _: MayBeImportingWithType)) => Some(nonImportingWith)
+        case _                                                                             => None
       }
 
   private def semanticCheckAbstractInScopeSubquery(
     clauses: Seq[Clause],
     clauseCheck: Seq[Clause] => SemanticCheck,
-    canOmitReturnClause: Boolean = false
+    canOmitReturnClause: Boolean = false,
+    context: UnaliasedNotAllowed
   ): SemanticCheck =
     checkStandaloneCall(clauses) chain
       withScopedState(clauseCheck(clauses)) chain
-      checkComposableNonTransactionCommandsAllowed(clauses) chain
-      checkOrder(clauses, canOmitReturnClause) chain
+      checkOrder(clauses, canOmitReturnClause, context) chain
       checkNoCallInTransactionsAfterWriteClause(clauses) chain
       checkInputDataStream(clauses) chain
       checkUsePositionInScopeSubquery() chain
@@ -178,30 +326,69 @@ case class SingleQuery(clauses: Seq[Clause])(val position: InputPosition) extend
   private def semanticCheckAbstract(
     clauses: Seq[Clause],
     clauseCheck: Seq[Clause] => SemanticCheck,
-    canOmitReturnClause: Boolean = false
+    canOmitReturnClause: Boolean = false,
+    context: UnaliasedNotAllowed = ImportingWithSubqueryCall
   ): SemanticCheck =
     checkStandaloneCall(clauses) chain
       withScopedState(clauseCheck(clauses)) chain
-      checkComposableNonTransactionCommandsAllowed(clauses) chain
-      checkOrder(clauses, canOmitReturnClause) chain
+      checkOrder(clauses, canOmitReturnClause, context) chain
       checkNoCallInTransactionsAfterWriteClause(clauses) chain
       checkInputDataStream(clauses) chain
       checkUsePosition() chain
+      checkUseForRoutedSystemCommand() chain
       recordCurrentScope(this)
 
   override def semanticCheck: SemanticCheck =
-    semanticCheckAbstract(clauses, checkClauses(_, None))
+    checkNoDefineAndCallInTransactions chain
+      semanticCheckAbstract(clauses, checkClauses(_, None))
+
+  override def semanticCheckInContext(context: UnaliasedNotAllowed): SemanticCheck =
+    semanticCheckAbstract(clauses, checkClauses(_, None, context), context = context)
 
   /**
    * No outer scope is needed for checkClauses as we don't need to check the naming of any returned variables
    * as no variables from EXISTS / COUNT can be returned, unlike in CALL subqueries.
    */
-  override def semanticCheckInSubqueryExpressionContext(canOmitReturn: Boolean): SemanticCheck =
-    semanticCheckAbstract(clauses, checkClauses(_, None), canOmitReturnClause = canOmitReturn)
+  override def semanticCheckInSubqueryExpressionContext(
+    canOmitReturn: Boolean,
+    outer: SemanticState,
+    context: UnaliasedNotAllowed
+  ): SemanticCheck =
+    semanticCheckAbstract(
+      clauses,
+      checkClauses(_, None, context),
+      canOmitReturnClause = canOmitReturn,
+      context = context
+    )
 
-  override def checkImportingWith: SemanticCheck = partitionedClauses.importingWith.foldSemanticCheck(_.semanticCheck)
+  override def checkImportingWith(optional: Boolean): SemanticCheck =
+    partitionedClauses.importingWith.foldSemanticCheck(_.semanticCheck)
 
-  override def semanticCheckImportingWithSubQueryContext(outer: SemanticState): SemanticCheck = {
+  override def invalidImportingWith: Seq[SemanticError] = leadingNonImportingWith.map { wth =>
+    def err(keyword: String): Seq[SemanticError] =
+      Seq(SemanticError.invalidImportingWithKeyword(keyword, wth.position))
+
+    val invalidValues = wth.returnItems.items.find(!_.isPassThrough)
+    if (invalidValues.nonEmpty) {
+      val value = invalidValues.head
+      val aliasString = if (value.alias.nonEmpty && !value.wasAutoAliased) s" AS ${value.alias.get.name}" else ""
+      val expression = ExpressionStringifier.apply().apply(value.expression)
+      val input = expression + aliasString
+      Seq(SemanticError.invalidImportingWithAliasOrExpression(input, wth.position))
+    } else if (wth.distinct) {
+      err("DISTINCT")
+    } else if (wth.orderBy.isDefined) {
+      err("ORDER BY")
+    } else if (wth.where.isDefined) {
+      err("WHERE")
+    } else if (wth.skip.isDefined) {
+      err("SKIP")
+    } else if (wth.limit.isDefined) {
+      err("LIMIT")
+    } else Seq.empty[SemanticError]
+  }.getOrElse(Seq.empty[SemanticError])
+
+  override def semanticCheckImportingWithSubQueryContext(outer: SemanticState, optional: Boolean): SemanticCheck = {
     def importVariables: SemanticCheck =
       partitionedClauses.importingWith.foldSemanticCheck(wth =>
         wth.semanticCheckContinuation(outer.currentScope.scope) chain
@@ -214,31 +401,46 @@ case class SingleQuery(clauses: Seq[Clause])(val position: InputPosition) extend
       checkInitialGraphSelection(outer) chain
       semanticCheckAbstract(
         partitionedClauses.clausesExceptImportingWithAndInitialGraphSelection,
-        importVariables chain checkClauses(_, Some(outer.currentScope.scope))
+        importVariables chain checkClauses(_, Some(outer.currentScope.scope), ImportingWithSubqueryCall),
+        context = ImportingWithSubqueryCall
       ) chain
-      warnOnPotentiallyShadowVariables(outer) chain
+      warnOnPotentiallyShadowVariables(outer, optional) chain
       SemanticCheck.fromState(state =>
         SemanticCheck.setState(state.recordWorkingGraph(workingGraph))
       ) // resetWorkingGraph
   }
 
-  override def returnVariableCheck(outer: SemanticState): SemanticCheck = {
-    semanticCheckAbstractInScopeSubquery(
-      partitionedClauses.clausesExceptInitialGraphSelection,
-      checkClauses(_, Some(outer.currentScope.scope))
-    )
-  }
+  override def semanticCheckInLocalCallableBodyContext(
+    outer: SemanticState,
+    current: SemanticState,
+    optional: Boolean
+  ): SemanticCheck =
+    semanticCheckInSubqueryAbstract(outer, current, optional, withShadowedCheck = false, QueryWithLocalDefinitions)
 
-  override def semanticCheckInSubqueryContext(outer: SemanticState, current: SemanticState): SemanticCheck = {
+  override def semanticCheckInSubqueryContext(
+    outer: SemanticState,
+    current: SemanticState,
+    optional: Boolean
+  ): SemanticCheck =
+    semanticCheckInSubqueryAbstract(outer, current, optional, withShadowedCheck = true, ScopeClauseSubqueryCall)
+
+  private def semanticCheckInSubqueryAbstract(
+    outer: SemanticState,
+    current: SemanticState,
+    optional: Boolean,
+    withShadowedCheck: Boolean,
+    context: UnaliasedNotAllowed
+  ): SemanticCheck = {
     val workingGraph = outer.workingGraph
 
     checkInitialGraphSelection(outer) chain
       semanticCheckAbstractInScopeSubquery(
         partitionedClauses.clausesExceptInitialGraphSelection,
-        checkClauses(_, Some(outer.currentScope.scope))
+        checkClauses(_, Some(outer.currentScope.scope), context),
+        context = context
       ) chain
-      errorOnShadowedImportVariables(outer) chain
-      warnOnPotentiallyShadowVariables(current) chain
+      (if (withShadowedCheck) errorOnShadowedImportVariables(outer) else success) chain
+      warnOnPotentiallyShadowVariables(current, optional) chain
       SemanticCheck.fromState(state =>
         SemanticCheck.setState(state.recordWorkingGraph(workingGraph))
       ) // resetWorkingGraph
@@ -250,37 +452,42 @@ case class SingleQuery(clauses: Seq[Clause])(val position: InputPosition) extend
     }
 
   private def checkIllegalImportWith: SemanticCheck = leadingNonImportingWith.foldSemanticCheck { wth =>
-    def err(msg: String): SemanticCheck =
-      error(s"Importing WITH should consist only of simple references to outside variables. $msg.", wth.position)
+    def err(keyword: String): SemanticCheck =
+      error(SemanticError.invalidImportingWithKeyword(keyword, wth.position))
 
     def checkReturnItems: SemanticCheck = {
-      val hasAliases = wth.returnItems.items.exists(!_.isPassThrough)
-      when(hasAliases) { err("Aliasing or expressions are not supported") }
+      val invalidValues = wth.returnItems.items.find(!_.isPassThrough)
+      when(invalidValues.nonEmpty) {
+        val value = invalidValues.head
+        val aliasString = if (value.alias.nonEmpty && !value.wasAutoAliased) s" AS ${value.alias.get.name}" else ""
+        val expression = ExpressionStringifier.apply().apply(value.expression)
+        val input = expression + aliasString
+        error(SemanticError.invalidImportingWithAliasOrExpression(input, wth.position))
+      }
     }
 
-    def checkDistinct: SemanticCheck = when(wth.distinct) { err("DISTINCT is not allowed") }
-    def checkOrderBy: SemanticCheck = wth.orderBy.foldSemanticCheck(_ => err("ORDER BY is not allowed"))
-    def checkWhere: SemanticCheck = wth.where.foldSemanticCheck(_ => err("WHERE is not allowed"))
-    def checkSkip: SemanticCheck = wth.skip.foldSemanticCheck(_ => err("SKIP is not allowed"))
-    def checkLimit: SemanticCheck = wth.limit.foldSemanticCheck(_ => err("LIMIT is not allowed"))
+    def checkDistinct: SemanticCheck = when(wth.distinct) {
+      err("DISTINCT")
+    }
 
-    fromState { state =>
-      val resultState = wth.returnItems.items.foldSemanticCheck(_.semanticCheck)
-        .run(state, SemanticCheckContext.empty)
+    def checkOrderBy: SemanticCheck = wth.orderBy.foldSemanticCheck(_ => err("ORDER BY"))
 
-      // [[ExpressionWithComputedDependencies]] do not carry their dependencies directly. Instead the dependencies are stored in the recorded scopes in the semantic state.
-      // See also: [[computeDependenciesForExpressions]]
-      val rewriter = topDown(Rewriter.lift {
-        case x: ExpressionWithComputedDependencies =>
-          val dependencies =
-            resultState.state.recordedScopes(x.subqueryAstNode).declarationsAndDependencies.dependencies
-          x.withComputedScopeDependencies(dependencies.map(_.asVariable))
-      })
+    def checkWhere: SemanticCheck = wth.where.foldSemanticCheck(_ => err("WHERE"))
 
-      val hasImports = wth.returnItems.includeExisting || wth.returnItems.items.exists { item =>
-        rewriter.apply(item.expression).asInstanceOf[Expression].dependencies.nonEmpty
+    def checkSkip: SemanticCheck = wth.skip.foldSemanticCheck(_ => err("SKIP"))
+
+    def checkLimit: SemanticCheck = wth.limit.foldSemanticCheck(_ => err("LIMIT"))
+
+    fromFunctionWithContext { (state, context) =>
+      val resultState = wth.returnItems.items.foldSemanticCheck(_.semanticCheck).run(state, context)
+      val hasImports = wth.returnItems.includeExisting || wth.returnItems.items.exists {
+        item =>
+          item.expression
+            .endoRewrite(DeclarationsAndDependencies.dependenciesRewriter(resultState.state))
+            .dependencies
+            .nonEmpty
       }
-      when(hasImports) {
+      val check = when(hasImports) {
         checkReturnItems chain
           checkDistinct chain
           checkWhere chain
@@ -288,34 +495,26 @@ case class SingleQuery(clauses: Seq[Clause])(val position: InputPosition) extend
           checkSkip chain
           checkLimit
       }
+      check.run(state, context)
     }
   }
 
   private def checkStandaloneCall(clauses: Seq[Clause]): SemanticCheck = {
     clauses match {
-      case Seq(_: UnresolvedCall, where: With) =>
-        val gql = GqlHelper.getGql42001_42N24(
-          "CALL",
-          "WHERE",
-          where.position.line,
-          where.position.column,
-          where.position.offset
-        )
-        error(
-          gql,
-          "Cannot use standalone call with WHERE (instead use: `CALL ... WITH * WHERE ... RETURN *`)",
-          where.position
-        )
-      case Seq(_: GraphSelection, _: UnresolvedCall) =>
+      case Seq(_: CallClause, where @ With(_, _, _, _, _, _, _, AddedInRewriteProcCall)) =>
+        standaloneCallWithWhereError(where)
+      case Seq(_: GraphSelection, _: CallClause, where @ With(_, _, _, _, _, _, _, AddedInRewriteProcCall)) =>
+        standaloneCallWithWhereError(where)
+      case Seq(_: GraphSelection, _: CallClause) =>
         // USE clause and standalone procedure call
         success
-      case all if all.size > 1 && all.exists(c => c.isInstanceOf[UnresolvedCall]) =>
+      case all if all.size > 1 && all.exists(c => c.isInstanceOf[CallClause]) =>
         // Non-standalone procedure call should not allow YIELD *
         clauses.find {
-          case uc: UnresolvedCall => uc.yieldAll
-          case _                  => false
+          case uc: CallClause => uc.yieldAll
+          case _              => false
         }.map(c =>
-          error("Cannot use `YIELD *` outside standalone call", c.position)
+          error(SemanticError.invalidYieldStar(c.position))
         )
           .getOrElse(success)
       case _ =>
@@ -323,106 +522,194 @@ case class SingleQuery(clauses: Seq[Clause])(val position: InputPosition) extend
     }
   }
 
-  private def checkComposableNonTransactionCommandsAllowed(clauses: Seq[Clause]): SemanticCheck = {
-    // Combining commands other than show and terminate transactions are hidden behind a feature flag
-    val commandClauses = clauses.filter(c => c.isInstanceOf[CommandClause])
-    if (commandClauses.size > 1) {
-      val nonTransactionCommands =
-        commandClauses.filter(c => !c.isInstanceOf[TransactionsCommandClause])
-
-      if (nonTransactionCommands.nonEmpty) {
-        requireFeatureSupport(
-          "Composing commands other than `SHOW TRANSACTIONS` and `TERMINATE TRANSACTIONS`",
-          SemanticFeature.ComposableCommands,
-          position
-        )
-      } else {
-        success
-      }
-    } else {
-      success
-    }
+  private def standaloneCallWithWhereError(where: With): SemanticCheck = {
+    val gql = GqlHelper.getGql42001_42N71_42NAB(
+      where.position.offset,
+      where.position.line,
+      where.position.column
+    )
+    error(
+      gql,
+      "Cannot use standalone call with WHERE (instead use: `CALL ... WITH * WHERE ... RETURN *`)",
+      where.position
+    )
   }
 
-  private def checkOrder(clauses: Seq[Clause], canOmitReturnClause: Boolean): SemanticCheck =
-    (s: SemanticState) => {
-      val sequenceErrors = clauses.sliding(2).foldLeft(Vector.empty[SemanticError]) {
+  private def containsNonCommandClause(clauses: Seq[Clause], onlyAllowReturnIfAddedInRewriter: Boolean): Boolean = {
+    clauses.exists(c =>
+      !c.isInstanceOf[CommandClause] &&
+        !c.isInstanceOf[GraphSelection] &&
+        !(c.isInstanceOf[Return] && (
+          !onlyAllowReturnIfAddedInRewriter || c.asInstanceOf[Return].returnType.addedInRewrite
+        )) &&
+        !(c.isInstanceOf[With] && (
+          c.asInstanceOf[With].withType == ParsedAsYield ||
+            c.asInstanceOf[With].withType == AddedInRewriteShowCommands ||
+            c.asInstanceOf[With].withType.isInstanceOf[AddedInRewriteGeneral]
+        ))
+    )
+  }
+
+  private def checkOrderForCommandClauses(clauses: Seq[Clause], context: UnaliasedNotAllowed) = {
+    val partOfLargerQuery = context != ImportingWithSubqueryCall
+    val containsNonCommand = containsNonCommandClause(clauses, onlyAllowReturnIfAddedInRewriter = true)
+
+    val checkYieldAndReturn = getCommandClauses.size > 1 || {
+      // put as a def to not calculate it if not needed
+      def exceptions = clauses match {
+        // COMMAND CLAUSE [WHERE]
+        case Seq(_: CommandClause, withClause: With, returnClause: Return)
+          if withClause.withType == AddedInRewriteShowCommands =>
+          returnClause.returnType.addedInRewrite
+        // USE x COMMAND CLAUSE [WHERE]
+        case Seq(_: GraphSelection, _: CommandClause, withClause: With, returnClause: Return)
+          if withClause.withType == AddedInRewriteShowCommands =>
+          returnClause.returnType.addedInRewrite
+        // COMMAND CLAUSE YIELD [RETURN]
+        case Seq(_: CommandClause, withClause: With, returnClause: Return) =>
+          withClause.withType == ParsedAsYield || returnClause.returnType.addedInRewrite
+        // USE x COMMAND CLAUSE YIELD [RETURN]
+        case Seq(_: GraphSelection, _: CommandClause, withClause: With, returnClause: Return) =>
+          withClause.withType == ParsedAsYield || returnClause.returnType.addedInRewrite
+        // COMMAND CLAUSE YIELD rewriter-WITH RETURN
+        // for when we split out variables from the return to a separate with clause
+        case Seq(_: CommandClause, withAsYieldClause: With, rewriterWith: With, returnClause: Return)
+          if withAsYieldClause.withType == ParsedAsYield && !returnClause.returnType.addedInRewrite =>
+          rewriterWith.withType.isInstanceOf[AddedInRewriteGeneral]
+        // USE x COMMAND CLAUSE YIELD rewriter-WITH RETURN
+        // for when we split out variables from the return to a separate with clause
+        case Seq(
+            _: GraphSelection,
+            _: CommandClause,
+            withAsYieldClause: With,
+            rewriterWith: With,
+            returnClause: Return
+          )
+          if withAsYieldClause.withType == ParsedAsYield && !returnClause.returnType.addedInRewrite =>
+          rewriterWith.withType.isInstanceOf[AddedInRewriteGeneral]
+        case _ => false
+      }
+
+      getCommandClauses.nonEmpty && (partOfLargerQuery || (containsNonCommand && !exceptions))
+    }
+
+    if (checkYieldAndReturn) {
+      val missingYield = clauses.sliding(2).foldLeft(Vector.empty[SemanticError]) {
         case (semanticErrors, pair) =>
           val optError = pair match {
-            case Seq(match1: Match, match2: Match) if match1.optional && !match2.optional =>
-              Some(SemanticError.invalidUseOfMatch(match2.position))
-            case Seq(clause: Return, _) =>
-              Some(SemanticError.invalidUseOfReturn(clause.name, clause.position))
-            case Seq(clause: Finish, _) =>
-              Some(SemanticError(s"${clause.name} can only be used at the end of the query.", clause.position))
-            case Seq(_: UpdateClause, _: UpdateClause) =>
-              None
-            case Seq(_: UpdateClause, _: With) =>
-              None
-            case Seq(_: UpdateClause, _: Return) =>
-              None
-            case Seq(_: UpdateClause, _: Finish) =>
-              None
-            case Seq(update: UpdateClause, clause) =>
-              Some(SemanticError.withIsRequiredBetween(update.name, clause.name, clause.position))
-            case _ =>
-              None
+            case Seq(command: CommandClause, clause: With) if command.yieldAll =>
+              Some(SemanticError.invalidYieldStar(
+                command.name,
+                clause.position
+              ))
+            case Seq(_: CommandClause, clause: With) if clause.withType == ParsedAsYield => None
+            case Seq(command: CommandClause, _) =>
+              Some(SemanticError.missingYield(
+                command.name,
+                command.position
+              ))
+            case _ => None
           }
           optError.fold(semanticErrors)(semanticErrors :+ _)
       }
 
-      val commandErrors =
-        if (clauses.count(_.isInstanceOf[CommandClause]) > 1) {
-          val missingYield = clauses.sliding(2).foldLeft(Vector.empty[SemanticError]) {
-            case (semanticErrors, pair) =>
-              val optError = pair match {
-                case Seq(command: CommandClause, clause: With) if command.yieldAll =>
-                  Some(SemanticError.invalidYieldStar(
-                    command.name,
-                    clause.position
-                  ))
-                case Seq(_: CommandClause, clause: With) if clause.withType != AddedInRewrite => None
-                case Seq(command: CommandClause, _) =>
-                  Some(SemanticError.missingYield(
-                    command.name,
-                    command.position
-                  ))
-                case _ => None
-              }
-              optError.fold(semanticErrors)(semanticErrors :+ _)
-          }
+      val missingReturn =
+        if (partOfLargerQuery || containsNonCommand)
+          checkLastClause(clauses, canOmitReturnClause = false, disallowReturnAddedInRewrite = true)
+        else clauses.last match {
+          case clause: Return if !clause.returnType.addedInRewrite => None
+          case clause =>
+            Some(SemanticError.missingReturn(
+              clause.position
+            ))
+        }
 
-          val missingReturn = clauses.last match {
-            case clause: Return if !clause.addedInRewrite => None
-            case clause =>
-              Some(SemanticError.missingReturn(
-                clause.position
-              ))
-          }
+      missingYield ++ missingReturn
+    } else Vector.empty[SemanticError]
 
-          missingYield ++ missingReturn
-        } else Vector.empty[SemanticError]
+  }
 
-      val concludeError = clauses match {
-        // standalone procedure call
-        case Seq(_: CallClause)                    => None
-        case Seq(_: GraphSelection, _: CallClause) => None
+  private def checkOrder(
+    clauses: Seq[Clause],
+    canOmitReturnClause: Boolean,
+    context: UnaliasedNotAllowed
+  ): SemanticCheck = {
+    fromFunctionWithContext { (s: SemanticState, c: SemanticCheckContext) =>
+      {
+        val sequenceErrors = clauses.sliding(2).foldLeft(Vector.empty[SemanticError]) {
+          case (semanticErrors, pair) =>
+            val optError = pair match {
+              case Seq(clause: Return, w: With)
+                if w.withType.isInstanceOf[OrderByOrPaginationWithType] =>
+                Some(SemanticError.invalidSubclauseOrder(
+                  clause.skip.fold(w.skip.fold("SKIP")(_.name))(_.name),
+                  clause.position
+                ))
+              case Seq(clause: Return, _) =>
+                Some(SemanticError.invalidPositionOfClause(clause.name, clause.position))
+              case Seq(clause: Finish, _) =>
+                Some(SemanticError.invalidPositionOfClause(clause.name, clause.position))
+              case Seq(_: UpdateClause, _: UpdateClause) =>
+                None
+              case Seq(_: UpdateClause, _: With) =>
+                None
+              case Seq(_: UpdateClause, _: Return) =>
+                None
+              case Seq(_: UpdateClause, _: Finish) =>
+                None
+              case Seq(update: UpdateClause, clause) if c.cypherVersion == CypherVersion.Cypher5 =>
+                Some(SemanticError.withIsRequiredBetween(update.name, clause.name, clause.position))
+              case _ =>
+                None
+            }
+            optError.fold(semanticErrors)(semanticErrors :+ _)
+        }
 
-        case Seq() => Some(SemanticError.queryMustConcludeWithClause(this.position))
+        val commandErrors = checkOrderForCommandClauses(clauses, context)
 
-        // otherwise
-        case seq => seq.last match {
-            case _: UpdateClause | _: Return | _: Finish | _: CommandClause                                  => None
-            case subquery: SubqueryCall if !subquery.innerQuery.isReturning && subquery.reportParams.isEmpty => None
-            case call: CallClause if call.returnVariables.explicitVariables.isEmpty && !call.yieldAll        => None
-            case call: CallClause         => Some(SemanticError.queryCannotConcludeWithCall(call.name, call.position))
-            case _ if canOmitReturnClause => None
-            case clause => Some(SemanticError.queryCannotConcludeWithClause(clause.name, clause.position))
-          }
+        val concludeError = clauses match {
+          // standalone procedure call
+          case Seq(_: CallClause)                    => None
+          case Seq(_: GraphSelection, _: CallClause) => None
+
+          case Seq() => Some(SemanticError.queryMustConcludeWithClause(this.position))
+
+          // standalone command clause
+          case Seq(_: CommandClause) if context == ImportingWithSubqueryCall                    => None
+          case Seq(_: GraphSelection, _: CommandClause) if context == ImportingWithSubqueryCall => None
+
+          // otherwise
+          case seq => checkLastClause(
+              seq,
+              canOmitReturnClause,
+              disallowReturnAddedInRewrite = getCommandClauses.nonEmpty && context != ImportingWithSubqueryCall
+            )
+        }
+
+        SemanticCheckResult(s, sequenceErrors ++ concludeError ++ commandErrors)
       }
-
-      semantics.SemanticCheckResult(s, sequenceErrors ++ concludeError ++ commandErrors)
     }
+  }
+
+  // Share end of query check between the CommandClause and general cypher query code path
+  @tailrec
+  private def checkLastClause(
+    clauses: Seq[Clause],
+    canOmitReturnClause: Boolean,
+    disallowReturnAddedInRewrite: Boolean
+  ): Option[SemanticError] = {
+    clauses.last match {
+      case ret: Return if disallowReturnAddedInRewrite && ret.returnType.addedInRewrite =>
+        // Return was added in rewrite so check second to last clause
+        checkLastClause(clauses.init, canOmitReturnClause, disallowReturnAddedInRewrite)
+      case _: UpdateClause | _: Return | _: Finish                                                     => None
+      case subquery: SubqueryCall if !subquery.innerQuery.isReturning && subquery.reportParams.isEmpty => None
+      case call: CallClause if call.returnVariables.explicitVariables.isEmpty && !call.yieldAll        => None
+      case _ if canOmitReturnClause                                                                    => None
+      case call: CallClause => Some(SemanticError.queryCannotConcludeWithCall(call.name, call.position))
+      case clause           => Some(SemanticError.queryCannotConcludeWithClause(clause.name, clause.position))
+    }
+  }
 
   private def checkNoCallInTransactionsAfterWriteClause(clauses: Seq[Clause]): SemanticCheck = {
     case class Acc(precedingWrite: Boolean, errors: Seq[SemanticError])
@@ -445,32 +732,52 @@ case class SingleQuery(clauses: Seq[Clause])(val position: InputPosition) extend
     errors
   }
 
-  private def checkClauses(clauses: Seq[Clause], outerScope: Option[Scope]): SemanticCheck = {
+  private def checkClauses(
+    clauses: Seq[Clause],
+    outerScope: Option[Scope],
+    context: UnaliasedNotAllowed = ImportingWithSubqueryCall
+  ): SemanticCheck = {
     val lastIndex = clauses.size - 1
     clauses.zipWithIndex.foldSemanticCheck {
       case (clause, idx) =>
-        val next = SemanticCheck.fromState { _ =>
-          clause match {
-            case c: HorizonClause =>
-              checkHorizon(c, outerScope)
-            case _ =>
-              clause.semanticCheck.map { checked =>
-                val resultState = clause match {
-                  case _: UpdateClause if idx == lastIndex =>
-                    checked.state.newSiblingScope
-                  case cc: CallClause
-                    if cc.returnVariables.explicitVariables.isEmpty && !cc.yieldAll && idx == lastIndex =>
-                    checked.state.newSiblingScope
-                  case _ =>
-                    checked.state
-                }
-                checked.copy(state = resultState)
+        clause match {
+          case c: Return =>
+            checkReturn(c, outerScope, context) chain recordCurrentScope(clause)
+          case c: ScopeClauseSubqueryCall =>
+            checkHorizon(c, outerScope)
+          case c: HorizonClause =>
+            checkHorizon(c, outerScope) chain recordCurrentScope(clause)
+          case _ =>
+            clause.semanticCheck.map { checked =>
+              val resultState = clause match {
+                case _: UpdateClause if idx == lastIndex =>
+                  checked.state.newSiblingScope
+                case cc: CallClause
+                  if cc.returnVariables.explicitVariables.isEmpty && !cc.yieldAll && idx == lastIndex =>
+                  checked.state.newSiblingScope
+                case _ =>
+                  checked.state
               }
-          }
+              checked.copy(state = resultState)
+            } chain recordCurrentScope(clause)
         }
-
-        next chain recordCurrentScope(clause)
     }
+  }
+
+  private def checkReturn(
+    clause: Return,
+    outerScope: Option[Scope],
+    context: UnaliasedNotAllowed
+  ): SemanticCheck = {
+    val returnWithContext = clause.copy(context = context)(clause.position)
+    for {
+      closingResult <- returnWithContext.semanticCheck
+      continuationResult <-
+        returnWithContext.semanticCheckContinuation(closingResult.state.currentScope.scope, outerScope)
+    } yield {
+      semantics.SemanticCheckResult(continuationResult.state, closingResult.errors ++ continuationResult.errors)
+    }
+
   }
 
   private def checkHorizon(clause: HorizonClause, outerScope: Option[Scope]): SemanticCheck = {
@@ -487,12 +794,20 @@ case class SingleQuery(clauses: Seq[Clause])(val position: InputPosition) extend
 
     idsClauses.size match {
       case c if c > 1 =>
-        error("There can be only one INPUT DATA STREAM in a query", idsClauses(1).position)
+        error(SemanticError.internalError(
+          this.getClass.getSimpleName,
+          "There can be only one INPUT DATA STREAM in a query",
+          idsClauses(1).position
+        ))
       case c if c == 1 =>
         if (clauses.head.isInstanceOf[InputDataStream]) {
           success
         } else {
-          error("INPUT DATA STREAM must be the first clause in a query", idsClauses.head.position)
+          error(SemanticError.internalError(
+            this.getClass.getSimpleName,
+            "INPUT DATA STREAM must be the first clause in a query",
+            idsClauses.head.position
+          ))
         }
       case _ => success
     }
@@ -504,7 +819,7 @@ case class SingleQuery(clauses: Seq[Clause])(val position: InputPosition) extend
     clauses.collect {
       case useGraph: UseGraph => useGraph
     }.foldSemanticCheck { clause =>
-      invalidPlacementOfUseClauseError(
+      SemanticAnalysisToolingErrorWithGqlInfo.invalidPlacementOfUseClauseError(
         clause.position
       )
     }
@@ -513,20 +828,28 @@ case class SingleQuery(clauses: Seq[Clause])(val position: InputPosition) extend
   private def checkUsePosition(): SemanticCheck = {
     val clauses = partitionedClauses.clausesExceptImportingWithAndLeadingGraphSelection
 
-    val message =
-      "USE clause must be either the first clause in a (sub-)query or preceded by an importing WITH clause in a sub-query."
-
     clauses.collect {
       case useGraph: UseGraph => useGraph
     }.foldSemanticCheck { clause =>
-      error(
-        message,
-        clause.position
-      )
+      error(SemanticError.invalidPlacementOfUseClauseVerboseLegacyMsg(clause.position))
     }
   }
 
-  private def warnOnPotentiallyShadowVariables(outer: SemanticState): SemanticCheck = {
+  private def checkUseForRoutedSystemCommand(): SemanticCheck = SemanticCheck.fromContext { context =>
+    // For backward compatibility, SHOW DATABASES is routed to system if it is standalone, but we don't want to allow it to be routed anywhere else,
+    // as this could allow it to get routed to a remote alias.
+    // Explicit routing should only be allowed from Cypher 25
+    partitionedClauses match {
+      case SingleQuery.PartitionedClauses(Some(use), _, _, cs)
+        if CommandClause.shouldRouteToSystem(cs) && (
+          context.cypherVersion == CypherVersion.Cypher5 || use.graphReference.print != SYSTEM_DATABASE_NAME
+        ) =>
+        SemanticError.useClauseWithAdministrationCommand(use.position)
+      case _ => success
+    }
+  }
+
+  private def warnOnPotentiallyShadowVariables(outer: SemanticState, optional: Boolean): SemanticCheck = {
     (inner: SemanticState) =>
       val outerScopeSymbols: Map[String, Symbol] = outer.currentScope.scope.symbolTable
       val innerScopeSymbols: Map[String, Set[Symbol]] = inner.currentScope.scope.allSymbols
@@ -536,56 +859,58 @@ case class SingleQuery(clauses: Seq[Clause])(val position: InputPosition) extend
           !innerScopeSymbols(s.name).map(_.definition).contains(s.definition)
 
       val shadowedSymbols = outerScopeSymbols.collect {
-        case (name, symbol) if isShadowed(symbol) =>
-          name -> innerScopeSymbols(name).find(_.definition != symbol.definition).get.definition.asVariable.position
+        case (symbolName, symbol) if isShadowed(symbol) =>
+          symbolName -> innerScopeSymbols(
+            symbolName
+          ).find(_.definition != symbol.definition).get.definition.asVariable.position
       }
       val stateWithNotifications = shadowedSymbols.foldLeft(inner) {
         case (state, (varName, pos)) =>
-          state.addNotification(SubqueryVariableShadowing(pos, varName))
+          val clause = if (optional) "OPTIONAL CALL" else "CALL"
+          state.addNotification(SubqueryVariableShadowing(pos, clause, varName))
       }
 
       SemanticCheckResult.success(stateWithNotifications)
   }
 
   private def errorOnShadowedImportVariables(outer: SemanticState): SemanticCheck = { (inner: SemanticState) =>
-    val outerScopeSymbols: Map[String, Symbol] = outer.currentScope.scope.symbolTable
+    if (getReturns.exists(_.returnType.addedInRewrite)) { SemanticCheckResult.success(inner) }
+    else {
+      val outerScopeSymbols: Map[String, Symbol] = outer.currentScope.scope.symbolTable
 
-    // Finds symbols of children of innerScope
-    val childrenTables = inner.currentScope.scope.children.map(_.symbolTable)
-    val innerScopeSymbols: Map[String, Set[Symbol]] =
-      childrenTables.foldLeft(Map.empty[String, Set[Symbol]]) {
-        case (acc0, table) =>
-          table.foldLeft(acc0) {
-            case (acc, (str, symbol)) if acc.contains(str) =>
-              acc.updated(str, acc(str) + symbol)
-            case (acc, (str, symbol)) =>
-              acc.updated(str, Set(symbol))
-          }
+      // Finds symbols of children of innerScope
+      val childrenTables = inner.currentScope.scope.children.map(_.symbolTable)
+      val innerScopeSymbols: Map[String, Set[Symbol]] =
+        childrenTables.foldLeft(Map.empty[String, Set[Symbol]]) {
+          case (acc0, table) =>
+            table.foldLeft(acc0) {
+              case (acc, (str, symbol)) if acc.contains(str) =>
+                acc.updated(str, acc(str) + symbol)
+              case (acc, (str, symbol)) =>
+                acc.updated(str, Set(symbol))
+            }
+        }
+
+      def isShadowed(s: Symbol): Boolean = {
+        innerScopeSymbols.contains(s.name) &&
+        !innerScopeSymbols(s.name).map(_.definition).forall(_ == s.definition)
       }
 
-    def isShadowed(s: Symbol): Boolean = {
-      innerScopeSymbols.contains(s.name) &&
-      !innerScopeSymbols(s.name).map(_.definition).forall(_ == s.definition)
+      val shadowedSymbols = outerScopeSymbols.collect {
+        case (symbolName, symbol) if isShadowed(symbol) =>
+          symbolName -> innerScopeSymbols(
+            symbolName
+          ).find(_.definition != symbol.definition).get.definition.asVariable.position
+      }
+
+      val shadowingErrors = shadowedSymbols.map {
+        case (varName, pos) =>
+          SemanticError.variableShadowingOuterScope(varName, pos)
+      }.toSeq
+
+      SemanticCheckResult(inner, shadowingErrors)
     }
-
-    val shadowedSymbols = outerScopeSymbols.collect {
-      case (name, symbol) if isShadowed(symbol) =>
-        name -> innerScopeSymbols(name).find(_.definition != symbol.definition).get.definition.asVariable.position
-    }
-
-    val shadowingErrors = shadowedSymbols.map {
-      case (varName, pos) =>
-        SemanticError(
-          s"The variable `$varName` is shadowing an imported variable with the same name and needs to be renamed",
-          pos
-        )
-    }.toSeq
-
-    SemanticCheckResult(inner, shadowingErrors)
   }
-
-  override def finalScope(scope: Scope): Scope =
-    scope.children.last
 }
 
 object SingleQuery {
@@ -593,9 +918,9 @@ object SingleQuery {
   /**
    * The clauses making up a single query.
    *
-   * @param initialGraphSelection A `USE` clause in first position.
-   * @param importingWith An importing `WITH` clause in first position, or in second position immediately after [[initialGraphSelection]] when defined.
-   * @param subsequentGraphSelection A `USE` clause in second position immediately after [[importingWith]]. If this field is defined then [[initialGraphSelection]] cannot be.
+   * @param initialGraphSelection                              A `USE` clause in first position.
+   * @param importingWith                                      An importing `WITH` clause in first position, or in second position immediately after [[initialGraphSelection]] when defined.
+   * @param subsequentGraphSelection                           A `USE` clause in second position immediately after [[importingWith]]. If this field is defined then [[initialGraphSelection]] cannot be.
    * @param clausesExceptImportingWithAndLeadingGraphSelection All the other clauses afterwards.
    */
   case class PartitionedClauses(
@@ -605,14 +930,25 @@ object SingleQuery {
     clausesExceptImportingWithAndLeadingGraphSelection: Seq[Clause]
   ) {
 
-    lazy val leadingGraphSelection: Option[GraphSelection] =
-      initialGraphSelection.orElse(subsequentGraphSelection)
+    private val leadingGraphSelectionLazy: LazyVal[Option[GraphSelection]] =
+      LazyVal(initialGraphSelection.orElse(subsequentGraphSelection))
+    def leadingGraphSelection: Option[GraphSelection] = leadingGraphSelectionLazy.value
 
-    lazy val clausesExceptImportingWithAndInitialGraphSelection: Seq[Clause] =
-      subsequentGraphSelection.toSeq ++ clausesExceptImportingWithAndLeadingGraphSelection
+    private val clausesExceptImportingWithAndInitialGraphSelectionLazy: LazyVal[Seq[Clause]] =
+      LazyVal(subsequentGraphSelection.toSeq ++ clausesExceptImportingWithAndLeadingGraphSelection)
 
-    lazy val clausesExceptInitialGraphSelection: Seq[Clause] =
-      importingWith.toSeq ++ subsequentGraphSelection ++ clausesExceptImportingWithAndLeadingGraphSelection
+    def clausesExceptImportingWithAndInitialGraphSelection: Seq[Clause] =
+      clausesExceptImportingWithAndInitialGraphSelectionLazy.value
+
+    private val clausesExceptInitialGraphSelectionLazy: LazyVal[Seq[Clause]] =
+      LazyVal(importingWith.toSeq ++ subsequentGraphSelection ++ clausesExceptImportingWithAndLeadingGraphSelection)
+    def clausesExceptInitialGraphSelection: Seq[Clause] = clausesExceptInitialGraphSelectionLazy.value
+
+    private val clausesExceptImportingWithLazy: LazyVal[Seq[Clause]] =
+      LazyVal(
+        initialGraphSelection.toSeq ++ subsequentGraphSelection ++ clausesExceptImportingWithAndLeadingGraphSelection
+      )
+    def clausesExceptImportingWith: Seq[Clause] = clausesExceptImportingWithLazy.value
   }
 
   private def partitionClauses(clauses: Seq[Clause]): PartitionedClauses =
@@ -640,7 +976,8 @@ object SingleQuery {
 
   private def extractImportingWith(clauses: Seq[Clause]): Option[(With, Seq[Clause])] =
     clauses.headOption.collect {
-      case withClause @ With(false, ri, None, None, None, None, _) if ri.items.forall(_.isPassThrough) =>
+      case withClause @ With(false, ri, None, None, None, None, None, _: MayBeImportingWithType)
+        if ri.items.forall(_.isPassThrough) =>
         (withClause, clauses.tail)
     }
 
@@ -648,6 +985,107 @@ object SingleQuery {
     clauses.headOption.collect {
       case useGraph: UseGraph => (useGraph, clauses.tail)
     }
+}
+
+case object TopLevelBraces extends UnaliasedNotAllowed {
+  val name: String = "{ ... }"
+  override val msg: String = "{ RETURN ... }"
+}
+
+case class TopLevelBraces(
+  query: Query,
+  use: Option[UseGraph]
+)(override val position: InputPosition) extends PartQuery {
+
+  override def singleQuery: SingleQuery = wrapQuery(query, position)
+
+  override def clauses: Seq[Clause] = singleQuery.clauses
+
+  override def mapEachSingleQuery(f: SingleQuery => SingleQuery): Query =
+    copy(query.mapEachSingleQuery(f))(position)
+
+  override def getEmittingResultClauses: ResultEmitter = query.getEmittingResultClauses
+
+  private def wrapQuery(innerQuery: Query, position: InputPosition): SingleQuery = {
+    val lastClause =
+      if (innerQuery.isReturning) {
+        val returnVariables = innerQuery.returnVariables
+        Return(returnItems =
+          ReturnItems(
+            if (returnVariables.includeExisting) AdditiveProjection else FreeProjection,
+            returnVariables.explicitVariables.map(v =>
+              AliasedReturnItem(v.copyId, v.copyId)(position, AliasedReturnItem.wasAutoAliasedDefault)
+            )
+          )(position)
+        )(position)
+      } else Finish()(position)
+
+    SingleQuery(
+      Seq(
+        ScopeClauseSubqueryCall(
+          innerQuery,
+          isImportingAll = true,
+          Seq.empty,
+          None,
+          optional = false
+        )(position),
+        lastClause
+      )
+    )(position)
+
+  }
+
+  override def semanticCheckInContext(context: UnaliasedNotAllowed): SemanticCheck = semanticCheck
+
+  override def semanticCheckInLocalCallableBodyContext(
+    outer: SemanticState,
+    current: SemanticState,
+    optional: Boolean
+  ): SemanticCheck =
+    query.semanticCheckInLocalCallableBodyContext(outer, current, optional) chain recordCurrentScope(this)
+
+  override def semanticCheckInSubqueryContext(
+    outer: SemanticState,
+    current: SemanticState,
+    optional: Boolean
+  ): SemanticCheck =
+    query.semanticCheckInSubqueryContext(outer, current, optional) chain recordCurrentScope(this)
+
+  override def semanticCheckImportingWithSubQueryContext(outer: SemanticState, optional: Boolean): SemanticCheck =
+    SemanticCheck.error(SemanticError.invalidUseOfOldCall(TopLevelBraces.name, position))
+
+  override def semanticCheckInSubqueryExpressionContext(
+    canOmitReturn: Boolean,
+    outer: SemanticState,
+    context: UnaliasedNotAllowed
+  ): SemanticCheck =
+    query.semanticCheckInSubqueryExpressionContext(canOmitReturn, outer, context) chain recordCurrentScope(this)
+
+  override def semanticCheck: SemanticCheck =
+    checkNoDefineAndCallInTransactions chain
+      query.semanticCheckInContext(TopLevelBraces) chain
+      recordCurrentScope(this)
+
+  override def checkImportingWith(optional: Boolean): SemanticCheck = query.checkImportingWith(optional)
+  override def invalidImportingWith: Seq[SemanticError] = query.invalidImportingWith
+  override def importColumns: Seq[LogicalVariable] = query.importColumns
+
+  override def getImportingWithItems: Seq[ReturnItem] = query.getImportingWithItems
+
+  override def withoutImportingWithAndGraphSelection: Option[TopLevelBraces] =
+    query.withoutImportingWithAndGraphSelection.map(q => TopLevelBraces(q, use)(position))
+
+  override def getGraphSelections: Seq[GraphSelection] =
+    query.getGraphSelections ++ use
+
+  override def isCorrelated: Boolean = query.isCorrelated
+
+  override def returnVariables: ReturnVariables = query.returnVariables
+}
+
+case object UnionContext extends UnaliasedNotAllowed {
+  val name: String = "UNION"
+  override val msg: String = "UNION"
 }
 
 object Union {
@@ -660,13 +1098,20 @@ object Union {
     variableInLhs: LogicalVariable,
     variableInRhs: LogicalVariable
   )
+
+  val errorParam = "UNION subqueries"
+
 }
 
 sealed trait Union extends Query {
   def lhs: Query
-  def rhs: SingleQuery
+
+  def rhs: PartQuery
 
   def unionMappings: List[UnionMapping]
+
+  override def getEmittingResultClauses: ResultEmitter =
+    ResultEmitter.AndEmitter(Seq(lhs.getEmittingResultClauses, rhs.getEmittingResultClauses))
 
   override def returnVariables: ReturnVariables = ReturnVariables(
     // If either side of the UNION has a RETURN *,
@@ -680,24 +1125,37 @@ sealed trait Union extends Query {
     lhs.getReturns ++ rhs.getReturns
   }
 
-  override def importColumns: Seq[String] = lhs.importColumns ++ rhs.importColumns
+  override def importColumns: Seq[LogicalVariable] = lhs.importColumns ++ rhs.importColumns
+
+  override def getImportingWithItems: Seq[ReturnItem] = lhs.getImportingWithItems ++ rhs.getImportingWithItems
 
   def containsUpdates: Boolean = lhs.containsUpdates || rhs.containsUpdates
 
   private def checkRecursively(semanticCheck: Query => SemanticCheck): SemanticCheck = {
-    def checkSingleQuery(singleQuery: SingleQuery): SemanticCheck = withScopedState {
-      semanticCheck(singleQuery) chain
-        checkNoInputDataStreamInsideUnionElement(singleQuery) chain
-        checkNoCallInTransactionInsideUnionElement(singleQuery)
+    def checkSingleQuery(partQuery: PartQuery): SemanticCheck = withScopedState {
+      semanticCheck(partQuery) chain
+        checkNoInputDataStreamInsideUnionElement(partQuery) chain
+        checkNoCallInTransactionInsideUnionElement(partQuery)
     }
 
     def checkNestedQuery(query: Query): SemanticCheck =
       query match {
-        case single: SingleQuery => checkSingleQuery(single)
+        case partQuery: PartQuery       => checkSingleQuery(partQuery)
+        case when: ConditionalQueryWhen => withScopedState(semanticCheck(when))
         case union: Union =>
           withScopedState {
             SemanticCheck.nestedCheck(union.checkRecursively(semanticCheck))
           }
+        case _: NextStatement => SemanticCheck.error(SemanticError.internalError(
+            "invalid union argument",
+            "NEXT should never be directly contained within a UNION",
+            position
+          ))
+        case withLocalDefinitions: QueryWithLocalDefinitions => SemanticCheck.error(SemanticError.internalError(
+            "invalid union argument",
+            "DEFINE should never be directly contained within a UNION",
+            position
+          ))
       }
 
     SemanticCheck.fromState(state => {
@@ -707,20 +1165,31 @@ sealed trait Union extends Query {
           SemanticCheck.setState(newState.recordWorkingGraph(state.workingGraph))
         ) chain
         checkSingleQuery(rhs) chain
-        checkColumnNamesAgree chain
         defineUnionVariables chain
         SemanticState.recordCurrentScope(this)
     })
   }
 
-  def semanticCheck: SemanticCheck = checkRecursively(_.semanticCheck)
+  def semanticCheck: SemanticCheck =
+    checkNoDefineAndCallInTransactions chain
+      checkRecursively(_.semanticCheckInContext(UnionContext))
 
-  override def semanticCheckInSubqueryExpressionContext(canOmitReturn: Boolean): SemanticCheck =
-    checkRecursively(_.semanticCheckInSubqueryExpressionContext(canOmitReturn))
+  override def semanticCheckInSubqueryExpressionContext(
+    canOmitReturn: Boolean,
+    outer: SemanticState,
+    context: UnaliasedNotAllowed
+  ): SemanticCheck =
+    checkRecursively(
+      importValuesFromScope(outer.currentScope.scope) chain
+        _.semanticCheckInSubqueryExpressionContext(canOmitReturn, outer, context)
+    )
 
-  override def checkImportingWith: SemanticCheck =
-    SemanticCheck.nestedCheck(lhs.checkImportingWith) chain
-      rhs.checkImportingWith
+  override def checkImportingWith(optional: Boolean): SemanticCheck =
+    SemanticCheck.nestedCheck(lhs.checkImportingWith(optional)) chain
+      rhs.checkImportingWith(optional)
+
+  override def invalidImportingWith: Seq[SemanticError] =
+    lhs.invalidImportingWith ++ rhs.invalidImportingWith
 
   override def isCorrelated: Boolean = lhs.isCorrelated || rhs.isCorrelated
 
@@ -728,23 +1197,47 @@ sealed trait Union extends Query {
 
   override def endsWithFinish: Boolean = rhs.endsWithFinish || lhs.endsWithFinish
 
-  def semanticCheckInSubqueryContext(outer: SemanticState, current: SemanticState): SemanticCheck = {
+  override def semanticCheckInLocalCallableBodyContext(
+    outer: SemanticState,
+    current: SemanticState,
+    optional: Boolean
+  ): SemanticCheck = {
     checkRecursively(innerQuery =>
       importValuesFromScope(outer.currentScope.scope) chain
-        innerQuery.semanticCheckInSubqueryContext(outer, current)
+        innerQuery.semanticCheckInLocalCallableBodyContext(outer, current, optional)
     )
   }
 
-  override def returnVariableCheck(outer: SemanticState): SemanticCheck =
-    checkRecursively(_.returnVariableCheck(outer))
+  override def semanticCheckInSubqueryContext(
+    outer: SemanticState,
+    current: SemanticState,
+    optional: Boolean
+  ): SemanticCheck = {
+    checkRecursively(innerQuery =>
+      importValuesFromScope(outer.currentScope.scope) chain
+        innerQuery.semanticCheckInSubqueryContext(outer, current, optional)
+    )
+  }
 
-  def semanticCheckImportingWithSubQueryContext(outer: SemanticState): SemanticCheck =
-    checkRecursively(_.semanticCheckImportingWithSubQueryContext(outer))
+  override def semanticCheckImportingWithSubQueryContext(outer: SemanticState, optional: Boolean): SemanticCheck =
+    checkRecursively(_.semanticCheckImportingWithSubQueryContext(outer, optional))
+
+  override def semanticCheckInContext(context: UnaliasedNotAllowed): SemanticCheck = {
+    context match {
+      case NextStatement | TopLevelBraces => checkRecursively(innerQuery =>
+          mapState(s =>
+            s.importValuesFromScope(s.currentScope.parent.fold(Scope.empty)(_.scope))
+          ) chain innerQuery.semanticCheckInContext(context)
+        )
+      case _ => checkRecursively(_.semanticCheckInContext(context))
+    }
+
+  }
 
   private def defineUnionVariables: SemanticCheck = (state: SemanticState) => {
     var result = SemanticCheckResult.success(state.newChildScope)
-    val scopeFromLhs = lhs.finalScope(state.scope(lhs).get)
-    val scopeFromRhs = rhs.finalScope(state.scope(rhs).get)
+    val scopeFromLhs = lhs.finalScope(state.scope(lhs).getOrElse(Scope.empty))
+    val scopeFromRhs = rhs.finalScope(state.scope(rhs).getOrElse(Scope.empty))
 
     /**
      * Derived from UnionMapping, but only has the names of the variables in LHS and RHS,
@@ -798,21 +1291,22 @@ sealed trait Union extends Query {
     // Union defines all return variables in its own scope using defineUnionVariables
     scope.children.last
 
-  // Check that columns names agree between both parts of the union
-  def checkColumnNamesAgree: SemanticCheck
-
-  private def checkNoInputDataStreamInsideUnionElement(query: SingleQuery): SemanticCheck =
+  private def checkNoInputDataStreamInsideUnionElement(query: PartQuery): SemanticCheck =
     query
       .clauses
       .collectFirst {
         case inputDataStream: InputDataStream => inputDataStream
       }
       .foldSemanticCheck { inputDataStream =>
-        error("INPUT DATA STREAM is not supported in UNION queries", inputDataStream.position)
+        error(SemanticError.internalError(
+          this.getClass.getSimpleName,
+          "INPUT DATA STREAM is not supported in UNION queries",
+          inputDataStream.position
+        ))
       }
 
   private def checkUnionAggregation: SemanticCheck = (lhs, this) match {
-    case (_: SingleQuery, _)                                      => None
+    case (_: PartQuery, _)                                        => None
     case (_: UnionAll, _: UnionAll)                               => None
     case (_: UnionDistinct, _: UnionDistinct)                     => None
     case (_: ProjectingUnionAll, _: ProjectingUnionAll)           => None
@@ -820,11 +1314,11 @@ sealed trait Union extends Query {
     case _                                                        => Some(SemanticError.invalidUseOfUnion(position))
   }
 
-  private def checkNoCallInTransactionInsideUnionElement(query: SingleQuery): SemanticCheck =
+  private def checkNoCallInTransactionInsideUnionElement(query: PartQuery): SemanticCheck =
     SubqueryCall
       .findTransactionalSubquery(query)
       .foldSemanticCheck { nestedCallInTransactions =>
-        error("CALL { ... } IN TRANSACTIONS in a UNION is not supported", nestedCallInTransactions.position)
+        error(SemanticError.invalidUseOfUnionAndCIT(nestedCallInTransactions.position))
       }
 }
 
@@ -833,13 +1327,10 @@ sealed trait Union extends Query {
  * When we do namespacing, we need to convert them the [[ProjectingUnion]].
  * ProjectingUnion is never produced by the parser.
  *
- * This has two reasons:
- * a) We capture how variables are projected from the two final scopes of the parts of the union to the scope
- *    after the union, before the Namespacer changes the names so that the Variable inside and outside of the union have different names
- *    and we would not find them any longer. The Namespacer will still change the name, but since we captured the Variable and not the
- *    name, we still have the correct projecting information.
- * b) We need to disable `checkColumnNamesAgree` for ProjectingUnion, because the names will actually not agree any more after the namespacing.
- *    This is not a problem though, since we would have failed earlier if the names did not agree originally.
+ * This is because we capture how variables are projected from the two final scopes of the parts of the union to the scope
+ * after the union, before the Namespacer changes the names so that the Variable inside and outside of the union have different names
+ * and we would not find them any longer. The Namespacer will still change the name, but since we captured the Variable and not the
+ * name, we still have the correct projecting information.
  */
 sealed trait UnmappedUnion extends Union {
 
@@ -874,57 +1365,552 @@ sealed trait UnmappedUnion extends Union {
       res._unionMappings = this.unionMappings
     }
 
-    res
-  }
-
-  override def checkColumnNamesAgree: SemanticCheck = (state: SemanticState) => {
-    val myScope: Scope = state.currentScope.scope
-
-    val lhsScope = if (lhs.isReturning) lhs.finalScope(myScope.children.head) else Scope.empty
-    val rhsScope = if (rhs.isReturning) rhs.finalScope(myScope.children.last) else Scope.empty
-    val errors =
-      if (lhsScope.symbolNames == rhsScope.symbolNames) {
-        Seq.empty
-      } else {
-        Seq(SemanticError.incompatibleReturnColumns(position))
-      }
-    semantics.SemanticCheckResult(state, errors)
+    res.asInstanceOf[UnmappedUnion.this.type]
   }
 }
 
-sealed trait ProjectingUnion extends Union {
-  // If we have a ProjectingUnion we have already checked this before and now they have been rewritten to actually not match.
-  override def checkColumnNamesAgree: SemanticCheck = SemanticCheck.success
-}
+sealed trait ProjectingUnion extends Union
 
-final case class UnionAll(lhs: Query, rhs: SingleQuery)(
+final case class UnionAll(lhs: Query, rhs: PartQuery)(
   val position: InputPosition
 ) extends UnmappedUnion {
 
   override def mapEachSingleQuery(f: SingleQuery => SingleQuery): Query =
-    copy(lhs.mapEachSingleQuery(f), f(rhs))(position)
+    copy(lhs.mapEachSingleQuery(f), rhs.mapEachSingleQuery(f).asInstanceOf[PartQuery])(position)
+
+  override def withoutImportingWithAndGraphSelection: Option[UnionAll] = {
+    val lhsOpt = lhs.withoutImportingWithAndGraphSelection
+    val rhsOpt = rhs.withoutImportingWithAndGraphSelection
+    lhsOpt.zip(rhsOpt).map {
+      case (lhs, rhs) => UnionAll(lhs, rhs)(position)
+    }
+  }
+
+  override def getGraphSelections: Seq[GraphSelection] =
+    lhs.getGraphSelections ++ rhs.getGraphSelections
 }
 
-final case class UnionDistinct(lhs: Query, rhs: SingleQuery)(
+final case class UnionDistinct(lhs: Query, rhs: PartQuery)(
   val position: InputPosition
 ) extends UnmappedUnion {
 
   override def mapEachSingleQuery(f: SingleQuery => SingleQuery): Query =
-    copy(lhs.mapEachSingleQuery(f), f(rhs))(position)
+    copy(lhs.mapEachSingleQuery(f), rhs.mapEachSingleQuery(f).asInstanceOf[PartQuery])(position)
+
+  override def withoutImportingWithAndGraphSelection: Option[UnionDistinct] = {
+    val lhsOpt = lhs.withoutImportingWithAndGraphSelection
+    val rhsOpt = rhs.withoutImportingWithAndGraphSelection
+    lhsOpt.zip(rhsOpt).map {
+      case (lhs, rhs) => UnionDistinct(lhs, rhs)(position)
+    }
+  }
+
+  override def getGraphSelections: Seq[GraphSelection] =
+    lhs.getGraphSelections ++ rhs.getGraphSelections
 }
 
-final case class ProjectingUnionAll(lhs: Query, rhs: SingleQuery, unionMappings: List[UnionMapping])(
+final case class ProjectingUnionAll(lhs: Query, rhs: PartQuery, unionMappings: List[UnionMapping])(
   val position: InputPosition
 ) extends ProjectingUnion {
 
   override def mapEachSingleQuery(f: SingleQuery => SingleQuery): Query =
-    copy(lhs.mapEachSingleQuery(f), f(rhs))(position)
+    copy(lhs.mapEachSingleQuery(f), rhs.mapEachSingleQuery(f).asInstanceOf[PartQuery])(position)
+
+  override def withoutImportingWithAndGraphSelection: Option[ProjectingUnionAll] = {
+    val lhsOpt = lhs.withoutImportingWithAndGraphSelection
+    val rhsOpt = rhs.withoutImportingWithAndGraphSelection
+    lhsOpt.zip(rhsOpt).map {
+      case (lhs, rhs) => ProjectingUnionAll(lhs, rhs, unionMappings)(position)
+    }
+  }
+
+  override def getGraphSelections: Seq[GraphSelection] =
+    lhs.getGraphSelections ++ rhs.getGraphSelections
 }
 
-final case class ProjectingUnionDistinct(lhs: Query, rhs: SingleQuery, unionMappings: List[UnionMapping])(
+final case class ProjectingUnionDistinct(lhs: Query, rhs: PartQuery, unionMappings: List[UnionMapping])(
   val position: InputPosition
 ) extends ProjectingUnion {
 
   override def mapEachSingleQuery(f: SingleQuery => SingleQuery): Query =
-    copy(lhs.mapEachSingleQuery(f), f(rhs))(position)
+    copy(lhs.mapEachSingleQuery(f), rhs.mapEachSingleQuery(f).asInstanceOf[PartQuery])(position)
+
+  override def withoutImportingWithAndGraphSelection: Option[ProjectingUnionDistinct] = {
+    val lhsOpt = lhs.withoutImportingWithAndGraphSelection
+    val rhsOpt = rhs.withoutImportingWithAndGraphSelection
+    lhsOpt.zip(rhsOpt).map {
+      case (lhs, rhs) => ProjectingUnionDistinct(lhs, rhs, unionMappings)(position)
+    }
+  }
+
+  override def getGraphSelections: Seq[GraphSelection] =
+    lhs.getGraphSelections ++ rhs.getGraphSelections
+}
+
+// Predicate is None for Else branch
+case class ConditionalQueryBranch(predicate: Option[Expression], query: PartQuery)(val position: InputPosition)
+    extends ASTNode
+    with SemanticCheckable with SemanticAnalysisTooling with QueryUtils {
+
+  override def returnVariables: ReturnVariables = query.returnVariables
+
+  override def isReturning: Boolean = query.isReturning
+
+  override def semanticCheck: SemanticCheck =
+    semanticCheckAbstract(_.semanticCheckInContext(ConditionalQueryWhen))
+
+  override def semanticCheckInContext(context: UnaliasedNotAllowed): SemanticCheck = semanticCheck
+
+  override def semanticCheckInLocalCallableBodyContext(
+    outer: SemanticState,
+    current: SemanticState,
+    optional: Boolean
+  ): SemanticCheck = {
+    importValuesFromScope(outer.currentScope.scope) chain
+      semanticCheckAbstract(_.semanticCheckInLocalCallableBodyContext(outer, current, optional))
+  }
+
+  override def semanticCheckInSubqueryContext(
+    outer: SemanticState,
+    current: SemanticState,
+    optional: Boolean
+  ): SemanticCheck = {
+    importValuesFromScope(outer.currentScope.scope) chain
+      semanticCheckAbstract(_.semanticCheckInSubqueryContext(outer, current, optional))
+  }
+
+  override def semanticCheckImportingWithSubQueryContext(outer: SemanticState, optional: Boolean): SemanticCheck =
+    semanticCheckAbstract(_.semanticCheckImportingWithSubQueryContext(outer, optional))
+
+  override def semanticCheckInSubqueryExpressionContext(
+    canOmitReturn: Boolean,
+    outer: SemanticState,
+    context: UnaliasedNotAllowed
+  ): SemanticCheck =
+    semanticCheckAbstract(
+      importValuesFromScope(outer.currentScope.scope) chain
+        _.semanticCheckInSubqueryExpressionContext(canOmitReturn, outer, context)
+    )
+
+  private def semanticCheckAbstract(check: QueryUtils => SemanticCheck): SemanticCheck = {
+    predicateCheck chain
+      check(query) chain
+      recordCurrentScope(this)
+  }
+
+  private def predicateCheck: SemanticCheck = {
+    SemanticExpressionCheck.simple(predicate) chain
+      SemanticExpressionCheck.expectType(CTBoolean.covariant, predicate)
+  }
+
+  override def finalScope(scope: Scope): Scope =
+    if (scope.children.size < 1) Scope.empty else scope.children.last
+
+  def mapEachSingleQuery(f: SingleQuery => SingleQuery): ConditionalQueryBranch =
+    copy(query = query.mapEachSingleQuery(f).asInstanceOf[PartQuery])(position)
+
+  def withoutImportingWith: Option[ConditionalQueryBranch] =
+    query.withoutImportingWithAndGraphSelection.map(q => ConditionalQueryBranch(predicate, q)(position))
+
+  def getGraphSelections: Seq[GraphSelection] = query.getGraphSelections
+}
+
+case object ConditionalQueryWhen extends UnaliasedNotAllowed {
+  override val msg: String = "WHEN ... THEN ..."
+  val name: String = "conditional queries"
+}
+
+case class ConditionalQueryWhen(
+  branches: Seq[ConditionalQueryBranch],
+  default: Option[ConditionalQueryBranch]
+)(val position: InputPosition) extends Query {
+
+  private def allBranches: Seq[ConditionalQueryBranch] = branches ++ default
+
+  override def containsUpdates: Boolean = allBranches.exists(_.query.containsUpdates)
+
+  override def getEmittingResultClauses: ResultEmitter =
+    ResultEmitter.OrEmitter(branches.map(_.query.getEmittingResultClauses))
+
+  override def returnVariables: ReturnVariables =
+    allBranches.foldLeft(ReturnVariables.empty)((acc, branch) => acc.merge(branch.query.returnVariables))
+
+  override def getReturns: Seq[Return] =
+    allBranches.flatMap(_.query.getReturns)
+
+  override def isReturning: Boolean = branches.head.isReturning
+
+  override def endsWithFinish: Boolean = allBranches.exists(_.query.endsWithFinish)
+
+  override def finalScope(scope: Scope): Scope = {
+    if (scope.children.size < 1) Scope.empty else scope.children.last
+  }
+
+  override def semanticCheckInLocalCallableBodyContext(
+    outer: SemanticState,
+    current: SemanticState,
+    optional: Boolean
+  ): SemanticCheck =
+    semanticCheckAbstract(_.semanticCheckInLocalCallableBodyContext(outer, current, optional))
+
+  override def semanticCheckInSubqueryContext(
+    outer: SemanticState,
+    current: SemanticState,
+    optional: Boolean
+  ): SemanticCheck =
+    semanticCheckAbstract(_.semanticCheckInSubqueryContext(outer, current, optional))
+
+  override def semanticCheckImportingWithSubQueryContext(outer: SemanticState, optional: Boolean): SemanticCheck =
+    SemanticCheck.error(SemanticError.invalidUseOfOldCall(msg, position))
+
+  override def semanticCheckInSubqueryExpressionContext(
+    canOmitReturn: Boolean,
+    outer: SemanticState,
+    context: UnaliasedNotAllowed
+  ): SemanticCheck =
+    semanticCheckAbstract(_.semanticCheckInSubqueryExpressionContext(canOmitReturn, outer, ConditionalQueryWhen))
+
+  override def semanticCheckInContext(context: UnaliasedNotAllowed): SemanticCheck =
+    semanticCheck
+
+  override def semanticCheck: SemanticCheck =
+    checkNoDefineAndCallInTransactions chain
+      semanticCheckAbstract(_.semanticCheckInContext(ConditionalQueryWhen))
+
+  private def semanticCheckAbstract(check: QueryUtils => SemanticCheck): SemanticCheck = {
+    allBranches.foldSemanticCheck(x => withScopedState(check(x))) chain
+      defineReturnScope chain
+      recordCurrentScope(this)
+  }
+
+  private def defineReturnScope: SemanticCheck = (state: SemanticState) => {
+    val result = SemanticCheckResult.success(state.newChildScope)
+    val headQuery = branches.head.query
+    val headScope = state.scope(headQuery)
+    val scope = headQuery.finalScope(headScope.getOrElse(Scope.empty))
+    SemanticCheckResult(result.state.importValuesFromScope(scope).popScope, Seq.empty)
+  }
+
+  override def checkImportingWith(optional: Boolean): SemanticCheck =
+    allBranches.foldSemanticCheck(_.query.checkImportingWith(optional))
+
+  override def invalidImportingWith: Seq[SemanticError] = allBranches.flatMap(_.query.invalidImportingWith)
+
+  override def isCorrelated: Boolean =
+    allBranches.exists(_.query.isCorrelated)
+
+  override def importColumns: Seq[LogicalVariable] =
+    allBranches.flatMap(_.query.importColumns)
+
+  override def getImportingWithItems: Seq[ReturnItem] =
+    allBranches.flatMap(_.query.getImportingWithItems)
+
+  override def withoutImportingWithAndGraphSelection: Option[ConditionalQueryWhen] = {
+    if (allBranches.exists(_.withoutImportingWith.isDefined)) {
+      Some(ConditionalQueryWhen(
+        branches.map(_.withoutImportingWith.get),
+        default.map(_.withoutImportingWith.get)
+      )(position))
+    } else None
+  }
+
+  override def getGraphSelections: Seq[GraphSelection] =
+    (allBranches.map(_.getGraphSelections) ++ default.map(_.getGraphSelections)).flatten
+
+  override def mapEachSingleQuery(f: SingleQuery => SingleQuery): Query =
+    copy(branches.map(_.mapEachSingleQuery(f)), default.map(_.mapEachSingleQuery(f)))(position)
+}
+
+case object NextStatement extends UnaliasedNotAllowed {
+  val name: String = "NEXT"
+  override val msg: String = "RETURN followed by NEXT"
+}
+
+case class NextStatement(queries: Seq[Query])(val position: InputPosition) extends Query {
+
+  private def lastQuery = queries.last
+
+  override def returnColumns: List[LogicalVariable] = lastQuery.returnColumns
+
+  override def containsUpdates: Boolean = queries.exists(_.containsUpdates)
+
+  override def getReturns: Seq[Return] = lastQuery.getReturns
+
+  override def endsWithFinish: Boolean = lastQuery.endsWithFinish
+
+  override def checkImportingWith(optional: Boolean): SemanticCheck =
+    queries.foldSemanticCheck(_.checkImportingWith(optional))
+
+  override def invalidImportingWith: Seq[SemanticError] = queries.flatMap(_.invalidImportingWith)
+
+  override def isCorrelated: Boolean = queries.exists(_.isCorrelated)
+
+  override def importColumns: Seq[LogicalVariable] = queries.flatMap(_.importColumns)
+
+  override def getImportingWithItems: Seq[ReturnItem] =
+    queries.flatMap(_.getImportingWithItems)
+
+  override def withoutImportingWithAndGraphSelection: Option[NextStatement] = {
+    if (queries.exists(_.withoutImportingWithAndGraphSelection.isDefined)) {
+      Some(NextStatement(queries.map(_.withoutImportingWithAndGraphSelection.get))(position))
+    } else None
+  }
+
+  override def getGraphSelections: Seq[GraphSelection] =
+    queries.flatMap(_.getGraphSelections)
+
+  override def mapEachSingleQuery(f: SingleQuery => SingleQuery): Query =
+    copy(queries.dropRight(1) :+ lastQuery.mapEachSingleQuery(f))(position)
+
+  override def getEmittingResultClauses: ResultEmitter = queries.last.getEmittingResultClauses
+
+  override def returnVariables: ReturnVariables = lastQuery.returnVariables
+
+  override def isReturning: Boolean = lastQuery.isReturning
+
+  override def finalScope(scope: Scope): Scope = lastQuery.finalScope(scope)
+
+  private case class CheckWithPrevious(
+    check: Query => SemanticCheck,
+    accumulator: SemanticCheck = SemanticCheck.success,
+    previous: Option[Query] = None,
+    outer: Option[SemanticState]
+  ) {
+
+    private def checkNoRedeclarationOfOuter(query: Query): SemanticCheck = {
+      val constantSymbols = outer.map(_.currentScope.symbolNames).getOrElse(Set.empty)
+      val symbolIntersection =
+        query.returnVariables.explicitVariables.filter(v => constantSymbols.contains(v.name))
+
+      val errors = symbolIntersection.map(v => SemanticError.variableAlreadyDeclaredInOuterScope(v.name, v.position))
+      when(symbolIntersection.nonEmpty)(SemanticCheck.error(errors))
+    }
+
+    private def innerCheck(query: Query): SemanticCheck =
+      withScopedState(
+        fromState(state => setState(state.recordWorkingGraph(None))) chain
+          when(previous.fold(false)(_.isReturning)) {
+            previous.map(importValuesFromRecordedFinalScope).getOrElse(SemanticCheck.success)
+          } chain
+          checkNoRedeclarationOfOuter(query) chain
+          query.semanticCheckInContext(NextStatement)
+      )
+
+    def checkQuery(query: Query): CheckWithPrevious =
+      copy(accumulator = accumulator chain innerCheck(query), previous = Some(query))
+
+  }
+
+  private def noteFinalScope(): SemanticCheck = {
+    withScopedState(
+      fromState(state =>
+        importValuesFromScope(lastQuery.finalScope(state.scope(lastQuery).getOrElse(Scope.empty)))
+      )
+    )
+  }
+
+  private def semanticCheckAbstract(check: Query => SemanticCheck, outer: Option[SemanticState]): SemanticCheck = {
+    val trunk = queries.dropRight(1)
+    trunk.foldLeft(CheckWithPrevious(check, outer = outer)) {
+      case (accCheck, q) => accCheck.checkQuery(q)
+    }.accumulator chain
+      withScopedState(fromState(s =>
+        setState(s.recordWorkingGraph(None)) chain
+          when(trunk.last.isReturning) {
+            importValuesFromRecordedFinalScope(trunk.last)
+          } chain
+          check(lastQuery)
+      )) chain
+      noteFinalScope() chain
+      recordCurrentScope(this)
+  }
+
+  override def semanticCheck: SemanticCheck =
+    checkNoDefineAndCallInTransactions chain
+      semanticCheckAbstract(_.semanticCheckInContext(NextStatement), None)
+
+  override def semanticCheckInLocalCallableBodyContext(
+    outer: SemanticState,
+    current: SemanticState,
+    optional: Boolean
+  ): SemanticCheck =
+    semanticCheckAbstract(_.semanticCheckInLocalCallableBodyContext(outer, current, optional), Some(outer))
+
+  override def semanticCheckInSubqueryContext(
+    outer: SemanticState,
+    current: SemanticState,
+    optional: Boolean
+  ): SemanticCheck =
+    semanticCheckAbstract(_.semanticCheckInSubqueryContext(outer, current, optional), Some(outer))
+
+  override def semanticCheckImportingWithSubQueryContext(outer: SemanticState, optional: Boolean): SemanticCheck =
+    SemanticCheck.error(SemanticError.invalidUseOfOldCall(NextStatement.name, position))
+
+  override def semanticCheckInSubqueryExpressionContext(
+    canOmitReturn: Boolean,
+    outer: SemanticState,
+    context: UnaliasedNotAllowed
+  ): SemanticCheck =
+    semanticCheckAbstract(_.semanticCheckInSubqueryExpressionContext(canOmitReturn, outer, context), Some(outer))
+
+  override def semanticCheckInContext(context: UnaliasedNotAllowed): SemanticCheck =
+    semanticCheckAbstract(_.semanticCheckInContext(context), None)
+
+}
+
+case object QueryWithLocalDefinitions extends UnaliasedNotAllowed {
+  val name: String = "local callable definitions"
+  override val msg: String = "DEFINE"
+}
+
+case class QueryWithLocalDefinitions(
+  definitions: Seq[LocalCallableDefinition],
+  query: Query
+)(val position: InputPosition)
+    extends Query {
+
+  override def containsUpdates: Boolean = query.containsUpdates
+
+  /**
+   * All Return clauses contained within this statement.
+   */
+  override def getReturns: Seq[Return] = query.getReturns
+
+  /**
+   * True iff this query part ends with a finish clause.
+   */
+  override def endsWithFinish: Boolean = query.endsWithFinish
+
+  /**
+   * Check this query part if it starts with an importing WITH
+   */
+  override def checkImportingWith(optional: Boolean): SemanticCheck = query.checkImportingWith(optional)
+
+  /**
+   * True if this query part starts with an importing WITH (has incoming arguments)
+   */
+  override def isCorrelated: Boolean = query.isCorrelated
+
+  /**
+   * Returns names of variables imported using importing WITH
+   */
+  override def importColumns: Seq[LogicalVariable] = query.importColumns
+
+  override def getImportingWithItems: Seq[ReturnItem] = query.getImportingWithItems
+
+  /**
+   * Returns the query stripped from importing WITH responsible for top-level importing.
+   */
+  override def withoutImportingWithAndGraphSelection: Option[Query] =
+    query.withoutImportingWithAndGraphSelection.map(q => QueryWithLocalDefinitions(definitions, q)(position))
+
+  override def getGraphSelections: Seq[GraphSelection] = query.getGraphSelections
+
+  /**
+   * Return a copy of this query where the mapping function f is applied
+   * to each returning single query, regardless if this a single query or a union query.
+   */
+  override def mapEachSingleQuery(f: SingleQuery => SingleQuery): Query =
+    query.mapEachSingleQuery(f)
+
+  override def getEmittingResultClauses: ResultEmitter = query.getEmittingResultClauses
+
+  /**
+   * All variables that are explicitly listed to be returned from this statement.
+   * This also includes the information whether all other potentially existing variables in scope are also returned.
+   */
+  override def returnVariables: ReturnVariables = query.returnVariables
+
+  /**
+   * True iff this query part ends with a return clause.
+   */
+  override def isReturning: Boolean = query.isReturning
+
+  /**
+   * Given the root scope for this query part,
+   * looks up the final scope after the last clause
+   */
+  override def finalScope(scope: Scope): Scope = query.finalScope(scope)
+
+  private def semanticCheckAbstract(check: Query => SemanticCheck): SemanticCheck = {
+    requireFeatureSupport(
+      "The DEFINE keyword",
+      SemanticFeature.LocalCallables,
+      position
+    ) ifOkChain
+      SemanticCheck.fromState { outer =>
+        // Detached base: no parent chain => no variables visible
+        val defsBase =
+          outer.copy(currentScope = Scope.empty.location).newChildScope
+        // (newChildScope is optional here, but it avoids “Top” issues if any code wants to insert siblings.)
+
+        SemanticCheck.setState(defsBase) chain
+          definitions.foldSemanticCheck(_.semanticCheck) chain
+          SemanticCheck.fromState { defsState =>
+            val outerWithGraphs = updateRecordedGraphs(outer, defsState)
+            val mergedOuter =
+              outerWithGraphs.copy(
+                recordedScopes = outerWithGraphs.recordedScopes ++ defsState.recordedScopes,
+                typeTable = outerWithGraphs.typeTable ++ defsState.typeTable,
+                notifications = outerWithGraphs.notifications ++ defsState.notifications
+              )
+            SemanticCheck.setState(mergedOuter)
+          }
+      } ifOkChain
+      check(query)
+  }
+
+  override def semanticCheck: SemanticCheck =
+    checkNoDefineAndCallInTransactions chain
+      semanticCheckAbstract(_.semanticCheckInContext(QueryWithLocalDefinitions))
+
+  /**
+   * Semantic check for when this `Query` is enclosed in outer context
+   */
+  override def semanticCheckInContext(context: UnaliasedNotAllowed): SemanticCheck =
+    semanticCheckAbstract(_.semanticCheckInContext(context))
+
+  /**
+   * Semantic check for when this `Query` is the body of local callable, and imports
+   * local callable parameters as variables from the `outer` scope
+   */
+  override def semanticCheckInLocalCallableBodyContext(
+    outer: SemanticState,
+    current: SemanticState,
+    optional: Boolean
+  ): SemanticCheck =
+    semanticCheckAbstract(_.semanticCheckInLocalCallableBodyContext(outer, current, optional))
+
+  /**
+   * Semantic check for when this `Query` is in a subquery, and might import
+   * variables from the `outer` scope
+   */
+  override def semanticCheckInSubqueryContext(
+    outer: SemanticState,
+    current: SemanticState,
+    optional: Boolean
+  ): SemanticCheck =
+    semanticCheckAbstract(_.semanticCheckInSubqueryContext(outer, current, optional))
+
+  override def semanticCheckImportingWithSubQueryContext(outer: SemanticState, optional: Boolean): SemanticCheck =
+    requireFeatureSupport(
+      "The DEFINE keyword",
+      SemanticFeature.LocalCallables,
+      position
+    ) ifOkChain
+      SemanticCheck.error(SemanticError.invalidUseOfOldCall(QueryWithLocalDefinitions.name, position))
+
+  /**
+   * Exists and Count can omit the Return Statement
+   * Count still requires it for Distinct Unions as in this case the count
+   * changes based on which rows are distinct vs not
+   */
+  override def semanticCheckInSubqueryExpressionContext(
+    canOmitReturn: Boolean,
+    outer: SemanticState,
+    context: UnaliasedNotAllowed
+  ): SemanticCheck =
+    semanticCheckAbstract(_.semanticCheckInSubqueryExpressionContext(canOmitReturn, outer, context))
+
+  override def invalidImportingWith: Seq[SemanticError] = query.invalidImportingWith
 }

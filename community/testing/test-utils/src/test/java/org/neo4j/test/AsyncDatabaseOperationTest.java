@@ -20,7 +20,7 @@
 package org.neo4j.test;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -32,6 +32,7 @@ import java.time.Duration;
 import org.junit.jupiter.api.Test;
 import org.neo4j.dbms.api.DatabaseManagementService;
 import org.neo4j.dbms.api.DatabaseNotFoundException;
+import org.neo4j.dbms.api.DatabaseNotFoundHelper;
 import org.neo4j.graphdb.GraphDatabaseService;
 
 class AsyncDatabaseOperationTest {
@@ -42,10 +43,10 @@ class AsyncDatabaseOperationTest {
     @Test
     void shouldThrowAtTheEnd() {
         var managementService = mock(DatabaseManagementService.class);
-        when(managementService.database(DB)).thenThrow(new DatabaseNotFoundException());
+        when(managementService.database(DB)).thenThrow(DatabaseNotFoundHelper.databaseNotFound(DB));
 
-        assertThat(assertThrows(
-                        DatabaseNotFoundException.class, () -> findDatabaseEventually(managementService, DB, TIMEOUT)))
+        assertThatThrownBy(() -> findDatabaseEventually(managementService, DB, TIMEOUT))
+                .isInstanceOf(DatabaseNotFoundException.class)
                 .hasMessageContaining(DB);
         verify(managementService, atLeastOnce()).database(DB);
     }
@@ -56,11 +57,11 @@ class AsyncDatabaseOperationTest {
         var database = mock(GraphDatabaseService.class);
         when(database.isAvailable()).thenReturn(false);
         when(managementService.database(DB))
-                .thenThrow(new DatabaseNotFoundException())
+                .thenThrow(DatabaseNotFoundHelper.databaseNotFound(DB))
                 .thenReturn(database);
 
-        assertThat(assertThrows(
-                        DatabaseNotFoundException.class, () -> findDatabaseEventually(managementService, DB, TIMEOUT)))
+        assertThatThrownBy(() -> findDatabaseEventually(managementService, DB, TIMEOUT))
+                .isInstanceOf(DatabaseNotFoundException.class)
                 .hasMessageContaining(DB);
         verify(managementService, atLeastOnce()).database(DB);
     }
@@ -73,7 +74,7 @@ class AsyncDatabaseOperationTest {
         when(unavaliableDatabase.isAvailable()).thenReturn(false);
         when(availableDatabase.isAvailable()).thenReturn(true);
         when(managementService.database(DB))
-                .thenThrow(new DatabaseNotFoundException())
+                .thenThrow(DatabaseNotFoundHelper.databaseNotFound(DB))
                 .thenReturn(unavaliableDatabase)
                 .thenReturn(availableDatabase);
 

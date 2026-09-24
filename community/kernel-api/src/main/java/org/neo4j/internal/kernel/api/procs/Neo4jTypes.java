@@ -29,6 +29,7 @@ package org.neo4j.internal.kernel.api.procs;
 public final class Neo4jTypes {
     public static final AnyType NTAny = new AnyType();
     public static final TextType NTString = new TextType();
+    public static final UUIDType NTUUID = new UUIDType();
     public static final NumberType NTNumber = new NumberType();
     public static final IntegerType NTInteger = new IntegerType();
     public static final FloatType NTFloat = new FloatType();
@@ -46,6 +47,7 @@ public final class Neo4jTypes {
     public static final TimeType NTTime = new TimeType();
     public static final LocalTimeType NTLocalTime = new LocalTimeType();
     public static final DurationType NTDuration = new DurationType();
+    public static final VectorType NTVector = new VectorType();
 
     private Neo4jTypes() {}
 
@@ -73,6 +75,12 @@ public final class Neo4jTypes {
     public static class TextType extends AnyType {
         public TextType() {
             super("STRING");
+        }
+    }
+
+    public static class UUIDType extends AnyType {
+        public UUIDType() {
+            super("UUID");
         }
     }
 
@@ -218,6 +226,12 @@ public final class Neo4jTypes {
     public static class DurationType extends AnyType {
         public DurationType() {
             super("DURATION");
+        }
+    }
+
+    public static class VectorType extends AnyType {
+        public VectorType() {
+            super("VECTOR");
         }
     }
 }

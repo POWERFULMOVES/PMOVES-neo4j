@@ -24,20 +24,24 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.OptionalLong;
-import org.eclipse.collections.api.RichIterable;
-import org.eclipse.collections.api.tuple.Pair;
 import org.neo4j.common.EntityType;
 import org.neo4j.internal.kernel.api.exceptions.schema.MalformedSchemaRuleException;
+import org.neo4j.internal.schema.constraints.ConstrainableType;
 import org.neo4j.internal.schema.constraints.ConstraintDescriptorFactory;
+import org.neo4j.internal.schema.constraints.DefaultValue;
 import org.neo4j.internal.schema.constraints.IndexBackedConstraintDescriptor;
 import org.neo4j.internal.schema.constraints.NodeLabelExistenceConstraintDescriptor;
 import org.neo4j.internal.schema.constraints.PropertyTypeSet;
 import org.neo4j.internal.schema.constraints.RelationshipEndpointLabelConstraintDescriptor;
-import org.neo4j.internal.schema.constraints.SchemaValueType;
 import org.neo4j.internal.schema.constraints.TypeConstraintDescriptor;
+import org.neo4j.internal.schema.constraints.TypeRepresentation;
+import org.neo4j.util.VisibleForTesting;
+import org.neo4j.values.ValueGenerators;
 import org.neo4j.values.storable.IntArray;
+import org.neo4j.values.storable.IntValue;
 import org.neo4j.values.storable.LongValue;
 import org.neo4j.values.storable.StringArray;
 import org.neo4j.values.storable.TextValue;
@@ -56,7 +60,10 @@ public class SchemaRuleMapifier {
     private static final String PROP_SCHEMA_ENDPOINT_LABEL_ID = PROP_SCHEMA_RULE_PREFIX + "endpointLabelId";
     private static final String PROP_SCHEMA_NODE_LABEL_EXISTENCE_REQUIRED_LABEL_ID =
             PROP_SCHEMA_RULE_PREFIX + "requiredLabelId";
-    private static final String PROP_SCHEMA_RULE_NAME = PROP_SCHEMA_RULE_PREFIX + "name";
+
+    @VisibleForTesting
+    public static final String PROP_SCHEMA_RULE_NAME = PROP_SCHEMA_RULE_PREFIX + "name";
+
     private static final String PROP_OWNED_INDEX = PROP_SCHEMA_RULE_PREFIX + "ownedIndex";
     public static final String PROP_OWNING_CONSTRAINT = PROP_SCHEMA_RULE_PREFIX + "owningConstraint";
     private static final String PROP_INDEX_PROVIDER_NAME = PROP_SCHEMA_RULE_PREFIX + "indexProviderName";
@@ -73,6 +80,21 @@ public class SchemaRuleMapifier {
     private static final String PROP_INDEX_TYPE = PROP_SCHEMA_RULE_PREFIX + "indexType";
     private static final String PROP_CONSTRAINT_ALLOWED_TYPES = PROP_SCHEMA_RULE_PREFIX + "propertyType";
     private static final String PROP_INDEX_CONFIG_PREFIX = PROP_SCHEMA_RULE_PREFIX + "IndexConfig.";
+    private static final String PROP_CONSTRAINT_DEFAULT_VALUE_CONSTANT =
+            PROP_SCHEMA_RULE_PREFIX + "defaultValueConstant";
+    private static final String PROP_CONSTRAINT_DEFAULT_VALUE_GENERATOR =
+            PROP_SCHEMA_RULE_PREFIX + "defaultValueGenerator";
+
+    /**
+     * Remove the {@link #PROP_SCHEMA_RULE_PREFIX} from a property name if it is prefixed
+     * @param property from which to potentially remove the prefix
+     * @return property name without prefix
+     */
+    public static String removePrefix(String property) {
+        return property.startsWith(PROP_SCHEMA_RULE_PREFIX)
+                ? property.substring(PROP_SCHEMA_RULE_PREFIX.length())
+                : property;
+    }
 
     /**
      * Turn a {@link SchemaRule} into a map-of-string-to-value representation.
@@ -111,8 +133,10 @@ public class SchemaRuleMapifier {
         return switch (schemaRuleType) {
             case "INDEX" -> buildIndexRule(ruleId, map);
             case "CONSTRAINT" -> buildConstraintRule(ruleId, map);
-            default -> throw new MalformedSchemaRuleException(
-                    "Can not create a schema rule of type: " + schemaRuleType);
+            default ->
+                throw MalformedSchemaRuleException.internalError(
+                        SchemaRuleMapifier.class.getSimpleName(),
+                        "Can not create a schema rule of type: " + schemaRuleType);
         };
     }
 
@@ -129,9 +153,8 @@ public class SchemaRuleMapifier {
     }
 
     private static void indexConfigToMap(IndexConfig indexConfig, Map<String, Value> map) {
-        RichIterable<Pair<String, Value>> entries = indexConfig.entries();
-        for (Pair<String, Value> entry : entries) {
-            putIndexConfigProperty(map, entry.getOne(), entry.getTwo());
+        for (Entry<String, Value> entry : indexConfig.entries()) {
+            putIndexConfigProperty(map, entry.getKey(), entry.getValue());
         }
     }
 
@@ -163,8 +186,8 @@ public class SchemaRuleMapifier {
 
     private static void indexProviderToMap(IndexDescriptor rule, Map<String, Value> map) {
         IndexProviderDescriptor provider = rule.getIndexProvider();
-        String name = provider.getKey();
-        String version = provider.getVersion();
+        String name = provider.key();
+        String version = provider.version();
         putStringProperty(map, PROP_INDEX_PROVIDER_NAME, name);
         putStringProperty(map, PROP_INDEX_PROVIDER_VERSION, version);
     }
@@ -189,13 +212,25 @@ public class SchemaRuleMapifier {
             }
             case PROPERTY_TYPE -> {
                 TypeConstraintDescriptor typeConstraintDescriptor = rule.asPropertyTypeConstraint();
-                PropertyTypeSet schemaValueTypes = typeConstraintDescriptor.propertyType();
-                String[] typeArray = new String[schemaValueTypes.size()];
+                PropertyTypeSet typeSet = typeConstraintDescriptor.propertyType();
+                String[] typeArray = new String[typeSet.size()];
                 int i = 0;
-                for (SchemaValueType schemaValueType : schemaValueTypes) {
-                    typeArray[i++] = schemaValueType.serialize();
+                for (ConstrainableType constraintType : typeSet) {
+                    typeArray[i++] = constraintType.serialize();
                 }
                 putStringArrayProperty(map, PROP_CONSTRAINT_ALLOWED_TYPES, typeArray);
+
+                Optional<DefaultValue> defaultValue = typeConstraintDescriptor.defaultValue();
+                if (defaultValue.isPresent()) {
+                    if (defaultValue.get() instanceof DefaultValue.Constant constant) {
+                        map.put(PROP_CONSTRAINT_DEFAULT_VALUE_CONSTANT, constant.value());
+                    } else if (defaultValue.get() instanceof DefaultValue.Generator generator) {
+                        putIntProperty(map, PROP_CONSTRAINT_DEFAULT_VALUE_GENERATOR, generator.generatorId());
+                    } else {
+                        throw new UnsupportedOperationException(
+                                "Unsupported default value generator: " + defaultValue.get());
+                    }
+                }
             }
             case RELATIONSHIP_ENDPOINT_LABEL -> {
                 RelationshipEndpointLabelConstraintDescriptor relationshipEndpointLabelConstraintDescriptor =
@@ -229,7 +264,7 @@ public class SchemaRuleMapifier {
         if (value instanceof IntArray intArray) {
             return intArray.asObject();
         }
-        throw new MalformedSchemaRuleException("Expected property " + property + " to be a IntArray but was " + value);
+        throw MalformedSchemaRuleException.propertyTypeMismatch(property, value, IntArray.class);
     }
 
     private static long getLong(String property, Map<String, Value> props) throws MalformedSchemaRuleException {
@@ -237,7 +272,7 @@ public class SchemaRuleMapifier {
         if (value instanceof LongValue longValue) {
             return longValue.value();
         }
-        throw new MalformedSchemaRuleException("Expected property " + property + " to be a LongValue but was " + value);
+        throw MalformedSchemaRuleException.propertyTypeMismatch(property, value, LongValue.class);
     }
 
     private static OptionalLong getOptionalLong(String property, Map<String, Value> props) {
@@ -258,10 +293,11 @@ public class SchemaRuleMapifier {
 
     private static String getString(String property, Map<String, Value> map) throws MalformedSchemaRuleException {
         Value value = map.get(property);
-        if (value instanceof TextValue textValue) {
-            return textValue.stringValue();
-        }
-        throw new MalformedSchemaRuleException("Expected property " + property + " to be a TextValue but was " + value);
+        return switch (value) {
+            case TextValue textValue -> textValue.stringValue();
+            case null, default ->
+                throw MalformedSchemaRuleException.propertyTypeMismatch(property, value, TextValue.class);
+        };
     }
 
     private static String[] getStringArray(String property, Map<String, Value> props)
@@ -270,12 +306,15 @@ public class SchemaRuleMapifier {
         if (value instanceof StringArray stringArray) {
             return stringArray.asObject();
         }
-        throw new MalformedSchemaRuleException(
-                "Expected property " + property + " to be a StringArray but was " + value);
+        throw MalformedSchemaRuleException.propertyTypeMismatch(property, value, StringArray.class);
     }
 
     private static void putLongProperty(Map<String, Value> map, String property, long value) {
         map.put(property, Values.longValue(value));
+    }
+
+    private static void putIntProperty(Map<String, Value> map, String property, int value) {
+        map.put(property, Values.intValue(value));
     }
 
     private static void putIntArrayProperty(Map<String, Value> map, String property, int[] value) {
@@ -326,7 +365,10 @@ public class SchemaRuleMapifier {
         return switch (indexRuleType) {
             case "NON_UNIQUE" -> false;
             case "UNIQUE" -> true;
-            default -> throw new MalformedSchemaRuleException("Did not recognize index rule type: " + indexRuleType);
+            default ->
+                throw MalformedSchemaRuleException.internalError(
+                        SchemaRuleMapifier.class.getSimpleName(),
+                        "Did not recognize index rule type: " + indexRuleType);
         };
     }
 
@@ -363,8 +405,9 @@ public class SchemaRuleMapifier {
                 yield constraint;
             }
 
-            case EXISTS -> ConstraintDescriptorFactory.existsForSchema(
-                    schema, graphTypeDependence == GraphTypeDependence.DEPENDENT);
+            case EXISTS ->
+                ConstraintDescriptorFactory.existsForSchema(
+                        schema, graphTypeDependence == GraphTypeDependence.DEPENDENT);
 
             case UNIQUE_EXISTS -> {
                 var constraint = ConstraintDescriptorFactory.keyForSchema(
@@ -376,19 +419,39 @@ public class SchemaRuleMapifier {
                 yield constraint;
             }
 
-            case PROPERTY_TYPE -> ConstraintDescriptorFactory.typeForSchema(
-                    schema,
-                    getAllowedTypes(getStringArray(PROP_CONSTRAINT_ALLOWED_TYPES, props)),
-                    graphTypeDependence == GraphTypeDependence.DEPENDENT);
+            case PROPERTY_TYPE -> {
+                TypeConstraintDescriptor constraint = ConstraintDescriptorFactory.typeForSchema(
+                        schema,
+                        getAllowedTypes(getStringArray(PROP_CONSTRAINT_ALLOWED_TYPES, props)),
+                        graphTypeDependence == GraphTypeDependence.DEPENDENT);
+                constraint = constraint.withDefaultValue(getDefaultValue(props));
+                yield constraint;
+            }
 
-            case RELATIONSHIP_ENDPOINT_LABEL -> ConstraintDescriptorFactory.relationshipEndpointLabelForSchema(
-                    schema.asSchemaDescriptorType(RelationshipEndpointLabelSchemaDescriptor.class),
-                    (int) getLong(PROP_SCHEMA_ENDPOINT_LABEL_ID, props),
-                    getEndpointType(props));
-            case NODE_LABEL_EXISTENCE -> ConstraintDescriptorFactory.nodeLabelExistenceForSchema(
-                    schema.asSchemaDescriptorType(NodeLabelExistenceSchemaDescriptor.class),
-                    (int) getLong(PROP_SCHEMA_NODE_LABEL_EXISTENCE_REQUIRED_LABEL_ID, props));
+            case RELATIONSHIP_ENDPOINT_LABEL ->
+                ConstraintDescriptorFactory.relationshipEndpointLabelForSchema(
+                        schema.asRelationshipEndpointLabelDescriptor(),
+                        (int) getLong(PROP_SCHEMA_ENDPOINT_LABEL_ID, props),
+                        getEndpointType(props));
+
+            case NODE_LABEL_EXISTENCE ->
+                ConstraintDescriptorFactory.nodeLabelExistenceForSchema(
+                        schema.asNodeLabelExistenceSchemaDescriptor(),
+                        (int) getLong(PROP_SCHEMA_NODE_LABEL_EXISTENCE_REQUIRED_LABEL_ID, props));
         };
+    }
+
+    private static DefaultValue getDefaultValue(Map<String, Value> props) {
+        Value constant = props.get(PROP_CONSTRAINT_DEFAULT_VALUE_CONSTANT);
+        if (constant != null) {
+            return new DefaultValue.Constant(constant);
+        }
+        Value generatorIdValue = props.get(PROP_CONSTRAINT_DEFAULT_VALUE_GENERATOR);
+        if (generatorIdValue != null) {
+            int generatorId = ((IntValue) generatorIdValue).intValue();
+            return new DefaultValue.Generator(ValueGenerators.byId(generatorId));
+        }
+        return null;
     }
 
     private static SchemaDescriptor buildSchemaDescriptor(Map<String, Value> props)
@@ -399,7 +462,7 @@ public class SchemaRuleMapifier {
         int[] entityIds = getIntArray(PROP_SCHEMA_DESCRIPTOR_ENTITY_IDS, props);
         int[] propertyIds = getIntArray(PROP_SCHEMA_DESCRIPTOR_PROPERTY_IDS, props);
 
-        return new SchemaDescriptorImplementationNode(entityType, schemaPatternMatchingType, entityIds, propertyIds);
+        return new SchemaDescriptorImplementation(entityType, schemaPatternMatchingType, entityIds, propertyIds);
     }
 
     private static IndexConfig extractIndexConfig(Map<String, Value> props) {
@@ -416,7 +479,8 @@ public class SchemaRuleMapifier {
         try {
             return IndexType.valueOf(indexType);
         } catch (Exception e) {
-            throw new MalformedSchemaRuleException("Did not recognize index type: " + indexType, e);
+            throw MalformedSchemaRuleException.internalError(
+                    SchemaRuleMapifier.class.getSimpleName(), "Did not recognize index type: " + indexType, e);
         }
     }
 
@@ -425,8 +489,10 @@ public class SchemaRuleMapifier {
         try {
             return SchemaPatternMatchingType.valueOf(schemaPatternMatchingType);
         } catch (Exception e) {
-            throw new MalformedSchemaRuleException(
-                    "Did not recognize schema pattern matching type: " + schemaPatternMatchingType, e);
+            throw MalformedSchemaRuleException.internalError(
+                    SchemaRuleMapifier.class.getSimpleName(),
+                    "Did not recognize schema pattern matching type: " + schemaPatternMatchingType,
+                    e);
         }
     }
 
@@ -434,17 +500,19 @@ public class SchemaRuleMapifier {
         try {
             return EntityType.valueOf(entityType);
         } catch (Exception e) {
-            throw new MalformedSchemaRuleException("Did not recognize entity type: " + entityType, e);
+            throw MalformedSchemaRuleException.internalError(
+                    SchemaRuleMapifier.class.getSimpleName(), "Did not recognize entity type: " + entityType, e);
         }
     }
 
     private static PropertyTypeSet getAllowedTypes(String[] allowedTypes) throws MalformedSchemaRuleException {
-        List<SchemaValueType> types = new ArrayList<>();
+        List<ConstrainableType> types = new ArrayList<>();
         for (String allowedType : allowedTypes) {
             try {
-                types.add(SchemaValueTypes.convertToSchemaValueType(allowedType));
+                types.add(TypeRepresentation.deserialize(allowedType));
             } catch (Exception e) {
-                throw new MalformedSchemaRuleException(
+                throw MalformedSchemaRuleException.internalError(
+                        SchemaRuleMapifier.class.getSimpleName(),
                         "Did not recognize schema value type '%s' in: %s"
                                 .formatted(allowedType, Arrays.toString(allowedTypes)),
                         e);
@@ -461,12 +529,16 @@ public class SchemaRuleMapifier {
             try {
                 graphTypeDependence = GraphTypeDependence.valueOf(maybeGraphTypeDependence.get());
             } catch (Exception e) {
-                throw new MalformedSchemaRuleException(
-                        "Did not recognize constraint dependency type: " + maybeGraphTypeDependence.get(), e);
+                throw MalformedSchemaRuleException.internalError(
+                        SchemaRuleMapifier.class.getSimpleName(),
+                        "Did not recognize constraint dependency type: " + maybeGraphTypeDependence.get(),
+                        e);
             }
             if (constraintType.enforcesUniqueness() && graphTypeDependence != GraphTypeDependence.UNDESIGNATED) {
-                throw new MalformedSchemaRuleException("incompatible graph type dependence " + graphTypeDependence
-                        + " with constraint rule type " + constraintType);
+                throw MalformedSchemaRuleException.internalError(
+                        SchemaRuleMapifier.class.getSimpleName(),
+                        "incompatible graph type dependence " + graphTypeDependence + " with constraint rule type "
+                                + constraintType);
             }
             return graphTypeDependence;
         }
@@ -480,10 +552,13 @@ public class SchemaRuleMapifier {
             try {
                 return EndpointType.valueOf(enumName);
             } catch (IllegalArgumentException e) {
-                throw new MalformedSchemaRuleException("Endpoint type with name " + enumName + " not recognized");
+                throw MalformedSchemaRuleException.internalError(
+                        SchemaRuleMapifier.class.getSimpleName(),
+                        "Endpoint type with name " + enumName + " not recognized");
             }
         } else {
-            throw new MalformedSchemaRuleException("Endpoint type of endpoint label constraint not found");
+            throw MalformedSchemaRuleException.internalError(
+                    SchemaRuleMapifier.class.getSimpleName(), "Endpoint type of endpoint label constraint not found");
         }
     }
 
@@ -491,7 +566,9 @@ public class SchemaRuleMapifier {
         try {
             return ConstraintType.valueOf(constraintType);
         } catch (Exception e) {
-            throw new MalformedSchemaRuleException("Did not recognize constraint rule type: " + constraintType);
+            throw MalformedSchemaRuleException.internalError(
+                    SchemaRuleMapifier.class.getSimpleName(),
+                    "Did not recognize constraint rule type: " + constraintType);
         }
     }
 }

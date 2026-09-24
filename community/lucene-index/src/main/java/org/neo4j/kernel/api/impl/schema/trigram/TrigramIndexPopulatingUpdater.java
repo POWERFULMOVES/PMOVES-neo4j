@@ -21,48 +21,57 @@ package org.neo4j.kernel.api.impl.schema.trigram;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import org.neo4j.internal.schema.SchemaDescriptorSupplier;
-import org.neo4j.kernel.api.exceptions.index.IndexEntryConflictException;
-import org.neo4j.kernel.api.impl.schema.writer.LuceneIndexWriter;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDocumentsFactory;
+import org.neo4j.kernel.api.impl.schema.writer.LucenePartitionIndexWriter;
 import org.neo4j.kernel.api.index.IndexUpdater;
 import org.neo4j.kernel.api.index.IndexValueValidator;
 import org.neo4j.kernel.impl.index.schema.IndexUpdateIgnoreStrategy;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
+import org.neo4j.storageengine.api.UpdateMode;
 import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
+import org.neo4j.values.storable.Value;
 
 class TrigramIndexPopulatingUpdater implements IndexUpdater {
-    private final LuceneIndexWriter writer;
+    private final LucenePartitionIndexWriter writer;
     private final IndexUpdateIgnoreStrategy ignoreStrategy;
     private final IndexValueValidator validator;
+    private final LuceneDocumentsFactory documentsFactory;
 
     TrigramIndexPopulatingUpdater(
-            LuceneIndexWriter writer, IndexUpdateIgnoreStrategy ignoreStrategy, IndexValueValidator validator) {
+            LucenePartitionIndexWriter writer,
+            IndexUpdateIgnoreStrategy ignoreStrategy,
+            IndexValueValidator validator) {
         this.writer = writer;
         this.ignoreStrategy = ignoreStrategy;
         this.validator = validator;
+        this.documentsFactory = writer.documentsFactory();
     }
 
     @Override
-    public void process(IndexEntryUpdate<?> update) {
-        final var valueUpdate = asValueUpdate(update);
+    public void process(IndexEntryUpdate update) {
+        ValueIndexEntryUpdate valueUpdate = asValueUpdate(update);
         if (valueUpdate == null) {
             return;
         }
 
         try {
-            final var entityId = valueUpdate.getEntityId();
-            var values = valueUpdate.values();
-            final var value = values[0];
+            long entityId = valueUpdate.getEntityId();
+            Value[] values = valueUpdate.values();
+            Value value = values[0];
             validator.validate(entityId, value);
-            final var updateMode = valueUpdate.updateMode();
+            UpdateMode updateMode = valueUpdate.updateMode();
             switch (updateMode) {
-                case ADDED -> writer.updateDocument(
-                        TrigramDocumentStructure.newTermForChangeOrRemove(entityId),
-                        TrigramDocumentStructure.createLuceneDocument(entityId, value));
-                case CHANGED -> writer.updateOrDeleteDocument(
-                        TrigramDocumentStructure.newTermForChangeOrRemove(entityId),
-                        TrigramDocumentStructure.createLuceneDocument(entityId, value));
-                case REMOVED -> writer.deleteDocuments(TrigramDocumentStructure.newTermForChangeOrRemove(entityId));
+                case ADDED ->
+                    writer.updateDocument(
+                            LuceneDocumentsFactory.ENTITY_ID_KEY,
+                            entityId,
+                            documentsFactory.createTrigramDocument(entityId, value));
+                case CHANGED ->
+                    writer.updateOrDeleteDocument(
+                            LuceneDocumentsFactory.ENTITY_ID_KEY,
+                            entityId,
+                            documentsFactory.createTrigramDocument(entityId, value));
+                case REMOVED -> writer.deleteDocuments(LuceneDocumentsFactory.ENTITY_ID_KEY, entityId);
             }
         } catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -70,12 +79,11 @@ class TrigramIndexPopulatingUpdater implements IndexUpdater {
     }
 
     @Override
-    public <INDEX_KEY extends SchemaDescriptorSupplier> ValueIndexEntryUpdate<INDEX_KEY> asValueUpdate(
-            IndexEntryUpdate<INDEX_KEY> update) {
-        final var valueUpdate = IndexUpdater.super.asValueUpdate(update);
+    public ValueIndexEntryUpdate asValueUpdate(IndexEntryUpdate update) {
+        ValueIndexEntryUpdate valueUpdate = IndexUpdater.super.asValueUpdate(update);
         return !ignoreStrategy.ignore(valueUpdate) ? ignoreStrategy.toEquivalentUpdate(valueUpdate) : null;
     }
 
     @Override
-    public void close() throws IndexEntryConflictException {}
+    public void close() {}
 }

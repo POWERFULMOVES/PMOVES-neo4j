@@ -19,13 +19,13 @@
  */
 package org.neo4j.internal.id.indexed;
 
+import static java.lang.Math.ceilDiv;
 import static java.lang.Math.max;
 
 import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.AtomicReference;
-import org.neo4j.internal.helpers.MathUtil;
 
 class DynamicConcurrentLongQueue implements ConcurrentLongQueue {
     private final AtomicReference<Chunk> head = new AtomicReference<>();
@@ -36,7 +36,9 @@ class DynamicConcurrentLongQueue implements ConcurrentLongQueue {
 
     DynamicConcurrentLongQueue(int chunkSize, int capacity) {
         this.chunkSize = chunkSize;
-        this.maxNumChunks = MathUtil.ceil(capacity, chunkSize);
+        // The internal chunking has it so that there must be at least two chunks, otherwise the queue
+        // will not report correct occupancy, resulting in inability to sometimes accept offered IDs.
+        this.maxNumChunks = Math.max(2, ceilDiv(capacity, chunkSize));
     }
 
     @Override
@@ -148,13 +150,6 @@ class DynamicConcurrentLongQueue implements ConcurrentLongQueue {
         }
         int occupied = (numChunks.get() - 1) * chunkSize + lastChunk.occupied();
         return capacity - occupied;
-    }
-
-    @Override
-    public void clear() {
-        head.set(null);
-        tail.set(null);
-        numChunks.set(0);
     }
 
     private static class Chunk {

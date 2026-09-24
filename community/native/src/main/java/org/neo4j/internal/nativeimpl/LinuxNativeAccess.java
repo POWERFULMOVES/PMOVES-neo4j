@@ -48,6 +48,20 @@ public class LinuxNativeAccess implements NativeAccess {
      */
     private static final int POSIX_FADV_DONTNEED = 4;
 
+    /**
+     * Constant defined in mman-common.h and asks to populate, or prefault, page tables writable for the specified
+     * range, as if the whole range was written to. Supported since Linux 5.14, older kernels fail with EINVAL.
+     * For more info check man page for madvise.
+     */
+    private static final int MADV_POPULATE_WRITE = 23;
+
+    /**
+     * Constant defined in mman-common.h and asks the kernel to start reading the specified range into the page cache
+     * without waiting for it. Same value as POSIX_MADV_WILLNEED, which glibc implements with this call.
+     * For more info check man page for madvise.
+     */
+    private static final int MADV_WILLNEED = 3;
+
     private static final boolean NATIVE_ACCESS_AVAILABLE;
     private static final Throwable INITIALIZATION_FAILURE;
 
@@ -90,6 +104,17 @@ public class LinuxNativeAccess implements NativeAccess {
      * @return returns zero on success, or an error number on failure
      */
     private static native int posix_fallocate(int fd, long offset, long len) throws LastErrorException;
+
+    /**
+     * Give advice about use of memory in the given range. The advice is not binding for some options, but
+     * MADV_POPULATE_WRITE performs the requested population before returning.
+     * For more info check man page for madvise.
+     * @param addr start of the memory range, must be page-aligned
+     * @param length length of the memory range in bytes
+     * @param advice advice option
+     * @return 0 on success. On error, -1 is returned and errno is set
+     */
+    private static native int madvise(long addr, long length, int advice) throws LastErrorException;
 
     /**
      * Return pointer to a string describing error number, possibly using the LC_MESSAGES part of the current locale to select the appropriate language.
@@ -141,6 +166,28 @@ public class LinuxNativeAccess implements NativeAccess {
     }
 
     @Override
+    public NativeCallResult tryPopulateMemory(long address, long bytes) {
+        if (address == 0 || bytes <= 0) {
+            return new NativeCallResult(
+                    ERROR,
+                    "Incorrect address or number of bytes. Requested address: " + address + ", number of bytes: "
+                            + bytes);
+        }
+        return wrapResult(() -> madvise(address, bytes, MADV_POPULATE_WRITE));
+    }
+
+    @Override
+    public NativeCallResult tryAdviseWillNeedMemory(long address, long bytes) {
+        if (address == 0 || bytes <= 0) {
+            return new NativeCallResult(
+                    ERROR,
+                    "Incorrect address or number of bytes. Requested address: " + address + ", number of bytes: "
+                            + bytes);
+        }
+        return wrapResult(() -> madvise(address, bytes, MADV_WILLNEED));
+    }
+
+    @Override
     public ErrorTranslator errorTranslator() {
         return LinuxErrorTranslator.INSTANCE;
     }
@@ -171,7 +218,7 @@ public class LinuxNativeAccess implements NativeAccess {
         }
     }
 
-    private static String tryExtractError(int errorCode) {
+    public static String tryExtractError(int errorCode) {
         // The GNU C Library uses a buffer of 1024 characters for strerror().
         // This buffer size therefore should be sufficient to avoid an ERANGE error when calling strerror_r() and
         // strerror_l().

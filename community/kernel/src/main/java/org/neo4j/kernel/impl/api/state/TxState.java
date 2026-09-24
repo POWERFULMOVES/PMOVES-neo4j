@@ -23,40 +23,50 @@ import static org.neo4j.collection.diffset.TrackableDiffSets.newChangeCountingDi
 import static org.neo4j.collection.diffset.TrackableDiffSets.newMutableDiffSets;
 import static org.neo4j.collection.diffset.TrackableDiffSets.newMutableLongDiffSets;
 import static org.neo4j.collection.diffset.TrackableDiffSets.newRemovalsCountingDiffSets;
+import static org.neo4j.collection.trackable.HeapTrackingCollections.newIntObjectHashMap;
 import static org.neo4j.collection.trackable.HeapTrackingCollections.newLongObjectMap;
 import static org.neo4j.collection.trackable.HeapTrackingCollections.newMap;
+import static org.neo4j.kernel.impl.api.state.StateNodeRelationshipIds.createStateNodeRelationshipIds;
 import static org.neo4j.kernel.impl.api.state.TokenState.createTokenState;
 import static org.neo4j.storageengine.api.txstate.EntityChange.ADDED;
 import static org.neo4j.storageengine.api.txstate.EntityChange.REMOVED;
+import static org.neo4j.storageengine.api.txstate.RelationshipModifications.IdDataDecorator.EMPTY_ID_DATA_DECORATOR;
 import static org.neo4j.storageengine.api.txstate.RelationshipModifications.idsAsBatch;
-import static org.neo4j.values.storable.Values.NO_VALUE;
 
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
-import java.util.TreeMap;
+import java.util.function.IntPredicate;
 import org.eclipse.collections.api.map.MutableMap;
+import org.eclipse.collections.api.map.primitive.LongObjectMap;
+import org.eclipse.collections.api.map.primitive.MutableIntObjectMap;
 import org.eclipse.collections.api.map.primitive.MutableLongObjectMap;
 import org.eclipse.collections.api.set.primitive.MutableIntSet;
+import org.eclipse.collections.api.set.primitive.MutableLongSet;
 import org.eclipse.collections.impl.UnmodifiableMap;
 import org.neo4j.collection.diffset.ChangeCountingDiffSet;
 import org.neo4j.collection.diffset.DiffSets;
+import org.neo4j.collection.diffset.IntDiffSets;
 import org.neo4j.collection.diffset.LongDiffSets;
 import org.neo4j.collection.diffset.MutableDiffSets;
+import org.neo4j.collection.diffset.MutableIntDiffSets;
 import org.neo4j.collection.diffset.MutableLongDiffSets;
 import org.neo4j.collection.diffset.RemovalsCountingDiffSets;
 import org.neo4j.collection.factory.CollectionsFactory;
 import org.neo4j.collection.factory.OnHeapCollectionsFactory;
 import org.neo4j.collection.trackable.HeapTrackingArrayList;
 import org.neo4j.exceptions.KernelException;
+import org.neo4j.graphdb.Vector;
 import org.neo4j.internal.helpers.collection.Iterables;
 import org.neo4j.internal.kernel.api.Upgrade;
 import org.neo4j.internal.kernel.api.exceptions.DeletedNodeStillHasRelationshipsException;
 import org.neo4j.internal.schema.ConstraintDescriptor;
 import org.neo4j.internal.schema.IndexDescriptor;
+import org.neo4j.internal.schema.IndexRemovalSnapshot;
 import org.neo4j.internal.schema.SchemaDescriptor;
 import org.neo4j.internal.schema.SchemaDescriptorPredicates;
 import org.neo4j.internal.schema.SchemaDescriptors;
@@ -70,16 +80,18 @@ import org.neo4j.memory.HeapEstimator;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.memory.ScopedMemoryTracker;
 import org.neo4j.storageengine.api.RelationshipDirection;
+import org.neo4j.storageengine.api.RelationshipSelection;
 import org.neo4j.storageengine.api.RelationshipVisitor;
 import org.neo4j.storageengine.api.RelationshipVisitorWithProperties;
 import org.neo4j.storageengine.api.enrichment.ApplyEnrichmentStrategy;
 import org.neo4j.storageengine.api.enrichment.EnrichmentMode;
 import org.neo4j.storageengine.api.txstate.NodeState;
 import org.neo4j.storageengine.api.txstate.RelationshipModifications;
-import org.neo4j.storageengine.api.txstate.RelationshipModifications.NodeRelationshipIds;
 import org.neo4j.storageengine.api.txstate.RelationshipState;
 import org.neo4j.storageengine.api.txstate.TransactionStateBehaviour;
 import org.neo4j.storageengine.api.txstate.TxStateVisitor;
+import org.neo4j.storageengine.api.txstate.memory.TxStateMemoryConsumer;
+import org.neo4j.storageengine.util.SingleDegree;
 import org.neo4j.util.VisibleForTesting;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.ValueTuple;
@@ -102,7 +114,7 @@ public class TxState implements TransactionState {
      */
     private final CollectionsFactory collectionsFactory;
 
-    private MutableLongObjectMap<MutableLongDiffSets> labelStatesMap;
+    private MutableIntObjectMap<MutableLongDiffSets> labelStatesMap;
     private MutableLongObjectMap<NodeStateImpl> nodeStatesMap;
     private MutableLongObjectMap<MutableLongDiffSets> relationshipTypeStatesMap;
     private MutableLongObjectMap<RelationshipStateImpl> relationshipStatesMap;
@@ -119,8 +131,10 @@ public class TxState implements TransactionState {
 
     private MutableMap<IndexBackedConstraintDescriptor, IndexDescriptor> createdConstraintIndexesByConstraint;
 
-    private MutableMap<IndexDescriptor, Map<ValueTuple, MutableLongDiffSets>> indexUpdates;
+    private MutableMap<IndexDescriptor, IndexUpdate> indexUpdates;
     private Upgrade.KernelUpgrade upgrade;
+    private TxStateVisitor.VectorStoreIdType vectorStoreToCreate;
+
     private final ScopedMemoryTracker stateMemoryTracker;
     private final TransactionStateBehaviour behaviour;
     private final ApplyEnrichmentStrategy enrichmentStrategy;
@@ -129,6 +143,7 @@ public class TxState implements TransactionState {
     private long dataRevision;
     private final TransactionEvent transactionEvent;
     private boolean isMultiChunk;
+    private final TxStateMemoryConsumer txStateMemoryConsumer;
 
     @VisibleForTesting
     public TxState() {
@@ -138,6 +153,7 @@ public class TxState implements TransactionState {
                 TransactionStateBehaviour.DEFAULT_BEHAVIOUR,
                 ApplyEnrichmentStrategy.NO_ENRICHMENT,
                 ChunkedTransactionSink.EMPTY,
+                TxStateMemoryConsumer.EMPTY_CONSUMER,
                 TransactionEvent.NULL);
     }
 
@@ -147,6 +163,7 @@ public class TxState implements TransactionState {
             TransactionStateBehaviour behaviour,
             ApplyEnrichmentStrategy enrichmentStrategy,
             ChunkedTransactionSink chunkWriter,
+            TxStateMemoryConsumer txStateMemoryConsumer,
             TransactionEvent transactionEvent) {
         transactionTracker.allocateHeap(SHALLOW_SIZE);
         this.chunkWriter = chunkWriter;
@@ -154,65 +171,43 @@ public class TxState implements TransactionState {
         this.stateMemoryTracker = new DefaultScopedMemoryTracker(transactionTracker);
         this.behaviour = behaviour;
         this.enrichmentStrategy = enrichmentStrategy;
+        this.txStateMemoryConsumer = txStateMemoryConsumer;
         this.transactionEvent = transactionEvent;
     }
 
     @Override
-    public void accept(final TxStateVisitor visitor) throws KernelException {
+    public void accept(TxStateVisitor visitor) throws KernelException {
+        accept(visitor, stateMemoryTracker);
+    }
+
+    @Override
+    public void accept(final TxStateVisitor visitor, MemoryTracker memoryTracker) throws KernelException {
         if (nodes != null) {
             nodes.getAdded().each(visitor::visitCreatedNode);
         }
 
         if (relationships != null) {
-            try (HeapTrackingArrayList<NodeRelationshipIds> sortedNodeRelState =
-                    HeapTrackingArrayList.newArrayList(nodeStatesMap.size(), stateMemoryTracker)) {
-                for (NodeStateImpl nodeState : nodeStatesMap.values()) {
-                    if (nodeState.isDeleted() && nodeState.hasAddedRelationships()) {
-                        // The usual case for nodes created in previous tx is handled by
-                        // IntegrityValidator/MutableRelationships, this is just for deleted nodes
-                        // with added rels in this tx.
-                        if (nodeState.isAddedInThisBatch()) {
-                            throw new DeletedNodeStillHasRelationshipsException();
-                        }
-                        throw new DeletedNodeStillHasRelationshipsException(nodeState.getId());
+            for (NodeStateImpl nodeState : nodeStatesMap.values()) {
+                if (nodeState.isDeleted() && nodeState.hasAddedRelationships()) {
+                    // The usual case for nodes created in previous tx is handled by
+                    // IntegrityValidator/MutableRelationships, this is just for deleted nodes
+                    // with added rels in this tx.
+                    if (nodeState.isAddedInThisBatch()) {
+                        throw DeletedNodeStillHasRelationshipsException.nodeCreatedInThisTxStillHasRelationships();
                     }
-                    // For nodes that were added and removed in this tx there is no need to try to figure out any
-                    // relationship ids, there shouldn't be any.
-                    if (!(nodeState.isDeleted() && nodeState.isAddedInThisBatch())) {
-                        if (nodeState.hasRelationshipChanges()) {
-                            sortedNodeRelState.add(StateNodeRelationshipIds.createStateNodeRelationshipIds(
-                                    nodeState, this::relationshipVisitWithProperties, stateMemoryTracker));
-                        }
-                    }
+                    throw DeletedNodeStillHasRelationshipsException.nodeStillHasRelationships(nodeState.getId());
                 }
-                sortedNodeRelState.sort(Comparator.comparingLong(NodeRelationshipIds::nodeId));
+            }
 
-                // Visit relationships, this will grab all the locks needed to do the updates
-                visitor.visitRelationshipModifications(new RelationshipModifications() {
-                    @Override
-                    public void forEachSplit(IdsVisitor visitor) {
-                        sortedNodeRelState.forEach(visitor);
-                    }
-
-                    @Override
-                    public RelationshipBatch creations() {
-                        return idsAsBatch(relationships.getAdded(), TxState.this::relationshipVisitWithProperties);
-                    }
-
-                    @Override
-                    public RelationshipBatch deletions() {
-                        if (behaviour.keepMetaDataForDeletedRelationship()) {
-                            return idsAsBatch(relationships.getRemoved(), TxState.this::deletedRelationshipVisit);
-                        } else {
-                            return idsAsBatch(relationships.getRemoved());
-                        }
-                    }
-
-                    @Override
-                    public RelationshipBatch updates() {
-                        return idsAsBatch(relationships.getChanged(), TxState.this::relationshipVisitWithProperties);
-                    }
-                });
+            try (RelationshipModificationsImpl modifications = new RelationshipModificationsImpl(
+                    nodeStatesMap,
+                    relationships,
+                    this::relationshipVisitWithProperties,
+                    behaviour.keepMetaDataForDeletedRelationship()
+                            ? this::deletedRelationshipVisit
+                            : EMPTY_ID_DATA_DECORATOR,
+                    memoryTracker)) {
+                visitor.visitRelationshipModifications(modifications);
             }
         }
 
@@ -222,28 +217,27 @@ public class TxState implements TransactionState {
 
         for (NodeState node : modifiedNodes()) {
             if (node.hasPropertyChanges()) {
-                visitor.visitNodePropertyChanges(
-                        node.getId(), node.addedProperties(), node.changedProperties(), node.removedProperties());
+                visitor.visitNodePropertyChanges(node.getId(), node.addedProperties(), node.removedProperties());
             }
 
-            final LongDiffSets labelDiffSets = node.labelDiffSets();
+            final IntDiffSets labelDiffSets = node.labelDiffSets();
             if (!labelDiffSets.isEmpty()) {
                 visitor.visitNodeLabelChanges(node.getId(), labelDiffSets.getAdded(), labelDiffSets.getRemoved());
             }
         }
 
         if (indexChanges != null) {
+            indexChanges.getRemoved().forEach(visitor::visitRemovedIndex);
             for (IndexDescriptor indexDescriptor : indexChanges.getAdded()) {
                 visitor.visitAddedIndex(indexDescriptor);
             }
-            indexChanges.getRemoved().forEach(visitor::visitRemovedIndex);
         }
 
         if (constraintsChanges != null) {
+            constraintsChanges.getRemoved().forEach(visitor::visitRemovedConstraint);
             for (ConstraintDescriptor added : constraintsChanges.getAdded()) {
                 visitor.visitAddedConstraint(added);
             }
-            constraintsChanges.getRemoved().forEach(visitor::visitRemovedConstraint);
         }
 
         if (createdLabelTokens != null) {
@@ -262,18 +256,94 @@ public class TxState implements TransactionState {
         }
 
         if (behaviour.useIndexCommands() && indexUpdates != null) {
-            indexUpdates.forEachKeyValue((indexDescriptor, changes) -> changes.forEach((values, entityChanges) -> {
-                entityChanges
-                        .getAdded()
-                        .forEach(entityId -> visitor.visitValueIndexUpdate(indexDescriptor, entityId, values, ADDED));
-                entityChanges
-                        .getRemoved()
-                        .forEach(entityId -> visitor.visitValueIndexUpdate(indexDescriptor, entityId, values, REMOVED));
-            }));
+            indexUpdates.forEachKeyValue((indexDescriptor, indexUpdate) -> {
+                indexUpdate
+                        .getAddedValueEntries()
+                        .forEach((values, entityIds) -> entityIds.forEach(
+                                entityId -> visitor.visitValueIndexUpdate(indexDescriptor, entityId, values, ADDED)));
+                indexUpdate
+                        .getRemovedValueEntries()
+                        .forEachKeyValue((entityId, values) ->
+                                visitor.visitValueIndexUpdate(indexDescriptor, entityId, values.valueTuple(), REMOVED));
+            });
+        }
+
+        if (vectorStoreToCreate != null) {
+            visitor.visitCreateVectorStore(vectorStoreToCreate);
         }
 
         if (upgrade != null) {
             visitor.visitKernelUpgrade(upgrade);
+        }
+
+        visitor.finishVisit();
+    }
+
+    private static class RelationshipModificationsImpl implements RelationshipModifications, AutoCloseable {
+        private final LongObjectMap<NodeStateImpl> nodes;
+        private final ChangeCountingDiffSet relationships;
+        private final IdDataDecorator visitChangedRelationships;
+        private final IdDataDecorator visitDeletedRelationships;
+        private final MemoryTracker memoryTracker;
+
+        private HeapTrackingArrayList<NodeStateImpl> sortedNodeRelState;
+
+        RelationshipModificationsImpl(
+                LongObjectMap<NodeStateImpl> nodes,
+                ChangeCountingDiffSet relationships,
+                IdDataDecorator visitChangedRelationships,
+                IdDataDecorator visitDeletedRelationships,
+                MemoryTracker memoryTracker) {
+            this.nodes = nodes;
+            this.relationships = relationships;
+            this.visitChangedRelationships = visitChangedRelationships;
+            this.visitDeletedRelationships = visitDeletedRelationships;
+            this.memoryTracker = memoryTracker;
+        }
+
+        @Override
+        public void forEachSplit(IdsVisitor visitor) {
+            for (NodeStateImpl nodeState : getOrCreateSortedNodeRelState()) {
+                visitor.accept(createStateNodeRelationshipIds(nodeState, visitChangedRelationships));
+            }
+        }
+
+        @Override
+        public RelationshipBatch creations() {
+            return idsAsBatch(relationships.getAdded(), visitChangedRelationships);
+        }
+
+        @Override
+        public RelationshipBatch deletions() {
+            return idsAsBatch(relationships.getRemoved(), visitDeletedRelationships);
+        }
+
+        @Override
+        public RelationshipBatch updates() {
+            return idsAsBatch(relationships.getChanged(), visitChangedRelationships);
+        }
+
+        private List<NodeStateImpl> getOrCreateSortedNodeRelState() {
+            if (sortedNodeRelState == null) {
+                sortedNodeRelState = HeapTrackingArrayList.newArrayList(nodes.size(), memoryTracker);
+                for (NodeStateImpl nodeState : nodes.values()) {
+                    // For nodes that were added and removed in this tx there is no need to try to figure
+                    // out any
+                    // relationship ids, there shouldn't be any.
+                    if (!(nodeState.isDeleted() && nodeState.isAddedInThisBatch())) {
+                        if (nodeState.hasRelationshipChanges()) {
+                            sortedNodeRelState.add(nodeState);
+                        }
+                    }
+                }
+                sortedNodeRelState.sort(Comparator.comparingLong(NodeState::getId));
+            }
+            return sortedNodeRelState;
+        }
+
+        @Override
+        public void close() {
+            try (var state = sortedNodeRelState) {}
         }
     }
 
@@ -287,6 +357,7 @@ public class TxState implements TransactionState {
         return getDataRevision() != 0;
     }
 
+    @Override
     public EnrichmentMode enrichmentMode() {
         return enrichmentStrategy.check();
     }
@@ -320,19 +391,19 @@ public class TxState implements TransactionState {
             return Iterables.empty();
         }
         Collection<NodeStateImpl> nodeStates = nodeStatesMap.values();
-        return Iterables.cast(Iterables.filter(ns -> !ns.isDeleted(), nodeStates));
+        return Iterables.cast(Iterables.filter(nodeStates, ns -> !ns.isDeleted()));
     }
 
     @VisibleForTesting
-    MutableLongDiffSets getOrCreateLabelStateNodeDiffSets(long labelId) {
+    MutableLongDiffSets getOrCreateLabelStateNodeDiffSets(int labelId) {
         if (labelStatesMap == null) {
-            labelStatesMap = newLongObjectMap(stateMemoryTracker);
+            labelStatesMap = newIntObjectHashMap(stateMemoryTracker);
         }
         return labelStatesMap.getIfAbsentPut(
                 labelId, () -> newMutableLongDiffSets(collectionsFactory, stateMemoryTracker));
     }
 
-    private LongDiffSets getLabelStateNodeDiffSets(long labelId) {
+    private LongDiffSets getLabelStateNodeDiffSets(int labelId) {
         if (labelStatesMap == null) {
             return LongDiffSets.EMPTY;
         }
@@ -350,11 +421,11 @@ public class TxState implements TransactionState {
     }
 
     @Override
-    public LongDiffSets nodeStateLabelDiffSets(long nodeId) {
+    public IntDiffSets nodeStateLabelDiffSets(long nodeId) {
         return getNodeState(nodeId).labelDiffSets();
     }
 
-    private MutableLongDiffSets getOrCreateNodeStateLabelDiffSets(long nodeId) {
+    private MutableIntDiffSets getOrCreateNodeStateLabelDiffSets(long nodeId) {
         return getOrCreateNodeState(nodeId).getOrCreateLabelDiffSets();
     }
 
@@ -391,6 +462,7 @@ public class TxState implements TransactionState {
     @Override
     public void nodeDoDelete(long nodeId) {
         nodes().remove(nodeId);
+        txStateMemoryConsumer.consume(stateMemoryTracker);
 
         if (nodeStatesMap != null) {
             // Previously this node state was removed completely and its state cleared. Was that to reduce memory
@@ -400,7 +472,7 @@ public class TxState implements TransactionState {
             // grouped by type and direction.
             NodeStateImpl nodeState = nodeStatesMap.get(nodeId);
             if (nodeState != null) {
-                final LongDiffSets diff = nodeState.labelDiffSets();
+                final IntDiffSets diff = nodeState.labelDiffSets();
                 diff.getAdded()
                         .each(label -> getOrCreateLabelStateNodeDiffSets(label).remove(nodeId));
                 nodeState.markAsDeleted();
@@ -449,6 +521,7 @@ public class TxState implements TransactionState {
         RemovalsCountingDiffSets relationships = relationships();
         boolean wasAddedInThisBatch = relationships.isAdded(id);
         relationships.remove(id);
+        txStateMemoryConsumer.consume(stateMemoryTracker);
 
         if (startNodeId == endNodeId) {
             getOrCreateNodeState(startNodeId).removeRelationship(id, type, RelationshipDirection.LOOP);
@@ -483,6 +556,15 @@ public class TxState implements TransactionState {
     }
 
     @Override
+    public boolean relationshipsIsModifiedInThisBatch(long relationshipId) {
+        if (relationshipStatesMap == null) {
+            return false;
+        }
+        var state = relationshipStatesMap.get(relationshipId);
+        return state != null && !state.isCreated() && !state.isDeleted() && state.hasPropertyChanges();
+    }
+
+    @Override
     public void nodeDoAddProperty(long nodeId, int newPropertyKeyId, Value value) {
         NodeStateImpl nodeState = getOrCreateNodeState(nodeId);
         nodeState.addProperty(newPropertyKeyId, value);
@@ -490,44 +572,40 @@ public class TxState implements TransactionState {
     }
 
     @Override
-    public void nodeDoChangeProperty(long nodeId, int propertyKeyId, Value newValue) {
-        getOrCreateNodeState(nodeId).changeProperty(propertyKeyId, newValue);
-        dataChanged();
-    }
-
-    @Override
-    public void relationshipDoReplaceProperty(
-            long relationshipId,
-            int type,
-            long startNode,
-            long endNode,
-            int propertyKeyId,
-            Value replacedValue,
-            Value newValue) {
+    public void relationshipDoAddProperty(
+            long relationshipId, int type, long startNode, long endNode, int propertyKeyId, Value newValue) {
         RelationshipStateImpl relationshipState =
                 getOrCreateRelationshipState(relationshipId, type, startNode, endNode);
-        if (replacedValue != NO_VALUE) {
-            relationshipState.changeProperty(propertyKeyId, newValue);
-        } else {
-            relationshipState.addProperty(propertyKeyId, newValue);
-        }
+        relationshipState.addProperty(propertyKeyId, newValue);
 
         updateRelationship(relationshipId, type, startNode, endNode, relationshipState);
         dataChanged();
     }
 
     @Override
-    public void nodeDoRemoveProperty(long nodeId, int propertyKeyId) {
-        getOrCreateNodeState(nodeId).removeProperty(propertyKeyId);
+    public void nodeDoRemoveProperty(long nodeId, int propertyKeyId, IntPredicate removeFromStore) {
+        NodeStateImpl nodeState = getOrCreateNodeState(nodeId);
+        boolean removedFromTx = nodeState.removePropertyFromTxState(propertyKeyId);
+        if (!removedFromTx || removeFromStore.test(propertyKeyId)) {
+            nodeState.removePropertyFromStore(propertyKeyId);
+        }
         dataChanged();
     }
 
     @Override
     public void relationshipDoRemoveProperty(
-            long relationshipId, int type, long startNode, long endNode, int propertyKeyId) {
+            long relationshipId,
+            int type,
+            long startNode,
+            long endNode,
+            int propertyKeyId,
+            IntPredicate removeFromStore) {
         RelationshipStateImpl relationshipState =
                 getOrCreateRelationshipState(relationshipId, type, startNode, endNode);
-        relationshipState.removeProperty(propertyKeyId);
+        boolean removedFromTx = relationshipState.removePropertyFromTxState(propertyKeyId);
+        if (!removedFromTx || removeFromStore.test(propertyKeyId)) {
+            relationshipState.removePropertyFromStore(propertyKeyId);
+        }
 
         updateRelationship(relationshipId, type, startNode, endNode, relationshipState);
 
@@ -628,10 +706,10 @@ public class TxState implements TransactionState {
 
     @Override
     public MutableIntSet augmentLabels(MutableIntSet labels, NodeState nodeState) {
-        final LongDiffSets labelDiffSets = nodeState.labelDiffSets();
+        final IntDiffSets labelDiffSets = nodeState.labelDiffSets();
         if (!labelDiffSets.isEmpty()) {
-            labelDiffSets.getRemoved().forEach(value -> labels.remove((int) value));
-            labelDiffSets.getAdded().forEach(element -> labels.add((int) element));
+            labelDiffSets.getRemoved().forEach(labels::remove);
+            labelDiffSets.getAdded().forEach(labels::add);
         }
         return labels;
     }
@@ -721,7 +799,7 @@ public class TxState implements TransactionState {
     public Iterable<RelationshipState> modifiedRelationships() {
         return relationshipStatesMap == null
                 ? Iterables.empty()
-                : Iterables.cast(Iterables.filter(rel -> !rel.isDeleted(), relationshipStatesMap.values()));
+                : Iterables.cast(Iterables.filter(relationshipStatesMap.values(), rel -> !rel.isDeleted()));
     }
 
     @VisibleForTesting
@@ -756,6 +834,9 @@ public class TxState implements TransactionState {
 
     @Override
     public void constraintDoAdd(ConstraintDescriptor constraint) {
+        if (!constraint.hasId()) {
+            throw new IllegalStateException(constraint + " should have been assigned an ID at this point");
+        }
         constraintsChangesDiffSets().add(constraint);
         changed();
     }
@@ -807,49 +888,44 @@ public class TxState implements TransactionState {
     }
 
     @Override
-    public UnmodifiableMap<ValueTuple, ? extends LongDiffSets> getIndexUpdates(IndexDescriptor indexDescriptor) {
-        if (indexUpdates == null) {
-            return null;
-        }
-        Map<ValueTuple, MutableLongDiffSets> updates = indexUpdates.get(indexDescriptor);
-        if (updates == null) {
-            return null;
-        }
-
-        return new UnmodifiableMap<>(updates);
+    public boolean hasIndexUpdates(IndexDescriptor descriptor) {
+        return getIndexUpdate(descriptor) != null;
     }
 
     @Override
-    public NavigableMap<ValueTuple, ? extends LongDiffSets> getSortedIndexUpdates(IndexDescriptor descriptor) {
+    public UnmodifiableMap<ValueTuple, MutableLongSet> getAddedIndexUpdates(IndexDescriptor descriptor) {
+        IndexUpdate updates = getIndexUpdate(descriptor);
+        return updates == null ? null : new UnmodifiableMap<>(updates.getAddedValueEntries());
+    }
+
+    @Override
+    public NavigableMap<ValueTuple, MutableLongSet> getSortedAddedIndexUpdates(IndexDescriptor descriptor) {
+        IndexUpdate updates = getIndexUpdate(descriptor);
+        return updates == null ? null : Collections.unmodifiableNavigableMap(updates.getSortedAddedValueEntries());
+    }
+
+    @Override
+    public IndexRemovalSnapshot getRemovedFromIndex(IndexDescriptor indexDescriptor) {
+        IndexUpdate updates = getIndexUpdate(indexDescriptor);
+        return updates == null ? null : updates.removedSnapshot();
+    }
+
+    private IndexUpdate getIndexUpdate(IndexDescriptor descriptor) {
         if (indexUpdates == null) {
             return null;
         }
-        Map<ValueTuple, MutableLongDiffSets> updates = indexUpdates.get(descriptor);
-        if (updates == null) {
-            return null;
-        }
-        TreeMap<ValueTuple, MutableLongDiffSets> sortedUpdates;
-        if (updates instanceof TreeMap) {
-            sortedUpdates = (TreeMap<ValueTuple, MutableLongDiffSets>) updates;
-        } else {
-            sortedUpdates = new TreeMap<>(ValueTuple.COMPARATOR);
-            sortedUpdates.putAll(updates);
-            indexUpdates.put(descriptor, sortedUpdates);
-        }
-        return Collections.unmodifiableNavigableMap(sortedUpdates);
+        return indexUpdates.get(descriptor);
     }
 
     @Override
     public void indexDoUpdateEntry(
             IndexDescriptor descriptor, long entityIdId, ValueTuple propertiesBefore, ValueTuple propertiesAfter) {
-        Map<ValueTuple, MutableLongDiffSets> updates = getOrCreateIndexUpdatesByDescriptor(descriptor);
+        IndexUpdate updates = getOrCreateIndexUpdatesByDescriptor(descriptor);
         if (propertiesBefore != null) {
-            MutableLongDiffSets before = getOrCreateIndexUpdatesForSeek(updates, propertiesBefore);
-            before.remove(entityIdId);
+            updates.removeEntry(propertiesBefore, entityIdId);
         }
         if (propertiesAfter != null) {
-            MutableLongDiffSets after = getOrCreateIndexUpdatesForSeek(updates, propertiesAfter);
-            after.add(entityIdId);
+            updates.addEntry(propertiesAfter, entityIdId);
         }
     }
 
@@ -861,21 +937,23 @@ public class TxState implements TransactionState {
     }
 
     @Override
+    public void createVectorStore(Vector.CoordinateType coordinateType, int dimensions) {
+        assert vectorStoreToCreate == null;
+        vectorStoreToCreate = new TxStateVisitor.VectorStoreIdType(coordinateType, dimensions);
+        changed();
+    }
+
+    @Override
     public MemoryTracker memoryTracker() {
         return stateMemoryTracker;
     }
 
-    @VisibleForTesting
-    MutableLongDiffSets getOrCreateIndexUpdatesForSeek(
-            Map<ValueTuple, MutableLongDiffSets> updates, ValueTuple values) {
-        return updates.computeIfAbsent(values, value -> newMutableLongDiffSets(collectionsFactory, stateMemoryTracker));
-    }
-
-    private Map<ValueTuple, MutableLongDiffSets> getOrCreateIndexUpdatesByDescriptor(IndexDescriptor indexDescriptor) {
+    private IndexUpdate getOrCreateIndexUpdatesByDescriptor(IndexDescriptor indexDescriptor) {
         if (indexUpdates == null) {
             indexUpdates = newMap(stateMemoryTracker);
         }
-        return indexUpdates.getIfAbsentPut(indexDescriptor, () -> newMap(stateMemoryTracker));
+        return indexUpdates.getIfAbsentPut(
+                indexDescriptor, () -> IndexUpdate.createIndexUpdate(behaviour, stateMemoryTracker));
     }
 
     private Map<IndexBackedConstraintDescriptor, IndexDescriptor> createdConstraintIndexesByConstraint() {
@@ -900,13 +978,27 @@ public class TxState implements TransactionState {
         return getRelationshipStateEvenDeleted(relId).accept(visitor);
     }
 
-    public void markAsMultiChunk() {
+    public boolean markAsMultiChunk() {
+        boolean markedFirstTime = !isMultiChunk;
         isMultiChunk = true;
+        return markedFirstTime;
     }
 
     @Override
     public boolean isMultiChunk() {
         return isMultiChunk;
+    }
+
+    @Override
+    public long calculateDegreeInTxState(long node, RelationshipSelection selection) {
+        NodeState nodeState = getNodeState(node);
+        if (nodeState == null) {
+            return 0;
+        } else {
+            SingleDegree degrees = new SingleDegree();
+            nodeState.fillDegrees(selection, degrees);
+            return degrees.getTotal();
+        }
     }
 
     @Override

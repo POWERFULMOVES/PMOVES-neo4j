@@ -24,22 +24,22 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
-import org.neo4j.kernel.impl.transaction.log.AppendTransactionEvent;
-import org.neo4j.kernel.impl.transaction.log.LogAppendEvent;
-import org.neo4j.kernel.impl.transaction.log.LogFileCreateEvent;
-import org.neo4j.kernel.impl.transaction.log.LogFileFlushEvent;
-import org.neo4j.kernel.impl.transaction.log.LogForceEvent;
-import org.neo4j.kernel.impl.transaction.log.LogForceWaitEvent;
-import org.neo4j.kernel.impl.transaction.log.entry.LogFormat;
-import org.neo4j.kernel.impl.transaction.log.rotation.CountingLogRotateEvent;
-import org.neo4j.kernel.impl.transaction.log.rotation.LogRotateEvent;
+import org.neo4j.kernel.impl.transaction.tracing.DatabaseAsyncRollbackEvent;
 import org.neo4j.kernel.impl.transaction.tracing.DatabaseTracer;
-import org.neo4j.kernel.impl.transaction.tracing.LogCheckPointEvent;
 import org.neo4j.kernel.impl.transaction.tracing.RollbackBatchEvent;
 import org.neo4j.kernel.impl.transaction.tracing.StoreApplyEvent;
 import org.neo4j.kernel.impl.transaction.tracing.TransactionEvent;
 import org.neo4j.kernel.impl.transaction.tracing.TransactionRollbackEvent;
 import org.neo4j.kernel.impl.transaction.tracing.TransactionWriteEvent;
+import org.neo4j.wal.AppendTransactionEvent;
+import org.neo4j.wal.LogAppendEvent;
+import org.neo4j.wal.LogFileCreateEvent;
+import org.neo4j.wal.LogFileFlushEvent;
+import org.neo4j.wal.LogForceEvent;
+import org.neo4j.wal.LogForceWaitEvent;
+import org.neo4j.wal.checkpoint.LogCheckPointEvent;
+import org.neo4j.wal.rotation.CountingLogRotateEvent;
+import org.neo4j.wal.rotation.LogRotateEvent;
 
 /**
  * Tracer used to trace database scoped events, like transaction logs rotations, checkpoints, transactions etc
@@ -53,7 +53,7 @@ public class DefaultDatabaseTracer implements DatabaseTracer {
     private final AtomicLong appliedBatchSize = new AtomicLong();
 
     private final CountingLogRotateEvent countingLogRotateEvent = new CountingLogRotateEvent();
-    private final LogFileCreateEvent logFileCreateEvent = () -> appendedBytes.add(LogFormat.BIGGEST_HEADER);
+    private final LogFileCreateEvent logFileCreateEvent = new DefaultLogFileCreateEvent();
     private final LogFileFlushEvent logFileFlushEvent = numberOfFlushes::increment;
     private final LogAppendEvent logAppendEvent = new DefaultLogAppendEvent();
     private final TransactionWriteEvent transactionWriteEvent = new DefaultTransactionWriteEvent();
@@ -77,8 +77,13 @@ public class DefaultDatabaseTracer implements DatabaseTracer {
     }
 
     @Override
-    public TransactionRollbackEvent beginAsyncRollback() {
+    public TransactionRollbackEvent beginAsyncTransactionRollback() {
         return transactionRollbackEvent;
+    }
+
+    @Override
+    public DatabaseAsyncRollbackEvent beginAsyncDatabaseRollback() {
+        return DatabaseAsyncRollbackEvent.NULL;
     }
 
     @Override
@@ -248,7 +253,8 @@ public class DefaultDatabaseTracer implements DatabaseTracer {
         }
 
         @Override
-        public void chunkAppended(int chunkNumber, long transactionSequenceNumber, long transactionId) {
+        public void chunkAppended(
+                int chunkNumber, long transactionSequenceNumber, long transactionId, long appendIndex) {
             batchesAppended.increment();
         }
     }
@@ -282,6 +288,7 @@ public class DefaultDatabaseTracer implements DatabaseTracer {
     private class DefaultLogAppendEvent implements LogAppendEvent {
         @Override
         public void appendedBytes(long bytes) {
+            assert bytes >= 0;
             appendedBytes.add(bytes);
         }
 
@@ -311,5 +318,15 @@ public class DefaultDatabaseTracer implements DatabaseTracer {
         public LogForceEvent beginLogForce() {
             return LogForceEvent.NULL;
         }
+    }
+
+    private class DefaultLogFileCreateEvent implements LogFileCreateEvent {
+        @Override
+        public void fileCreated(long headerSize) {
+            appendedBytes.add(headerSize);
+        }
+
+        @Override
+        public void close() {}
     }
 }

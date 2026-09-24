@@ -58,6 +58,7 @@ import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.Relationship;
 import org.neo4j.graphdb.ResourceIterable;
 import org.neo4j.graphdb.Transaction;
+import org.neo4j.importer.SchemaCommandSource.ResolvedSchemaCommands;
 import org.neo4j.internal.batchimport.input.DataGeneratorInput;
 import org.neo4j.internal.batchimport.input.Groups;
 import org.neo4j.internal.batchimport.input.InputEntity;
@@ -72,6 +73,7 @@ import org.neo4j.internal.schema.SchemaDescriptors;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.kernel.impl.coreapi.InternalTransaction;
 import org.neo4j.token.TokenHolders;
+import org.neo4j.values.storable.RandomValues;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.Values;
 
@@ -82,8 +84,9 @@ public class SimpleRandomizedInput implements Input {
     private final long nodeCount;
     private final long relationshipCount;
 
-    public SimpleRandomizedInput(long seed, long nodeCount, long relationshipCount) {
-        this(seed, DataGeneratorInput.data(nodeCount, relationshipCount), 0, 0, null);
+    public SimpleRandomizedInput(
+            long seed, long nodeCount, long relationshipCount, RandomValues.Configuration randomValuesConfiguration) {
+        this(seed, DataGeneratorInput.data(nodeCount, relationshipCount), 0, 0, null, randomValuesConfiguration);
     }
 
     public SimpleRandomizedInput(
@@ -91,11 +94,12 @@ public class SimpleRandomizedInput implements Input {
             DataGeneratorInput.DataDistribution dataDistribution,
             int maxAdditionalNodeProperties,
             int maxAdditionalRelationshipProperties,
-            String labelNameForIncrementalImport) {
+            String labelNameForIncrementalImport,
+            RandomValues.Configuration randomValuesConfiguration) {
         this.nodeCount = dataDistribution.nodeCount();
         this.relationshipCount = dataDistribution.relationshipCount();
         var idType = IdType.INTEGER;
-        var extractors = new Extractors(Configuration.COMMAS.arrayDelimiter());
+        var extractors = new Extractors(Configuration.COMMAS.arrayDelimiter(), Configuration.COMMAS.vectorDelimiter());
         var groups = new Groups();
         var group = groups.getOrCreate(null);
 
@@ -115,10 +119,12 @@ public class SimpleRandomizedInput implements Input {
                 dataDistribution,
                 idType,
                 seed,
+                randomValuesConfiguration,
                 nodeHeader,
                 DataGeneratorInput.bareboneRelationshipHeader(
                         idType, group, extractors, additionalRelationshipEntries.toArray(new Entry[0])),
-                groups);
+                groups,
+                ResolvedSchemaCommands.of());
     }
 
     private Entry[] additionalPropertyEntries(int count, Group group, Extractors extractors, long seed) {
@@ -171,6 +177,11 @@ public class SimpleRandomizedInput implements Input {
     @Override
     public Map<String, SchemaDescriptor> referencedNodeSchema(TokenHolders tokenHolders) {
         return actual.referencedNodeSchema(tokenHolders);
+    }
+
+    @Override
+    public boolean containsVectorData() {
+        return actual.containsVectorData();
     }
 
     public void verify(GraphDatabaseService db) throws IOException {
@@ -374,12 +385,7 @@ public class SimpleRandomizedInput implements Input {
     }
 
     private static Map<String, Value> propertiesOf(InputEntity entity) {
-        Map<String, Value> result = new HashMap<>();
-        Object[] properties = entity.properties();
-        for (int i = 0; i < properties.length; i++) {
-            result.put((String) properties[i++], Values.of(properties[i]));
-        }
-        return result;
+        return entity.propertiesAsValueMap();
     }
 
     private record RelationshipKey(Object startId, String type, Object endId) {}
@@ -392,7 +398,7 @@ public class SimpleRandomizedInput implements Input {
     }
 
     @Override
-    public Estimates validateAndEstimate(PropertySizeCalculator valueSizeCalculator) throws IOException {
+    public Estimates validateAndEstimate(PropertySizeCalculator valueSizeCalculator, int numberOfThreads) {
         return Input.knownEstimates(nodeCount, relationshipCount, 0, 0, 0, 0, 0);
     }
 }

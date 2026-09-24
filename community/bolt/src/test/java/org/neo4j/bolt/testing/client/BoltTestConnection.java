@@ -27,22 +27,22 @@ import java.net.SocketAddress;
 import java.security.PrivateKey;
 import java.security.cert.X509Certificate;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.stream.Stream;
-import org.neo4j.bolt.negotiation.ProtocolVersion;
 import org.neo4j.bolt.negotiation.message.ProtocolCapability;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
+import org.neo4j.bolt.protocol.common.connector.transport.ConnectorTransport;
 import org.neo4j.bolt.testing.client.error.BoltTestClientException;
 import org.neo4j.bolt.testing.client.struct.ProtocolProposal;
-import org.neo4j.bolt.testing.messages.BoltDefaultWire;
+import org.neo4j.bolt.testing.messages.BoltWire;
 import org.neo4j.packstream.io.PackstreamBuf;
 
 public interface BoltTestConnection extends AutoCloseable {
 
     /**
      * Defines the default protocol version which is transmitted when no specific value is passed.
-     * <p>
-     * This value should be updated along with {@link BoltDefaultWire} in order to transmit the correct message variations.
      */
-    ProtocolVersion DEFAULT_PROTOCOL_VERSION = new ProtocolVersion(4, 4);
+    ProtocolVersion DEFAULT_PROTOCOL_VERSION = BoltWire.latest().getProtocolVersion();
 
     /**
      * Retrieves a stream of factories capable of constructing connections for all default transports supported by Bolt.
@@ -56,6 +56,13 @@ public interface BoltTestConnection extends AutoCloseable {
                 WebSocketConnection.factory(),
                 SecureWebSocketConnection.factory());
     }
+
+    /**
+     * Retrieves the wire with which this connection has been configured.
+     *
+     * @return a wire implementation.
+     */
+    BoltWire wire();
 
     /**
      * Establishes a connection to the desired host if none has already been established.
@@ -166,6 +173,14 @@ public interface BoltTestConnection extends AutoCloseable {
     BoltTestConnection send(ByteBuf buf);
 
     /**
+     * Executes a function for running in memory messages with the Bolt Server.
+     * <p />
+     * @param work The work which will be executed. You should *NOT* access the connection object inside the
+     *             worker.
+     */
+    void unwired(Consumer<UnwiredTestConnection> work);
+
+    /**
      * Transmits a chunked message via this connection.
      *
      * @param buf an arbitrary payload.
@@ -173,13 +188,13 @@ public interface BoltTestConnection extends AutoCloseable {
      * @throws IOException when transmitting the payload fails.
      */
     default BoltTestConnection send(PackstreamBuf buf) {
-        return this.send(buf.getTarget());
+        return this.send(buf.raw());
     }
 
     /**
      * Retrieves the total amount of NOOPs received during the last message read operation.
      * <p>
-     * Applies to {@link #receiveMessage()} and{@link #receiveMessage(int)}.
+     * Applies to {@link #receiveMessage()}.
      *
      * @return a number of NOOP chunks.
      */
@@ -205,7 +220,7 @@ public interface BoltTestConnection extends AutoCloseable {
 
     ByteBuf receiveMessage();
 
-    boolean isClosed();
+    boolean isDisconnected();
 
     @Override
     default void close() {
@@ -217,6 +232,10 @@ public interface BoltTestConnection extends AutoCloseable {
 
     @FunctionalInterface
     interface Factory {
-        BoltTestConnection create(SocketAddress address);
+        BoltTestConnection create(ConnectorTransport transport, BoltWire wire, SocketAddress address);
+
+        default boolean isSupported(ConnectorTransport transport) {
+            return true;
+        }
     }
 }

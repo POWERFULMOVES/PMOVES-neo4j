@@ -19,6 +19,7 @@
  */
 package org.neo4j.kernel.api.index;
 
+import static org.neo4j.internal.helpers.TimeUtil.zoneOffsetOfTotalSeconds;
 import static org.neo4j.internal.schema.SchemaDescriptors.forLabel;
 
 import java.time.LocalDate;
@@ -33,7 +34,7 @@ import java.util.Arrays;
 import java.util.List;
 import org.junit.jupiter.api.Nested;
 import org.neo4j.internal.schema.IndexPrototype;
-import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.values.storable.CoordinateReferenceSystem;
 import org.neo4j.values.storable.DateTimeValue;
 import org.neo4j.values.storable.DateValue;
@@ -49,11 +50,11 @@ import org.neo4j.values.storable.Values;
 abstract class PropertyIndexProviderCompatibilityTestSuite extends IndexProviderCompatibilityTestSuite {
     @Override
     IndexPrototype indexPrototype() {
-        return IndexPrototype.forSchema(forLabel(1000, 100)).withIndexType(indexType());
+        return IndexPrototype.forSchema(forLabel(1000, 0)).withIndexType(indexType());
     }
 
     IndexPrototype uniqueIndexPrototype() {
-        return IndexPrototype.uniqueForSchema(forLabel(1000, 100)).withIndexType(indexType());
+        return IndexPrototype.uniqueForSchema(forLabel(1000, 0)).withIndexType(indexType());
     }
 
     abstract boolean supportsSpatial();
@@ -99,7 +100,7 @@ abstract class PropertyIndexProviderCompatibilityTestSuite extends IndexProvider
                     ValueType.GEOGRAPHIC_POINT_3D,
                     ValueType.GEOGRAPHIC_POINT_3D_ARRAY);
         }
-        return ValueType.values();
+        return ValueType.ALL_TYPES;
     }
 
     @Nested
@@ -206,7 +207,13 @@ abstract class PropertyIndexProviderCompatibilityTestSuite extends IndexProvider
                             Values.of(new short[] {314, 1337}),
                             Values.of(new int[] {3140, 13370}),
                             Values.of(new long[] {31400, 133700}),
-                            Values.of(new boolean[] {true, true})),
+                            Values.of(new boolean[] {true, true}),
+                            Values.int8Vector(new byte[4000]),
+                            Values.int16Vector(new short[2000]),
+                            Values.int32Vector(new int[1000]),
+                            Values.int64Vector(new long[500]),
+                            Values.float32Vector(new float[1000]),
+                            Values.float64Vector(new double[500])),
                     Arrays.asList(
                             DateValue.epochDate(2),
                             LocalTimeValue.localTime(100000),
@@ -228,8 +235,8 @@ abstract class PropertyIndexProviderCompatibilityTestSuite extends IndexProvider
                             // only runnable if JVM supports East-Saskatchewan
                             // DateTimeValue.datetime( 2001, 1, 25, 11, 11, 30, 0, "Canada/East-Saskatchewan" ),
                             DateTimeValue.datetime(2038, 1, 18, 9, 14, 7, 0, "-18:00"),
-                            DateTimeValue.datetime(10000, 100, ZoneOffset.ofTotalSeconds(3)),
-                            DateTimeValue.datetime(10000, 101, ZoneOffset.ofTotalSeconds(-3)),
+                            DateTimeValue.datetime(10000, 100, zoneOffsetOfTotalSeconds(3)),
+                            DateTimeValue.datetime(10000, 101, zoneOffsetOfTotalSeconds(-3)),
                             DurationValue.duration(10, 20, 30, 40),
                             DurationValue.duration(11, 20, 30, 40),
                             DurationValue.duration(10, 21, 30, 40),
@@ -266,7 +273,13 @@ abstract class PropertyIndexProviderCompatibilityTestSuite extends IndexProvider
                             Values.of(new short[] {99, 999}),
                             Values.of(new int[] {99999, 99999}),
                             Values.of(new long[] {999999, 999999}),
-                            Values.of(new boolean[] {false, false})),
+                            Values.of(new boolean[] {false, false}),
+                            Values.int8Vector(new byte[4000]),
+                            Values.int16Vector(new short[2000]),
+                            Values.int32Vector(new int[1000]),
+                            Values.int64Vector(new long[500]),
+                            Values.float32Vector(new float[1000]),
+                            Values.float64Vector(new double[500])),
                     Arrays.asList(
                             DateValue.epochDate(42),
                             LocalTimeValue.localTime(2000),
@@ -294,14 +307,14 @@ abstract class PropertyIndexProviderCompatibilityTestSuite extends IndexProvider
                             Values.pointValue(CoordinateReferenceSystem.WGS_84, 9.21, 9.65)));
         }
 
-        List<ValueIndexEntryUpdate<?>> updates(List<NodeAndValue> values) {
+        List<EagerValueIndexEntryUpdate> updates(List<NodeAndValue> values) {
             return updates(values, 0);
         }
 
-        List<ValueIndexEntryUpdate<?>> updates(List<NodeAndValue> values, long nodeIdOffset) {
-            List<ValueIndexEntryUpdate<?>> updates = new ArrayList<>();
+        List<EagerValueIndexEntryUpdate> updates(List<NodeAndValue> values, long nodeIdOffset) {
+            List<EagerValueIndexEntryUpdate> updates = new ArrayList<>();
             values.forEach(entry ->
-                    updates.add(ValueIndexEntryUpdate.add(nodeIdOffset + entry.nodeId, descriptor, entry.value)));
+                    updates.add(EagerValueIndexEntryUpdate.add(nodeIdOffset + entry.nodeId, descriptor, entry.value)));
             return updates;
         }
 

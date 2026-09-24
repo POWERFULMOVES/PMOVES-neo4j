@@ -20,7 +20,7 @@
 package org.neo4j.kernel.availability;
 
 public interface AvailabilityListener {
-    void available();
+    default void available() {}
 
-    void unavailable();
+    default void unavailable() {}
 }

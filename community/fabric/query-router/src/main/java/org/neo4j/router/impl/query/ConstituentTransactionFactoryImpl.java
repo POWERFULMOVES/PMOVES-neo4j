@@ -21,7 +21,7 @@ package org.neo4j.router.impl.query;
 
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-import org.neo4j.cypher.internal.QueryOptions;
+import org.neo4j.cypher.internal.preparser.QueryOptions;
 import org.neo4j.cypher.internal.util.CancellationChecker;
 import org.neo4j.cypher.rendering.QueryOptionsRenderer;
 import org.neo4j.fabric.executor.Location;
@@ -97,9 +97,18 @@ public class ConstituentTransactionFactoryImpl implements ConstituentTransaction
                     context.transactionInfo().statementLifecycleTransactionInfo(), queryString, parameters, null);
             statementLifecycle.startProcessing();
             var query = Query.of(QueryOptionsRenderer.addOptions(queryString, queryOptions), parameters);
+            final var defaultQueryLanguage =
+                    context.transactionInfo().defaultQueryLanguageScope().defaultQueryLanguage();
+            final var preParsedQuery = queryProcessor.preParse(query, defaultQueryLanguage);
+            statementLifecycle.donePreParsing(preParsedQuery);
             var processedQuery = queryProcessor.processQuery(
-                    // the session database can be ignored in the constituent for now
-                    query, targetService, (dbRef) -> location, cancellationChecker, sessionDatabase());
+                    query,
+                    preParsedQuery,
+                    targetService,
+                    (dbRef) -> location,
+                    cancellationChecker,
+                    sessionDatabase(),
+                    statementLifecycle);
             var notifications = Stream.concat(
                             processedQuery.routingNotifications().stream(),
                             processedQuery.parsingNotifications().stream())

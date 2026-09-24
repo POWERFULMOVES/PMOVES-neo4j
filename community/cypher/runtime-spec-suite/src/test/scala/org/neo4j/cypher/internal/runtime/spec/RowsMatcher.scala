@@ -19,7 +19,7 @@
  */
 package org.neo4j.cypher.internal.runtime.spec
 
-import org.neo4j.cypher.internal.macros.AssertMacros.checkOnlyWhenAssertionsAreEnabled
+import org.neo4j.cypher.internal.macros.AssertMacros3.checkOnlyWhenAssertionsAreEnabled
 import org.neo4j.cypher.internal.runtime.spec.RowDiffStringBuilder.PARTIALLY_ORDERED_GROUP_SEPARATOR
 import org.neo4j.values.AnyValue
 import org.neo4j.values.AnyValues
@@ -35,7 +35,9 @@ import org.neo4j.values.storable.NumberValue
 import org.neo4j.values.storable.PointValue
 import org.neo4j.values.storable.TextValue
 import org.neo4j.values.storable.TimeValue
+import org.neo4j.values.storable.UUIDValue
 import org.neo4j.values.storable.Values
+import org.neo4j.values.storable.VectorValue
 import org.neo4j.values.virtual.ListValue
 import org.neo4j.values.virtual.MapValue
 import org.neo4j.values.virtual.MapValueBuilder
@@ -427,12 +429,7 @@ trait RowOrderMatcher extends RowsMatcher {
       return false
     }
 
-    for (row <- rows) {
-      if (!onRow(columns, row)) {
-        return false
-      }
-    }
-    onComplete()
+    rows.forall(row => onRow(columns, row)) && onComplete()
   }
 
   override def formatRows(rows: IndexedSeq[Array[AnyValue]]): String = Rows.pretty(rows)
@@ -597,10 +594,12 @@ object SortListValueMapper extends ValueMapper[AnyValue] {
   override def mapNoValue(): AnyValue = Values.NO_VALUE
 
   override def mapSequence(seq: SequenceValue): AnyValue = {
-    val array = new Array[AnyValue](seq.intSize())
-    for (i <- 0 until seq.intSize()) {
-      array(i) = seq.value(i).map(this)
+    val builder = mutable.ArrayBuilder.make[AnyValue]
+    val it = seq.iterator()
+    while (it.hasNext) {
+      builder += it.next().map(this)
     }
+    val array = builder.result()
     java.util.Arrays.sort(array, AnyValues.COMPARATOR)
     VirtualValues.list(array: _*)
   }
@@ -614,4 +613,6 @@ object SortListValueMapper extends ValueMapper[AnyValue] {
   override def mapLocalTime(value: LocalTimeValue): AnyValue = value
   override def mapDuration(value: DurationValue): AnyValue = value
   override def mapPoint(value: PointValue): AnyValue = value
+  override def mapVector(value: VectorValue): AnyValue = value
+  override def mapUUID(value: UUIDValue): AnyValue = value
 }

@@ -20,9 +20,24 @@
 package org.neo4j.storageengine.api.txstate.validation;
 
 import org.neo4j.kernel.impl.locking.LockManager;
+import org.neo4j.memory.MemoryTracker;
 
 public interface ValidationLockDumper {
-    ValidationLockDumper EMPTY_DUMPER = (validator, lockClient, chunkNumber, txId) -> {};
+    ValidationLockDumper EMPTY_DUMPER = new ValidationLockDumper() {
 
-    void dumpLocks(TransactionValidator validator, LockManager.Client lockClient, int chunkNumber, long txId);
+        @Override
+        public void dumpLocks(LockManager.Client lockClient, int chunkNumber, long txId, MemoryTracker memoryTracker) {}
+
+        @Override
+        public void add(long pageId, int unitsPerPage, String storeName, long chainHead) {}
+
+        @Override
+        public void denseNodeValidation(long nodeId) {}
+    };
+
+    void dumpLocks(LockManager.Client lockClient, int chunkNumber, long txId, MemoryTracker memoryTracker);
+
+    void add(long pageId, int unitsPerPage, String storeName, long chainHead);
+
+    void denseNodeValidation(long nodeId);
 }

@@ -25,33 +25,35 @@ import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ExecutionPlan
 import org.neo4j.cypher.internal.LogicalQuery
 import org.neo4j.cypher.internal.MasterCompiler
-import org.neo4j.cypher.internal.PreParser
 import org.neo4j.cypher.internal.ResourceManagerFactory
 import org.neo4j.cypher.internal.RuntimeContext
-import org.neo4j.cypher.internal.RuntimeContextManager
-import org.neo4j.cypher.internal.config.CypherConfiguration
+import org.neo4j.cypher.internal.compiler.ExecutionModel
+import org.neo4j.cypher.internal.compiler.ExecutionModel.BatchedParallel
+import org.neo4j.cypher.internal.compiler.ExecutionModel.BatchedSingleThreaded
 import org.neo4j.cypher.internal.javacompat.GraphDatabaseCypherService
 import org.neo4j.cypher.internal.options.CypherDebugOptions
+import org.neo4j.cypher.internal.options.CypherParallelRuntimeConfigOption
 import org.neo4j.cypher.internal.plandescription.InternalPlanDescription
 import org.neo4j.cypher.internal.plandescription.PlanDescriptionBuilder
 import org.neo4j.cypher.internal.planner.spi.IDPPlannerName
 import org.neo4j.cypher.internal.planner.spi.ImmutablePlanningAttributes
+import org.neo4j.cypher.internal.planner.spi.NoPreferenceIndexComparatorFactory
+import org.neo4j.cypher.internal.preparser.QueryOptions
 import org.neo4j.cypher.internal.runtime.InputDataStream
-import org.neo4j.cypher.internal.runtime.InputValues
 import org.neo4j.cypher.internal.runtime.NoInput
 import org.neo4j.cypher.internal.runtime.NormalMode
 import org.neo4j.cypher.internal.runtime.ProfileMode
 import org.neo4j.cypher.internal.runtime.QueryContext
+import org.neo4j.cypher.internal.runtime.QueryRuntimeConfig
 import org.neo4j.cypher.internal.runtime.ResourceManager
 import org.neo4j.cypher.internal.runtime.ResourceMonitor
 import org.neo4j.cypher.internal.runtime.interpreted.TransactionBoundQueryContext
 import org.neo4j.cypher.internal.runtime.interpreted.TransactionBoundQueryContext.IndexSearchMonitor
 import org.neo4j.cypher.internal.runtime.interpreted.TransactionalContextWrapper
+import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSupport.WorkloadMode
 import org.neo4j.cypher.internal.runtime.spec.rewriters.TestPlanCombinationRewriter
-import org.neo4j.cypher.internal.runtime.spec.rewriters.TestPlanCombinationRewriter.NoRewrites
 import org.neo4j.cypher.internal.runtime.spec.rewriters.TestPlanCombinationRewriter.TestPlanCombinationRewriterHint
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
-import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.result.QueryProfile
 import org.neo4j.cypher.result.RuntimeResult
 import org.neo4j.graphdb.GraphDatabaseService
@@ -64,6 +66,7 @@ import org.neo4j.kernel.api.query.CompilerInfo
 import org.neo4j.kernel.api.security.AuthManager
 import org.neo4j.kernel.api.security.AuthToken
 import org.neo4j.kernel.impl.coreapi.InternalTransaction
+import org.neo4j.kernel.impl.factory.KernelTransactionFactory
 import org.neo4j.kernel.impl.locking.LockManager
 import org.neo4j.kernel.impl.query.ChainableQuerySubscriberProbe
 import org.neo4j.kernel.impl.query.Neo4jTransactionalContextFactory
@@ -74,47 +77,55 @@ import org.neo4j.kernel.impl.query.QuerySubscriberProbe
 import org.neo4j.kernel.impl.query.RecordingQuerySubscriber
 import org.neo4j.kernel.impl.query.TransactionalContext
 import org.neo4j.kernel.impl.query.WrappingTransactionalContextFactory
+import org.neo4j.kernel.impl.util.ValueUtils
 import org.neo4j.kernel.lifecycle.LifeSupport
 import org.neo4j.logging.InternalLogProvider
 import org.neo4j.monitoring.Monitors
 import org.neo4j.storageengine.api.TransactionIdStore
 import org.neo4j.values.AnyValue
-import org.neo4j.values.storable.Values
+import org.neo4j.values.virtual.MapValue
 import org.neo4j.values.virtual.VirtualValues
 
 import java.util.Collections
+import java.util.concurrent.TimeUnit
+
+import scala.concurrent.duration.FiniteDuration
+import scala.util.control.NonFatal
 
 /**
  * This class contains various ugliness needed to perform physical compilation
  * and then execute a query.
  */
 class RuntimeTestSupport[CONTEXT <: RuntimeContext](
-  val graphDb: GraphDatabaseService,
-  val edition: Edition[CONTEXT],
-  val runtime: CypherRuntime[CONTEXT],
-  val workloadMode: Boolean,
-  val logProvider: InternalLogProvider,
-  val debugOptions: CypherDebugOptions = CypherDebugOptions.default,
+  graphDb: GraphDatabaseService,
+  edition: Edition[CONTEXT],
+  runtime: CypherRuntime[CONTEXT],
+  workloadMode: WorkloadMode,
+  logProvider: InternalLogProvider,
+  debugOptions: CypherDebugOptions = CypherDebugOptions.default,
   val defaultTransactionType: Type = Type.EXPLICIT
-) extends RuntimeExecutionSupport[CONTEXT] {
+) {
 
   private val cypherGraphDb = new GraphDatabaseCypherService(graphDb)
   private val lifeSupport = new LifeSupport
   private val resolver: DependencyResolver = cypherGraphDb.getDependencyResolver
 
-  protected val runtimeContextManager: RuntimeContextManager[CONTEXT] =
+  val runtimeContextManager: TestRuntimeContextManager[CONTEXT] =
     edition.newRuntimeContextManager(resolver, lifeSupport, logProvider)
   private val monitors = resolver.resolveDependency(classOf[Monitors])
 
+  private val kernelTransactionFactory =
+    resolver.resolveDependency(classOf[KernelTransactionFactory])
+
   private val contextFactory = new WrappingTransactionalContextFactory(
-    Neo4jTransactionalContextFactory.create(cypherGraphDb),
+    Neo4jTransactionalContextFactory.create(() => cypherGraphDb, kernelTransactionFactory, edition.databaseMode),
     wrapTransactionContext
   )
   private lazy val txIdStore = resolver.resolveDependency(classOf[TransactionIdStore])
   private lazy val authManager = resolver.resolveDependency(classOf[AuthManager])
 
   private[this] var _tx: InternalTransaction = _
-  private[this] var _txContext: TransactionalContext = _
+  protected[this] var _txContext: TransactionalContext = _
 
   private[this] var runtimeTestParameters: RuntimeTestParameters = RuntimeTestParameters()
   private[this] var isParallel: Boolean = _
@@ -227,32 +238,6 @@ class RuntimeTestSupport[CONTEXT <: RuntimeContext](
     probe
   }
 
-  private def newRecordingQuerySubscriber: RecordingQuerySubscriber = {
-    new RecordingQuerySubscriber(createQuerySubscriberProbe(runtimeTestParameters))
-  }
-
-  private def newNonRecordingQuerySubscriber: NonRecordingQuerySubscriber = {
-    new NonRecordingQuerySubscriber(createQuerySubscriberProbe(runtimeTestParameters))
-  }
-
-  private def newRecordingRuntimeResult(
-    runtimeResult: RuntimeResult,
-    recordingQuerySubscriber: RecordingQuerySubscriber
-  ): RecordingRuntimeResult = {
-    RecordingRuntimeResult(runtimeResult, recordingQuerySubscriber, runtimeTestParameters.resultConsumptionController)
-  }
-
-  private def newNonRecordingRuntimeResult(
-    runtimeResult: RuntimeResult,
-    nonRecordingQuerySubscriber: NonRecordingQuerySubscriber
-  ): NonRecordingRuntimeResult = {
-    NonRecordingRuntimeResult(
-      runtimeResult,
-      nonRecordingQuerySubscriber,
-      runtimeTestParameters.resultConsumptionController
-    )
-  }
-
   def start(): Unit = {
     lifeSupport.init()
     lifeSupport.start()
@@ -271,6 +256,18 @@ class RuntimeTestSupport[CONTEXT <: RuntimeContext](
       VirtualValues.EMPTY_MAP,
       QueryExecutionConfiguration.DEFAULT_CONFIG
     )
+  }
+
+  def newTx(transactionType: KernelTransaction.Type = defaultTransactionType)
+    : (InternalTransaction, TransactionalContext) = {
+    val tx = cypherGraphDb.beginTransaction(transactionType, LoginContext.AUTH_DISABLED)
+    val txContext = contextFactory.newContext(
+      tx,
+      "<<queryText>>",
+      VirtualValues.EMPTY_MAP,
+      QueryExecutionConfiguration.DEFAULT_CONFIG
+    )
+    (tx, txContext)
   }
 
   def restartTx(transactionType: KernelTransaction.Type = defaultTransactionType): Unit = {
@@ -297,20 +294,6 @@ class RuntimeTestSupport[CONTEXT <: RuntimeContext](
     )
   }
 
-  def restartImplicitTx(): Unit = {
-    _txContext.close()
-    if (_tx.isOpen) {
-      _tx.commit()
-    }
-    _tx = cypherGraphDb.beginTransaction(Type.IMPLICIT, LoginContext.AUTH_DISABLED)
-    _txContext = contextFactory.newContext(
-      _tx,
-      "<<queryText>>",
-      VirtualValues.EMPTY_MAP,
-      QueryExecutionConfiguration.DEFAULT_CONFIG
-    )
-  }
-
   def stopTx(): Unit = {
     _txContext.close()
     _tx.close()
@@ -321,7 +304,7 @@ class RuntimeTestSupport[CONTEXT <: RuntimeContext](
   }
 
   def getLastClosedTransactionId: Long = {
-    txIdStore.getLastClosedTransactionId
+    txIdStore.getHighestGapFreeClosedTransactionId
   }
 
   def tx: InternalTransaction = _tx
@@ -329,12 +312,15 @@ class RuntimeTestSupport[CONTEXT <: RuntimeContext](
 
   def locks: LockManager = cypherGraphDb.getDependencyResolver.resolveDependency(classOf[LockManager])
 
-  override def buildPlan(
+  // RuntimeExecutionSupport
+
+  def buildPlan(
     logicalQuery: LogicalQuery,
     runtime: CypherRuntime[CONTEXT],
-    testPlanCombinationRewriterHints: Set[TestPlanCombinationRewriterHint]
+    testPlanCombinationRewriterHints: Set[TestPlanCombinationRewriterHint],
+    queryConfig: QueryRuntimeConfig
   ): ExecutionPlan = {
-    val queryContext = newQueryContext(_txContext)
+    val queryContext = newQueryContext(_txContext, queryConfig)
     try {
       compileWithTx(
         logicalQuery,
@@ -347,545 +333,317 @@ class RuntimeTestSupport[CONTEXT <: RuntimeContext](
     }
   }
 
-  override def buildPlanAndContext(
+  def buildPlanAndContext(
     logicalQuery: LogicalQuery,
-    runtime: CypherRuntime[CONTEXT]
+    runtime: CypherRuntime[CONTEXT],
+    testPlanCombinationRewriterHints: Set[TestPlanCombinationRewriterHint],
+    queryConfig: QueryRuntimeConfig
   ): (ExecutionPlan, CONTEXT) = {
-    val queryContext = newQueryContext(_txContext)
-    compileWithTx(logicalQuery, runtime, queryContext)
+    val queryContext = newQueryContext(_txContext, queryConfig)
+    compileWithTx(logicalQuery, runtime, queryContext, testPlanCombinationRewriterHints)
   }
 
-  override def execute(
-    executablePlan: ExecutionPlan,
-    readOnly: Boolean = true,
-    implicitTx: Boolean = false
-  ): RecordingRuntimeResult = {
-    val subscriber = newRecordingQuerySubscriber
-    val result = run(
-      executablePlan,
-      NoInput,
-      (_, result) => result,
-      subscriber,
-      profile = false,
-      prePopulateResults = true,
-      implicitTx = implicitTx
-    )
-    newRecordingRuntimeResult(result, subscriber)
-  }
-
-  override def execute(
+  /**
+   * NOTE: This has some default values, because it is also used directly from the logical plan fuzz tests,
+   *       alongside RuntimeTestSupportExecution like the rest of the execution methods.
+   */
+  def executeAndConsumeTransactionally(
     logicalQuery: LogicalQuery,
     runtime: CypherRuntime[CONTEXT],
-    inputStream: InputDataStream,
-    parameters: Map[String, Any]
-  ): RecordingRuntimeResult = {
-    val subscriber = newRecordingQuerySubscriber
-    val result =
-      runLogical(
-        logicalQuery,
-        runtime,
-        inputStream,
-        (_, result) => result,
-        subscriber,
-        profile = false,
-        prePopulateResults = true,
-        parameters
-      )
-    newRecordingRuntimeResult(result, subscriber)
-  }
-
-  override def executeWithoutValuePopulation(
-    logicalQuery: LogicalQuery,
-    runtime: CypherRuntime[CONTEXT],
-    inputStream: InputDataStream,
-    parameters: Map[String, Any]
-  ): RecordingRuntimeResult = {
-    val subscriber = newRecordingQuerySubscriber
-    val result =
-      runLogical(
-        logicalQuery,
-        runtime,
-        inputStream,
-        (_, result) => result,
-        subscriber,
-        profile = false,
-        prePopulateResults = false,
-        parameters
-      )
-    newRecordingRuntimeResult(result, subscriber)
-  }
-
-  override def execute(
-    logicalQuery: LogicalQuery,
-    runtime: CypherRuntime[CONTEXT],
-    input: InputDataStream,
-    subscriber: QuerySubscriber,
-    testPlanCombinationRewriterHints: Set[TestPlanCombinationRewriterHint]
-  ): RuntimeResult = runLogical(
-    logicalQuery,
-    runtime,
-    input,
-    (_, result) => result,
-    subscriber,
-    profile = false,
-    prePopulateResults = true,
-    testPlanCombinationRewriterHints = testPlanCombinationRewriterHints
-  )
-
-  def execute(
-    logicalQuery: LogicalQuery,
-    runtime: CypherRuntime[CONTEXT],
-    testPlanCombinationRewriterHints: Set[TestPlanCombinationRewriterHint]
-  ): RecordingRuntimeResult = {
-    val subscriber = newRecordingQuerySubscriber
-    val result =
-      runLogical(
-        logicalQuery,
-        runtime,
-        NoInput,
-        (_, result) => result,
-        subscriber,
-        profile = false,
-        prePopulateResults = true,
-        testPlanCombinationRewriterHints = testPlanCombinationRewriterHints
-      )
-    newRecordingRuntimeResult(result, subscriber)
-  }
-
-  override def execute(
-    logicalQuery: LogicalQuery,
-    runtime: CypherRuntime[CONTEXT],
-    input: InputValues,
-    testPlanCombinationRewriterHints: Set[TestPlanCombinationRewriterHint]
-  ): RecordingRuntimeResult = {
-    val subscriber = newRecordingQuerySubscriber
-    val result =
-      runLogical(
-        logicalQuery,
-        runtime,
-        input.stream(),
-        (_, result) => result,
-        subscriber,
-        profile = false,
-        prePopulateResults = true,
-        testPlanCombinationRewriterHints = testPlanCombinationRewriterHints
-      )
-    newRecordingRuntimeResult(result, subscriber)
-  }
-
-  override def executeAs(
-    logicalQuery: LogicalQuery,
-    runtime: CypherRuntime[CONTEXT],
-    username: String,
-    password: String
-  ): RecordingRuntimeResult = {
-
-    val lgCtx =
-      authManager.login(AuthToken.newBasicAuthToken(username, password), ClientConnectionInfo.EMBEDDED_CONNECTION)
-    val tx = cypherGraphDb.beginTransaction(Type.EXPLICIT, lgCtx)
-    val txContext = contextFactory.newContext(
-      tx,
-      "<<queryText>>",
-      VirtualValues.EMPTY_MAP,
-      QueryExecutionConfiguration.DEFAULT_CONFIG
-    )
-    val queryContext = newQueryContext(txContext)
-    val subscriber = newRecordingQuerySubscriber
-    try {
-      val executionPlan = compileWithTx(logicalQuery, runtime, queryContext)._1
-      runWithTx(
-        executionPlan,
-        NO_INPUT.stream(),
-        (_, result) => {
-          val recordingRuntimeResult = newRecordingRuntimeResult(result, subscriber)
-          recordingRuntimeResult.awaitAll()
-          recordingRuntimeResult.runtimeResult.close()
-          recordingRuntimeResult
-        },
-        subscriber,
-        profile = false,
-        Map.empty,
-        tx,
-        txContext,
-        prePopulateResults = true
-      )
-    } finally {
-      queryContext.resources.close()
-      txContext.close()
-      tx.close()
-    }
-  }
-
-  override def executeAndConsumeTransactionally(
-    logicalQuery: LogicalQuery,
-    runtime: CypherRuntime[CONTEXT],
-    parameters: Map[String, Any] = Map.empty,
-    profileAssertion: Option[QueryProfile => Unit] = None,
-    prePopulateResults: Boolean = true
-  ): IndexedSeq[Array[AnyValue]] = {
-    val subscriber = newRecordingQuerySubscriber
-    runTransactionally(
-      logicalQuery,
-      runtime,
-      NoInput,
-      (_, result) => {
-        val recordingRuntimeResult = newRecordingRuntimeResult(result, subscriber)
-        val seq = recordingRuntimeResult.awaitAll()
-        profileAssertion.foreach(_(recordingRuntimeResult.runtimeResult.queryProfile()))
-        recordingRuntimeResult.runtimeResult.close()
+    parameters: Map[String, Any],
+    profileAssertion: Option[QueryProfile => Unit] = None
+  ): PlanRunner[IndexedSeq[Array[AnyValue]]] =
+    PlanRunner.empty
+      .withPlan(logicalQuery, runtime, Set.empty)
+      .withParams(parameters)
+      .withTransaction {
+        cypherGraphDb.beginTransaction(Type.EXPLICIT, LoginContext.AUTH_DISABLED)
+      }
+      .recording
+      .copy(profile = profileAssertion.isDefined)
+      .mapResult { result =>
+        val seq = result.awaitAll()
+        profileAssertion.foreach(_(result.runtimeResult.queryProfile()))
+        result.runtimeResult.close()
         seq
-      },
-      subscriber,
-      parameters,
-      profile = profileAssertion.isDefined,
-      prePopulateResults
-    )
-  }
+      }
 
-  override def executeAndConsumeTransactionallyNonRecording(
-    logicalQuery: LogicalQuery,
-    runtime: CypherRuntime[CONTEXT],
-    parameters: Map[String, Any] = Map.empty,
-    profileAssertion: Option[QueryProfile => Unit] = None,
-    prePopulateResults: Boolean = true
-  ): Long = {
-    val subscriber = newNonRecordingQuerySubscriber
-    runTransactionallyAndRollback[Long](
-      logicalQuery,
-      runtime,
-      NoInput,
-      (_, result) => {
-        val nonRecordingRuntimeResult = newNonRecordingRuntimeResult(result, subscriber)
-        val seq = nonRecordingRuntimeResult.awaitAll()
-        profileAssertion.foreach(_(nonRecordingRuntimeResult.runtimeResult.queryProfile()))
-        nonRecordingRuntimeResult.runtimeResult.close()
-        seq
-      },
-      subscriber,
-      parameters,
-      profile = profileAssertion.isDefined,
-      prePopulateResults
-    )
-  }
-
-  override def profile(
-    logicalQuery: LogicalQuery,
-    runtime: CypherRuntime[CONTEXT],
-    inputDataStream: InputDataStream = NoInput,
-    testPlanCombinationRewriterHints: Set[TestPlanCombinationRewriterHint]
-  ): RecordingRuntimeResult = {
-    val subscriber = newRecordingQuerySubscriber
-    val result = runLogical(
-      logicalQuery,
-      runtime,
-      inputDataStream,
-      (_, result) => result,
-      subscriber,
-      profile = true,
-      prePopulateResults = true,
-      testPlanCombinationRewriterHints = testPlanCombinationRewriterHints
-    )
-    newRecordingRuntimeResult(result, subscriber)
-  }
-
-  override def profile(
-    executionPlan: ExecutionPlan,
-    inputDataStream: InputDataStream,
-    readOnly: Boolean
-  ): RecordingRuntimeResult = {
-    val subscriber = newRecordingQuerySubscriber
-    val result =
-      run(executionPlan, inputDataStream, (_, result) => result, subscriber, profile = true, prePopulateResults = true)
-    newRecordingRuntimeResult(result, subscriber)
-  }
-
-  override def profileNonRecording(
-    logicalQuery: LogicalQuery,
-    runtime: CypherRuntime[CONTEXT],
-    inputDataStream: InputDataStream = NoInput
-  ): NonRecordingRuntimeResult = {
-    val subscriber = newNonRecordingQuerySubscriber
-    val result = runLogical(
-      logicalQuery,
-      runtime,
-      inputDataStream,
-      (_, result) => result,
-      subscriber,
-      profile = true,
-      prePopulateResults = true
-    )
-    newNonRecordingRuntimeResult(result, subscriber)
-  }
-
-  override def profileWithSubscriber(
-    logicalQuery: LogicalQuery,
-    runtime: CypherRuntime[CONTEXT],
-    subscriber: QuerySubscriber,
-    inputDataStream: InputDataStream = NoInput
-  ): RuntimeResult = {
-    runLogical(
-      logicalQuery,
-      runtime,
-      inputDataStream,
-      (_, result) => result,
-      subscriber,
-      profile = true,
-      prePopulateResults = true
-    )
-  }
-
-  override def executeAndContext(
-    logicalQuery: LogicalQuery,
-    runtime: CypherRuntime[CONTEXT],
-    input: InputValues
-  ): (RecordingRuntimeResult, CONTEXT) = {
-    val subscriber = newRecordingQuerySubscriber
-    val (result, context) = runLogical(
-      logicalQuery,
-      runtime,
-      input.stream(),
-      (context, result) => (result, context),
-      subscriber,
-      profile = false,
-      prePopulateResults = true
-    )
-    (newRecordingRuntimeResult(result, subscriber), context)
-  }
-
-  override def executeAndContextNonRecording(
-    logicalQuery: LogicalQuery,
-    runtime: CypherRuntime[CONTEXT],
-    input: InputValues,
-    parameters: Map[String, Any]
-  ): (NonRecordingRuntimeResult, CONTEXT) = {
-    val subscriber = newNonRecordingQuerySubscriber
-    val (result, context) = runLogical(
-      logicalQuery,
-      runtime,
-      input.stream(),
-      (context, result) => (result, context),
-      subscriber,
-      profile = false,
-      prePopulateResults = true,
-      parameters = parameters
-    )
-    (newNonRecordingRuntimeResult(result, subscriber), context)
-  }
-
-  override def executeAndExplain(
-    logicalQuery: LogicalQuery,
-    runtime: CypherRuntime[CONTEXT],
-    input: InputValues
-  ): (RecordingRuntimeResult, InternalPlanDescription) = {
-    val subscriber = newRecordingQuerySubscriber
-    val executionPlan = buildPlan(logicalQuery, runtime, testPlanCombinationRewriterHints = Set(NoRewrites))
-    val result = run(
+  private def planDescriptionBuilder(logicalQuery: LogicalQuery, executionPlan: ExecutionPlan) =
+    PlanDescriptionBuilder(
+      executionPlan.rewrittenPlan.getOrElse(logicalQuery.logicalPlan),
+      IDPPlannerName,
+      logicalQuery.readOnly,
+      ImmutablePlanningAttributes.EffectiveCardinalities(logicalQuery.effectiveCardinalities),
+      debugOptions.rawCardinalitiesEnabled,
+      debugOptions.renderDistinctnessEnabled,
+      debugOptions.renderNestedPlanExpressions,
+      ImmutablePlanningAttributes.ProvidedOrders(logicalQuery.providedOrders),
       executionPlan,
-      input.stream(),
-      (_, result) => result,
-      subscriber,
-      profile = false,
-      prePopulateResults = true,
-      parameters = Map.empty
+      renderPlanDescription = false,
+      CypherVersion.Legacy.legacyVersion(),
+      explainScopeOpt = None,
+      cypherPlannerVersion = None
     )
-    val executionPlanDescription = {
-      val planDescriptionBuilder =
-        PlanDescriptionBuilder(
-          executionPlan.rewrittenPlan.getOrElse(logicalQuery.logicalPlan),
-          IDPPlannerName,
-          logicalQuery.readOnly,
-          ImmutablePlanningAttributes.EffectiveCardinalities(logicalQuery.effectiveCardinalities),
-          debugOptions.rawCardinalitiesEnabled,
-          debugOptions.renderDistinctnessEnabled,
-          ImmutablePlanningAttributes.ProvidedOrders(logicalQuery.providedOrders),
-          executionPlan,
-          renderPlanDescription = false,
-          CypherVersion.Default
+
+  def explainDescription(logicalQuery: LogicalQuery, executionPlan: ExecutionPlan): InternalPlanDescription =
+    planDescriptionBuilder(logicalQuery, executionPlan).explain()
+
+  def profileDescription(
+    logicalQuery: LogicalQuery,
+    executionPlan: ExecutionPlan,
+    profile: QueryProfile
+  ): InternalPlanDescription =
+    planDescriptionBuilder(logicalQuery, executionPlan).profile(profile)
+
+  sealed trait Plan
+
+  object Plan {
+
+    case class Unbuilt(
+      query: LogicalQuery,
+      runtime: CypherRuntime[CONTEXT],
+      testPlanCombinationRewriterHints: Set[TestPlanCombinationRewriterHint]
+    ) extends Plan
+
+    case class Built(plan: ExecutionPlan) extends Plan
+  }
+
+  case class PlanRunner[RESULT](
+    plan: Plan,
+    input: InputDataStream,
+    subscriber: QuerySubscriber,
+    profile: Boolean,
+    prePopulateResults: Boolean,
+    parameters: Map[String, Any],
+    queryConfig: QueryRuntimeConfig,
+    resultMapper: (CONTEXT, RuntimeResult) => RESULT,
+    transaction: TransactionSelection
+  ) {
+
+    def withPlan(plan: ExecutionPlan): PlanRunner[RESULT] =
+      copy(plan = Plan.Built(plan))
+
+    def withPlan(
+      query: LogicalQuery,
+      runtime: CypherRuntime[CONTEXT],
+      testPlanCombinationRewriterHints: Set[TestPlanCombinationRewriterHint]
+    ): PlanRunner[RESULT] =
+      copy(plan = Plan.Unbuilt(query, runtime, testPlanCombinationRewriterHints))
+
+    def withPlan(
+      query: LogicalQuery,
+      runtime: CypherRuntime[CONTEXT]
+    ): PlanRunner[RESULT] =
+      withPlan(query, runtime, Set.empty)
+
+    def withPlan(query: LogicalQuery): PlanRunner[RESULT] =
+      withPlan(query, runtime)
+
+    def recording(implicit ev: RESULT =:= RuntimeResult): PlanRunner[RecordingRuntimeResult] = {
+      val sub = new RecordingQuerySubscriber(createQuerySubscriberProbe(runtimeTestParameters))
+      withSubscriber(sub)
+        .mapResult(RecordingRuntimeResult(_, sub, runtimeTestParameters.resultConsumptionController))
+    }
+
+    def nonRecording(implicit ev: RESULT =:= RuntimeResult): PlanRunner[NonRecordingRuntimeResult] = {
+      val sub = new NonRecordingQuerySubscriber(createQuerySubscriberProbe(runtimeTestParameters))
+      withSubscriber(sub)
+        .mapResult(NonRecordingRuntimeResult(
+          _,
+          sub,
+          runtimeTestParameters.resultConsumptionController
+        ))
+    }
+
+    def withImplicitTx(implicitTx: Boolean): PlanRunner[RESULT] =
+      if (implicitTx) {
+        withTransaction {
+          cypherGraphDb.beginTransaction(Type.IMPLICIT, LoginContext.AUTH_DISABLED)
+        }
+      } else this
+
+    def noValues: PlanRunner[RESULT] = copy(prePopulateResults = false)
+
+    def withSubscriber(sub: QuerySubscriber): PlanRunner[RESULT] = copy(subscriber = sub)
+
+    def withInput(input: InputDataStream): PlanRunner[RESULT] = copy(input = input)
+
+    def withParams(params: Map[String, Any]): PlanRunner[RESULT] = copy(parameters = params)
+
+    def withConfig(queryConfig: QueryRuntimeConfig): PlanRunner[RESULT] = copy(queryConfig = queryConfig)
+
+    def profiling: PlanRunner[RESULT] = copy(profile = true)
+
+    def withContext: PlanRunner[(RESULT, CONTEXT)] =
+      copy(resultMapper = (c, res) => (resultMapper(c, res), c))
+
+    def mapResult[RESULT2](f: RESULT => RESULT2): PlanRunner[RESULT2] =
+      copy(resultMapper = (c, res) => f(resultMapper(c, res)))
+
+    // note: call-by-value, will create a new transaction and close it after run()
+    def withTransaction(tx: => InternalTransaction): PlanRunner[RESULT] =
+      copy(transaction = TransactionSelection.Owned(() => tx))
+
+    def executeAs(username: String, password: String): PlanRunner[RESULT] =
+      withTransaction {
+        val lgCtx =
+          authManager.login(AuthToken.newBasicAuthToken(username, password), ClientConnectionInfo.EMBEDDED_CONNECTION)
+        cypherGraphDb.beginTransaction(Type.EXPLICIT, lgCtx)
+      }
+
+    def withTimeout(duration: FiniteDuration): PlanRunner[RESULT] =
+      withTransaction {
+        cypherGraphDb.beginTransaction(
+          Type.EXPLICIT,
+          LoginContext.AUTH_DISABLED,
+          ClientConnectionInfo.EMBEDDED_CONNECTION,
+          duration.toSeconds.toInt,
+          TimeUnit.SECONDS
         )
-      planDescriptionBuilder.explain()
+      }
+
+    private def getPlan(txContext: TransactionalContext): ExecutionPlan =
+      plan match {
+        case Plan.Unbuilt(query, runtime, testPlanCombinationRewriterHints) =>
+          val queryContext = newQueryContext(txContext, queryConfig)
+          try {
+            compileWithTx(
+              query.copy(doProfile = profile),
+              runtime,
+              queryContext,
+              testPlanCombinationRewriterHints
+            )._1
+          } finally {
+            queryContext.resources.close()
+          }
+        case Plan.Built(plan) =>
+          plan
+
+        case PlanRunner.NoPlan =>
+          throw new IllegalArgumentException("No plan specified for PlanRunner.")
+      }
+
+    def run(): RESULT = {
+      transaction match {
+        case TransactionSelection.Shared => doRun(_tx, _txContext)
+        case TransactionSelection.Owned(create) =>
+          val tx = create()
+          val txContext = contextFactory.newContext(
+            tx,
+            "<<queryText>>",
+            VirtualValues.EMPTY_MAP,
+            QueryExecutionConfiguration.DEFAULT_CONFIG
+          )
+          try {
+            doRun(tx, txContext)
+          } catch {
+            case NonFatal(e) =>
+              txContext.close()
+              tx.close()
+              throw e
+          }
+      }
     }
-    (newRecordingRuntimeResult(result, subscriber), executionPlanDescription)
-  }
 
-  // PRIVATE EXECUTE HELPER METHODS
+    private def doRun(tx: InternalTransaction, txContext: TransactionalContext) = {
+      val executableQuery = getPlan(txContext)
+      val defaultLanguage = CypherVersion.Legacy.legacyVersion()
+      txContext.executingQuery().setCompilerInfoForTesting(new CompilerInfo(
+        "NO PLANNER",
+        "2026.04",
+        executableQuery.runtimeName,
+        Collections.emptyList(),
+        defaultLanguage
+      ))
+      val queryContext = newQueryContext(txContext, queryConfig, executableQuery.threadSafeExecutionResources())
+      val runtimeContext = newRuntimeContext(queryContext, defaultLanguage)
 
-  private def runLogical[RESULT](
-    logicalQuery: LogicalQuery,
-    runtime: CypherRuntime[CONTEXT],
-    input: InputDataStream,
-    resultMapper: (CONTEXT, RuntimeResult) => RESULT,
-    subscriber: QuerySubscriber,
-    profile: Boolean,
-    prePopulateResults: Boolean,
-    parameters: Map[String, Any] = Map.empty,
-    testPlanCombinationRewriterHints: Set[TestPlanCombinationRewriterHint] = Set.empty[TestPlanCombinationRewriterHint]
-  ): RESULT = {
-    run(
-      buildPlan(logicalQuery, runtime, testPlanCombinationRewriterHints),
-      input,
-      resultMapper,
-      subscriber,
-      profile,
-      prePopulateResults,
-      parameters
-    )
-  }
+      val executionMode = if (profile) ProfileMode else NormalMode
+      val (keys, values) =
+        parameters.mapValues {
+          case m: MapValue  => m
+          case m: Map[_, _] => VirtualValues.map(m.keys.map(_.toString).toArray, m.values.map(ValueUtils.of).toArray)
+          case v            => ValueUtils.of(v)
+        }.unzip match { case (a, b) => (a.toArray, b.toArray[AnyValue]) }
 
-  private def runTransactionally[RESULT](
-    logicalQuery: LogicalQuery,
-    runtime: CypherRuntime[CONTEXT],
-    input: InputDataStream,
-    resultMapper: (CONTEXT, RuntimeResult) => RESULT,
-    subscriber: QuerySubscriber,
-    parameters: Map[String, Any],
-    profile: Boolean,
-    prePopulateResults: Boolean
-  ): RESULT = {
-    val tx = cypherGraphDb.beginTransaction(Type.EXPLICIT, LoginContext.AUTH_DISABLED)
-    val txContext = contextFactory.newContext(
-      tx,
-      "<<queryText>>",
-      VirtualValues.EMPTY_MAP,
-      QueryExecutionConfiguration.DEFAULT_CONFIG
-    )
-    val queryContext = newQueryContext(txContext)
-    try {
-      val executionPlan = compileWithTx(logicalQuery, runtime, queryContext)._1
-      runWithTx(
-        executionPlan,
-        input,
-        resultMapper,
-        subscriber,
-        profile = profile,
-        parameters,
-        tx,
-        txContext,
-        prePopulateResults
-      )
-    } finally {
-      queryContext.resources.close()
-      txContext.close()
-      tx.close()
-    }
-  }
+      val paramsMap = VirtualValues.map(keys, values)
+      var result: RuntimeResult = null
+      try {
+        result =
+          executableQuery.run(queryContext, executionMode, paramsMap, prePopulateResults, input, subscriber)
+      } catch {
+        case t: Throwable => {
+          queryContext.resources.close()
+          throw t
+        }
+      }
 
-  private def runTransactionallyAndRollback[RESULT](
-    logicalQuery: LogicalQuery,
-    runtime: CypherRuntime[CONTEXT],
-    input: InputDataStream,
-    resultMapper: (CONTEXT, RuntimeResult) => RESULT,
-    subscriber: QuerySubscriber,
-    parameters: Map[String, Any],
-    profile: Boolean,
-    prePopulateResults: Boolean
-  ): RESULT = {
-    val tx = cypherGraphDb.beginTransaction(Type.EXPLICIT, LoginContext.AUTH_DISABLED)
-    val txContext = contextFactory.newContext(
-      tx,
-      "<<queryText>>",
-      VirtualValues.EMPTY_MAP,
-      QueryExecutionConfiguration.DEFAULT_CONFIG
-    )
-    val queryContext = newQueryContext(txContext)
-    try {
-      val executionPlan = compileWithTx(logicalQuery, runtime, queryContext)._1
-      runWithTx(
-        executionPlan,
-        input,
-        resultMapper,
-        subscriber,
-        profile = profile,
-        parameters,
-        tx,
-        txContext,
-        prePopulateResults
-      )
-    } finally {
-      queryContext.resources.close()
-      tx.rollback()
-      txContext.close()
-      tx.close()
-    }
-  }
-
-  private def run[RESULT](
-    executableQuery: ExecutionPlan,
-    input: InputDataStream,
-    resultMapper: (CONTEXT, RuntimeResult) => RESULT,
-    subscriber: QuerySubscriber,
-    profile: Boolean,
-    prePopulateResults: Boolean,
-    parameters: Map[String, Any] = Map.empty,
-    implicitTx: Boolean = false
-  ): RESULT = {
-    if (implicitTx) {
-      restartImplicitTx()
-    }
-    runWithTx(
-      executableQuery,
-      input,
-      resultMapper,
-      subscriber,
-      profile,
-      parameters,
-      _tx,
-      _txContext,
-      prePopulateResults
-    )
-  }
-
-  private def runWithTx[RESULT](
-    executableQuery: ExecutionPlan,
-    input: InputDataStream,
-    resultMapper: (CONTEXT, RuntimeResult) => RESULT,
-    subscriber: QuerySubscriber,
-    profile: Boolean,
-    parameters: Map[String, Any],
-    tx: InternalTransaction,
-    txContext: TransactionalContext,
-    prePopulateResults: Boolean
-  ): RESULT = {
-    txContext.executingQuery().setCompilerInfoForTesting(new CompilerInfo(
-      "NO PLANNER",
-      executableQuery.runtimeName.name,
-      Collections.emptyList()
-    ))
-    val queryContext = newQueryContext(txContext, executableQuery.threadSafeExecutionResources())
-    val runtimeContext = newRuntimeContext(queryContext)
-
-    val executionMode = if (profile) ProfileMode else NormalMode
-    val (keys, values) =
-      parameters.mapValues(Values.of).unzip match { case (a, b) => (a.toArray, b.toArray[AnyValue]) }
-    val paramsMap = VirtualValues.map(keys, values)
-    val result =
-      executableQuery.run(queryContext, executionMode, paramsMap, prePopulateResults, input, subscriber)
-    val assertAllReleased =
-      if (!workloadMode) {
-        () =>
-          {
+      val assertAllReleased = workloadMode match {
+        case WorkloadMode.On => () => ()
+        case WorkloadMode.Off => () => {
             runtimeContextManager.waitForWorkersToIdle(5000)
             runtimeContextManager.assertAllReleased()
           }
-      } else () => ()
-    resultMapper(
-      runtimeContext,
-      new ClosingRuntimeTestResult(result, tx, txContext, queryContext.resources, subscriber, assertAllReleased)
+      }
+      resultMapper(
+        runtimeContext,
+        new ClosingRuntimeTestResult(
+          result,
+          tx,
+          txContext,
+          queryContext.resources,
+          subscriber,
+          assertAllReleased,
+          closeTx = transaction.isInstanceOf[TransactionSelection.Owned]
+        )
+      )
+    }
+
+  }
+
+  object PlanRunner {
+    private object NoPlan extends Plan
+
+    def empty: PlanRunner[RuntimeResult] = PlanRunner(
+      NoPlan,
+      NoInput,
+      QuerySubscriber.DO_NOTHING_SUBSCRIBER,
+      profile = false,
+      prePopulateResults = true,
+      parameters = Map.empty,
+      queryConfig = runtimeContextManager.defaultQueryRuntimeConfig,
+      resultMapper = (_, res) => res,
+      transaction = TransactionSelection.Shared
     )
   }
+
+  sealed trait TransactionSelection
+
+  object TransactionSelection {
+
+    /** refers to the tx and txContext shared by the base class */
+    case object Shared extends TransactionSelection
+
+    /** a transaction that will be created and closed by the runner */
+    case class Owned(create: () => InternalTransaction) extends TransactionSelection
+  }
+
+  // PRIVATE EXECUTE HELPER METHODS
 
   private def compileWithTx(
     logicalQuery: LogicalQuery,
     runtime: CypherRuntime[CONTEXT],
     queryContext: QueryContext,
-    testPlanCombinationRewriterHints: Set[TestPlanCombinationRewriterHint] = Set.empty[TestPlanCombinationRewriterHint]
+    testPlanCombinationRewriterHints: Set[TestPlanCombinationRewriterHint]
   ): (ExecutionPlan, CONTEXT) = {
-    val runtimeContext = newRuntimeContext(queryContext)
+    val defaultLanguage = CypherVersion.Legacy.legacyVersion() // To be replaced with db specific default
+    val runtimeContext = newRuntimeContext(queryContext, defaultLanguage)
     val rewrittenLogicalQuery =
       rewriteLogicalQuery(logicalQuery, runtimeContext.anonymousVariableNameGenerator, testPlanCombinationRewriterHints)
     (runtime.compileToExecutable(rewrittenLogicalQuery, runtimeContext, txContext.databaseMode()), runtimeContext)
   }
 
-  private def rewriteLogicalQuery(
+  protected[spec] def rewriteLogicalQuery(
     logicalQuery: LogicalQuery,
     anonymousVariableNameGenerator: AnonymousVariableNameGenerator,
     testPlanCombinationRewriterHints: Set[TestPlanCombinationRewriterHint]
@@ -906,17 +664,41 @@ class RuntimeTestSupport[CONTEXT <: RuntimeContext](
 
   protected def wrapTransactionContext(ctx: TransactionalContext): TransactionalContext = ctx
 
-  protected def newRuntimeContext(queryContext: QueryContext): CONTEXT = {
+  private def selectExecutionModel(queryOptions: QueryOptions): ExecutionModel = {
+    if (RuntimeTestSuite.isParallel(runtime)) {
+      queryOptions.queryOptions.parallelRuntimeConfigOption match {
+        case CypherParallelRuntimeConfigOption.none =>
+          BatchedParallel(
+            runtimeContextManager.cypherConfig.pipelinedBatchSizeSmall,
+            runtimeContextManager.cypherConfig.pipelinedBatchSizeBig,
+            providedOrderPreserving = false
+          )
+        case CypherParallelRuntimeConfigOption.leverageOrder =>
+          BatchedParallel(
+            runtimeContextManager.cypherConfig.pipelinedBatchSizeSmall,
+            runtimeContextManager.cypherConfig.pipelinedBatchSizeBig,
+            providedOrderPreserving = true
+          )
+      }
+    } else if (RuntimeTestSuite.isPipelined(runtime)) {
+      BatchedSingleThreaded(
+        runtimeContextManager.cypherConfig.pipelinedBatchSizeSmall,
+        runtimeContextManager.cypherConfig.pipelinedBatchSizeBig
+      )
+    } else {
+      ExecutionModel.Volcano
+    }
+  }
 
-    val cypherConfiguration: CypherConfiguration = edition.cypherConfig
+  protected def newRuntimeContext(queryContext: QueryContext, dbDefaultLanguage: CypherVersion): CONTEXT = {
 
-    val queryOptions = PreParser.queryOptions(List.empty, InputPosition.NONE, cypherConfiguration)
+    val queryOptions = runtimeContextManager.defaultQueryOptions.copy(defaultLanguage = dbDefaultLanguage)
+    val executionModel = selectExecutionModel(queryOptions)
 
     runtimeContextManager.create(
-      queryOptions.queryOptions.cypherVersion.actualVersion,
+      queryOptions.resolvedLanguage,
       queryContext,
-      queryContext.transactionalContext.schemaRead,
-      queryContext.transactionalContext.procedures,
+      _txContext,
       MasterCompiler.CLOCK,
       debugOptions,
       compileExpressions = queryOptions.useCompiledExpressions,
@@ -924,12 +706,14 @@ class RuntimeTestSupport[CONTEXT <: RuntimeContext](
       operatorEngine = queryOptions.queryOptions.operatorEngine,
       interpretedPipesFallback = queryOptions.queryOptions.interpretedPipesFallback,
       anonymousVariableNameGenerator = new AnonymousVariableNameGenerator(),
-      () => {}
+      executionModel,
+      indexComparatorFactory = NoPreferenceIndexComparatorFactory
     )
   }
 
   private def newQueryContext(
     txContext: TransactionalContext,
+    queryConfig: QueryRuntimeConfig,
     maybeExecutionResources: Option[ResourceManagerFactory] = None
   ): QueryContext = {
     val resourceManager = maybeExecutionResources match {
@@ -937,12 +721,25 @@ class RuntimeTestSupport[CONTEXT <: RuntimeContext](
       case None => new ResourceManager(ResourceMonitor.NOOP, txContext.kernelTransaction().memoryTracker())
     }
 
-    new TransactionBoundQueryContext(TransactionalContextWrapper(txContext), resourceManager)(
+    new TransactionBoundQueryContext(
+      TransactionalContextWrapper(txContext),
+      resourceManager,
+      queryConfig = queryConfig
+    )(
       monitors.newMonitor(classOf[IndexSearchMonitor])
     )
   }
 
   def waitForWorkersToIdle(timeoutMs: Int): Unit = {
     runtimeContextManager.waitForWorkersToIdle(timeoutMs)
+  }
+}
+
+object RuntimeTestSupport {
+  sealed trait WorkloadMode
+
+  object WorkloadMode {
+    case object On extends WorkloadMode
+    case object Off extends WorkloadMode
   }
 }

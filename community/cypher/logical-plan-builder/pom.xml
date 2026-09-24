@@ -1,16 +1,13 @@
-<?xml version="1.0"?>
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
 
-
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+  <modelVersion>4.0.0</modelVersion>
   <parent>
     <groupId>org.neo4j</groupId>
     <artifactId>cypher-parent</artifactId>
-    <version>5.26.0</version>
+    <version>2026.09.0</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
-
-  <modelVersion>4.0.0</modelVersion>
   <artifactId>neo4j-cypher-logical-plan-builder</artifactId>
   <packaging>jar</packaging>
   <name>Neo4j - Cypher Logical Plan Builder</name>
@@ -28,22 +25,60 @@
   </properties>
 
   <dependencies>
-
-    <!-- scala -->
-
     <dependency>
-      <groupId>org.scala-lang</groupId>
-      <artifactId>scala-library</artifactId>
+      <groupId>org.neo4j</groupId>
+      <artifactId>cypher-antlr-common</artifactId>
+      <version>${project.version}</version>
     </dependency>
-
     <dependency>
-      <groupId>org.scala-lang</groupId>
-      <artifactId>scala-reflect</artifactId>
+      <groupId>org.neo4j</groupId>
+      <artifactId>cypher-parser-ast-common</artifactId>
+      <version>${project.version}</version>
     </dependency>
-
     <dependency>
-      <groupId>org.scala-lang</groupId>
-      <artifactId>scalap</artifactId>
+      <groupId>org.neo4j</groupId>
+      <artifactId>cypher-parser-factory</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.neo4j</groupId>
+      <artifactId>cypher-v25-antlr-parser</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.neo4j</groupId>
+      <artifactId>cypher-v25-ast-factory</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.neo4j</groupId>
+      <artifactId>cypher-v5-antlr-parser</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.neo4j</groupId>
+      <artifactId>cypher-v5-ast-factory</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.neo4j</groupId>
+      <artifactId>neo4j-ast</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.neo4j</groupId>
+      <artifactId>neo4j-common</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.neo4j</groupId>
+      <artifactId>neo4j-configuration</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.neo4j</groupId>
+      <artifactId>neo4j-cypher-ir</artifactId>
+      <version>${project.version}</version>
     </dependency>
 
     <!-- neo4j -->
@@ -52,11 +87,54 @@
       <artifactId>neo4j-cypher-logical-plans</artifactId>
       <version>${project.version}</version>
     </dependency>
-
     <dependency>
       <groupId>org.neo4j</groupId>
-      <artifactId>neo4j-cypher-ast-factory</artifactId>
+      <artifactId>neo4j-cypher-planner-spi</artifactId>
       <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.neo4j</groupId>
+      <artifactId>neo4j-cypher-runtime-expressions</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.neo4j</groupId>
+      <artifactId>neo4j-expressions</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.neo4j</groupId>
+      <artifactId>neo4j-front-end</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.neo4j</groupId>
+      <artifactId>neo4j-graphdb-api</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.neo4j</groupId>
+      <artifactId>neo4j-rewriting</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.neo4j</groupId>
+      <artifactId>neo4j-util</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.scala-lang</groupId>
+      <artifactId>scala-library</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.scala-lang</groupId>
+      <artifactId>scala3-library_3</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.neo4j</groupId>
+      <artifactId>neo4j-ast-test-util</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
     </dependency>
 
     <!-- test -->
@@ -68,15 +146,62 @@
       <scope>test</scope>
     </dependency>
 
+    <!-- scala -->
+
     <dependency>
-      <groupId>org.neo4j</groupId>
-      <artifactId>neo4j-ast</artifactId>
-      <version>${project.version}</version>
-      <type>test-jar</type>
+      <groupId>org.scala-lang</groupId>
+      <artifactId>scala3-compiler_3</artifactId>
+      <version>${scala3.version}</version>
       <scope>test</scope>
     </dependency>
-
+    <dependency>
+      <groupId>org.scalactic</groupId>
+      <artifactId>scalactic_${scala.binary.version}</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.scalatest</groupId>
+      <artifactId>scalatest-compatible</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.scalatest</groupId>
+      <artifactId>scalatest-core_${scala.binary.version}</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.scalatest</groupId>
+      <artifactId>scalatest-matchers-core_${scala.binary.version}</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.scalatest</groupId>
+      <artifactId>scalatest-shouldmatchers_${scala.binary.version}</artifactId>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>analyze</id>
+            <goals>
+              <goal>analyze-only</goal>
+            </goals>
+            <configuration>
+              <failOnWarning>true</failOnWarning>
+              <ignoredNonTestScopedDependencies>
+                <ignoredNonTestScopedDependency>org.scala-lang:scala3-library_3</ignoredNonTestScopedDependency>
+              </ignoredNonTestScopedDependencies>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
   <profiles>
     <profile>
       <id>scala-fatal-warnings</id>

@@ -16,11 +16,15 @@
  */
 package org.neo4j.cypher.internal.ast
 
+import org.neo4j.cypher.internal.ast.semantics.MapExtendedType
 import org.neo4j.cypher.internal.ast.semantics.SemanticAnalysisTooling
+import org.neo4j.cypher.internal.ast.semantics.SemanticCheck
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheck.when
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheckable
+import org.neo4j.cypher.internal.ast.semantics.SemanticError
 import org.neo4j.cypher.internal.ast.semantics.SemanticExpressionCheck
 import org.neo4j.cypher.internal.ast.semantics.SemanticPatternCheck
+import org.neo4j.cypher.internal.ast.semantics.SemanticPatternCheck.TokenType
 import org.neo4j.cypher.internal.expressions.ContainerIndex
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.HasMappableExpressions
@@ -49,9 +53,9 @@ case class SetLabelItem(
 
   def semanticCheck =
     SemanticExpressionCheck.simple(variable) chain
-      SemanticPatternCheck.checkValidLabels(labels, position) chain
+      SemanticPatternCheck.checkValidLabels(TokenType.NodeLabel, labels, position) chain
       SemanticExpressionCheck.simple(dynamicLabels) chain
-      SemanticPatternCheck.checkValidDynamicLabels(dynamicLabels, position) chain
+      SemanticPatternCheck.checkValidDynamicLabels(TokenType.NodeLabel, dynamicLabels, position) chain
       SemanticExpressionCheck.expectType(CTString.covariant | CTList(CTString).covariant, dynamicLabels) chain
       SemanticExpressionCheck.expectType(CTNode.covariant, variable)
 
@@ -90,16 +94,21 @@ case class SetDynamicPropertyItem(dynamicPropertyLookup: ContainerIndex, express
 
   def semanticCheck =
     SemanticExpressionCheck.simple(dynamicPropertyLookup) chain
-      SemanticPatternCheck.checkValidDynamicLabels(Seq(dynamicPropertyLookup.idx), position) chain
+      SemanticPatternCheck.checkValidDynamicLabels(
+        TokenType.PropertyName,
+        Seq(dynamicPropertyLookup.idx),
+        position
+      ) chain
       SemanticExpressionCheck.simple(expression) chain
       SemanticExpressionCheck.expectType(CTNode.covariant | CTRelationship.covariant, dynamicPropertyLookup.expr)
 
-  override def mapExpressions(f: Expression => Expression): SetItem = {
-    copy(
-      f(dynamicPropertyLookup).asInstanceOf[ContainerIndex],
-      f(expression)
-    )(this.position)
-  }
+  override def mapExpressions(f: Expression => Expression): SetItem = copy(
+    dynamicPropertyLookup = dynamicPropertyLookup.copy(
+      expr = f(dynamicPropertyLookup.expr),
+      idx = f(dynamicPropertyLookup.idx)
+    )(dynamicPropertyLookup.position),
+    expression = f(expression)
+  )(this.position)
 }
 
 case class SetPropertyItems(map: Expression, items: Seq[(PropertyKeyName, Expression)])(val position: InputPosition)
@@ -136,7 +145,24 @@ case class SetExactPropertiesFromMapItem(variable: Variable, expression: Express
       expectType(CTMap.covariant, expression) chain
       // This was deprecated in Cypher 5 and disallowed in Cypher 25
       when(rhsMustBeMap) {
-        expectType(CTMap.invariant, expression)
+        typeSwitch(expression) { rhsTypes =>
+          // Only surface the hint when the inferred type is strictly NODE/RELATIONSHIP.
+          val nonNodeRelTypes = rhsTypes.without(CTNode).without(CTRelationship)
+          if (nonNodeRelTypes.ranges.isEmpty) {
+            SemanticCheck.error(
+              SemanticError.invalidEntityTypeWithPropertiesHint(
+                if (rhsTypes.containsAny(CTNode.covariant)) "NODE" else "RELATIONSHIP",
+                expression.asCanonicalStringVal,
+                Seq("MAP"),
+                "Type mismatch: expected Map but was " +
+                  (if (rhsTypes.containsAny(CTNode.covariant)) "Node" else "Relationship"),
+                expression.position
+              )
+            )
+          } else {
+            expectType(MapExtendedType.getTypeSpec(CTMap), expression)
+          }
+        }
       }
 
   override def mapExpressions(f: Expression => Expression): SetItem = copy(
@@ -156,7 +182,24 @@ case class SetIncludingPropertiesFromMapItem(variable: Variable, expression: Exp
       expectType(CTMap.covariant, expression) chain
       // This was deprecated in Cypher 5 and disallowed in Cypher 25
       when(rhsMustBeMap) {
-        expectType(CTMap.invariant, expression)
+        typeSwitch(expression) { rhsTypes =>
+          // Only surface the hint when the inferred type is strictly NODE/RELATIONSHIP.
+          val nonNodeRelTypes = rhsTypes.without(CTNode).without(CTRelationship)
+          if (nonNodeRelTypes.ranges.isEmpty) {
+            SemanticCheck.error(
+              SemanticError.invalidEntityTypeWithPropertiesHint(
+                if (rhsTypes.containsAny(CTNode.covariant)) "NODE" else "RELATIONSHIP",
+                expression.asCanonicalStringVal,
+                Seq("MAP"),
+                "Type mismatch: expected Map but was " +
+                  (if (rhsTypes.containsAny(CTNode.covariant)) "Node" else "Relationship"),
+                expression.position
+              )
+            )
+          } else {
+            expectType(MapExtendedType.getTypeSpec(CTMap), expression)
+          }
+        }
       }
 
   override def mapExpressions(f: Expression => Expression): SetItem = copy(

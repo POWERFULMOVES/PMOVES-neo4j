@@ -43,6 +43,8 @@ import org.neo4j.values.storable.Values
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 
+object ProcedureCallTestBase
+
 abstract class ProcedureCallTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
@@ -178,6 +180,8 @@ abstract class ProcedureCallTestBase[CONTEXT <: RuntimeContext](
     super.beforeEach()
     testVar.set(0)
     procedures.foreach(registerProcedure)
+    // Refresh the transaction so its ProcedureView snapshot includes the procedures we just registered.
+    restartTx()
   }
 
   test("should call read void procedure") {
@@ -202,7 +206,7 @@ abstract class ProcedureCallTestBase[CONTEXT <: RuntimeContext](
 
   test("should call read int procedure") {
     // given
-    val nodes = givenGraph {
+    givenGraph {
       nodeGraph(sizeHint)
     }
 

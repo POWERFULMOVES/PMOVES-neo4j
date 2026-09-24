@@ -22,28 +22,32 @@ package org.neo4j.kernel.api.impl.index;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.LongPredicate;
 import java.util.function.ToLongFunction;
 import java.util.stream.Collectors;
-import org.apache.lucene.document.Document;
 import org.eclipse.collections.api.block.function.primitive.LongToLongFunction;
 import org.neo4j.annotations.documented.ReporterFactory;
+import org.neo4j.common.Subject;
 import org.neo4j.graphdb.ResourceIterator;
 import org.neo4j.internal.helpers.collection.BoundedIterable;
 import org.neo4j.internal.helpers.progress.ProgressListener;
 import org.neo4j.internal.helpers.progress.ProgressMonitorFactory;
 import org.neo4j.internal.schema.IndexDescriptor;
-import org.neo4j.internal.schema.SchemaDescriptorSupplier;
+import org.neo4j.io.IOUtils;
+import org.neo4j.io.async.AsyncBlockAccessor;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
-import org.neo4j.kernel.api.exceptions.index.IndexEntryConflictException;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDocument;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDocumentsFactory;
 import org.neo4j.kernel.api.impl.schema.LuceneIndexReaderAcquisitionException;
 import org.neo4j.kernel.api.impl.schema.reader.LuceneAllEntriesIndexAccessorReader;
-import org.neo4j.kernel.api.impl.schema.writer.LuceneIndexWriter;
+import org.neo4j.kernel.api.impl.schema.writer.LucenePartitionIndexWriter;
 import org.neo4j.kernel.api.index.IndexAccessor;
 import org.neo4j.kernel.api.index.IndexEntriesReader;
 import org.neo4j.kernel.api.index.IndexEntryConflictHandler;
@@ -52,17 +56,24 @@ import org.neo4j.kernel.api.index.ValueIndexReader;
 import org.neo4j.kernel.impl.api.index.IndexUpdateMode;
 import org.neo4j.kernel.impl.index.schema.IndexUpdateIgnoreStrategy;
 import org.neo4j.kernel.impl.index.schema.IndexUsageTracking;
+import org.neo4j.scheduler.Group;
+import org.neo4j.scheduler.JobHandle;
+import org.neo4j.scheduler.JobHandles;
+import org.neo4j.scheduler.JobMonitoringParams;
 import org.neo4j.scheduler.JobScheduler;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
+import org.neo4j.storageengine.api.UpdateMode;
 import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.Values;
 
 public abstract class AbstractLuceneIndexAccessor<READER extends ValueIndexReader, INDEX extends DatabaseIndex<READER>>
         implements IndexAccessor {
-    protected final LuceneIndexWriter writer;
+    protected final LucenePartitionIndexWriter writer;
     protected final INDEX luceneIndex;
     protected final IndexDescriptor descriptor;
+    protected final LuceneDocumentsFactory documentsFactory;
     private final IndexUpdateIgnoreStrategy ignoreStrategy;
 
     protected AbstractLuceneIndexAccessor(
@@ -71,6 +82,7 @@ public abstract class AbstractLuceneIndexAccessor<READER extends ValueIndexReade
         this.luceneIndex = luceneIndex;
         this.descriptor = descriptor;
         this.ignoreStrategy = ignoreStrategy;
+        this.documentsFactory = luceneIndex.luceneContext().documentsFactory();
     }
 
     @Override
@@ -90,13 +102,13 @@ public abstract class AbstractLuceneIndexAccessor<READER extends ValueIndexReade
             LongPredicate entityFilter,
             int threads,
             JobScheduler jobScheduler,
-            ProgressListener progress)
-            throws IndexEntryConflictException {
+            ProgressListener progress) {
         // NB entityIdConverter not used at the moment but this test would be required when doing incremental updates
         // during the build phase rather than the merge phase - keeping commented code as an aide-mémoire
         // Preconditions.checkArgument(entityIdConverter == null, "Unable to modify document IDs");
 
-        var o = (AbstractLuceneIndexAccessor<READER, INDEX>) other;
+        //noinspection unchecked
+        AbstractLuceneIndexAccessor<READER, INDEX> o = (AbstractLuceneIndexAccessor<READER, INDEX>) other;
         try {
             o.luceneIndex.accessClosedDirectories(writer::addDirectory);
         } catch (IOException e) {
@@ -104,22 +116,38 @@ public abstract class AbstractLuceneIndexAccessor<READER extends ValueIndexReade
         }
         refresh();
 
+        // If there's a filter then merge the index and then remove those that should be filtered out
         if (entityFilter != null) {
-            // If there's a filter then merge the index and then remove those that should be filtered out
-            // TODO come on, make this parallel! Use the threads arg
-            try (var reader = newAllEntriesValueReader(1, CursorContext.NULL_CONTEXT)[0];
-                    var updater = newUpdater(IndexUpdateMode.ONLINE, CursorContext.NULL_CONTEXT, false)) {
-                while (reader.hasNext()) {
-                    var candidate = reader.next();
-                    if (!entityFilter.test(candidate)) {
-                        var values = new Value[descriptor.schema().getPropertyIds().length];
-                        for (int i = 0; i < values.length; i++) {
-                            values[i] = Values.stringValue("");
-                        }
-                        updater.process(IndexEntryUpdate.remove(candidate, descriptor, values));
-                        progress.add(1);
-                    }
+            IndexEntriesReader[] partitions = newAllEntriesValueReader(threads, CursorContext.NULL_CONTEXT);
+            try {
+                Collection<JobHandle<Void>> handles = new ArrayList<>();
+                for (IndexEntriesReader partition : partitions) {
+                    handles.add(jobScheduler.schedule(
+                            Group.INDEX_POPULATION_WORK,
+                            new JobMonitoringParams(Subject.AUTH_DISABLED, "db", "insertFrom"),
+                            () -> {
+                                try (IndexUpdater updater =
+                                        newUpdater(IndexUpdateMode.ONLINE, CursorContext.NULL_CONTEXT, false)) {
+                                    while (partition.hasNext()) {
+                                        long candidate = partition.next();
+                                        if (!entityFilter.test(candidate)) {
+                                            Value[] values = new Value
+                                                    [descriptor.schema().getPropertyIds().length];
+                                            for (int i = 0; i < values.length; i++) {
+                                                values[i] = Values.stringValue("");
+                                            }
+                                            updater.process(
+                                                    EagerValueIndexEntryUpdate.remove(candidate, descriptor, values));
+                                            progress.add(1);
+                                        }
+                                    }
+                                }
+                                return null;
+                            }));
+                    JobHandles.getAllResults(handles, RuntimeException.class, RuntimeException::new);
                 }
+            } finally {
+                IOUtils.closeAllUnchecked(partitions);
             }
         }
     }
@@ -129,7 +157,6 @@ public abstract class AbstractLuceneIndexAccessor<READER extends ValueIndexReade
             IndexAccessor other,
             boolean valueUniqueness,
             IndexEntryConflictHandler conflictHandler,
-            LongPredicate entityFilter,
             int threads,
             JobScheduler jobScheduler) {
         throw new UnsupportedOperationException();
@@ -146,7 +173,7 @@ public abstract class AbstractLuceneIndexAccessor<READER extends ValueIndexReade
     }
 
     @Override
-    public void force(FileFlushEvent flushEvent, CursorContext cursorContext) {
+    public void force(FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext) {
         try {
             // We never change status of read-only indexes.
             if (!luceneIndex.isReadOnly()) {
@@ -186,14 +213,15 @@ public abstract class AbstractLuceneIndexAccessor<READER extends ValueIndexReade
     }
 
     protected BoundedIterable<Long> newAllEntriesReader(
-            ToLongFunction<Document> entityIdReader, long fromIdInclusive, long toIdExclusive) {
+            ToLongFunction<LuceneDocument> entityIdReader, long fromIdInclusive, long toIdExclusive) {
         return new LuceneAllEntriesIndexAccessorReader(
                 luceneIndex.allDocumentsReader(), entityIdReader, fromIdInclusive, toIdExclusive);
     }
 
-    public IndexEntriesReader[] newAllEntriesValueReader(ToLongFunction<Document> entityIdReader, int numPartitions) {
-        LuceneAllDocumentsReader allDocumentsReader = luceneIndex.allDocumentsReader();
-        List<Iterator<Document>> partitions = allDocumentsReader.partition(numPartitions);
+    public IndexEntriesReader[] newAllEntriesValueReader(
+            ToLongFunction<LuceneDocument> entityIdReader, int numPartitions) {
+        LucenePartitionsAllDocumentsReader allDocumentsReader = luceneIndex.allDocumentsReader();
+        List<Iterator<LuceneDocument>> partitions = allDocumentsReader.partition(numPartitions);
         AtomicInteger closeCount = new AtomicInteger(partitions.size());
         List<IndexEntriesReader> readers = partitions.stream()
                 .map(partitionDocuments -> new PartitionIndexEntriesReader(
@@ -213,9 +241,8 @@ public abstract class AbstractLuceneIndexAccessor<READER extends ValueIndexReade
             CursorContextFactory contextFactory,
             int numThreads,
             ProgressMonitorFactory progressMonitorFactory) {
-        final LuceneIndexConsistencyCheckVisitor visitor =
-                reporterFactory.getClass(LuceneIndexConsistencyCheckVisitor.class);
-        final boolean isConsistent = luceneIndex.isValid();
+        LuceneIndexConsistencyCheckVisitor visitor = reporterFactory.getClass(LuceneIndexConsistencyCheckVisitor.class);
+        boolean isConsistent = luceneIndex.isValid();
         if (!isConsistent) {
             visitor.isInconsistent(descriptor);
         }
@@ -224,7 +251,11 @@ public abstract class AbstractLuceneIndexAccessor<READER extends ValueIndexReade
 
     @Override
     public long estimateNumberOfEntries(CursorContext ignored) {
-        return luceneIndex.allDocumentsReader().maxCount();
+        try (LucenePartitionsAllDocumentsReader documentsReader = luceneIndex.allDocumentsReader()) {
+            return documentsReader.maxCount();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
     }
 
     @Override
@@ -234,15 +265,15 @@ public abstract class AbstractLuceneIndexAccessor<READER extends ValueIndexReade
 
     private static class PartitionIndexEntriesReader implements IndexEntriesReader {
         private final AtomicInteger closeCount;
-        private final LuceneAllDocumentsReader allDocumentsReader;
-        private final ToLongFunction<Document> entityIdReader;
-        private final Iterator<Document> partitionDocuments;
+        private final LucenePartitionsAllDocumentsReader allDocumentsReader;
+        private final ToLongFunction<LuceneDocument> entityIdReader;
+        private final Iterator<LuceneDocument> partitionDocuments;
 
         PartitionIndexEntriesReader(
                 AtomicInteger closeCount,
-                LuceneAllDocumentsReader allDocumentsReader,
-                ToLongFunction<Document> entityIdReader,
-                Iterator<Document> partitionDocuments) {
+                LucenePartitionsAllDocumentsReader allDocumentsReader,
+                ToLongFunction<LuceneDocument> entityIdReader,
+                Iterator<LuceneDocument> partitionDocuments) {
             this.closeCount = closeCount;
             this.allDocumentsReader = allDocumentsReader;
             this.entityIdReader = entityIdReader;
@@ -301,18 +332,18 @@ public abstract class AbstractLuceneIndexAccessor<READER extends ValueIndexReade
         }
 
         @Override
-        public void process(IndexEntryUpdate<?> update) {
+        public void process(IndexEntryUpdate update) {
             assert update.indexKey().schema().equals(descriptor.schema());
-            final var valueUpdate = asValueUpdate(update);
+            ValueIndexEntryUpdate valueUpdate = asValueUpdate(update);
 
             // ignoreStrategy set update to null; ignore update
             if (valueUpdate == null) {
                 return;
             }
 
-            final var entityId = valueUpdate.getEntityId();
-            final var values = valueUpdate.values();
-            final var updateMode = valueUpdate.updateMode();
+            long entityId = valueUpdate.getEntityId();
+            Value[] values = valueUpdate.values();
+            UpdateMode updateMode = valueUpdate.updateMode();
             switch (updateMode) {
                 case ADDED -> {
                     if (idempotent) {
@@ -329,9 +360,8 @@ public abstract class AbstractLuceneIndexAccessor<READER extends ValueIndexReade
         }
 
         @Override
-        public <INDEX_KEY extends SchemaDescriptorSupplier> ValueIndexEntryUpdate<INDEX_KEY> asValueUpdate(
-                IndexEntryUpdate<INDEX_KEY> update) {
-            final var valueUpdate = IndexUpdater.super.asValueUpdate(update);
+        public ValueIndexEntryUpdate asValueUpdate(IndexEntryUpdate update) {
+            ValueIndexEntryUpdate valueUpdate = IndexUpdater.super.asValueUpdate(update);
             return !ignoreStrategy.ignore(valueUpdate) ? ignoreStrategy.toEquivalentUpdate(valueUpdate) : null;
         }
 

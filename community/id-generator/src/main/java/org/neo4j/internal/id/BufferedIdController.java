@@ -19,10 +19,9 @@
  */
 package org.neo4j.internal.id;
 
-import static java.util.concurrent.TimeUnit.SECONDS;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 import java.io.IOException;
-import java.nio.file.Path;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
@@ -32,6 +31,7 @@ import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.kernel.lifecycle.LifecycleAdapter;
 import org.neo4j.logging.InternalLog;
 import org.neo4j.logging.internal.LogService;
@@ -54,9 +54,9 @@ public class BufferedIdController extends LifecycleAdapter implements IdControll
     private final DatabaseConfig databaseConfig;
     private final String databaseName;
     private final InternalLog log;
-    private JobHandle<?> jobHandle;
+    private IdMaintenanceJob freeIdsJob;
+    private IdMaintenanceJob loadIdsJob;
     private volatile boolean running;
-    private final Lock maintenanceLock = new ReentrantLock();
     private volatile DatabaseReadOnlyChecker databaseReadOnlyChecker;
 
     public BufferedIdController(
@@ -84,21 +84,26 @@ public class BufferedIdController extends LifecycleAdapter implements IdControll
         bufferingIdGeneratorFactory.start();
         running = true;
         var monitoringParams = JobMonitoringParams.systemJob(databaseName, "ID generator maintenance");
-        long maintenanceIntervalInSeconds = databaseConfig
+        long intervalMillis = databaseConfig
                 .get(GraphDatabaseInternalSettings.id_controller_maintenance_interval)
-                .toSeconds();
-        jobHandle = scheduler.scheduleRecurring(
-                Group.STORAGE_MAINTENANCE, monitoringParams, this::maintenance, maintenanceIntervalInSeconds, SECONDS);
+                .toMillis();
+        freeIdsJob = new IdMaintenanceJob(scheduler, monitoringParams, intervalMillis, MAINTENANCE_FREE_IDS);
+        loadIdsJob = new IdMaintenanceJob(scheduler, monitoringParams, intervalMillis, MAINTENANCE_LOAD_IDS);
     }
 
     @Override
     public void stop() throws Exception {
         running = false;
-        if (jobHandle != null) {
-            jobHandle.cancel();
-            jobHandle = null;
-            maintenanceLock.lock();
-            maintenanceLock.unlock();
+        IdMaintenanceJob freeIdsJob = this.freeIdsJob;
+        IdMaintenanceJob loadIdsJob = this.loadIdsJob;
+        try (freeIdsJob;
+                loadIdsJob) {
+            if (freeIdsJob != null) {
+                freeIdsJob.cancelJob();
+            }
+            if (loadIdsJob != null) {
+                loadIdsJob.cancelJob();
+            }
         }
         bufferingIdGeneratorFactory.stop();
     }
@@ -109,39 +114,84 @@ public class BufferedIdController extends LifecycleAdapter implements IdControll
     }
 
     @Override
-    public void maintenance() {
+    public void maintenance(int flags) {
         if (databaseReadOnlyChecker.isReadOnly()) {
             // Avoid doing this when in read-only mode since it may incur I/O and added space on disk
             return;
         }
 
-        maintenanceLock.lock();
-        try {
-            if (running) {
-                try (var cursorContext = contextFactory.create(BUFFERED_ID_CONTROLLER)) {
-                    bufferingIdGeneratorFactory.maintenance(cursorContext);
-                } catch (Throwable t) {
-                    log.error("Exception when performing id maintenance", t);
-                }
-            }
-        } finally {
-            maintenanceLock.unlock();
+        if ((flags & MAINTENANCE_FREE_IDS) != 0) {
+            freeIdsJob.maintenance();
+        }
+        if ((flags & MAINTENANCE_LOAD_IDS) != 0) {
+            loadIdsJob.maintenance();
         }
     }
 
     @Override
     public void initialize(
             FileSystemAbstraction fs,
-            Path baseBufferPath,
+            StoreFile storeFile,
             Config config,
             Supplier<TransactionSnapshot> snapshotSupplier,
-            TransactionIdVisibilityBoundary visibilityBoundary,
+            VisibilityHorizonVisibilityBoundary visibilityBoundary,
             IdFreeCondition condition,
             MemoryTracker memoryTracker,
             DatabaseReadOnlyChecker databaseReadOnlyChecker)
             throws IOException {
         bufferingIdGeneratorFactory.initialize(
-                fs, baseBufferPath, config, snapshotSupplier, visibilityBoundary, condition, memoryTracker);
+                fs, storeFile, config, snapshotSupplier, visibilityBoundary, condition, memoryTracker);
         this.databaseReadOnlyChecker = databaseReadOnlyChecker;
+    }
+
+    private class IdMaintenanceJob implements AutoCloseable {
+        private final Lock lock = new ReentrantLock();
+        private final int flags;
+        private volatile JobHandle<?> jobHandle;
+
+        IdMaintenanceJob(JobScheduler scheduler, JobMonitoringParams monitoringParams, long intervalMillis, int flags) {
+            this.flags = flags;
+            this.jobHandle = scheduler.scheduleRecurring(
+                    Group.STORAGE_MAINTENANCE,
+                    monitoringParams,
+                    this::maintenance,
+                    intervalMillis,
+                    intervalMillis,
+                    MILLISECONDS);
+        }
+
+        private void maintenance() {
+            lock.lock();
+            try {
+                if (running) {
+                    try (var cursorContext = contextFactory.create(BUFFERED_ID_CONTROLLER)) {
+                        bufferingIdGeneratorFactory.maintenance(flags, cursorContext);
+                    } catch (Throwable t) {
+                        log.error("Exception when performing id maintenance", t);
+                    }
+                }
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        void cancelJob() {
+            JobHandle<?> jobHandle = this.jobHandle;
+            try {
+                if (jobHandle != null) {
+                    jobHandle.cancel();
+                }
+            } finally {
+                this.jobHandle = null;
+            }
+        }
+
+        @Override
+        public void close() {
+            // this lock/unlock is to coordinate with cancelJob(), so that this will block until the job is completed,
+            // if it's currently being run.
+            lock.lock();
+            lock.unlock();
+        }
     }
 }

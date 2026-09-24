@@ -22,7 +22,6 @@ package org.neo4j.cypher.internal.runtime.slotted.expressions
 import org.neo4j.cypher.internal.physicalplanning.Slot
 import org.neo4j.cypher.internal.physicalplanning.SlotConfigurationUtils.makeGetPrimitiveNodeFromSlotFunctionFor
 import org.neo4j.cypher.internal.runtime.CypherRow
-import org.neo4j.cypher.internal.runtime.LenientCreateRelationship
 import org.neo4j.cypher.internal.runtime.interpreted.IsMap
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.CreateNode.handleNaNValue
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.CreateNode.handleNoValue
@@ -37,7 +36,7 @@ import org.neo4j.cypher.internal.runtime.slotted.pipes.CreateRelationshipSlotted
 import org.neo4j.cypher.operations.CypherFunctions
 import org.neo4j.cypher.operations.CypherTypeValueMapper
 import org.neo4j.exceptions.CypherTypeException
-import org.neo4j.exceptions.InternalException
+import org.neo4j.exceptions.InvalidArgumentException
 import org.neo4j.kernel.api.StatementConstants
 import org.neo4j.kernel.api.StatementConstants.NO_SUCH_RELATIONSHIP
 import org.neo4j.values.AnyValue
@@ -56,7 +55,7 @@ case class CreateSlottedNode(command: CreateNodeSlottedCommand, allowNullOrNaNPr
     val query = state.query
     val labelIds = command.labels.map(_.getOrCreateId(query))
     val dynamicLabelIds = command.labelExpressions.flatMap(expr =>
-      CypherFunctions.asStringList(expr(row, state)).asScala.map(query.getOrCreateLabelId)
+      CypherFunctions.nodeLabelsAsStringList(expr(row, state)).asScala.map(query.getOrCreateLabelId)
     )
     val node = query.createNodeId((labelIds ++ dynamicLabelIds).toArray)
     row.setLongAt(command.idOffset, node)
@@ -92,7 +91,9 @@ case class CreateSlottedRelationship(command: CreateRelationshipSlottedCommand, 
   override def execute(row: CypherRow, state: QueryState): Unit = {
     def handleMissingNode(nodeName: String) =
       if (state.lenientCreateRelationship) NO_SUCH_RELATIONSHIP
-      else throw new InternalException(LenientCreateRelationship.errorMsg(command.relName, nodeName))
+      else {
+        throw InvalidArgumentException.createRelationshipMissingNode(command.relName, nodeName)
+      }
 
     val start = command.startNodeIdGetter.applyAsLong(row)
     val end = command.endNodeIdGetter.applyAsLong(row)
@@ -145,7 +146,9 @@ case class SlottedRemoveLabelsOperation(nodeSlot: Slot, labels: Seq[LazyLabel], 
     val node = getFromNodeFunction.applyAsLong(executionContext)
     if (node != StatementConstants.NO_SUCH_NODE) {
       val labelIds = labels.map(_.getOrCreateId(state.query)) ++ dynamicLabels.flatMap(e => {
-        CypherFunctions.asStringList(e(executionContext, state)).asScala.map(l => state.query.getOrCreateLabelId(l))
+        CypherFunctions.nodeLabelsAsStringList(e(executionContext, state)).asScala.map(l =>
+          state.query.getOrCreateLabelId(l)
+        )
       })
       state.query.removeLabelsFromNode(node, labelIds.iterator)
     }

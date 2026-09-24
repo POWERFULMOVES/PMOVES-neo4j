@@ -20,14 +20,31 @@
 package org.neo4j.cypher.internal.runtime.spec
 
 import org.neo4j.cypher.internal.LogicalQuery
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorBreak
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorContinue
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorFail
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorRetryThenBreak
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorRetryThenContinue
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorRetryThenFail
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsRetryParameters
 import org.neo4j.cypher.internal.ast.semantics.CachableSemanticTable
+import org.neo4j.cypher.internal.compiler.ExecutionModel
+import org.neo4j.cypher.internal.compiler.ExecutionModel.BatchedSingleThreaded
+import org.neo4j.cypher.internal.expressions.DecimalDoubleLiteral
+import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder
+import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.pos
 import org.neo4j.cypher.internal.logical.builder.Resolver
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
+import org.neo4j.cypher.internal.logical.plans.NestedPlanCollectExpression
 import org.neo4j.cypher.internal.logical.plans.ordering.ProvidedOrder
+import org.neo4j.cypher.internal.planner.spi.LeafStability.MvccEmptyTx
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.EffectiveCardinalities
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.LeveragedOrders
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.ProvidedOrders
+import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.StableLeafPlans
+import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder.randomErrorBehaviour
 import org.neo4j.cypher.internal.util.Cardinality
 import org.neo4j.cypher.internal.util.EffectiveCardinality
 import org.neo4j.cypher.internal.util.attribution.Default
@@ -55,6 +72,10 @@ class LogicalQueryBuilder(
 
   private val leveragedOrders: LeveragedOrders = new LeveragedOrders
 
+  private val stableLeafPlans: StableLeafPlans = new StableLeafPlans
+
+  private var executionModel: Option[ExecutionModel] = None
+
   def withProvidedOrder(order: ProvidedOrder): this.type = {
     providedOrders.set(idOfLastPlan, order)
     this
@@ -70,10 +91,22 @@ class LogicalQueryBuilder(
     this
   }
 
+  def withStableIterators(): this.type = {
+    stableLeafPlans.set(idOfLastPlan, MvccEmptyTx)
+    this
+  }
+
+  def withMorselSize(morselSize: Int): this.type = {
+    executionModel = Some(BatchedSingleThreaded(morselSize, morselSize))
+    this
+  }
+
+  private[spec] def buildInnerLogicalPlan(): LogicalPlan = buildLogicalPlan()
+
   def build(readOnly: Boolean = true): LogicalQuery = {
     val logicalPlan = buildLogicalPlan()
     LogicalQuery(
-      logicalPlan,
+      logicalPlan.endoRewrite(expressionRewriter),
       "<<queryText>>",
       readOnly,
       resultColumns,
@@ -81,10 +114,76 @@ class LogicalQueryBuilder(
       effectiveCardinalities,
       providedOrders,
       leveragedOrders,
+      stableLeafPlans,
       hasLoadCsv,
       idGen,
       doProfile = false,
-      executionPlanCacheKeyHash = 0
+      executionPlanCacheKeyHash = 0,
+      executionModel = executionModel
     )
+  }
+
+  def transactionApplyRandomErrorBehaviour(randomValuesTestSupport: RandomValuesTestSupport[_])(
+    batchSize: Int = randomValuesTestSupport.random.between(1, 16),
+    maybeReportAs: Option[String] = None
+  ): LogicalQueryBuilder = {
+    val (errorBehaviour, retryParameters) = randomErrorBehaviour(randomValuesTestSupport, maybeReportAs)
+    transactionApply(
+      batchSize,
+      onErrorBehaviour = errorBehaviour,
+      maybeRetryParameters = retryParameters,
+      maybeReportAs = maybeReportAs
+    )
+  }
+
+  def transactionForeachRandomErrorBehaviour(randomValuesTestSupport: RandomValuesTestSupport[_])(
+    batchSize: Int = randomValuesTestSupport.random.between(1, 16),
+    maybeReportAs: Option[String] = None
+  ): LogicalQueryBuilder = {
+    val (errorBehaviour, retryParameters) = randomErrorBehaviour(randomValuesTestSupport, maybeReportAs)
+    transactionForeach(
+      batchSize,
+      onErrorBehaviour = errorBehaviour,
+      maybeRetryParameters = retryParameters,
+      maybeReportAs = maybeReportAs
+    )
+  }
+}
+
+object LogicalQueryBuilder {
+
+  def randomErrorBehaviour(
+    randomValuesTestSupport: RandomValuesTestSupport[_],
+    maybeReportAs: Option[String] = None
+  ): (InTransactionsOnErrorBehaviour, Option[InTransactionsRetryParameters]) = {
+    val options = Seq(
+      (OnErrorContinue, None),
+      (OnErrorBreak, None),
+      (OnErrorRetryThenContinue, randomRetryParameters(randomValuesTestSupport)),
+      (OnErrorRetryThenBreak, randomRetryParameters(randomValuesTestSupport))
+    ) ++ (if (maybeReportAs.isEmpty) Seq(
+            // ON ERROR FAIL does not support status report
+            (OnErrorFail, None),
+            (OnErrorRetryThenFail, randomRetryParameters(randomValuesTestSupport))
+          )
+          else Seq.empty)
+    randomValuesTestSupport.randomAmong(options)
+  }
+
+  def randomRetryParameters(randomValuesTestSupport: RandomValuesTestSupport[_])
+    : Option[InTransactionsRetryParameters] = {
+    val timeout = randomValuesTestSupport.random.between(1.0, 10.0)
+    randomValuesTestSupport.randomAmong(Seq(
+      None,
+      Some(InTransactionsRetryParameters(Some(DecimalDoubleLiteral(timeout.toString)(pos)))(pos))
+    ))
+  }
+
+  def nestedPlanCollectExpression(innerPlan: LogicalQueryBuilder, e: Expression): NestedPlanCollectExpression = {
+    NestedPlanCollectExpression(
+      innerPlan.buildInnerLogicalPlan(),
+      e,
+      "collect(...)"
+    )(pos)
   }
 }

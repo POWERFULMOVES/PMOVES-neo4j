@@ -19,6 +19,7 @@ package org.neo4j.cypher.internal.ast
 import org.neo4j.cypher.internal.ast.CatalogName.quote
 import org.neo4j.cypher.internal.ast.CatalogName.separatorChar
 import org.neo4j.cypher.internal.ast.CatalogName.separatorString
+import org.neo4j.kernel.database.NormalizedCatalogEntry
 
 import java.util
 
@@ -26,16 +27,16 @@ import scala.jdk.CollectionConverters.SeqHasAsJava
 
 object CatalogName {
 
-  def apply(head: String, tail: List[String]): CatalogName = {
-    CatalogName(head :: tail)
+  def apply(head: String, tail: List[String], resolveStrictly: Boolean): CatalogName = {
+    CatalogName(head :: tail, resolveStrictly)
   }
 
-  def apply(parts: String*): CatalogName = {
-    CatalogName(parts.head, parts.tail.toList)
+  def apply(resolveStrictly: Boolean, parts: String*): CatalogName = {
+    CatalogName(parts.head, parts.tail.toList, resolveStrictly)
   }
 
   /** Java helper */
-  def of(part: String): CatalogName = CatalogName(part)
+  def of(part: String, resolveStrictly: Boolean): CatalogName = CatalogName(resolveStrictly, part)
 
   val separatorChar: Char = '.'
   val separatorString: String = separatorChar.toString
@@ -44,7 +45,11 @@ object CatalogName {
   def quote(str: String): String = quoteChar ++ str.replace("`", "``") ++ quoteChar
 }
 
-case class CatalogName(parts: List[String]) {
+case class CatalogName(parts: List[String], resolveByDisplayName: Boolean) {
+
+  def simplifiedQualifiedNameString: String =
+    parts
+      .mkString(separatorString)
 
   /**
    * @return the catalog name used in catalog lookups
@@ -58,14 +63,20 @@ case class CatalogName(parts: List[String]) {
    * @return the catalog name guaranteed to be parsed in a Cypher statement
    */
   def asCanonicalNameString: String =
-    parts
-      .map(quote)
-      .mkString(separatorString)
+    if (resolveByDisplayName) {
+      quote(parts.mkString(separatorString))
+    } else {
+      parts
+        .map(quote)
+        .mkString(separatorString)
+    }
 
   override def equals(obj: Any): Boolean = {
     obj match {
       case name: CatalogName =>
-        name.qualifiedNameString.toLowerCase.equals(this.qualifiedNameString.toLowerCase)
+        name.qualifiedNameString.toLowerCase.equals(
+          this.qualifiedNameString.toLowerCase
+        ) && name.resolveByDisplayName == this.resolveByDisplayName
       case _ =>
         false
     }
@@ -76,4 +87,10 @@ case class CatalogName(parts: List[String]) {
   }
 
   override def hashCode(): Int = qualifiedNameString.toLowerCase.hashCode
+
+  /**
+   * @return the catalog name as a normalized catalog entry
+   * @throws if there are more than 2 catalog parts
+   */
+  def toCatalogEntry: NormalizedCatalogEntry = NormalizedCatalogEntry.fromList(parts.asJava)
 }

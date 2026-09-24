@@ -20,12 +20,14 @@
 package org.neo4j.io;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.neo4j.io.IOUtils.closeAll;
 
 import java.io.IOException;
+import java.util.Arrays;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -51,9 +53,9 @@ class IOUtilsTest {
 
     @Test
     void closeAllAndRethrowException() {
-        final var e = assertThrows(IOException.class, () -> closeAll(goodClosable1, faultyClosable, goodClosable2));
-        assertThat(e.getMessage()).isEqualTo("Exception closing multiple resources.");
-        assertThat(e.getCause()).isInstanceOf(IOException.class);
+        assertThatExceptionOfType(IOException.class)
+                .isThrownBy(() -> closeAll(goodClosable1, faultyClosable, goodClosable2))
+                .withMessage("Exception closing multiple resources.");
     }
 
     @Test
@@ -62,5 +64,21 @@ class IOUtilsTest {
         AutoCloseable b = null;
         AutoCloseable c = () -> {};
         IOUtils.close(IOException::new, a, b, c);
+    }
+
+    @Test
+    void closeAllSuppressingIntoRethrowsPrimaryWithSuppressedAndCompletesLoop() {
+        var primary = new IllegalStateException("primary");
+        var closeFailure = new IOException("close fail");
+        var laterRan = new boolean[1];
+        AutoCloseable failing = () -> {
+            throw closeFailure;
+        };
+        AutoCloseable later = () -> laterRan[0] = true;
+
+        assertThatThrownBy(() -> IOUtils.closeAllSuppressingInto(primary, Arrays.asList(failing, later)))
+                .isSameAs(primary);
+        assertThat(primary.getSuppressed()).containsExactly(closeFailure);
+        assertThat(laterRan[0]).isTrue();
     }
 }

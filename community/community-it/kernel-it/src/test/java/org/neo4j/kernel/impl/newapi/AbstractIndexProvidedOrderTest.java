@@ -32,8 +32,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.TreeSet;
 import java.util.stream.Collectors;
+import org.apache.commons.lang3.ArrayUtils;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.graphdb.Entity;
 import org.neo4j.graphdb.GraphDatabaseService;
@@ -46,14 +46,15 @@ import org.neo4j.internal.schema.IndexOrder;
 import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.values.storable.RandomValues;
+import org.neo4j.values.storable.RandomValuesUtils;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.ValueTuple;
 import org.neo4j.values.storable.ValueType;
 
 @SuppressWarnings("FieldCanBeLocal")
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 public abstract class AbstractIndexProvidedOrderTest extends KernelAPIReadTestBase<ReadTestSupport> {
     private static final int N_ENTITIES = 10000;
     private static final int N_ITERATIONS = 100;
@@ -81,6 +82,7 @@ public abstract class AbstractIndexProvidedOrderTest extends KernelAPIReadTestBa
 
     private TreeSet<EntityValueTuple> singlePropValues = new TreeSet<>(COMPARATOR);
     private ValueType[] targetedTypes;
+    private RandomValues.Configuration rngConfiguration;
 
     @Override
     public ReadTestSupport newTestSupport() {
@@ -100,9 +102,18 @@ public abstract class AbstractIndexProvidedOrderTest extends KernelAPIReadTestBa
             tx.commit();
         }
 
+        rngConfiguration = RandomValuesUtils.selectStorageEngineDependentConfigurationBuilder(graphDb)
+                .maxVectorNumBytes(RandomValues.MAX_NUM_BYTES_IN_INDEX_KEY)
+                .build();
+        randomRule.withConfiguration(rngConfiguration).reset();
+
+        var allowedTypes = rngConfiguration.allowedTypes();
+        targetedTypes =
+                Arrays.stream(ALL_ORDERABLE).filter(allowedTypes::contains).toArray(ValueType[]::new);
+
         RandomValues randomValues = randomRule.randomValues();
 
-        targetedTypes = randomValues.selection(ALL_ORDERABLE, 1, ALL_ORDERABLE.length, false);
+        targetedTypes = randomValues.selection(targetedTypes, 1, targetedTypes.length, false);
         targetedTypes = ensureHighEnoughCardinality(targetedTypes);
         try (Transaction tx = graphDb.beginTx()) {
             for (int i = 0; i < N_ENTITIES; i++) {
@@ -124,8 +135,8 @@ public abstract class AbstractIndexProvidedOrderTest extends KernelAPIReadTestBa
     @Test
     void shouldProvideResultInOrderIfCapable() throws KernelException {
         int prop = token.propertyKey(PROPERTY_KEY);
-
-        RandomValues randomValues = randomRule.randomValues();
+        RandomValues randomValues =
+                randomRule.withConfiguration(rngConfiguration).randomValues();
         IndexReadSession index = read.indexReadSession(tx.schemaRead().indexGetForName(INDEX_NAME));
         for (int i = 0; i < N_ITERATIONS; i++) {
             ValueType type = randomValues.among(targetedTypes);
@@ -186,8 +197,11 @@ public abstract class AbstractIndexProvidedOrderTest extends KernelAPIReadTestBa
             }
         }
         List<ValueType> result = new ArrayList<>(Arrays.asList(targetedTypes));
-        ValueType highCardinalityType =
-                randomRule.randomValues().among(RandomValues.excluding(ALL_ORDERABLE, lowCardinalityArray));
+        RandomValues randomValues = randomRule.randomValues();
+        ValueType highCardinalityType = randomValues.among(RandomValues.excluding(
+                ALL_ORDERABLE,
+                t -> ArrayUtils.contains(lowCardinalityArray, t)
+                        || !randomValues.configuration().allowedTypes().contains(t)));
         result.add(highCardinalityType);
         return result.toArray(new ValueType[0]);
     }

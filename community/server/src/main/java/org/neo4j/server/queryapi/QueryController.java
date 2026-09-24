@@ -19,18 +19,13 @@
  */
 package org.neo4j.server.queryapi;
 
-import static java.lang.String.format;
-import static org.neo4j.kernel.api.exceptions.Status.Transaction.TransactionAccessedConcurrently;
 import static org.neo4j.server.queryapi.request.AccessMode.toDriverAccessMode;
-import static org.neo4j.server.queryapi.response.HttpErrorResponse.fromDriverException;
-import static org.neo4j.server.queryapi.response.HttpErrorResponse.singleError;
 import static org.neo4j.server.queryapi.response.QueryResponseBookmarks.fromBookmarks;
 import static org.neo4j.server.queryapi.response.QueryResponseTxInfo.fromQueryAPITransaction;
 
 import java.time.Duration;
-import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.ConcurrentModificationException;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
@@ -40,24 +35,23 @@ import org.neo4j.driver.AuthToken;
 import org.neo4j.driver.AuthTokens;
 import org.neo4j.driver.Bookmark;
 import org.neo4j.driver.Driver;
+import org.neo4j.driver.Result;
 import org.neo4j.driver.Session;
 import org.neo4j.driver.SessionConfig;
 import org.neo4j.driver.TransactionConfig;
-import org.neo4j.driver.exceptions.ClientException;
-import org.neo4j.driver.exceptions.FatalDiscoveryException;
 import org.neo4j.driver.exceptions.Neo4jException;
-import org.neo4j.driver.exceptions.TransientException;
-import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.logging.InternalLog;
 import org.neo4j.logging.InternalLogProvider;
-import org.neo4j.server.queryapi.request.AutoCommitResultContainer;
+import org.neo4j.server.queryapi.exception.QueryApiException;
+import org.neo4j.server.queryapi.exception.TransactionConcurrentAccessException;
+import org.neo4j.server.queryapi.exception.TransactionNotFoundException;
 import org.neo4j.server.queryapi.request.QueryRequest;
-import org.neo4j.server.queryapi.request.TxManagedResultContainer;
+import org.neo4j.server.queryapi.request.QueryTxRequest;
+import org.neo4j.server.queryapi.response.QueryResponseAutoCommit;
+import org.neo4j.server.queryapi.response.QueryResponseTimers;
+import org.neo4j.server.queryapi.response.QueryResponseTxManaged;
 import org.neo4j.server.queryapi.tx.Transaction;
-import org.neo4j.server.queryapi.tx.TransactionConcurrentAccessException;
-import org.neo4j.server.queryapi.tx.TransactionIdCollisionException;
 import org.neo4j.server.queryapi.tx.TransactionManager;
-import org.neo4j.server.queryapi.tx.TransactionNotFoundException;
 import org.neo4j.server.queryapi.tx.WrongUserException;
 import org.neo4j.server.rest.dbms.AuthorizationHeaders;
 
@@ -82,7 +76,7 @@ public class QueryController {
         this.log = logProvider.getLog(QueryController.class);
     }
 
-    public Response executeQuery(QueryRequest request, HttpServletRequest rawRequest, String databaseName) {
+    public Response executeQuery(QueryTxRequest request, HttpServletRequest rawRequest, String databaseName) {
         var sessionConfig = buildSessionConfig(request, databaseName);
         // The session will be closed after the result set has been serialized, it must not be closed in a
         // try-with-resources block here. It must be closed only in an exceptional state
@@ -92,21 +86,23 @@ public class QueryController {
         }
         Session session = driver.session(Session.class, sessionConfig, sessionAuthToken);
 
+        var txConfig = buildTxConfig(request);
         try {
-            var result = session.run(request.statement(), request.parameters());
-            var resultContainer = new AutoCommitResultContainer(result, session, request);
+            var timers = QueryResponseTimers.start();
+            var result =
+                    session.run(request.statement(), request.maybeParameters().orElseGet(Map::of), txConfig);
+            timers.notifyResultAvailable();
+            var resultContainer = new QueryResponseAutoCommit(result, session, timers, request.includeCounters());
             return Response.accepted(resultContainer).build();
-        } catch (FatalDiscoveryException ex) {
-            return notFoundDiscoveryResponse(ex);
-        } catch (ClientException | TransientException clientException) {
-            return clientError(clientException);
+        } catch (Neo4jException neo4jException) {
+            throw neo4jException;
         } catch (Exception exception) {
             log.error("Local driver failed to execute query", exception);
-            return serverError();
+            throw exception;
         }
     }
 
-    public Response beginTransaction(QueryRequest request, HttpServletRequest rawRequest, String databaseName) {
+    public Response beginTransaction(QueryTxRequest request, HttpServletRequest rawRequest, String databaseName) {
         var sessionConfig = buildSessionConfig(request, databaseName);
         var txId = randomTxId(txIdLength);
         var sessionAuthToken = extractAuthToken(rawRequest);
@@ -114,32 +110,18 @@ public class QueryController {
             return Response.status(Response.Status.BAD_REQUEST).build();
         }
         Session session = driver.session(Session.class, sessionConfig, sessionAuthToken);
-        var txCleanUpAction = TxHandling.CLOSE;
-
+        Transaction transaction;
         try {
-            var queryTransaction =
-                    transactionManager.begin(txId, session, sessionAuthToken, databaseName, buildTxConfig(request));
-            if (request.statement() != null) {
-                queryTransaction.runQuery(request.statement(), request.parameters());
-                txCleanUpAction = TxHandling.KEEP_OPEN;
-                return successWithResultResponse(queryTransaction, request.includeCounters(), false);
-            } else {
-                // todo for extra peace of mind, we can release after the writer has done
-                txCleanUpAction = TxHandling.RETURN;
-                return transactionInfoOnlyResponse(queryTransaction);
-            }
-        } catch (FatalDiscoveryException ex) {
-            return notFoundDiscoveryResponse(ex);
-        } catch (TransactionIdCollisionException ignored) {
-            return txCollisionResponse();
-        } catch (ClientException | TransientException clientException) {
-            return clientError(clientException);
+            transaction = transactionManager.begin(
+                    txId, session, sessionAuthToken, databaseName, buildTxConfig(request), request.txType());
+        } catch (QueryApiException | Neo4jException queryApiException) {
+            throw queryApiException;
         } catch (Exception exception) {
             log.error("Local driver failed to execute query", exception);
-            return serverError();
-        } finally {
-            cleanUp(txId, txCleanUpAction);
+            throw exception;
         }
+
+        return executeStatement(request, transaction, false);
     }
 
     public Response continueTransaction(
@@ -152,14 +134,15 @@ public class QueryController {
         return executeStatement(request, txId, extractAuthToken(rawRequest), databaseName, true);
     }
 
-    public Response rollbackTransaction(String txId, HttpServletRequest rawRequest, String requestDatabase) {
+    public Response rollbackTransaction(String txId, HttpServletRequest rawRequest, String requestDatabase)
+            throws QueryApiException {
         Transaction transaction;
         try {
             transaction = transactionManager.retrieveTransaction(txId, requestDatabase, extractAuthToken(rawRequest));
-        } catch (TransactionNotFoundException | WrongUserException ex) {
-            return transactionNotFoundResponse(txId);
+        } catch (WrongUserException ex) {
+            throw new TransactionNotFoundException(txId);
         } catch (ConcurrentModificationException ex) {
-            return txConcurrentAccessResponse();
+            throw new TransactionConcurrentAccessException();
         }
 
         try {
@@ -167,7 +150,8 @@ public class QueryController {
         } finally {
             transactionManager.removeTransaction(txId);
         }
-        return Response.ok().build();
+        // Keeps the status as 200 for not breaking compatibility
+        return Response.ok().entity(fromBookmarks(null)).build();
     }
 
     private Response executeStatement(
@@ -175,41 +159,49 @@ public class QueryController {
             String txId,
             AuthToken requestAuthToken,
             String requestDatabase,
-            boolean requiresCommit) {
+            boolean requiresCommit)
+            throws QueryApiException {
         Transaction queryAPITransaction;
 
         try {
             queryAPITransaction = transactionManager.retrieveTransaction(txId, requestDatabase, requestAuthToken);
-        } catch (TransactionNotFoundException | WrongUserException ex) {
-            return transactionNotFoundResponse(txId);
-        } catch (TransactionConcurrentAccessException ex) {
-            return txConcurrentAccessResponse();
+        } catch (WrongUserException ex) {
+            throw new TransactionNotFoundException(txId);
         }
 
+        return executeStatement(request, queryAPITransaction, requiresCommit);
+    }
+
+    private Response executeStatement(QueryRequest request, Transaction transaction, boolean requiresCommit)
+            throws QueryApiException {
         var txCleanUpAction = TxHandling.CLOSE;
 
         try {
-            if (request.statement() != null) {
-                queryAPITransaction.runQuery(request.statement(), request.parameters());
+            if (request.statement() != null && !request.statement().isEmpty()) {
+                var timers = QueryResponseTimers.start();
+                var result = transaction.run(
+                        request.statement(), request.maybeParameters().orElseGet(Map::of));
+                timers.notifyResultAvailable();
                 txCleanUpAction = TxHandling.KEEP_OPEN;
-                return successWithResultResponse(queryAPITransaction, request.includeCounters(), requiresCommit);
+                return successWithResultResponse(
+                        result, transaction, timers, request.includeCounters(), requiresCommit);
             } else {
                 if (requiresCommit) {
-                    var bookmarks = queryAPITransaction.commit();
+                    var bookmarks = transaction.commit();
                     return bookmarksOnlyResponse(bookmarks);
                 } else {
-                    queryAPITransaction.extendTimeout();
+                    transaction.extendTimeout();
                     txCleanUpAction = TxHandling.RETURN;
-                    return transactionInfoOnlyResponse(queryAPITransaction);
+                    return transactionInfoOnlyResponse(transaction);
                 }
             }
-        } catch (ClientException | TransientException clientException) {
-            return clientError(clientException);
+        } catch (Neo4jException neo4jException) {
+            throw neo4jException;
         } catch (Exception exception) {
             log.error("Local driver failed to execute query", exception);
-            return serverError();
+            throw exception;
         } finally {
-            cleanUp(txId, txCleanUpAction);
+            cleanUp(transaction.id(), txCleanUpAction);
         }
     }
 
@@ -226,7 +218,7 @@ public class QueryController {
         this.driver.close();
     }
 
-    private SessionConfig buildSessionConfig(QueryRequest request, String databaseName) {
+    private SessionConfig buildSessionConfig(QueryTxRequest request, String databaseName) {
         var sessionConfigBuilder = SessionConfig.builder().withDatabase(databaseName);
 
         if (!(request.bookmarks() == null || request.bookmarks().isEmpty())) {
@@ -242,14 +234,20 @@ public class QueryController {
             sessionConfigBuilder.withDefaultAccessMode(toDriverAccessMode(request.accessMode()));
         }
 
+        request.maybeNotificationsFilter().ifPresent(filter -> {
+            filter.minimumSeverityLevel().ifPresent(sessionConfigBuilder::withMinimumNotificationSeverity);
+            filter.disabledCategories().ifPresent(sessionConfigBuilder::withDisabledNotificationClassifications);
+        });
+
         return sessionConfigBuilder.build();
     }
 
-    private TransactionConfig buildTxConfig(QueryRequest request) {
+    private TransactionConfig buildTxConfig(QueryTxRequest request) {
         var txConfigBuilder = TransactionConfig.builder();
         if (request.maxExecutionTime() > 0) {
             txConfigBuilder.withTimeout(Duration.ofSeconds(request.maxExecutionTime()));
         }
+        request.maybeTxMetadata().ifPresent(txConfigBuilder::withMetadata);
         return txConfigBuilder.build();
     }
 
@@ -279,17 +277,13 @@ public class QueryController {
     }
 
     private static Response successWithResultResponse(
-            Transaction transaction, boolean requireCounters, boolean requiresCommit) {
+            Result result,
+            Transaction transaction,
+            QueryResponseTimers timers,
+            boolean requireCounters,
+            boolean requiresCommit) {
         return Response.accepted()
-                .entity(new TxManagedResultContainer(transaction, requireCounters, requiresCommit))
-                .build();
-    }
-
-    private static Response txConcurrentAccessResponse() {
-        return Response.status(Response.Status.BAD_REQUEST)
-                .entity(singleError(
-                        TransactionAccessedConcurrently.code().serialize(),
-                        "Another request is currently accessing this transaction."))
+                .entity(new QueryResponseTxManaged(result, transaction, timers, requireCounters, requiresCommit))
                 .build();
     }
 
@@ -299,51 +293,6 @@ public class QueryController {
 
     private static Response transactionInfoOnlyResponse(Transaction transaction) {
         return Response.accepted().entity(fromQueryAPITransaction(transaction)).build();
-    }
-
-    private static Response transactionNotFoundResponse(String transactionId) {
-        return Response.status(404)
-                .entity(singleError(
-                        Status.Request.Invalid.code().serialize(),
-                        format(
-                                "Transaction with Id: \"%s\" was not found. It may have timed out and therefore"
-                                        + " rolled back or the routing header \'neo4j-cluster-affinity\' was not provided.",
-                                transactionId)))
-                .build();
-    }
-
-    private static Response serverError() {
-        return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
-                .entity(singleError(
-                        Status.General.UnknownError.code().serialize(),
-                        Status.General.UnknownError.code().description()))
-                .build();
-    }
-
-    private static Response clientError(Neo4jException clientException) {
-        return Response.status(Response.Status.BAD_REQUEST)
-                .entity(fromDriverException(clientException))
-                .build();
-    }
-
-    private static Response notFoundDiscoveryResponse(FatalDiscoveryException ex) {
-        return Response.status(Response.Status.NOT_FOUND)
-                .entity(fromDriverException(ex))
-                .build();
-    }
-
-    private static Response txCollisionResponse() {
-        return Response.status(Response.Status.BAD_REQUEST)
-                .entity(singleError(
-                        Status.Request.ResourceExhaustion.code().serialize(),
-                        "A transaction identifier collision has been detected whilst creating your"
-                                + " transaction. Please retry. If this occurs frequently consider increasing"
-                                + "the length of transaction identifier."))
-                .build();
-    }
-
-    private Instant generateTimeout() {
-        return Instant.now().truncatedTo(ChronoUnit.SECONDS).plus(defaultTimeout);
     }
 
     private enum TxHandling {

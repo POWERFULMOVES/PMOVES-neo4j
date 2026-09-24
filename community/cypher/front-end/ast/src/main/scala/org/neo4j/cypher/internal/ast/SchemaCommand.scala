@@ -16,48 +16,40 @@
  */
 package org.neo4j.cypher.internal.ast
 
+import org.neo4j.cypher.internal.ast.AdministrationCommand.checkIsStringLiteralOrParameter
+import org.neo4j.cypher.internal.ast.AlterCurrentGraphType.AlterOperation
+import org.neo4j.cypher.internal.ast.semantics.CypherTypeChecking
 import org.neo4j.cypher.internal.ast.semantics.SemanticAnalysisTooling
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheck
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheck.when
-import org.neo4j.cypher.internal.ast.semantics.SemanticCheckResult
 import org.neo4j.cypher.internal.ast.semantics.SemanticError
 import org.neo4j.cypher.internal.ast.semantics.SemanticExpressionCheck
+import org.neo4j.cypher.internal.ast.semantics.SemanticState
+import org.neo4j.cypher.internal.ast.semantics.liftSemanticEitherFunc
 import org.neo4j.cypher.internal.expressions.DynamicLabelExpression
 import org.neo4j.cypher.internal.expressions.DynamicRelTypeExpression
 import org.neo4j.cypher.internal.expressions.ElementTypeName
+import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
-import org.neo4j.cypher.internal.expressions.FunctionName
 import org.neo4j.cypher.internal.expressions.LabelName
 import org.neo4j.cypher.internal.expressions.LogicalVariable
-import org.neo4j.cypher.internal.expressions.Parameter
 import org.neo4j.cypher.internal.expressions.Property
 import org.neo4j.cypher.internal.expressions.RelTypeName
 import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.expressions.functions.Labels
 import org.neo4j.cypher.internal.expressions.functions.Type
 import org.neo4j.cypher.internal.util.InputPosition
-import org.neo4j.cypher.internal.util.symbols.BooleanType
 import org.neo4j.cypher.internal.util.symbols.CTNode
 import org.neo4j.cypher.internal.util.symbols.CTRelationship
-import org.neo4j.cypher.internal.util.symbols.ClosedDynamicUnionType
 import org.neo4j.cypher.internal.util.symbols.CypherType
-import org.neo4j.cypher.internal.util.symbols.DateType
-import org.neo4j.cypher.internal.util.symbols.DurationType
-import org.neo4j.cypher.internal.util.symbols.FloatType
-import org.neo4j.cypher.internal.util.symbols.IntegerType
-import org.neo4j.cypher.internal.util.symbols.ListType
-import org.neo4j.cypher.internal.util.symbols.LocalDateTimeType
-import org.neo4j.cypher.internal.util.symbols.LocalTimeType
-import org.neo4j.cypher.internal.util.symbols.PointType
-import org.neo4j.cypher.internal.util.symbols.PropertyValueType
-import org.neo4j.cypher.internal.util.symbols.StringType
-import org.neo4j.cypher.internal.util.symbols.ZonedDateTimeType
-import org.neo4j.cypher.internal.util.symbols.ZonedTimeType
+import org.neo4j.cypher.internal.util.symbols.invariantTypeSpec
 import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation
 import org.neo4j.gqlstatus.GqlParams
 import org.neo4j.gqlstatus.GqlStatusInfoCodes
 
 sealed trait SchemaCommand extends StatementWithGraph with SemanticAnalysisTooling {
+
+  def commandDescription: String
 
   override def withGraph(useGraph: Option[UseGraph]): SchemaCommand
 
@@ -65,28 +57,31 @@ sealed trait SchemaCommand extends StatementWithGraph with SemanticAnalysisTooli
 
   override def containsUpdates: Boolean = true
 
-  // The validation of the values (provider, config keys and config values) are done at runtime.
-  protected def checkOptionsMap(schemaString: String, options: Options): SemanticCheck = options match {
-    case OptionsMap(ops)
-      if ops.view.filterKeys(k =>
-        !k.equalsIgnoreCase("indexProvider") && !k.equalsIgnoreCase("indexConfig")
-      ).nonEmpty =>
-      SemanticCheck.error(SemanticError.invalidOption(schemaString, String.valueOf(options), position))
-    case _ => SemanticCheck.success
-  }
-
-  protected def checkSingleProperty(schemaString: String, properties: List[Property]): SemanticCheck =
+  protected def checkSingleProperty(schemaString: String, properties: List[Property]): SemanticCheck = {
     when(properties.size > 1) {
-      error(s"Only single property $schemaString are supported", properties(1).position)
+      val position = properties(1).position
+      val gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42001)
+        .withCause(
+          ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N16)
+            .withParam(GqlParams.StringParam.idxType, schemaString)
+            .atPosition(position.offset, position.line, position.column)
+            .build()
+        )
+        .atPosition(position.offset, position.line, position.column)
+        .build()
+      error(gql, s"Only single property $schemaString are supported", properties(1).position)
     }
+  }
 }
 
 // Indexes
 
 sealed trait CreateIndex extends SchemaCommand {
+  override def commandDescription: String = "CREATE " + indexType.command
+
   // To anonymize the name
-  val name: Option[Either[String, Parameter]]
-  def withName(name: Option[Either[String, Parameter]]): CreateIndex
+  val name: Option[Expression]
+  def withName(name: Option[Expression]): CreateIndex
 
   def indexType: CreateIndexType
   def variable: Variable
@@ -95,18 +90,31 @@ sealed trait CreateIndex extends SchemaCommand {
   def ifExistsDo: IfExistsDo
   def options: Options
 
+  // Vector indexes have two lists of properties to be checked, so it overrides this to add both it's lists
+  protected def propertiesForSemanticCheck: List[Property] = properties
+
   override def semanticCheck: SemanticCheck = ifExistsDo match {
     case IfExistsInvalidSyntax | IfExistsReplace =>
       SemanticCheck.error(SemanticError.badCommandWithOrReplace("create index", "CREATE INDEX", position))
     case _ =>
       val ctType = if (isNodeIndex) CTNode else CTRelationship
-      declareVariable(variable, ctType) chain
-        SemanticExpressionCheck.simple(properties) chain
-        semanticCheckFold(properties) {
+      name.map(checkIsStringLiteralOrParameter("index name", _)).getOrElse(SemanticCheck.success) chain
+        declareVariable(variable, ctType) chain
+        SemanticExpressionCheck.simple(propertiesForSemanticCheck) chain
+        semanticCheckFold(propertiesForSemanticCheck) {
           property =>
             when(!property.map.isInstanceOf[Variable]) {
-              error("Cannot index nested properties", property.position)
+              // This is unreachable, the parser only produces variables for Property for CreateIndex/Constraint
+              val gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_50N00)
+                .atPosition(property.position.offset, property.position.line, property.position.column)
+                .withParam(GqlParams.StringParam.msgTitle, "Syntax Exception")
+                .withParam(GqlParams.StringParam.msg, "Cannot index nested properties.")
+                .build()
+              error(gql, "Cannot index nested properties", property.position)
             }
+        } chain {
+          if (indexType.singlePropertyOnly) checkSingleProperty(indexType.allDescription, propertiesForSemanticCheck)
+          else SemanticCheck.success
         }
   }
 }
@@ -119,7 +127,7 @@ object CreateIndex {
     variable: Variable,
     labels: List[LabelName],
     properties: List[Property],
-    name: Option[Either[String, Parameter]],
+    name: Option[Expression],
     ifExistsDo: IfExistsDo,
     options: Options,
     useGraph: Option[GraphSelection] = None
@@ -138,7 +146,7 @@ object CreateIndex {
     variable: Variable,
     relTypes: List[RelTypeName],
     properties: List[Property],
-    name: Option[Either[String, Parameter]],
+    name: Option[Expression],
     ifExistsDo: IfExistsDo,
     options: Options,
     useGraph: Option[GraphSelection] = None
@@ -157,7 +165,7 @@ object CreateIndex {
     variable: Variable,
     isNodeIndex: Boolean,
     function: FunctionInvocation,
-    name: Option[Either[String, Parameter]],
+    name: Option[Expression],
     ifExistsDo: IfExistsDo,
     options: Options,
     useGraph: Option[GraphSelection] = None
@@ -176,7 +184,7 @@ object CreateIndex {
     variable: Variable,
     label: LabelName,
     properties: List[Property],
-    name: Option[Either[String, Parameter]],
+    name: Option[Expression],
     ifExistsDo: IfExistsDo,
     options: Options,
     useGraph: Option[GraphSelection] = None
@@ -196,7 +204,7 @@ object CreateIndex {
     variable: Variable,
     relType: RelTypeName,
     properties: List[Property],
-    name: Option[Either[String, Parameter]],
+    name: Option[Expression],
     ifExistsDo: IfExistsDo,
     options: Options,
     useGraph: Option[GraphSelection] = None
@@ -216,7 +224,7 @@ object CreateIndex {
     variable: Variable,
     label: LabelName,
     properties: List[Property],
-    name: Option[Either[String, Parameter]],
+    name: Option[Expression],
     ifExistsDo: IfExistsDo,
     options: Options,
     fromDefault: Boolean,
@@ -237,7 +245,7 @@ object CreateIndex {
     variable: Variable,
     relType: RelTypeName,
     properties: List[Property],
-    name: Option[Either[String, Parameter]],
+    name: Option[Expression],
     ifExistsDo: IfExistsDo,
     options: Options,
     fromDefault: Boolean,
@@ -258,7 +266,7 @@ object CreateIndex {
     variable: Variable,
     label: LabelName,
     properties: List[Property],
-    name: Option[Either[String, Parameter]],
+    name: Option[Expression],
     ifExistsDo: IfExistsDo,
     options: Options,
     useGraph: Option[GraphSelection] = None
@@ -278,7 +286,7 @@ object CreateIndex {
     variable: Variable,
     relType: RelTypeName,
     properties: List[Property],
-    name: Option[Either[String, Parameter]],
+    name: Option[Expression],
     ifExistsDo: IfExistsDo,
     options: Options,
     useGraph: Option[GraphSelection] = None
@@ -296,19 +304,20 @@ object CreateIndex {
 
   def createVectorNodeIndex(
     variable: Variable,
-    label: LabelName,
+    labels: List[LabelName],
     properties: List[Property],
-    name: Option[Either[String, Parameter]],
+    additionalProperties: List[Property],
+    name: Option[Expression],
     ifExistsDo: IfExistsDo,
     options: Options,
     useGraph: Option[GraphSelection] = None
   )(position: InputPosition): CreateIndex =
-    CreateSingleLabelPropertyIndexCommand(
+    CreateVectorIndexCommand(
       variable,
-      entityName = label,
+      entityNames = Left(labels),
       properties,
+      additionalProperties,
       name,
-      indexType = VectorCreateIndex,
       ifExistsDo,
       options,
       useGraph
@@ -316,19 +325,20 @@ object CreateIndex {
 
   def createVectorRelationshipIndex(
     variable: Variable,
-    relType: RelTypeName,
+    relTypes: List[RelTypeName],
     properties: List[Property],
-    name: Option[Either[String, Parameter]],
+    additionalProperties: List[Property],
+    name: Option[Expression],
     ifExistsDo: IfExistsDo,
     options: Options,
     useGraph: Option[GraphSelection] = None
   )(position: InputPosition): CreateIndex =
-    CreateSingleLabelPropertyIndexCommand(
+    CreateVectorIndexCommand(
       variable,
-      entityName = relType,
+      entityNames = Right(relTypes),
       properties,
+      additionalProperties,
       name,
-      indexType = VectorCreateIndex,
       ifExistsDo,
       options,
       useGraph
@@ -353,11 +363,7 @@ sealed trait CreateSingleLabelPropertyIndex extends CreateIndex {
   }
 
   override def semanticCheck: SemanticCheck =
-    checkOptionsMap(entityIndexDescription, options) chain
-      super.semanticCheck chain {
-        if (indexType.singlePropertyOnly) checkSingleProperty(indexType.allDescription, properties)
-        else SemanticCheck.success
-      }
+    options.checkOptionsForSchema(entityIndexDescription) chain super.semanticCheck
 }
 
 object CreateSingleLabelPropertyIndex {
@@ -366,7 +372,7 @@ object CreateSingleLabelPropertyIndex {
     Variable,
     ElementTypeName,
     List[Property],
-    Option[Either[String, Parameter]],
+    Option[Expression],
     CreateIndexType,
     IfExistsDo,
     Options
@@ -385,7 +391,7 @@ sealed trait CreateFulltextIndex extends CreateIndex {
   }
 
   override def semanticCheck: SemanticCheck =
-    checkOptionsMap(entityIndexDescription, options) chain super.semanticCheck
+    options.checkOptionsForSchema(entityIndexDescription) chain super.semanticCheck
 }
 
 object CreateFulltextIndex {
@@ -394,12 +400,55 @@ object CreateFulltextIndex {
     Variable,
     Either[List[LabelName], List[RelTypeName]],
     List[Property],
-    Option[Either[String, Parameter]],
+    Option[Expression],
     CreateIndexType,
     IfExistsDo,
     Options
   )] =
     Some((c.variable, c.entityNames, c.properties, c.name, c.indexType, c.ifExistsDo, c.options))
+}
+
+sealed trait CreateVectorIndex extends CreateIndex {
+  def entityNames: Either[List[LabelName], List[RelTypeName]]
+  def additionalProperties: List[Property]
+  override def propertiesForSemanticCheck: List[Property] = properties ++ additionalProperties
+
+  override val indexType: CreateIndexType = VectorCreateIndex
+
+  val (isNodeIndex: Boolean, entityIndexDescription: String) = entityNames match {
+    case Left(_)  => (true, indexType.nodeDescription)
+    case Right(_) => (false, indexType.relDescription)
+  }
+
+  override def semanticCheck: SemanticCheck =
+    options.checkOptionsForSchema(entityIndexDescription) chain
+      // While vector indexes allow multiple additional properties, they only allow a single vector property
+      checkSingleProperty(indexType.allDescription, properties) chain
+      super.semanticCheck
+}
+
+object CreateVectorIndex {
+
+  def unapply(c: CreateVectorIndex): Some[(
+    Variable,
+    Either[List[LabelName], List[RelTypeName]],
+    List[Property],
+    List[Property],
+    Option[Expression],
+    CreateIndexType,
+    IfExistsDo,
+    Options
+  )] =
+    Some((
+      c.variable,
+      c.entityNames,
+      c.properties,
+      c.additionalProperties,
+      c.name,
+      c.indexType,
+      c.ifExistsDo,
+      c.options
+    ))
 }
 
 sealed trait CreateLookupIndex extends CreateIndex {
@@ -412,13 +461,18 @@ sealed trait CreateLookupIndex extends CreateIndex {
     if (isNodeIndex) name.equalsIgnoreCase(Labels.name) else name.equalsIgnoreCase(Type.name)
 
   override def semanticCheck: SemanticCheck = function match {
-    case FunctionInvocation(FunctionName(_, name), _, _, _, _) if !allowedFunction(name) =>
+    case fi: FunctionInvocation if !(fi.isBuiltIn && allowedFunction(fi.name)) =>
       val (validFunction, entityIndexDescription) =
         if (isNodeIndex) (Labels.name, indexType.nodeDescription)
         else (Type.name, indexType.relDescription)
-      SemanticCheck.error(SemanticError.invalidFunctionForIndex(entityIndexDescription, name, validFunction, position))
+      SemanticCheck.error(SemanticError.invalidFunctionForIndex(
+        entityIndexDescription,
+        fi.name,
+        validFunction,
+        position
+      ))
     case _ =>
-      checkOptionsMap(indexType.allDescription, options) chain
+      options.checkOptionsForSchema(indexType.allDescription) chain
         super.semanticCheck chain
         SemanticExpressionCheck.simple(function)
   }
@@ -430,7 +484,7 @@ object CreateLookupIndex {
     Variable,
     Boolean,
     FunctionInvocation,
-    Option[Either[String, Parameter]],
+    Option[Expression],
     CreateIndexType,
     IfExistsDo,
     Options
@@ -442,7 +496,7 @@ private case class CreateSingleLabelPropertyIndexCommand(
   variable: Variable,
   entityName: ElementTypeName,
   properties: List[Property],
-  override val name: Option[Either[String, Parameter]],
+  override val name: Option[Expression],
   indexType: CreateIndexType,
   ifExistsDo: IfExistsDo,
   options: Options,
@@ -450,7 +504,7 @@ private case class CreateSingleLabelPropertyIndexCommand(
 )(val position: InputPosition) extends CreateSingleLabelPropertyIndex {
   override def withGraph(useGraph: Option[UseGraph]): SchemaCommand = copy(useGraph = useGraph)(position)
 
-  override def withName(name: Option[Either[String, Parameter]]): CreateSingleLabelPropertyIndexCommand =
+  override def withName(name: Option[Expression]): CreateSingleLabelPropertyIndexCommand =
     copy(name = name)(position)
 }
 
@@ -458,14 +512,30 @@ private case class CreateFulltextIndexCommand(
   variable: Variable,
   entityNames: Either[List[LabelName], List[RelTypeName]],
   properties: List[Property],
-  override val name: Option[Either[String, Parameter]],
+  override val name: Option[Expression],
   ifExistsDo: IfExistsDo,
   options: Options,
   useGraph: Option[GraphSelection] = None
 )(val position: InputPosition) extends CreateFulltextIndex {
   override def withGraph(useGraph: Option[UseGraph]): SchemaCommand = copy(useGraph = useGraph)(position)
 
-  override def withName(name: Option[Either[String, Parameter]]): CreateFulltextIndexCommand =
+  override def withName(name: Option[Expression]): CreateFulltextIndexCommand =
+    copy(name = name)(position)
+}
+
+private case class CreateVectorIndexCommand(
+  variable: Variable,
+  entityNames: Either[List[LabelName], List[RelTypeName]],
+  properties: List[Property],
+  additionalProperties: List[Property],
+  override val name: Option[Expression],
+  ifExistsDo: IfExistsDo,
+  options: Options,
+  useGraph: Option[GraphSelection] = None
+)(val position: InputPosition) extends CreateVectorIndex {
+  override def withGraph(useGraph: Option[UseGraph]): SchemaCommand = copy(useGraph = useGraph)(position)
+
+  override def withName(name: Option[Expression]): CreateVectorIndexCommand =
     copy(name = name)(position)
 }
 
@@ -473,28 +543,35 @@ private case class CreateLookupIndexCommand(
   variable: Variable,
   isNodeIndex: Boolean,
   function: FunctionInvocation,
-  override val name: Option[Either[String, Parameter]],
+  override val name: Option[Expression],
   ifExistsDo: IfExistsDo,
   options: Options,
   useGraph: Option[GraphSelection] = None
 )(val position: InputPosition) extends CreateLookupIndex {
   override def withGraph(useGraph: Option[UseGraph]): SchemaCommand = copy(useGraph = useGraph)(position)
-  override def withName(name: Option[Either[String, Parameter]]): CreateLookupIndexCommand = copy(name = name)(position)
+  override def withName(name: Option[Expression]): CreateLookupIndexCommand = copy(name = name)(position)
 }
 
-case class DropIndexOnName(name: Either[String, Parameter], ifExists: Boolean, useGraph: Option[GraphSelection] = None)(
+case class DropIndexOnName(
+  name: Expression,
+  ifExists: Boolean,
+  useGraph: Option[GraphSelection] = None
+)(
   val position: InputPosition
 ) extends SchemaCommand {
+  override val commandDescription: String = "DROP INDEX"
   override def withGraph(useGraph: Option[UseGraph]): SchemaCommand = copy(useGraph = useGraph)(position)
-  override def semanticCheck: SemanticCheck = Seq()
+  override def semanticCheck: SemanticCheck = checkIsStringLiteralOrParameter("index name", name)
 }
 
 // Constraints
 
 sealed trait CreateConstraint extends SchemaCommand {
+  override def commandDescription: String = "CREATE CONSTRAINT ... " + constraintType.predicate
+
   // To anonymize the name
-  val name: Option[Either[String, Parameter]]
-  def withName(name: Option[Either[String, Parameter]]): CreateConstraint
+  val name: Option[Expression]
+  def withName(name: Option[Expression]): CreateConstraint
 
   def constraintType: CreateConstraintType
   def variable: Variable
@@ -504,15 +581,23 @@ sealed trait CreateConstraint extends SchemaCommand {
   def ifExistsDo: IfExistsDo
   def options: Options
 
-  override def semanticCheck: SemanticCheck =
-    declareVariable(variable, entityType) chain
+  override def semanticCheck: SemanticCheck = {
+    name.map(checkIsStringLiteralOrParameter("constraint name", _)).getOrElse(SemanticCheck.success) chain
+      declareVariable(variable, entityType) chain
       SemanticExpressionCheck.simple(properties) chain
       semanticCheckFold(properties) {
         property =>
           when(!property.map.isInstanceOf[Variable]) {
-            error("Cannot index nested properties", property.position)
+            // This is unreachable, the parser only produces variables for Property for CreateIndex/Constraint
+            val gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_50N00)
+              .atPosition(property.position.offset, property.position.line, property.position.column)
+              .withParam(GqlParams.StringParam.msgTitle, "Syntax Exception")
+              .withParam(GqlParams.StringParam.msg, "Cannot index nested properties.")
+              .build()
+            error(gql, "Cannot index nested properties", property.position)
           }
       }
+  }
 
   protected def checkIfExistsDoAndOptions(): SemanticCheck = ifExistsDo match {
     case IfExistsInvalidSyntax | IfExistsReplace =>
@@ -522,109 +607,17 @@ sealed trait CreateConstraint extends SchemaCommand {
         position
       ))
     case _ =>
-      checkOptionsMap(s"${constraintType.description} constraint", options)
+      options.checkOptionsForSchema(s"${constraintType.description} constraint")
   }
-
-  private val allowedPropertyTypes = List(
-    BooleanType(isNullable = true)(InputPosition.NONE),
-    StringType(isNullable = true)(InputPosition.NONE),
-    IntegerType(isNullable = true)(InputPosition.NONE),
-    FloatType(isNullable = true)(InputPosition.NONE),
-    DateType(isNullable = true)(InputPosition.NONE),
-    LocalTimeType(isNullable = true)(InputPosition.NONE),
-    ZonedTimeType(isNullable = true)(InputPosition.NONE),
-    LocalDateTimeType(isNullable = true)(InputPosition.NONE),
-    ZonedDateTimeType(isNullable = true)(InputPosition.NONE),
-    DurationType(isNullable = true)(InputPosition.NONE),
-    PointType(isNullable = true)(InputPosition.NONE),
-    ListType(BooleanType(isNullable = false)(InputPosition.NONE), isNullable = true)(InputPosition.NONE),
-    ListType(StringType(isNullable = false)(InputPosition.NONE), isNullable = true)(InputPosition.NONE),
-    ListType(IntegerType(isNullable = false)(InputPosition.NONE), isNullable = true)(InputPosition.NONE),
-    ListType(FloatType(isNullable = false)(InputPosition.NONE), isNullable = true)(InputPosition.NONE),
-    ListType(DateType(isNullable = false)(InputPosition.NONE), isNullable = true)(InputPosition.NONE),
-    ListType(LocalTimeType(isNullable = false)(InputPosition.NONE), isNullable = true)(InputPosition.NONE),
-    ListType(ZonedTimeType(isNullable = false)(InputPosition.NONE), isNullable = true)(InputPosition.NONE),
-    ListType(LocalDateTimeType(isNullable = false)(InputPosition.NONE), isNullable = true)(InputPosition.NONE),
-    ListType(ZonedDateTimeType(isNullable = false)(InputPosition.NONE), isNullable = true)(InputPosition.NONE),
-    ListType(DurationType(isNullable = false)(InputPosition.NONE), isNullable = true)(InputPosition.NONE),
-    ListType(PointType(isNullable = false)(InputPosition.NONE), isNullable = true)(InputPosition.NONE)
-  )
 
   protected def checkPropertyTypes(
     originalPropertyType: CypherType,
     normalizedPropertyType: CypherType
-  ): SemanticCheck = {
-
-    def allowedTypesCheck = {
-      def anyPropertyValueType(pt: CypherType): Boolean = pt match {
-        case _: PropertyValueType      => true
-        case l: ListType               => anyPropertyValueType(l.innerType)
-        case c: ClosedDynamicUnionType => c.sortedInnerTypes.map(anyPropertyValueType).exists(b => b)
-        case _                         => false
-      }
-      val containsPropertyValueType = anyPropertyValueType(originalPropertyType)
-
-      val onlyAllowedTypes = normalizedPropertyType match {
-        case c: ClosedDynamicUnionType =>
-          c.sortedInnerTypes.forall(p => allowedPropertyTypes.contains(p.withPosition(InputPosition.NONE)))
-        case _ =>
-          allowedPropertyTypes.contains(normalizedPropertyType.withPosition(InputPosition.NONE))
-      }
-
-      if (containsPropertyValueType || !onlyAllowedTypes) {
-        def additionalErrorInfo(pt: CypherType): String = pt match {
-          case ListType(_: ListType, _) =>
-            " Lists cannot have lists as an inner type."
-          case ListType(_: ClosedDynamicUnionType, _) =>
-            " Lists cannot have a union of types as an inner type."
-          case ListType(inner, _) if inner.isNullable =>
-            " Lists cannot have nullable inner types."
-          case c: ClosedDynamicUnionType if c.sortedInnerTypes.exists(_.isInstanceOf[ListType]) =>
-            // If we have lists we want to check them for the above cases as well
-            // Unions within unions should have been flattened in parsing so won't be handled here
-            c.sortedInnerTypes.filter(_.isInstanceOf[ListType])
-              .map(additionalErrorInfo)
-              .find(_.nonEmpty)
-              .getOrElse("")
-          case _ => ""
-        }
-
-        // Don't expand the PROPERTY VALUE in error message as that makes it confusing as to why it's not allowed.
-        // Similarly, it shouldn't get any additional error messages for being a union in a list,
-        // in case of LIST<PROPERTY VALUE>, as that isn't the main reason for failure.
-        val (typeDescription, additionalError) =
-          if (containsPropertyValueType) (originalPropertyType.description, additionalErrorInfo(originalPropertyType))
-          else (normalizedPropertyType.description, additionalErrorInfo(normalizedPropertyType))
-
-        val gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_50N11)
-          .withParam(GqlParams.StringParam.constrDescrOrName, constraintType.description + " constraint")
-          .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N90)
-            .withParam(GqlParams.StringParam.item, typeDescription)
-            .build())
-          .build()
-
-        error(
-          gql,
-          s"Failed to create ${constraintType.description} constraint: " +
-            s"Invalid property type `$typeDescription`.$additionalError",
-          originalPropertyType.position
-        )
-      } else SemanticCheck.success
-    }
-
-    // We want run the semantic checks for the types themselves, but the error messages might not make sense in this context
-    // There isn't much point telling users to make all their union types NOT NULL if that is not accepted here.
-    CypherTypeName(originalPropertyType).semanticCheck.map {
-      case r @ SemanticCheckResult(_, Nil) => r
-      case SemanticCheckResult(state, _) => SemanticCheckResult(
-          state,
-          Seq(SemanticError.propertyTypeUnsupportedInConstraint(
-            constraintType.description,
-            originalPropertyType
-          ))
-        )
-    } chain allowedTypesCheck
-  }
+  ): SemanticCheck = CypherTypeChecking.checkPropertyTypeForConstraint(
+    originalPropertyType,
+    normalizedPropertyType,
+    SemanticError.propertyTypeUnsupportedInConstraint(constraintType.description, _, _, _)
+  )
 }
 
 object CreateConstraint {
@@ -633,7 +626,7 @@ object CreateConstraint {
     Variable,
     ElementTypeName,
     Seq[Property],
-    Option[Either[String, Parameter]],
+    Option[Expression],
     CreateConstraintType,
     IfExistsDo,
     Options
@@ -646,7 +639,7 @@ object CreateConstraint {
     variable: Variable,
     label: LabelName,
     properties: Seq[Property],
-    name: Option[Either[String, Parameter]],
+    name: Option[Expression],
     ifExistsDo: IfExistsDo,
     options: Options,
     fromCypher5: Boolean,
@@ -667,7 +660,7 @@ object CreateConstraint {
     variable: Variable,
     relType: RelTypeName,
     properties: Seq[Property],
-    name: Option[Either[String, Parameter]],
+    name: Option[Expression],
     ifExistsDo: IfExistsDo,
     options: Options,
     fromCypher5: Boolean,
@@ -688,9 +681,10 @@ object CreateConstraint {
     variable: Variable,
     label: LabelName,
     properties: Seq[Property],
-    name: Option[Either[String, Parameter]],
+    name: Option[Expression],
     ifExistsDo: IfExistsDo,
     options: Options,
+    fromCypher5: Boolean,
     useGraph: Option[GraphSelection] = None
   )(position: InputPosition): CreateConstraint =
     CreateConstraintCommand(
@@ -698,7 +692,7 @@ object CreateConstraint {
       entityName = label,
       properties,
       name,
-      constraintType = NodePropertyUniqueness,
+      constraintType = if (fromCypher5) NodePropertyUniqueness.cypher5 else NodePropertyUniqueness.cypher25,
       ifExistsDo,
       options,
       useGraph
@@ -708,9 +702,10 @@ object CreateConstraint {
     variable: Variable,
     relType: RelTypeName,
     properties: Seq[Property],
-    name: Option[Either[String, Parameter]],
+    name: Option[Expression],
     ifExistsDo: IfExistsDo,
     options: Options,
+    fromCypher5: Boolean,
     useGraph: Option[GraphSelection] = None
   )(position: InputPosition): CreateConstraint =
     CreateConstraintCommand(
@@ -718,7 +713,8 @@ object CreateConstraint {
       entityName = relType,
       properties,
       name,
-      constraintType = RelationshipPropertyUniqueness,
+      constraintType =
+        if (fromCypher5) RelationshipPropertyUniqueness.cypher5 else RelationshipPropertyUniqueness.cypher25,
       ifExistsDo,
       options,
       useGraph
@@ -728,7 +724,7 @@ object CreateConstraint {
     variable: Variable,
     label: LabelName,
     property: Property,
-    name: Option[Either[String, Parameter]],
+    name: Option[Expression],
     ifExistsDo: IfExistsDo,
     options: Options,
     useGraph: Option[GraphSelection] = None
@@ -748,7 +744,7 @@ object CreateConstraint {
     variable: Variable,
     relType: RelTypeName,
     property: Property,
-    name: Option[Either[String, Parameter]],
+    name: Option[Expression],
     ifExistsDo: IfExistsDo,
     options: Options,
     useGraph: Option[GraphSelection] = None
@@ -769,7 +765,7 @@ object CreateConstraint {
     label: LabelName,
     property: Property,
     propertyType: CypherType,
-    name: Option[Either[String, Parameter]],
+    name: Option[Expression],
     ifExistsDo: IfExistsDo,
     options: Options,
     useGraph: Option[GraphSelection] = None
@@ -790,7 +786,7 @@ object CreateConstraint {
     relType: RelTypeName,
     property: Property,
     propertyType: CypherType,
-    name: Option[Either[String, Parameter]],
+    name: Option[Expression],
     ifExistsDo: IfExistsDo,
     options: Options,
     useGraph: Option[GraphSelection] = None
@@ -811,14 +807,14 @@ private case class CreateConstraintCommand(
   variable: Variable,
   entityName: ElementTypeName,
   properties: Seq[Property],
-  override val name: Option[Either[String, Parameter]],
+  override val name: Option[Expression],
   constraintType: CreateConstraintType,
   ifExistsDo: IfExistsDo,
   options: Options,
   useGraph: Option[GraphSelection] = None
 )(val position: InputPosition) extends CreateConstraint {
   override def withGraph(useGraph: Option[UseGraph]): SchemaCommand = copy(useGraph = useGraph)(position)
-  override def withName(name: Option[Either[String, Parameter]]): CreateConstraintCommand = copy(name = name)(position)
+  override def withName(name: Option[Expression]): CreateConstraintCommand = copy(name = name)(position)
 
   val entityType: CypherType = entityName match {
     case _: LabelName   => CTNode
@@ -841,14 +837,14 @@ private case class CreatePropertyTypeConstraint(
   entityName: ElementTypeName,
   property: Property,
   private val propertyType: CypherType,
-  override val name: Option[Either[String, Parameter]],
+  override val name: Option[Expression],
   ifExistsDo: IfExistsDo,
   options: Options,
   useGraph: Option[GraphSelection] = None
 )(val position: InputPosition) extends CreateConstraint {
   override def withGraph(useGraph: Option[UseGraph]): SchemaCommand = copy(useGraph = useGraph)(position)
 
-  override def withName(name: Option[Either[String, Parameter]]): CreatePropertyTypeConstraint =
+  override def withName(name: Option[Expression]): CreatePropertyTypeConstraint =
     copy(name = name)(position)
 
   val properties: Seq[Property] = Seq(property)
@@ -870,10 +866,50 @@ private case class CreatePropertyTypeConstraint(
 }
 
 case class DropConstraintOnName(
-  name: Either[String, Parameter],
+  name: Expression,
   ifExists: Boolean,
   useGraph: Option[GraphSelection] = None
 )(val position: InputPosition) extends SchemaCommand {
+  override val commandDescription: String = "DROP CONSTRAINT"
   override def withGraph(useGraph: Option[UseGraph]): SchemaCommand = copy(useGraph = useGraph)(position)
-  override def semanticCheck: SemanticCheck = Seq()
+  override def semanticCheck: SemanticCheck = checkIsStringLiteralOrParameter("constraint name", name)
+}
+
+// Graph types
+
+case class AlterCurrentGraphType(
+  graphType: GraphType,
+  operation: AlterOperation,
+  useGraph: Option[GraphSelection] = None
+)(val position: InputPosition) extends SchemaCommand {
+  override val commandDescription: String = "ALTER CURRENT GRAPH TYPE " + operation.name()
+
+  override def semanticCheck: SemanticCheck =
+    SemanticCheck.fromState { (state: SemanticState) =>
+      SemanticCheck.setState(state.copy(graphTypeMode = operation)) chain graphType.semanticCheck
+    }
+  override def withGraph(useGraph: Option[UseGraph]): SchemaCommand = copy(useGraph = useGraph)(position)
+}
+
+object AlterCurrentGraphType {
+
+  sealed trait AlterOperation {
+    def name(): String
+  }
+
+  case object Set extends AlterOperation {
+    override def name(): String = "SET"
+  }
+
+  case object Add extends AlterOperation {
+    override def name(): String = "ADD"
+  }
+
+  case object Drop extends AlterOperation {
+    override def name(): String = "DROP"
+  }
+
+  case object Alter extends AlterOperation {
+    override def name(): String = "ALTER"
+  }
 }

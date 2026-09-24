@@ -19,6 +19,7 @@
  */
 package org.neo4j.kernel.impl.index.schema;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -26,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.neo4j.collection.Dependencies.dependenciesOf;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
-import static org.neo4j.io.pagecache.impl.muninn.MuninnPageCache.config;
+import static org.neo4j.io.pagecache.impl.muninn.MuninnPageCache.forPages;
 import static org.neo4j.kernel.impl.index.schema.PointKeyUtil.SIZE_GEOMETRY_DERIVED_SPACE_FILLING_CURVE_VALUE;
 import static org.neo4j.kernel.impl.index.schema.Types.SIZE_BOOLEAN;
 import static org.neo4j.kernel.impl.index.schema.Types.SIZE_DATE;
@@ -43,8 +44,10 @@ import static org.neo4j.kernel.impl.index.schema.Types.SIZE_STRING_LENGTH;
 import static org.neo4j.kernel.impl.index.schema.Types.SIZE_ZONED_DATE_TIME;
 import static org.neo4j.kernel.impl.index.schema.Types.SIZE_ZONED_TIME;
 import static org.neo4j.test.TestLabels.LABEL_ONE;
+import static org.neo4j.test.extension.SkipOnSpd.Note.temporary;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -52,11 +55,11 @@ import java.util.StringJoiner;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.neo4j.dbms.api.DatabaseManagementService;
 import org.neo4j.graphdb.Node;
+import org.neo4j.graphdb.ResourceIterator;
 import org.neo4j.graphdb.Transaction;
 import org.neo4j.graphdb.schema.IndexCreator;
 import org.neo4j.graphdb.schema.IndexType;
@@ -75,12 +78,19 @@ import org.neo4j.test.RandomSupport;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.Neo4jLayoutExtension;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.test.tags.MultiVersionedTag;
 import org.neo4j.test.utils.TestDirectory;
+import org.neo4j.values.storable.Float16Format;
+import org.neo4j.values.storable.RandomValues;
+import org.neo4j.values.storable.RandomValuesUtils;
+import org.neo4j.values.storable.ValueType;
+import org.neo4j.values.storable.VectorValue;
 
 @Neo4jLayoutExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
+@SkipOnSpd(notes = temporary, reason = "SPD does not (yet?) support custom page sizes through distributed db creation")
 public class RangeIndexKeySizeValidationIT {
     private static final String[] PROP_KEYS = new String[] {"prop0", "prop1", "prop2", "prop3", "prop4"};
     private static final int PAGE_SIZE_8K = (int) ByteUnit.kibiBytes(8);
@@ -104,6 +114,7 @@ public class RangeIndexKeySizeValidationIT {
     private GraphDatabaseAPI db;
     private JobScheduler scheduler;
     private PageCache pageCache;
+    private RandomValues.Configuration valuesConfiguration;
 
     @AfterEach
     void cleanup() throws Exception {
@@ -136,7 +147,11 @@ public class RangeIndexKeySizeValidationIT {
         startDb(pageSize);
         List<String> failureMessages = new ArrayList<>();
         NamedDynamicValueGenerator[] dynamicValueGenerators = NamedDynamicValueGenerator.values();
+        StringBuilder sb = new StringBuilder();
         for (NamedDynamicValueGenerator generator : dynamicValueGenerators) {
+            if (!isSupported(generator)) {
+                continue;
+            }
             int expectedMax = generator.expectedMax;
             String propKey = PROP_KEYS[0] + generator.name();
             createIndex(propKey);
@@ -146,6 +161,7 @@ public class RangeIndexKeySizeValidationIT {
 
             while (!binarySearch.finished()) {
                 propValue = generator.dynamicValue(random, binarySearch.arrayLength);
+                sb.append(propKey.getClass().getSimpleName()).append("\n====\n");
                 long expectedNodeId = -1;
 
                 // Write
@@ -155,7 +171,17 @@ public class RangeIndexKeySizeValidationIT {
                     node.setProperty(propKey, propValue);
                     expectedNodeId = node.getId();
                     tx.commit();
-                } catch (Exception e) {
+                    sb.append("Testing: ")
+                            .append(binarySearch.arrayLength)
+                            .append(" = true")
+                            .append('\n');
+                } catch (IllegalArgumentException e) {
+                    assertThat(e.getMessage()).contains("Property value is too large to index");
+                    sb.append("Testing: ")
+                            .append(binarySearch.arrayLength)
+                            .append(" = ")
+                            .append(e.getMessage())
+                            .append("\n");
                     wasAbleToWrite = false;
                 }
 
@@ -166,11 +192,12 @@ public class RangeIndexKeySizeValidationIT {
                 binarySearch.progress(wasAbleToWrite);
             }
             if (expectedMax != binarySearch.longestSuccessful) {
+                failureMessages.add(sb.toString());
                 failureMessages.add(
                         generator.name() + ": expected=" + expectedMax + ", actual=" + binarySearch.longestSuccessful);
             }
         }
-        if (failureMessages.size() > 0) {
+        if (!failureMessages.isEmpty()) {
             StringJoiner joiner = new StringJoiner(
                     System.lineSeparator(),
                     "Some value types did not have expected longest successful array. "
@@ -300,8 +327,11 @@ public class RangeIndexKeySizeValidationIT {
 
     private Object[] generatePropertyValues(String[] propKeys, int keySizeLimitPerSlot, int wiggleRoomPerSlot) {
         Object[] propValues = new Object[propKeys.length];
+        List<NamedDynamicValueGenerator> generators =
+                new ArrayList<>(Arrays.asList(NamedDynamicValueGenerator.values()));
+        generators.removeIf(generator -> !isSupported(generator));
         for (int propKey = 0; propKey < propKeys.length; propKey++) {
-            NamedDynamicValueGenerator among = random.among(NamedDynamicValueGenerator.values());
+            NamedDynamicValueGenerator among = random.among(generators.toArray(NamedDynamicValueGenerator[]::new));
             propValues[propKey] = among.dynamicValue(random, keySizeLimitPerSlot, wiggleRoomPerSlot);
         }
         return propValues;
@@ -317,7 +347,7 @@ public class RangeIndexKeySizeValidationIT {
             for (int propKey = 0; propKey < propKeys.length; propKey++) {
                 values.put(propKeys[propKey], propValues[propKey]);
             }
-            try (var nodes = tx.findNodes(LABEL_ONE, values)) {
+            try (ResourceIterator<Node> nodes = tx.findNodes(LABEL_ONE, values)) {
                 if (ableToWrite) {
                     assertTrue(nodes.hasNext());
                     Node node = nodes.next();
@@ -350,11 +380,21 @@ public class RangeIndexKeySizeValidationIT {
         TestDatabaseManagementServiceBuilder builder = new TestDatabaseManagementServiceBuilder(neo4jLayout);
         scheduler = JobSchedulerFactory.createInitialisedScheduler();
         pageCache = StandalonePageCacheFactory.createPageCache(
-                fs, scheduler, PageCacheTracer.NULL, config(100).pageSize(pageSize));
+                fs, scheduler, PageCacheTracer.NULL, forPages(100).pageSize(pageSize));
         builder.setExternalDependencies(dependenciesOf(pageCache));
 
         dbms = builder.build();
         db = (GraphDatabaseAPI) dbms.database(DEFAULT_DATABASE_NAME);
+        valuesConfiguration = RandomValuesUtils.selectStorageEngineDependentConfiguration(db);
+    }
+
+    /**
+     * A value type is only exercised when the running storage engine <em>and</em> kernel version can store it.
+     * {@link RandomValuesUtils} derives both from the started database, so the allowed types already exclude
+     * vector types that the storage engine does not support as well as those gated behind a later kernel version.
+     */
+    private boolean isSupported(NamedDynamicValueGenerator generator) {
+        return generator.valueType == null || valuesConfiguration.allowedTypes().contains(generator.valueType);
     }
 
     private static class SuccessAndFail {
@@ -376,9 +416,11 @@ public class RangeIndexKeySizeValidationIT {
     }
 
     private enum NamedDynamicValueGenerator {
-        string(Byte.BYTES, 8164, (random, i) -> random.randomValues()
-                .nextAlphaNumericTextValue(i, i)
-                .stringValue()),
+        string(
+                Byte.BYTES,
+                8164,
+                (random, i) ->
+                        random.randomValues().nextAlphaNumericTextValue(i, i).stringValue()),
         byteArray(SIZE_NUMBER_BYTE, 8163, (random, i) -> random.randomValues().nextByteArrayRaw(i, i)),
         shortArray(SIZE_NUMBER_SHORT, 4081, (random, i) -> random.randomValues().nextShortArrayRaw(i, i)),
         intArray(SIZE_NUMBER_INT, 2040, (random, i) -> random.randomValues().nextIntArrayRaw(i, i)),
@@ -387,18 +429,29 @@ public class RangeIndexKeySizeValidationIT {
         doubleArray(
                 SIZE_NUMBER_DOUBLE, 1020, (random, i) -> random.randomValues().nextDoubleArrayRaw(i, i)),
         booleanArray(SIZE_BOOLEAN, 8164, (random, i) -> random.randomValues().nextBooleanArrayRaw(i, i)),
-        charArray(Byte.BYTES, 2721, (random, i) -> random.randomValues()
-                .nextAlphaNumericTextValue(i, i)
-                .stringValue()
-                .toCharArray()),
-        stringArray1(SIZE_STRING_LENGTH + 1, 2721, (random, i) -> random.randomValues()
-                .nextAlphaNumericStringArrayRaw(i, i, 1, 1)),
-        stringArray10(SIZE_STRING_LENGTH + 10, 680, (random, i) -> random.randomValues()
-                .nextAlphaNumericStringArrayRaw(i, i, 10, 10)),
-        stringArray100(SIZE_STRING_LENGTH + 100, 80, (random, i) -> random.randomValues()
-                .nextAlphaNumericStringArrayRaw(i, i, 100, 100)),
-        stringArray1000(SIZE_STRING_LENGTH + 1000, 8, (random, i) -> random.randomValues()
-                .nextAlphaNumericStringArrayRaw(i, i, 1000, 1000)),
+        charArray(
+                Byte.BYTES,
+                2721,
+                (random, i) -> random.randomValues()
+                        .nextAlphaNumericTextValue(i, i)
+                        .stringValue()
+                        .toCharArray()),
+        stringArray1(
+                SIZE_STRING_LENGTH + 1,
+                2721,
+                (random, i) -> random.randomValues().nextAlphaNumericStringArrayRaw(i, i, 1, 1)),
+        stringArray10(
+                SIZE_STRING_LENGTH + 10,
+                680,
+                (random, i) -> random.randomValues().nextAlphaNumericStringArrayRaw(i, i, 10, 10)),
+        stringArray100(
+                SIZE_STRING_LENGTH + 100,
+                80,
+                (random, i) -> random.randomValues().nextAlphaNumericStringArrayRaw(i, i, 100, 100)),
+        stringArray1000(
+                SIZE_STRING_LENGTH + 1000,
+                8,
+                (random, i) -> random.randomValues().nextAlphaNumericStringArrayRaw(i, i, 1000, 1000)),
         dateArray(SIZE_DATE, 1020, (random, i) -> random.randomValues().nextDateArrayRaw(i, i)),
         timeArray(SIZE_ZONED_TIME, 680, (random, i) -> random.randomValues().nextTimeArrayRaw(i, i)),
         localTimeArray(
@@ -409,29 +462,105 @@ public class RangeIndexKeySizeValidationIT {
                 SIZE_LOCAL_DATE_TIME, 680, (random, i) -> random.randomValues().nextLocalDateTimeArrayRaw(i, i)),
         durationArray(SIZE_DURATION, 291, (random, i) -> random.randomValues().nextDurationArrayRaw(i, i)),
         periodArray(SIZE_DURATION, 291, (random, i) -> random.randomValues().nextPeriodArrayRaw(i, i)),
-        cartesianPointArray(SIZE_GEOMETRY_DERIVED_SPACE_FILLING_CURVE_VALUE, 510, (random, i) -> random.randomValues()
-                .nextCartesianPointArray(i, i)
-                .asObjectCopy()),
-        cartesian3DPointArray(SIZE_GEOMETRY_DERIVED_SPACE_FILLING_CURVE_VALUE, 340, (random, i) -> random.randomValues()
-                .nextCartesian3DPointArray(i, i)
-                .asObjectCopy()),
-        geographicPointArray(SIZE_GEOMETRY_DERIVED_SPACE_FILLING_CURVE_VALUE, 510, (random, i) -> random.randomValues()
-                .nextGeographicPointArray(i, i)
-                .asObjectCopy()),
+        cartesianPointArray(
+                SIZE_GEOMETRY_DERIVED_SPACE_FILLING_CURVE_VALUE,
+                510,
+                (random, i) ->
+                        random.randomValues().nextCartesianPointArray(i, i).asObjectCopy()),
+        cartesian3DPointArray(
+                SIZE_GEOMETRY_DERIVED_SPACE_FILLING_CURVE_VALUE,
+                340,
+                (random, i) ->
+                        random.randomValues().nextCartesian3DPointArray(i, i).asObjectCopy()),
+        geographicPointArray(
+                SIZE_GEOMETRY_DERIVED_SPACE_FILLING_CURVE_VALUE,
+                510,
+                (random, i) ->
+                        random.randomValues().nextGeographicPointArray(i, i).asObjectCopy()),
         geographic3DPointArray(
-                SIZE_GEOMETRY_DERIVED_SPACE_FILLING_CURVE_VALUE, 340, (random, i) -> random.randomValues()
-                        .nextGeographic3DPointArray(i, i)
-                        .asObjectCopy());
+                SIZE_GEOMETRY_DERIVED_SPACE_FILLING_CURVE_VALUE,
+                340,
+                (random, i) ->
+                        random.randomValues().nextGeographic3DPointArray(i, i).asObjectCopy()),
+        // NOTE: All Int8Vector in [MIN_VECTOR_DIM, MAX_VECTOR_DIM] fits into a page, no need to test this.
+        vectorInt16(
+                Types.VECTOR_INT16.elementSize,
+                4081,
+                (random, i) -> {
+                    int dim = Math.clamp(i, VectorValue.MIN_VECTOR_DIMENSIONS, VectorValue.MAX_VECTOR_DIMENSIONS);
+                    return random.randomValues().nextInt16Vector(dim, dim);
+                },
+                ValueType.INT16_VECTOR),
+        vectorInt32(
+                Types.VECTOR_INT32.elementSize,
+                2040,
+                (random, i) -> {
+                    int dim = Math.clamp(i, VectorValue.MIN_VECTOR_DIMENSIONS, VectorValue.MAX_VECTOR_DIMENSIONS);
+                    return random.randomValues().nextInt32Vector(dim, dim);
+                },
+                ValueType.INT32_VECTOR),
+        vectorInt64(
+                Types.VECTOR_INT64.elementSize,
+                1020,
+                (random, i) -> {
+                    int dim = Math.clamp(i, VectorValue.MIN_VECTOR_DIMENSIONS, VectorValue.MAX_VECTOR_DIMENSIONS);
+                    return random.randomValues().nextInt64Vector(dim, dim);
+                },
+                ValueType.INT64_VECTOR),
+        vectorFloat16(
+                Types.VECTOR_FLOAT16.elementSize,
+                4081,
+                (random, i) -> {
+                    int dim = Math.clamp(i, VectorValue.MIN_VECTOR_DIMENSIONS, VectorValue.MAX_VECTOR_DIMENSIONS);
+                    return random.randomValues().nextFloat16Vector(Float16Format.FLOAT16, dim, dim);
+                },
+                ValueType.FLOAT16_VECTOR),
+        vectorBFloat16(
+                Types.VECTOR_BFLOAT16.elementSize,
+                4081,
+                (random, i) -> {
+                    int dim = Math.clamp(i, VectorValue.MIN_VECTOR_DIMENSIONS, VectorValue.MAX_VECTOR_DIMENSIONS);
+                    return random.randomValues().nextFloat16Vector(Float16Format.BFLOAT16, dim, dim);
+                },
+                ValueType.BFLOAT16_VECTOR),
+        vectorFloat32(
+                Types.VECTOR_FLOAT32.elementSize,
+                2040,
+                (random, i) -> {
+                    int dim = Math.clamp(i, VectorValue.MIN_VECTOR_DIMENSIONS, VectorValue.MAX_VECTOR_DIMENSIONS);
+                    return random.randomValues().nextFloat32Vector(dim, dim);
+                },
+                ValueType.FLOAT32_VECTOR),
+        vectorFloat64(
+                Types.VECTOR_FLOAT64.elementSize,
+                1020,
+                (random, i) -> {
+                    int dim = Math.clamp(i, VectorValue.MIN_VECTOR_DIMENSIONS, VectorValue.MAX_VECTOR_DIMENSIONS);
+                    return random.randomValues().nextFloat64Vector(dim, dim);
+                },
+                ValueType.FLOAT64_VECTOR);
 
         private final int singleArrayEntrySize;
         private final DynamicValueGenerator generator;
         private final int expectedMax;
 
+        /** The generated vector value type, or {@code null} for generators of always-supported types. */
+        private final ValueType valueType;
+
         NamedDynamicValueGenerator(
                 int singleArrayEntrySize, int expectedLongestArrayLength, DynamicValueGenerator generator) {
+            this(singleArrayEntrySize, expectedLongestArrayLength, generator, null);
+        }
+
+        NamedDynamicValueGenerator(
+                int singleArrayEntrySize,
+                int expectedLongestArrayLength,
+                DynamicValueGenerator generator,
+                ValueType valueType) {
             this.singleArrayEntrySize = singleArrayEntrySize;
             this.expectedMax = expectedLongestArrayLength;
             this.generator = generator;
+            this.valueType = valueType;
         }
 
         Object dynamicValue(RandomSupport random, int length) {

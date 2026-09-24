@@ -32,7 +32,8 @@ public interface InternalAccess<KEY, VALUE> {
             PageCursor cursor,
             StructurePropagation<KEY> structurePropagation,
             long stableGeneration,
-            long unstableGeneration)
+            long unstableGeneration,
+            CursorContext cursorContext)
             throws IOException;
 
     void underflowInLeaf(
@@ -44,12 +45,13 @@ public interface InternalAccess<KEY, VALUE> {
             CursorContext cursorContext)
             throws IOException;
 
-    void createSuccessorIfNeeded(
+    boolean createSuccessorIfNeeded(
             PageCursor cursor,
             StructurePropagation<KEY> structurePropagation,
             StructureUpdate updateMidChild,
             long stableGeneration,
-            long unstableGeneration)
+            long unstableGeneration,
+            CursorContext cursorContext)
             throws IOException;
 
     void handleStructureChanges(
@@ -60,8 +62,7 @@ public interface InternalAccess<KEY, VALUE> {
             CursorContext cursorContext)
             throws IOException;
 
-    boolean moveToCorrectLeaf(
-            PageCursor cursor, KEY key, long stableGeneration, long unstableGeneration, CursorContext cursorContext)
+    boolean moveToCorrectLeaf(KEY key, long stableGeneration, long unstableGeneration, CursorContext cursorContext)
             throws IOException;
 
     boolean cursorIsAtExpectedLocation(PageCursor cursor);

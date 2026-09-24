@@ -19,9 +19,8 @@
  */
 package org.neo4j.internal.schema;
 
+import static org.neo4j.internal.schema.AllIndexProviderDescriptors.DEFAULT_FULLTEXT_DESCRIPTOR;
 import static org.neo4j.internal.schema.AllIndexProviderDescriptors.DEFAULT_TEXT_DESCRIPTOR;
-import static org.neo4j.internal.schema.AllIndexProviderDescriptors.DEFAULT_VECTOR_DESCRIPTOR;
-import static org.neo4j.internal.schema.AllIndexProviderDescriptors.FULLTEXT_DESCRIPTOR;
 import static org.neo4j.internal.schema.AllIndexProviderDescriptors.POINT_DESCRIPTOR;
 import static org.neo4j.internal.schema.AllIndexProviderDescriptors.RANGE_DESCRIPTOR;
 import static org.neo4j.internal.schema.AllIndexProviderDescriptors.TOKEN_DESCRIPTOR;
@@ -29,16 +28,20 @@ import static org.neo4j.internal.schema.SchemaCommandUtils.backingIndex;
 import static org.neo4j.internal.schema.SchemaCommandUtils.forSchema;
 import static org.neo4j.internal.schema.SchemaCommandUtils.withName;
 
+import java.io.Serializable;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import org.neo4j.common.EntityType;
 import org.neo4j.internal.schema.constraints.ConstraintDescriptorFactory;
+import org.neo4j.internal.schema.constraints.DefaultValue;
 import org.neo4j.internal.schema.constraints.PropertyTypeSet;
 import org.neo4j.token.TokenHolders;
 
 /**
  * Defines the different types of schema changes that can be performed in Cypher.
  */
-public sealed interface SchemaCommand {
+public sealed interface SchemaCommand extends Serializable {
 
     /**
      * @return the name of the schema change
@@ -284,11 +287,11 @@ public sealed interface SchemaCommand {
                             name,
                             forSchema(
                                             this,
-                                            SchemaDescriptors.fulltext(
+                                            SchemaDescriptors.forSemanticSearch(
                                                     EntityType.NODE,
                                                     tokenHolders.labelsForNames(labels),
                                                     tokenHolders.propertiesForName(properties)),
-                                            FULLTEXT_DESCRIPTOR)
+                                            DEFAULT_FULLTEXT_DESCRIPTOR)
                                     .withIndexConfig(config),
                             tokenHolders);
                 }
@@ -314,18 +317,25 @@ public sealed interface SchemaCommand {
                             name,
                             forSchema(
                                             this,
-                                            SchemaDescriptors.fulltext(
+                                            SchemaDescriptors.forSemanticSearch(
                                                     EntityType.RELATIONSHIP,
                                                     tokenHolders.relationshipsForNames(types),
                                                     tokenHolders.propertiesForName(properties)),
-                                            FULLTEXT_DESCRIPTOR)
+                                            DEFAULT_FULLTEXT_DESCRIPTOR)
                                     .withIndexConfig(config),
                             tokenHolders);
                 }
             }
 
             // SchemaCommand.CreateVectorNodeIndex
-            record NodeVector(String name, String label, String property, boolean ifNotExists, IndexConfig config)
+            record NodeVector(
+                    String name,
+                    List<String> labels,
+                    String property,
+                    List<String> additionalProperties,
+                    IndexProviderDescriptor providerDescriptor,
+                    boolean ifNotExists,
+                    IndexConfig config)
                     implements Create {
                 @Override
                 public EntityType entityType() {
@@ -339,14 +349,18 @@ public sealed interface SchemaCommand {
 
                 @Override
                 public IndexPrototype toPrototype(TokenHolders tokenHolders) {
+                    List<String> allProperties = new ArrayList<>(1 + additionalProperties.size());
+                    allProperties.add(property);
+                    allProperties.addAll(additionalProperties);
                     return withName(
                             name,
                             forSchema(
                                             this,
-                                            SchemaDescriptors.forLabel(
-                                                    tokenHolders.labelForName(label),
-                                                    tokenHolders.propertyForName(property)),
-                                            DEFAULT_VECTOR_DESCRIPTOR)
+                                            SchemaDescriptors.forSemanticSearch(
+                                                    EntityType.NODE,
+                                                    tokenHolders.labelsForNames(labels),
+                                                    tokenHolders.propertiesForName(allProperties)),
+                                            providerDescriptor)
                                     .withIndexConfig(config),
                             tokenHolders);
                 }
@@ -354,7 +368,13 @@ public sealed interface SchemaCommand {
 
             // SchemaCommand.CreateVectorRelationshipIndex
             record RelationshipVector(
-                    String name, String type, String property, boolean ifNotExists, IndexConfig config)
+                    String name,
+                    List<String> types,
+                    String property,
+                    List<String> additionalProperties,
+                    IndexProviderDescriptor providerDescriptor,
+                    boolean ifNotExists,
+                    IndexConfig config)
                     implements Create {
                 @Override
                 public EntityType entityType() {
@@ -368,14 +388,18 @@ public sealed interface SchemaCommand {
 
                 @Override
                 public IndexPrototype toPrototype(TokenHolders tokenHolders) {
+                    List<String> allProperties = new ArrayList<>(1 + additionalProperties.size());
+                    allProperties.add(property);
+                    allProperties.addAll(additionalProperties);
                     return withName(
                             name,
                             forSchema(
                                             this,
-                                            SchemaDescriptors.forRelType(
-                                                    tokenHolders.relationshipForName(type),
-                                                    tokenHolders.propertyForName(property)),
-                                            DEFAULT_VECTOR_DESCRIPTOR)
+                                            SchemaDescriptors.forSemanticSearch(
+                                                    EntityType.RELATIONSHIP,
+                                                    tokenHolders.relationshipsForNames(types),
+                                                    tokenHolders.propertiesForName(allProperties)),
+                                            providerDescriptor)
                                     .withIndexConfig(config),
                             tokenHolders);
                 }
@@ -405,8 +429,18 @@ public sealed interface SchemaCommand {
 
             ConstraintPrototype toPrototype(TokenHolders tokenHolders);
 
-            record NodeUniqueness(String name, String label, List<String> properties, boolean ifNotExists)
+            record NodeUniqueness(
+                    String name,
+                    String label,
+                    List<String> properties,
+                    IndexProviderDescriptor providerDescriptor,
+                    boolean ifNotExists)
                     implements Create {
+
+                public NodeUniqueness(String name, String label, List<String> properties, boolean ifNotExists) {
+                    this(name, label, properties, RANGE_DESCRIPTOR, ifNotExists);
+                }
+
                 @Override
                 public EntityType entityType() {
                     return EntityType.NODE;
@@ -424,10 +458,11 @@ public sealed interface SchemaCommand {
 
                 @Override
                 public ConstraintPrototype toPrototype(TokenHolders tokenHolders) {
-                    final var schema = SchemaDescriptors.forLabel(
+                    LabelSchemaDescriptor schema = SchemaDescriptors.forLabel(
                             tokenHolders.labelForName(label), tokenHolders.propertiesForName(properties));
-                    final var backingIndex = backingIndex(schema);
-                    final var constraintDescriptor = withName(
+                    IndexPrototype backingIndex =
+                            backingIndex(schema, providerDescriptor == null ? RANGE_DESCRIPTOR : providerDescriptor);
+                    ConstraintDescriptor constraintDescriptor = withName(
                             name,
                             ConstraintDescriptorFactory.uniqueForSchema(schema, backingIndex.getIndexType()),
                             tokenHolders);
@@ -436,7 +471,8 @@ public sealed interface SchemaCommand {
                 }
             }
 
-            record NodeExistence(String name, String label, String property, boolean ifNotExists) implements Create {
+            record NodeExistence(String name, String label, String property, boolean isDependent, boolean ifNotExists)
+                    implements Create {
                 @Override
                 public EntityType entityType() {
                     return EntityType.NODE;
@@ -454,15 +490,26 @@ public sealed interface SchemaCommand {
 
                 @Override
                 public ConstraintPrototype toPrototype(TokenHolders tokenHolders) {
-                    final var schema = SchemaDescriptors.forLabel(
+                    LabelSchemaDescriptor schema = SchemaDescriptors.forLabel(
                             tokenHolders.labelForName(label), tokenHolders.propertyForName(property));
-                    final var constraintDescriptor =
-                            withName(name, ConstraintDescriptorFactory.existsForSchema(schema, false), tokenHolders);
+                    ConstraintDescriptor constraintDescriptor = withName(
+                            name, ConstraintDescriptorFactory.existsForSchema(schema, isDependent), tokenHolders);
                     return new ConstraintPrototype(constraintDescriptor);
                 }
             }
 
-            record NodeKey(String name, String label, List<String> properties, boolean ifNotExists) implements Create {
+            record NodeKey(
+                    String name,
+                    String label,
+                    List<String> properties,
+                    IndexProviderDescriptor providerDescriptor,
+                    boolean ifNotExists)
+                    implements Create {
+
+                public NodeKey(String name, String label, List<String> properties, boolean ifNotExists) {
+                    this(name, label, properties, RANGE_DESCRIPTOR, ifNotExists);
+                }
+
                 @Override
                 public EntityType entityType() {
                     return EntityType.NODE;
@@ -480,10 +527,11 @@ public sealed interface SchemaCommand {
 
                 @Override
                 public ConstraintPrototype toPrototype(TokenHolders tokenHolders) {
-                    final var schema = SchemaDescriptors.forLabel(
+                    LabelSchemaDescriptor schema = SchemaDescriptors.forLabel(
                             tokenHolders.labelForName(label), tokenHolders.propertiesForName(properties));
-                    final var backingIndex = backingIndex(schema);
-                    final var constraintDescriptor = withName(
+                    IndexPrototype backingIndex =
+                            backingIndex(schema, providerDescriptor == null ? RANGE_DESCRIPTOR : providerDescriptor);
+                    ConstraintDescriptor constraintDescriptor = withName(
                             name,
                             ConstraintDescriptorFactory.keyForSchema(schema, backingIndex.getIndexType()),
                             tokenHolders);
@@ -493,7 +541,13 @@ public sealed interface SchemaCommand {
             }
 
             record NodePropertyType(
-                    String name, String label, String property, PropertyTypeSet propertyTypes, boolean ifNotExists)
+                    String name,
+                    String label,
+                    String property,
+                    PropertyTypeSet propertyTypes,
+                    DefaultValue defaultValue,
+                    boolean isDependent,
+                    boolean ifNotExists)
                     implements Create {
                 @Override
                 public EntityType entityType() {
@@ -512,18 +566,29 @@ public sealed interface SchemaCommand {
 
                 @Override
                 public ConstraintPrototype toPrototype(TokenHolders tokenHolders) {
-                    final var schema = SchemaDescriptors.forLabel(
+                    LabelSchemaDescriptor schema = SchemaDescriptors.forLabel(
                             tokenHolders.labelForName(label), tokenHolders.propertyForName(property));
-                    final var constraintDescriptor = withName(
+                    ConstraintDescriptor constraintDescriptor = withName(
                             name,
-                            ConstraintDescriptorFactory.typeForSchema(schema, propertyTypes, false),
+                            ConstraintDescriptorFactory.typeForSchema(schema, propertyTypes, isDependent)
+                                    .withDefaultValue(defaultValue),
                             tokenHolders);
                     return new ConstraintPrototype(constraintDescriptor);
                 }
             }
 
-            record RelationshipUniqueness(String name, String type, List<String> properties, boolean ifNotExists)
+            record RelationshipUniqueness(
+                    String name,
+                    String type,
+                    List<String> properties,
+                    IndexProviderDescriptor providerDescriptor,
+                    boolean ifNotExists)
                     implements Create {
+
+                public RelationshipUniqueness(String name, String type, List<String> properties, boolean ifNotExists) {
+                    this(name, type, properties, RANGE_DESCRIPTOR, ifNotExists);
+                }
+
                 @Override
                 public EntityType entityType() {
                     return EntityType.RELATIONSHIP;
@@ -541,10 +606,11 @@ public sealed interface SchemaCommand {
 
                 @Override
                 public ConstraintPrototype toPrototype(TokenHolders tokenHolders) {
-                    final var schema = SchemaDescriptors.forRelType(
+                    RelationTypeSchemaDescriptor schema = SchemaDescriptors.forRelType(
                             tokenHolders.relationshipForName(type), tokenHolders.propertiesForName(properties));
-                    final var backingIndex = backingIndex(schema);
-                    final var constraintDescriptor = withName(
+                    IndexPrototype backingIndex =
+                            backingIndex(schema, providerDescriptor == null ? RANGE_DESCRIPTOR : providerDescriptor);
+                    ConstraintDescriptor constraintDescriptor = withName(
                             name,
                             ConstraintDescriptorFactory.uniqueForSchema(schema, backingIndex.getIndexType()),
                             tokenHolders);
@@ -553,7 +619,8 @@ public sealed interface SchemaCommand {
                 }
             }
 
-            record RelationshipExistence(String name, String type, String property, boolean ifNotExists)
+            record RelationshipExistence(
+                    String name, String type, String property, boolean isDependent, boolean ifNotExists)
                     implements Create {
                 @Override
                 public EntityType entityType() {
@@ -572,16 +639,26 @@ public sealed interface SchemaCommand {
 
                 @Override
                 public ConstraintPrototype toPrototype(TokenHolders tokenHolders) {
-                    final var schema = SchemaDescriptors.forRelType(
+                    RelationTypeSchemaDescriptor schema = SchemaDescriptors.forRelType(
                             tokenHolders.relationshipForName(type), tokenHolders.propertyForName(property));
-                    final var constraintDescriptor =
-                            withName(name, ConstraintDescriptorFactory.existsForSchema(schema, false), tokenHolders);
+                    ConstraintDescriptor constraintDescriptor = withName(
+                            name, ConstraintDescriptorFactory.existsForSchema(schema, isDependent), tokenHolders);
                     return new ConstraintPrototype(constraintDescriptor);
                 }
             }
 
-            record RelationshipKey(String name, String type, List<String> properties, boolean ifNotExists)
+            record RelationshipKey(
+                    String name,
+                    String type,
+                    List<String> properties,
+                    IndexProviderDescriptor providerDescriptor,
+                    boolean ifNotExists)
                     implements Create {
+
+                public RelationshipKey(String name, String type, List<String> properties, boolean ifNotExists) {
+                    this(name, type, properties, RANGE_DESCRIPTOR, ifNotExists);
+                }
+
                 @Override
                 public EntityType entityType() {
                     return EntityType.RELATIONSHIP;
@@ -599,10 +676,11 @@ public sealed interface SchemaCommand {
 
                 @Override
                 public ConstraintPrototype toPrototype(TokenHolders tokenHolders) {
-                    final var schema = SchemaDescriptors.forRelType(
+                    RelationTypeSchemaDescriptor schema = SchemaDescriptors.forRelType(
                             tokenHolders.relationshipForName(type), tokenHolders.propertiesForName(properties));
-                    final var backingIndex = backingIndex(schema);
-                    final var constraintDescriptor = withName(
+                    IndexPrototype backingIndex =
+                            backingIndex(schema, providerDescriptor == null ? RANGE_DESCRIPTOR : providerDescriptor);
+                    ConstraintDescriptor constraintDescriptor = withName(
                             name,
                             ConstraintDescriptorFactory.keyForSchema(schema, backingIndex.getIndexType()),
                             tokenHolders);
@@ -612,7 +690,13 @@ public sealed interface SchemaCommand {
             }
 
             record RelationshipPropertyType(
-                    String name, String type, String property, PropertyTypeSet propertyTypes, boolean ifNotExists)
+                    String name,
+                    String type,
+                    String property,
+                    PropertyTypeSet propertyTypes,
+                    DefaultValue defaultValue,
+                    boolean isDependent,
+                    boolean ifNotExists)
                     implements Create {
                 @Override
                 public EntityType entityType() {
@@ -631,15 +715,113 @@ public sealed interface SchemaCommand {
 
                 @Override
                 public ConstraintPrototype toPrototype(TokenHolders tokenHolders) {
-                    final var schema = SchemaDescriptors.forRelType(
+                    RelationTypeSchemaDescriptor schema = SchemaDescriptors.forRelType(
                             tokenHolders.relationshipForName(type), tokenHolders.propertyForName(property));
-                    final var constraintDescriptor = withName(
+                    ConstraintDescriptor constraintDescriptor = withName(
                             name,
-                            ConstraintDescriptorFactory.typeForSchema(schema, propertyTypes, false),
+                            ConstraintDescriptorFactory.typeForSchema(schema, propertyTypes, isDependent)
+                                    .withDefaultValue(defaultValue),
                             tokenHolders);
                     return new ConstraintPrototype(constraintDescriptor);
                 }
             }
+
+            record NodeLabelExistence(String name, String label, String requiredLabel, boolean ifNotExists)
+                    implements Create {
+                @Override
+                public EntityType entityType() {
+                    return EntityType.NODE;
+                }
+
+                @Override
+                public ConstraintType constraintType() {
+                    return ConstraintType.NODE_LABEL_EXISTENCE;
+                }
+
+                @Override
+                public boolean hasBackingIndex() {
+                    return false;
+                }
+
+                @Override
+                public ConstraintPrototype toPrototype(TokenHolders tokenHolders) {
+                    int labelId = tokenHolders.labelForName(label);
+                    int requiredLabelId = tokenHolders.labelForName(requiredLabel);
+                    NodeLabelExistenceSchemaDescriptor schema = SchemaDescriptors.forNodeLabelExistence(labelId);
+                    return new ConstraintPrototype(withName(
+                            name,
+                            ConstraintDescriptorFactory.nodeLabelExistenceForSchema(schema, requiredLabelId),
+                            tokenHolders));
+                }
+            }
+
+            record RelationshipEndpointLabel(
+                    String name, String type, String requiredLabel, EndpointType endpointType, boolean ifNotExists)
+                    implements Create {
+                @Override
+                public EntityType entityType() {
+                    return EntityType.RELATIONSHIP;
+                }
+
+                @Override
+                public ConstraintType constraintType() {
+                    return ConstraintType.RELATIONSHIP_ENDPOINT_LABEL;
+                }
+
+                @Override
+                public boolean hasBackingIndex() {
+                    return false;
+                }
+
+                @Override
+                public ConstraintPrototype toPrototype(TokenHolders tokenHolders) {
+                    int relationshipId = tokenHolders.relationshipForName(type);
+                    int requiredLabelId = tokenHolders.labelForName(requiredLabel);
+                    RelationshipEndpointLabelSchemaDescriptor schema =
+                            SchemaDescriptors.forRelationshipEndpointLabel(relationshipId);
+                    ConstraintDescriptor constraintDescriptor = withName(
+                            name,
+                            ConstraintDescriptorFactory.relationshipEndpointLabelForSchema(
+                                    schema, requiredLabelId, endpointType),
+                            tokenHolders);
+                    return new ConstraintPrototype(constraintDescriptor);
+                }
+            }
+        }
+    }
+
+    record GraphType(
+            Set<? extends ConstraintCommand.Create> addedConstraints,
+            Set<ConstraintCommand.Drop> droppedConstraints,
+            Operation op)
+            implements SchemaCommand.ConstraintCommand {
+        @Override
+        public String name() {
+            return op.name() + " "
+                    + String.join(
+                            ",",
+                            addedConstraints.stream().map(SchemaCommand::name).toList()) + ";"
+                    + String.join(
+                            ",",
+                            droppedConstraints.stream().map(SchemaCommand::name).toList());
+        }
+
+        @Override
+        public String toString() {
+            return "GraphType[addedConstraints="
+                    + String.join(
+                            ",\n",
+                            addedConstraints.stream().map(Object::toString).toList()) + ",\n droppedConstraints="
+                    + String.join(
+                            ",\n",
+                            droppedConstraints.stream().map(Object::toString).toList()) + ", op=" + op + "]";
+        }
+
+        public enum Operation {
+            ADD,
+            DROP,
+            SET,
+            ALTER
         }
     }
 

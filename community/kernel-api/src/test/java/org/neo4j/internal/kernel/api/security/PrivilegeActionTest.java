@@ -19,19 +19,24 @@
  */
 package org.neo4j.internal.kernel.api.security;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.ACCESS;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.ADMIN;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.ALIAS_MANAGEMENT;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.ALTER_ALIAS;
+import static org.neo4j.internal.kernel.api.security.PrivilegeAction.ALTER_AUTH_RULE;
+import static org.neo4j.internal.kernel.api.security.PrivilegeAction.ALTER_COMPOSITE_DATABASE;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.ALTER_DATABASE;
+import static org.neo4j.internal.kernel.api.security.PrivilegeAction.ALTER_DATABASE_OPTIONS;
+import static org.neo4j.internal.kernel.api.security.PrivilegeAction.ALTER_DATABASE_TOPOLOGY;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.ALTER_USER;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.ASSIGN_PRIVILEGE;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.ASSIGN_ROLE;
+import static org.neo4j.internal.kernel.api.security.PrivilegeAction.AUTH_RULE_MANAGEMENT;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.COMPOSITE_DATABASE_MANAGEMENT;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.CONSTRAINT;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.CREATE_ALIAS;
+import static org.neo4j.internal.kernel.api.security.PrivilegeAction.CREATE_AUTH_RULE;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.CREATE_COMPOSITE_DATABASE;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.CREATE_CONSTRAINT;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.CREATE_DATABASE;
@@ -47,6 +52,7 @@ import static org.neo4j.internal.kernel.api.security.PrivilegeAction.DATABASE_MA
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.DBMS_ACTIONS;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.DELETE_ELEMENT;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.DROP_ALIAS;
+import static org.neo4j.internal.kernel.api.security.PrivilegeAction.DROP_AUTH_RULE;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.DROP_COMPOSITE_DATABASE;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.DROP_CONSTRAINT;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.DROP_DATABASE;
@@ -64,29 +70,38 @@ import static org.neo4j.internal.kernel.api.security.PrivilegeAction.MATCH;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.MERGE;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.PRIVILEGE_MANAGEMENT;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.READ;
+import static org.neo4j.internal.kernel.api.security.PrivilegeAction.READ_SECRETS;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.REMOVE_LABEL;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.REMOVE_PRIVILEGE;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.REMOVE_ROLE;
+import static org.neo4j.internal.kernel.api.security.PrivilegeAction.RENAME_AUTH_RULE;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.RENAME_ROLE;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.RENAME_USER;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.ROLE_MANAGEMENT;
+import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SECRETS_MANAGEMENT;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SERVER_MANAGEMENT;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SET_AUTH;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SET_DATABASE_ACCESS;
+import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SET_DEFAULT_LANGUAGE;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SET_LABEL;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SET_PASSWORDS;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SET_PROPERTY;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SET_USER_HOME_DATABASE;
+import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SET_USER_METADATA;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SET_USER_STATUS;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SHOW_ALIAS;
+import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SHOW_AUTH_RULE;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SHOW_CONNECTION;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SHOW_CONSTRAINT;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SHOW_INDEX;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SHOW_PRIVILEGE;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SHOW_ROLE;
+import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SHOW_SECRETS;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SHOW_SERVER;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SHOW_TRANSACTION;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SHOW_USER;
+import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SHOW_USER_CREDENTIALS;
+import static org.neo4j.internal.kernel.api.security.PrivilegeAction.SHOW_USER_METADATA;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.START_DATABASE;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.STOP_DATABASE;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.TERMINATE_CONNECTION;
@@ -95,7 +110,9 @@ import static org.neo4j.internal.kernel.api.security.PrivilegeAction.TOKEN;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.TRANSACTION_MANAGEMENT;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.TRAVERSE;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.USER_MANAGEMENT;
+import static org.neo4j.internal.kernel.api.security.PrivilegeAction.USER_METADATA_MANAGEMENT;
 import static org.neo4j.internal.kernel.api.security.PrivilegeAction.WRITE;
+import static org.neo4j.internal.kernel.api.security.PrivilegeAction.WRITE_SECRETS;
 
 import java.util.Arrays;
 import java.util.HashMap;
@@ -113,14 +130,25 @@ class PrivilegeActionTest {
                 TRANSACTION_MANAGEMENT,
                 Set.of(SHOW_TRANSACTION, TERMINATE_TRANSACTION, SHOW_CONNECTION, TERMINATE_CONNECTION));
         expected.put(ROLE_MANAGEMENT, Set.of(SHOW_ROLE, CREATE_ROLE, RENAME_ROLE, DROP_ROLE, ASSIGN_ROLE, REMOVE_ROLE));
-        expected.put(USER_MANAGEMENT, Set.of(SHOW_USER, CREATE_USER, RENAME_USER, DROP_USER, ALTER_USER));
+        expected.put(
+                AUTH_RULE_MANAGEMENT,
+                Set.of(SHOW_AUTH_RULE, CREATE_AUTH_RULE, DROP_AUTH_RULE, ALTER_AUTH_RULE, RENAME_AUTH_RULE));
+        expected.put(
+                USER_MANAGEMENT,
+                Set.of(SHOW_USER, SHOW_USER_CREDENTIALS, CREATE_USER, RENAME_USER, DROP_USER, ALTER_USER));
         expected.put(ALTER_USER, Set.of(SET_USER_STATUS, SET_PASSWORDS, SET_AUTH, SET_USER_HOME_DATABASE));
         expected.put(SET_AUTH, Set.of(SET_PASSWORDS));
+        expected.put(USER_METADATA_MANAGEMENT, Set.of(SHOW_USER_METADATA, SET_USER_METADATA));
+        expected.put(SECRETS_MANAGEMENT, Set.of(READ_SECRETS, WRITE_SECRETS, SHOW_SECRETS));
         expected.put(
                 DATABASE_MANAGEMENT,
                 Set.of(CREATE_DATABASE, DROP_DATABASE, ALTER_DATABASE, COMPOSITE_DATABASE_MANAGEMENT));
-        expected.put(COMPOSITE_DATABASE_MANAGEMENT, Set.of(CREATE_COMPOSITE_DATABASE, DROP_COMPOSITE_DATABASE));
-        expected.put(ALTER_DATABASE, Set.of(SET_DATABASE_ACCESS));
+        expected.put(
+                COMPOSITE_DATABASE_MANAGEMENT,
+                Set.of(CREATE_COMPOSITE_DATABASE, DROP_COMPOSITE_DATABASE, ALTER_COMPOSITE_DATABASE));
+        expected.put(
+                ALTER_DATABASE,
+                Set.of(SET_DATABASE_ACCESS, SET_DEFAULT_LANGUAGE, ALTER_DATABASE_OPTIONS, ALTER_DATABASE_TOPOLOGY));
         expected.put(ALIAS_MANAGEMENT, Set.of(CREATE_ALIAS, DROP_ALIAS, ALTER_ALIAS, SHOW_ALIAS));
         expected.put(PRIVILEGE_MANAGEMENT, Set.of(SHOW_PRIVILEGE, ASSIGN_PRIVILEGE, REMOVE_PRIVILEGE));
         expected.put(WRITE, Set.of(SET_LABEL, REMOVE_LABEL, CREATE_ELEMENT, DELETE_ELEMENT, SET_PROPERTY));
@@ -136,6 +164,9 @@ class PrivilegeActionTest {
                 Set.of(
                         ROLE_MANAGEMENT,
                         USER_MANAGEMENT,
+                        USER_METADATA_MANAGEMENT,
+                        SECRETS_MANAGEMENT,
+                        AUTH_RULE_MANAGEMENT,
                         DATABASE_MANAGEMENT,
                         ALIAS_MANAGEMENT,
                         PRIVILEGE_MANAGEMENT,
@@ -149,7 +180,7 @@ class PrivilegeActionTest {
     @Test
     void shouldSatisfySelf() {
         for (var action : PrivilegeAction.values()) {
-            assertTrue(action.satisfies(action));
+            assertThat(action.satisfies(action)).isTrue();
         }
     }
 
@@ -165,7 +196,9 @@ class PrivilegeActionTest {
             if (expected.containsKey(action)) {
                 assertGroupSatisfies(group, expected.get(action));
             }
-            assertTrue(group.satisfies(action), String.format("%s should satisfy %s", group, action));
+            assertThat(group.satisfies(action))
+                    .as(String.format("%s should satisfy %s", group, action))
+                    .isTrue();
         }
     }
 
@@ -173,9 +206,9 @@ class PrivilegeActionTest {
     void shouldNotSatisfy() {
         for (var action : PrivilegeAction.values()) {
             for (var notSatisfied : notChild(action)) {
-                assertFalse(
-                        action.satisfies(notSatisfied),
-                        String.format("%s should not satisfy %s", action, notSatisfied));
+                assertThat(action.satisfies(notSatisfied))
+                        .as(String.format("%s should not satisfy %s", action, notSatisfied))
+                        .isFalse();
             }
         }
     }

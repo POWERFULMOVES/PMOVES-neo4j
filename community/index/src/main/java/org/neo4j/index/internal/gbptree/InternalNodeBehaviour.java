@@ -73,6 +73,10 @@ public sealed interface InternalNodeBehaviour<KEY> extends SharedNodeBehaviour<K
 
     int totalSpaceOfKeyChild(KEY key);
 
+    int totalSpaceOfKeyChildAt(PageCursor cursor, int pos);
+
+    int maxEntrySizeBound(CursorCreator cursorCreator, long treeNodeId, int keyCount) throws IOException;
+
     void defragment(PageCursor cursor, int keyCount);
 
     void doSplit(
@@ -100,10 +104,6 @@ public sealed interface InternalNodeBehaviour<KEY> extends SharedNodeBehaviour<K
 
     long childAt(PageCursor cursor, int pos, long stableGeneration, long unstableGeneration);
 
-    long childAt(
-            PageCursor cursor,
-            int pos,
-            long stableGeneration,
-            long unstableGeneration,
-            GBPTreeGenerationTarget generationTarget);
+    PointerWithGeneration childWithGenerationAt(
+            PageCursor cursor, int pos, long stableGeneration, long unstableGeneration);
 }

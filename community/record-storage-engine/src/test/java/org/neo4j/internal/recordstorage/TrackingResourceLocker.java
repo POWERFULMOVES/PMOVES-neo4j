@@ -40,6 +40,7 @@ import org.neo4j.lock.LockTracer;
 import org.neo4j.lock.LockType;
 import org.neo4j.lock.ResourceLocker;
 import org.neo4j.lock.ResourceType;
+import org.neo4j.memory.MemoryTracker;
 import org.neo4j.test.RandomSupport;
 
 /**
@@ -91,6 +92,11 @@ class TrackingResourceLocker implements ResourceLocker {
     }
 
     @Override
+    public boolean trySharedLock(ResourceType resourceType, long resourceId) {
+        return false;
+    }
+
+    @Override
     public void acquireExclusive(LockTracer tracer, ResourceType resourceType, long... resourceIds) {
         acquireLock(resourceType, resourceIds, EXCLUSIVE);
     }
@@ -139,7 +145,7 @@ class TrackingResourceLocker implements ResourceLocker {
     }
 
     @Override
-    public Collection<ActiveLock> activeLocks() {
+    public Collection<ActiveLock> activeLocks(MemoryTracker memoryTracker) {
         List<ActiveLock> locks = new ArrayList<>();
         gatherActiveLocks(locks, exclusiveLocks, EXCLUSIVE);
         gatherActiveLocks(locks, sharedLocks, LockType.SHARED);
@@ -204,6 +210,11 @@ class TrackingResourceLocker implements ResourceLocker {
             }
 
             @Override
+            public boolean trySharedLock(ResourceType resourceType, long resourceId) {
+                return false;
+            }
+
+            @Override
             public void acquireExclusive(LockTracer tracer, ResourceType resourceType, long... resourceIds) {
                 for (long resourceId : resourceIds) {
                     if (actual.hasLock(resourceType, resourceId)) {
@@ -230,8 +241,8 @@ class TrackingResourceLocker implements ResourceLocker {
             public void releaseShared(ResourceType resourceType, long... resourceIds) {}
 
             @Override
-            public Collection<ActiveLock> activeLocks() {
-                return actual.activeLocks();
+            public Collection<ActiveLock> activeLocks(MemoryTracker memoryTracker) {
+                return actual.activeLocks(memoryTracker);
             }
 
             @Override

@@ -70,7 +70,7 @@ class AsyncEventsTest {
     void eventsMustBeProcessedByBackgroundThread() throws Exception {
         EventConsumer consumer = new EventConsumer();
 
-        AsyncEvents<Event> asyncEvents = new AsyncEvents<>(consumer, AsyncEvents.Monitor.NONE);
+        AsyncEvents<Event> asyncEvents = new AsyncEvents<>(consumer);
         executor.submit(asyncEvents);
 
         Event firstSentEvent = new Event();
@@ -91,7 +91,7 @@ class AsyncEventsTest {
     void mustNotProcessEventInSameThreadWhenNotShutDown() throws Exception {
         EventConsumer consumer = new EventConsumer();
 
-        AsyncEvents<Event> asyncEvents = new AsyncEvents<>(consumer, AsyncEvents.Monitor.NONE);
+        AsyncEvents<Event> asyncEvents = new AsyncEvents<>(consumer);
         executor.submit(asyncEvents);
 
         asyncEvents.send(new Event());
@@ -106,7 +106,7 @@ class AsyncEventsTest {
     void mustProcessEventsDirectlyWhenShutDown() throws InterruptedException {
         EventConsumer consumer = new EventConsumer();
 
-        AsyncEvents<Event> asyncEvents = new AsyncEvents<>(consumer, AsyncEvents.Monitor.NONE);
+        AsyncEvents<Event> asyncEvents = new AsyncEvents<>(consumer);
         executor.submit(asyncEvents);
 
         asyncEvents.send(new Event());
@@ -128,29 +128,29 @@ class AsyncEventsTest {
         final CountDownLatch startLatch = new CountDownLatch(1);
         final int threads = 10;
         final int iterations = 2_000;
-        final AsyncEvents<Event> asyncEvents = new AsyncEvents<>(consumer, AsyncEvents.Monitor.NONE);
+        final AsyncEvents<Event> asyncEvents = new AsyncEvents<>(consumer);
         executor.submit(asyncEvents);
 
-        ExecutorService threadPool = Executors.newFixedThreadPool(threads);
-        Runnable runner = () -> {
-            try {
-                startLatch.await();
-            } catch (InterruptedException e) {
-                throw new RuntimeException(e);
-            }
+        try (ExecutorService threadPool = Executors.newFixedThreadPool(threads)) {
+            Runnable runner = () -> {
+                try {
+                    startLatch.await();
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
 
-            for (int i = 0; i < iterations; i++) {
-                asyncEvents.send(new Event());
+                for (int i = 0; i < iterations; i++) {
+                    asyncEvents.send(new Event());
+                }
+            };
+            for (int i = 0; i < threads; i++) {
+                threadPool.submit(runner);
             }
-        };
-        for (int i = 0; i < threads; i++) {
-            threadPool.submit(runner);
-        }
-        startLatch.countDown();
+            startLatch.countDown();
 
-        Thread thisThread = Thread.currentThread();
-        int eventCount = threads * iterations;
-        try {
+            Thread thisThread = Thread.currentThread();
+            int eventCount = threads * iterations;
+
             for (int i = 0; i < eventCount; i++) {
                 Event event = consumer.poll(1, TimeUnit.SECONDS);
                 if (event == null) {
@@ -161,7 +161,6 @@ class AsyncEventsTest {
             }
         } finally {
             asyncEvents.shutdown();
-            threadPool.shutdown();
         }
     }
 
@@ -170,7 +169,7 @@ class AsyncEventsTest {
         final Event specialShutdownObservedEvent = new Event();
         final CountDownLatch awaitStartLatch = new CountDownLatch(1);
         final EventConsumer consumer = new EventConsumer();
-        final AsyncEvents<Event> asyncEvents = new AsyncEvents<>(consumer, AsyncEvents.Monitor.NONE);
+        final AsyncEvents<Event> asyncEvents = new AsyncEvents<>(consumer);
         executor.submit(asyncEvents);
 
         // Wait for the background thread to start processing events

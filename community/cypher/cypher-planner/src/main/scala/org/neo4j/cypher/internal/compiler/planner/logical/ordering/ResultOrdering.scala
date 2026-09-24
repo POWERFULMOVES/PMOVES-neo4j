@@ -77,7 +77,8 @@ object ResultOrdering {
     if (indexProperties.isEmpty || interestingOrder == InterestingOrder.empty) {
       (ProvidedOrder.empty, IndexOrderNone)
     } else {
-      val candidates = interestingOrder.requiredOrderCandidate +: interestingOrder.interestingOrderCandidates
+      val candidates: Seq[OrderCandidate[_]] =
+        interestingOrder.requiredOrderCandidate +: interestingOrder.interestingOrderCandidates
 
       // Accumulator for the foldLeft
       sealed trait Acc
@@ -140,7 +141,8 @@ object ResultOrdering {
             val nextCol = indexOrder match {
               case IndexOrderAscending  => Asc(prop)
               case IndexOrderDescending => Desc(prop)
-              case IndexOrderNone => throw new InternalException(
+              case IndexOrderNone => throw InternalException.internalError(
+                  this.getClass.getSimpleName,
                   s"Expected IndexOrderAscending or IndexOrderDescending but was IndexOrderNone"
                 )
             }
@@ -233,7 +235,8 @@ object ResultOrdering {
     indexOrderCapability match {
       case IndexOrderCapability.NONE => ProvidedOrder.empty
       case IndexOrderCapability.BOTH =>
-        val candidates = interestingOrder.requiredOrderCandidate +: interestingOrder.interestingOrderCandidates
+        val candidates: Seq[OrderCandidate[_]] =
+          interestingOrder.requiredOrderCandidate +: interestingOrder.interestingOrderCandidates
 
         candidates.map(_.headOption).collectFirst {
           case Some(Desc(expression, projection)) if satisfies(expression, projection) =>

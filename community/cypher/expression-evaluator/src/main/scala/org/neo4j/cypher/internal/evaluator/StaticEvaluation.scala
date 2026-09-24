@@ -27,8 +27,11 @@ import org.neo4j.csv.reader.CharReadable
 import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.SemanticDirection
+import org.neo4j.cypher.internal.frontend.phases.InternalUsageStats
 import org.neo4j.cypher.internal.logical.plans.IndexOrder
+import org.neo4j.cypher.internal.planner.spi.NoPreferenceIndexComparatorFactory
 import org.neo4j.cypher.internal.runtime.ClosingLongIterator
+import org.neo4j.cypher.internal.runtime.ClosingRelationshipIterator
 import org.neo4j.cypher.internal.runtime.ConstraintInfo
 import org.neo4j.cypher.internal.runtime.ConstraintInformation
 import org.neo4j.cypher.internal.runtime.CypherRow
@@ -38,18 +41,21 @@ import org.neo4j.cypher.internal.runtime.IndexInformation
 import org.neo4j.cypher.internal.runtime.NodeOperations
 import org.neo4j.cypher.internal.runtime.NodeReadOperations
 import org.neo4j.cypher.internal.runtime.QueryContext
+import org.neo4j.cypher.internal.runtime.QueryRuntimeConfig
 import org.neo4j.cypher.internal.runtime.QueryTransactionalContext
-import org.neo4j.cypher.internal.runtime.RelationshipIterator
 import org.neo4j.cypher.internal.runtime.RelationshipOperations
 import org.neo4j.cypher.internal.runtime.RelationshipReadOperations
 import org.neo4j.cypher.internal.runtime.ResourceManager
+import org.neo4j.cypher.internal.runtime.admin.topology.ShowDatabaseService
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.QueryState
 import org.neo4j.cypher.internal.runtime.memory.NoOpMemoryTrackerForOperatorProvider
 import org.neo4j.cypher.internal.runtime.memory.NoOpQueryMemoryTracker
 import org.neo4j.dbms.database.DatabaseContext
 import org.neo4j.dbms.database.DatabaseContextProvider
 import org.neo4j.graphdb.GraphDatabaseService
+import org.neo4j.internal.kernel.api.IndexQueryConstraints
 import org.neo4j.internal.kernel.api.IndexReadSession
+import org.neo4j.internal.kernel.api.MutatingEntityCursor
 import org.neo4j.internal.kernel.api.NodeCursor
 import org.neo4j.internal.kernel.api.NodeLabelIndexCursor
 import org.neo4j.internal.kernel.api.NodeValueIndexCursor
@@ -68,8 +74,10 @@ import org.neo4j.internal.schema.IndexConfig
 import org.neo4j.internal.schema.IndexDescriptor
 import org.neo4j.internal.schema.IndexProviderDescriptor
 import org.neo4j.internal.schema.IndexType
-import org.neo4j.internal.schema.constraints.PropertyTypeSet
+import org.neo4j.internal.schema.SchemaCommand.ConstraintCommand
+import org.neo4j.internal.schema.SchemaDescriptor
 import org.neo4j.kernel.api.KernelTransaction
+import org.neo4j.kernel.api.QueryLanguage
 import org.neo4j.kernel.api.exceptions.Status.HasStatus
 import org.neo4j.kernel.api.index.IndexUsageStats
 import org.neo4j.kernel.impl.query.FunctionInformation
@@ -87,10 +95,14 @@ import org.neo4j.values.virtual.VirtualNodeValue
 import org.neo4j.values.virtual.VirtualRelationshipValue
 
 import java.net.URI
+import java.util
+
+import scala.collection.immutable.ArraySeq
 
 object StaticEvaluation {
 
-  def from(procedures: Procedures) = new StaticEvaluator(() => new SimplifiedStaticQueryContext(procedures))
+  def from(procedures: Procedures, cypherVersion: CypherVersion) =
+    new StaticEvaluator(() => new SimplifiedStaticQueryContext(procedures, cypherVersion))
 
   class StaticEvaluator(makeQueryContext: () => QueryContext) extends SimpleInternalExpressionEvaluator {
 
@@ -107,7 +119,8 @@ object StaticEvaluation {
       expressionVariables = new Array(nExpressionSlots),
       subscriber = QuerySubscriber.DO_NOTHING_SUBSCRIBER,
       queryMemoryTracker = NoOpQueryMemoryTracker,
-      memoryTrackerForOperatorProvider = NoOpMemoryTrackerForOperatorProvider
+      memoryTrackerForOperatorProvider = NoOpMemoryTrackerForOperatorProvider,
+      indexComparatorFactory = NoPreferenceIndexComparatorFactory
     )
 
     override def evaluate(expression: Expression, params: MapValue, context: CypherRow): AnyValue = {
@@ -137,13 +150,43 @@ object StaticEvaluation {
     }
   }
 
-  private class SimplifiedStaticQueryContext(procedures: Procedures) extends EmptyQueryContext {
+  private class SimplifiedStaticQueryContext(procedures: Procedures, cypherVersion: CypherVersion)
+      extends EmptyQueryContext {
 
     override def callFunction(id: Int, args: Array[AnyValue], ctx: ProcedureCallContext): AnyValue =
       procedures.functionCall(id, args, ctx)
 
     override def callBuiltInFunction(id: Int, args: Array[AnyValue], ctx: ProcedureCallContext): AnyValue = {
       procedures.builtInFunctionCall(id, args, ctx)
+    }
+
+    override def procedureCallContext(fcnId: Int, memoryTracker: MemoryTracker): ProcedureCallContext = {
+      new ProcedureCallContext(
+        fcnId,
+        true,
+        "",
+        false,
+        "",
+        memoryTracker,
+        if (cypherVersion.equals(CypherVersion.Cypher5)) QueryLanguage.CYPHER_5 else QueryLanguage.CYPHER_25
+      )
+    }
+
+    override def procedureCallContext(
+      procId: Int,
+      outputFields: Array[String],
+      m: MemoryTracker
+    ): ProcedureCallContext = {
+      new ProcedureCallContext(
+        procId,
+        outputFields,
+        true,
+        "",
+        false,
+        "",
+        m,
+        if (cypherVersion.equals(CypherVersion.Cypher5)) QueryLanguage.CYPHER_5 else QueryLanguage.CYPHER_25
+      )
     }
   }
 
@@ -155,6 +198,8 @@ object StaticEvaluation {
     override def transactionalContext: QueryTransactionalContext = notAvailable()
 
     override def resources: ResourceManager = notAvailable()
+
+    override def queryConfig: QueryRuntimeConfig = notAvailable()
 
     override def nodeReadOps: NodeReadOperations = notAvailable()
 
@@ -168,15 +213,31 @@ object StaticEvaluation {
 
     override def createRelationshipId(start: Long, end: Long, relType: Int): Long = notAvailable()
 
+    override def mergeInto(
+      nodeCursor: NodeCursor,
+      traversalCursor: RelationshipTraversalCursor,
+      propertyCursor: PropertyCursor,
+      source: Long,
+      relType: Int,
+      direction: SemanticDirection,
+      target: Long,
+      onMatch: IntObjectMap[Value],
+      onCreate: IntObjectMap[Value]
+    ): MutatingEntityCursor = notAvailable()
+
     override def getOrCreateRelTypeId(relTypeName: String): Int = notAvailable()
 
     override def nodeCursor(): NodeCursor = notAvailable()
 
     override def nodeLabelIndexCursor(): NodeLabelIndexCursor = notAvailable()
 
+    override def nodeValueIndexCursor(): NodeValueIndexCursor = notAvailable()
+
     override def relationshipTypeIndexCursor(): RelationshipTypeIndexCursor = notAvailable()
 
     override def traversalCursor(): RelationshipTraversalCursor = notAvailable()
+
+    override def propertyCursor(): PropertyCursor = notAvailable()
 
     override def scanCursor(): RelationshipScanCursor = notAvailable()
 
@@ -184,13 +245,14 @@ object StaticEvaluation {
       node: Long,
       dir: SemanticDirection,
       types: Array[Int]
-    ): ClosingLongIterator with RelationshipIterator = notAvailable()
+    ): ClosingRelationshipIterator = notAvailable()
 
     override def getRelationshipsByType(
       tokenReadSession: TokenReadSession,
       relType: Int,
-      indexOrder: IndexOrder
-    ): ClosingLongIterator with RelationshipIterator = notAvailable()
+      indexOrder: IndexOrder,
+      includeChangesFromThisTransaction: Boolean
+    ): ClosingRelationshipIterator = notAvailable()
 
     override def relationshipById(id: Long, startNode: Long, endNode: Long, `type`: Int): VirtualRelationshipValue =
       notAvailable()
@@ -263,9 +325,10 @@ object StaticEvaluation {
     ): IndexDescriptor = notAvailable()
 
     override def addVectorIndexRule(
-      entityId: Int,
+      entityIds: List[Int],
       entityType: EntityType,
       propertyKeyIds: Seq[Int],
+      additionalPropertyKeyIds: Seq[Int],
       name: Option[String],
       provider: Option[IndexProviderDescriptor],
       indexConfig: IndexConfig
@@ -288,6 +351,13 @@ object StaticEvaluation {
     override def constraintExists(matchFn: ConstraintDescriptor => Boolean, entityId: Int, properties: Int*): Boolean =
       notAvailable()
 
+    override def indexReferences(
+      entityId: Int,
+      entityType: EntityType,
+      properties: Int*
+    ): util.Iterator[IndexDescriptor] =
+      notAvailable()
+
     override def indexReference(
       indexType: IndexType,
       entityId: Int,
@@ -297,7 +367,8 @@ object StaticEvaluation {
 
     override def lookupIndexReference(entityType: EntityType): IndexDescriptor = notAvailable()
 
-    override def fulltextIndexReference(
+    override def semanticIndexReference(
+      indexType: IndexType,
       entityIds: List[Int],
       entityType: EntityType,
       properties: Int*
@@ -307,31 +378,47 @@ object StaticEvaluation {
       index: IndexReadSession,
       needsValues: Boolean,
       indexOrder: IndexOrder,
-      queries: Seq[PropertyIndexQuery]
+      queries: Seq[PropertyIndexQuery],
+      includeChangesFromThisTransaction: Boolean
     ): NodeValueIndexCursor = notAvailable()
+
+    override def nodeFulltextIndexSeek(
+      index: IndexReadSession,
+      constraints: IndexQueryConstraints,
+      query: PropertyIndexQuery.FulltextSearchPredicate
+    ): NodeValueIndexCursor = notAvailable()
+
+    override def relationshipFulltextIndexSeek(
+      index: IndexReadSession,
+      constraints: IndexQueryConstraints,
+      query: PropertyIndexQuery.FulltextSearchPredicate
+    ): RelationshipValueIndexCursor = notAvailable()
 
     override def nodeIndexSeekByContains(
       index: IndexReadSession,
       needsValues: Boolean,
       indexOrder: IndexOrder,
-      value: TextValue
+      value: TextValue,
+      includeChangesFromThisTransaction: Boolean
     ): NodeValueIndexCursor = notAvailable()
 
     override def nodeIndexSeekByEndsWith(
       index: IndexReadSession,
       needsValues: Boolean,
       indexOrder: IndexOrder,
-      value: TextValue
+      value: TextValue,
+      includeChangesFromThisTransaction: Boolean
     ): NodeValueIndexCursor = notAvailable()
 
     override def nodeIndexScan(
       index: IndexReadSession,
       needsValues: Boolean,
-      indexOrder: IndexOrder
+      indexOrder: IndexOrder,
+      includeChangesFromThisTransaction: Boolean
     ): NodeValueIndexCursor = notAvailable()
 
     override def nodeLockingUniqueIndexSeek(
-      index: IndexDescriptor,
+      index: IndexReadSession,
       queries: Seq[PropertyIndexQuery.ExactPredicate]
     ): NodeValueIndexCursor = notAvailable()
 
@@ -339,11 +426,12 @@ object StaticEvaluation {
       index: IndexReadSession,
       needsValues: Boolean,
       indexOrder: IndexOrder,
-      queries: Seq[PropertyIndexQuery]
+      queries: Seq[PropertyIndexQuery],
+      includeChangesFromThisTransaction: Boolean
     ): RelationshipValueIndexCursor = notAvailable()
 
     override def relationshipLockingUniqueIndexSeek(
-      index: IndexDescriptor,
+      index: IndexReadSession,
       queries: Seq[PropertyIndexQuery.ExactPredicate]
     ): RelationshipValueIndexCursor = notAvailable()
 
@@ -351,80 +439,35 @@ object StaticEvaluation {
       index: IndexReadSession,
       needsValues: Boolean,
       indexOrder: IndexOrder,
-      value: TextValue
+      value: TextValue,
+      includeChangesFromThisTransaction: Boolean
     ): RelationshipValueIndexCursor = notAvailable()
 
     override def relationshipIndexSeekByEndsWith(
       index: IndexReadSession,
       needsValues: Boolean,
       indexOrder: IndexOrder,
-      value: TextValue
+      value: TextValue,
+      includeChangesFromThisTransaction: Boolean
     ): RelationshipValueIndexCursor = notAvailable()
 
     override def relationshipIndexScan(
       index: IndexReadSession,
       needsValues: Boolean,
-      indexOrder: IndexOrder
+      indexOrder: IndexOrder,
+      includeChangesFromThisTransaction: Boolean
     ): RelationshipValueIndexCursor = notAvailable()
 
     override def getNodesByLabel(
       tokenReadSession: TokenReadSession,
       id: Int,
-      indexOrder: IndexOrder
+      indexOrder: IndexOrder,
+      includeChangesFromThisTransaction: Boolean
     ): ClosingLongIterator = notAvailable()
 
-    override def createNodeKeyConstraint(
-      labelId: Int,
-      propertyKeyIds: Seq[Int],
-      name: Option[String],
-      provider: Option[IndexProviderDescriptor]
-    ): Unit = notAvailable()
+    override def createConstraint(constraint: ConstraintCommand.Create): Unit = notAvailable()
 
-    override def createRelationshipKeyConstraint(
-      relTypeId: Int,
-      propertyKeyIds: Seq[Int],
-      name: Option[String],
-      provider: Option[IndexProviderDescriptor]
-    ): Unit = notAvailable()
-
-    override def createNodeUniqueConstraint(
-      labelId: Int,
-      propertyKeyIds: Seq[Int],
-      name: Option[String],
-      provider: Option[IndexProviderDescriptor]
-    ): Unit = notAvailable()
-
-    override def createRelationshipUniqueConstraint(
-      relTypeId: Int,
-      propertyKeyIds: Seq[Int],
-      name: Option[String],
-      provider: Option[IndexProviderDescriptor]
-    ): Unit = notAvailable()
-
-    override def createNodePropertyExistenceConstraint(labelId: Int, propertyKeyId: Int, name: Option[String]): Unit =
-      notAvailable()
-
-    override def createRelationshipPropertyExistenceConstraint(
-      relTypeId: Int,
-      propertyKeyId: Int,
-      name: Option[String]
-    ): Unit = notAvailable()
-
-    override def createNodePropertyTypeConstraint(
-      labelId: Int,
-      propertyKeyId: Int,
-      propertyTypes: PropertyTypeSet,
-      name: Option[String]
-    ): Unit = notAvailable()
-
-    override def createRelationshipPropertyTypeConstraint(
-      relTypeId: Int,
-      propertyKeyId: Int,
-      propertyTypes: PropertyTypeSet,
-      name: Option[String]
-    ): Unit = notAvailable()
-
-    override def dropNamedConstraint(name: String): Unit = notAvailable()
+    override def dropNamedConstraint(name: String, allowDependent: Boolean): Unit = notAvailable()
 
     override def getConstraintInformation(name: String): ConstraintInformation = notAvailable()
 
@@ -435,6 +478,13 @@ object StaticEvaluation {
     ): ConstraintInformation = notAvailable()
 
     override def getAllConstraints(): Map[ConstraintDescriptor, ConstraintInfo] = notAvailable()
+
+    override def getGeneratedNameForConstraint(
+      forNode: Boolean,
+      entityId: Int,
+      propertyIds: ArraySeq[Int],
+      descriptor: SchemaDescriptor => ConstraintDescriptor
+    ): String = notAvailable()
 
     override def getImportDataConnection(uri: URI): CharReadable = notAvailable()
 
@@ -555,40 +605,47 @@ object StaticEvaluation {
 
     override def relationshipDeletedInThisTransaction(id: Long): Boolean = notAvailable()
 
-    override def nodeGetOutgoingDegreeWithMax(maxDegree: Int, node: Long, nodeCursor: NodeCursor): Int = notAvailable()
-
-    override def nodeGetOutgoingDegreeWithMax(
-      maxDegree: Int,
-      node: Long,
-      relationship: Int,
-      nodeCursor: NodeCursor
-    ): Int = notAvailable()
-
-    override def nodeGetIncomingDegreeWithMax(maxDegree: Int, node: Long, nodeCursor: NodeCursor): Int = notAvailable()
-
-    override def nodeGetIncomingDegreeWithMax(
-      maxDegree: Int,
-      node: Long,
-      relationship: Int,
-      nodeCursor: NodeCursor
-    ): Int = notAvailable()
-
-    override def nodeGetTotalDegreeWithMax(maxDegree: Int, node: Long, nodeCursor: NodeCursor): Int = notAvailable()
-
-    override def nodeGetTotalDegreeWithMax(maxDegree: Int, node: Long, relationship: Int, nodeCursor: NodeCursor): Int =
+    override def nodeGetOutgoingDegreeWithMax(maxDegree: Long, node: Long, nodeCursor: NodeCursor): Long =
       notAvailable()
 
-    override def nodeGetOutgoingDegree(node: Long, nodeCursor: NodeCursor): Int = notAvailable()
+    override def nodeGetOutgoingDegreeWithMax(
+      maxDegree: Long,
+      node: Long,
+      relationship: Int,
+      nodeCursor: NodeCursor
+    ): Long = notAvailable()
 
-    override def nodeGetOutgoingDegree(node: Long, relationship: Int, nodeCursor: NodeCursor): Int = notAvailable()
+    override def nodeGetIncomingDegreeWithMax(maxDegree: Long, node: Long, nodeCursor: NodeCursor): Long =
+      notAvailable()
 
-    override def nodeGetIncomingDegree(node: Long, nodeCursor: NodeCursor): Int = notAvailable()
+    override def nodeGetIncomingDegreeWithMax(
+      maxDegree: Long,
+      node: Long,
+      relationship: Int,
+      nodeCursor: NodeCursor
+    ): Long = notAvailable()
 
-    override def nodeGetIncomingDegree(node: Long, relationship: Int, nodeCursor: NodeCursor): Int = notAvailable()
+    override def nodeGetTotalDegreeWithMax(maxDegree: Long, node: Long, nodeCursor: NodeCursor): Long = notAvailable()
 
-    override def nodeGetTotalDegree(node: Long, nodeCursor: NodeCursor): Int = notAvailable()
+    override def nodeGetTotalDegreeWithMax(
+      maxDegree: Long,
+      node: Long,
+      relationship: Int,
+      nodeCursor: NodeCursor
+    ): Long =
+      notAvailable()
 
-    override def nodeGetTotalDegree(node: Long, relationship: Int, nodeCursor: NodeCursor): Int = notAvailable()
+    override def nodeGetOutgoingDegree(node: Long, nodeCursor: NodeCursor): Long = notAvailable()
+
+    override def nodeGetOutgoingDegree(node: Long, relationship: Int, nodeCursor: NodeCursor): Long = notAvailable()
+
+    override def nodeGetIncomingDegree(node: Long, nodeCursor: NodeCursor): Long = notAvailable()
+
+    override def nodeGetIncomingDegree(node: Long, relationship: Int, nodeCursor: NodeCursor): Long = notAvailable()
+
+    override def nodeGetTotalDegree(node: Long, nodeCursor: NodeCursor): Long = notAvailable()
+
+    override def nodeGetTotalDegree(node: Long, relationship: Int, nodeCursor: NodeCursor): Long = notAvailable()
 
     override def singleNode(id: Long, cursor: NodeCursor): Unit = notAvailable()
 
@@ -637,9 +694,14 @@ object StaticEvaluation {
 
     override def callFunction(id: Int, args: Array[AnyValue], ctx: ProcedureCallContext): AnyValue = notAvailable()
 
-    override def getTxStateNodePropertyOrNull(nodeId: Long, propertyKey: Int): Value = notAvailable()
+    override def getTxStateNodePropertyOrNull(nodeId: Long, propertyKey: Int, failOnDeletedNode: Boolean): Value =
+      notAvailable()
 
-    override def getTxStateRelationshipPropertyOrNull(relId: Long, propertyKey: Int): Value = notAvailable()
+    override def getTxStateRelationshipPropertyOrNull(
+      relId: Long,
+      propertyKey: Int,
+      faiOnDeletedRelationship: Boolean
+    ): Value = notAvailable()
 
     override def getTransactionType: KernelTransaction.Type = notAvailable()
 
@@ -649,9 +711,13 @@ object StaticEvaluation {
 
     override def systemGraph: GraphDatabaseService = notAvailable()
 
+    override def getShowDatabaseService: ShowDatabaseService = notAvailable()
+
     override def jobScheduler: JobScheduler = notAvailable()
 
     override def logProvider: InternalLogProvider = notAvailable()
+
+    override def internalUsageStats: InternalUsageStats = notAvailable()
 
     override def providedLanguageFunctions: Seq[FunctionInformation] = notAvailable()
 
@@ -660,18 +726,6 @@ object StaticEvaluation {
     override def getConfig: Config = notAvailable()
 
     override def entityTransformer: EntityTransformer = notAvailable()
-
-    override def procedureCallContext(fcnId: Int, memoryTracker: MemoryTracker): ProcedureCallContext = {
-      new ProcedureCallContext(fcnId, true, "", false, "", memoryTracker)
-    }
-
-    override def procedureCallContext(
-      procId: Int,
-      outputFields: Array[String],
-      m: MemoryTracker
-    ): ProcedureCallContext = {
-      new ProcedureCallContext(procId, outputFields, true, "", false, "", m)
-    }
   }
 
 }

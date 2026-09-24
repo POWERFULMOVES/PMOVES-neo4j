@@ -27,7 +27,11 @@ import io.netty.handler.ssl.SslContext;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.StandardOpenOption;
+import java.util.Set;
+import org.neo4j.bolt.protocol.common.BoltProtocol;
+import org.neo4j.bolt.protocol.common.connector.connection.Connection;
 import org.neo4j.bolt.protocol.common.connector.netty.AbstractNettyConnector;
+import org.neo4j.bolt.protocol.common.handler.messages.GoodbyeMessageHandler;
 import org.neo4j.logging.InternalLog;
 import org.neo4j.logging.InternalLogProvider;
 import org.neo4j.memory.HeapEstimator;
@@ -64,10 +68,6 @@ public class BoltChannelInitializer extends ChannelInitializer<Channel> {
     protected void initChannel(Channel ch) {
         log.debug("Incoming connection from %s", ch.remoteAddress());
 
-        // ensure that this newly created channel makes use of the designated buffer allocator for its receive and send
-        // buffers respectively
-        ch.config().setAllocator(this.allocator);
-
         // acquire a new connection from our connector and register it for use with the network channel
         var connection = this.connector.createConnection(ch);
 
@@ -77,9 +77,15 @@ public class BoltChannelInitializer extends ChannelInitializer<Channel> {
                 .memoryTracker()
                 .allocateHeap(HeapEstimator.sizeOf(ch)
                         + TransportSelectionHandler.SHALLOW_SIZE
+                        + DeadlockReportingHandler.SHALLOW_SIZE
                         + TrafficAccountantHandler.SHALLOW_SIZE);
 
-        ch.pipeline().addLast(new TrafficAccountantHandler(this.connector.trafficAccountant()));
+        ch.pipeline()
+                .addLast(new DeadlockReportingHandler(this.connector.threadAccountant()))
+                .addLast(new TrafficAccountantHandler(this.connector.trafficAccountant()));
+
+        // PROXY protocol detection is now handled by TransportSelectionHandler to avoid
+        // conflicts with byte accumulation requirements
 
         // when enabled, also register a protocol capture handler which writes all network
         // communication for this channel into a dedicated file
@@ -112,8 +118,29 @@ public class BoltChannelInitializer extends ChannelInitializer<Channel> {
             }
         }
 
-        ch.pipeline().addLast(new TransportSelectionHandler(this.logging));
+        var protocol = initializeProtocolPipeline(ch, connection);
 
         connection.notifyListeners(listener -> listener.onNetworkPipelineInitialized(ch.pipeline()));
+        if (protocol != null) {
+            connection.notifyListeners(listener -> listener.onProtocolSelected(protocol));
+        }
+    }
+
+    private BoltProtocol initializeProtocolPipeline(Channel ch, Connection connection) {
+        if (this.connector.configuration().enableJavaObjectMessages()) {
+            var preconfiguredVersion = this.connector.configuration().javaObjectProtocolVersion();
+            var protocol =
+                    this.connector.protocolRegistry().get(preconfiguredVersion).orElseThrow();
+            connection.selectProtocol(protocol, Set.of());
+
+            ch.pipeline()
+                    .addLast(GoodbyeMessageHandler.HANDLER_NAME, new GoodbyeMessageHandler(logging))
+                    .addLast("requestHandler", new RequestHandler(logging))
+                    .addLast(HouseKeeperHandler.HANDLER_NAME, new HouseKeeperHandler(logging));
+            return protocol;
+        }
+
+        ch.pipeline().addLast(new TransportSelectionHandler(this.logging));
+        return null;
     }
 }

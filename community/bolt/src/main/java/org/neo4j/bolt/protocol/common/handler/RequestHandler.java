@@ -24,7 +24,7 @@ import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.handler.codec.DecoderException;
 import org.neo4j.bolt.protocol.common.connector.connection.Connection;
 import org.neo4j.bolt.protocol.common.message.Error;
-import org.neo4j.bolt.protocol.common.message.request.RequestMessage;
+import org.neo4j.boltmessages.request.RequestMessage;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.logging.InternalLog;
 import org.neo4j.logging.InternalLogProvider;
@@ -83,6 +83,9 @@ public class RequestHandler extends SimpleChannelInboundHandler<RequestMessage> 
 
         // all status bearing errors are enqueued on the state machine for reporting (e.g. as a FAILURE message)
         var error = Error.from(cause);
-        connection.submit((fsm, responseHandler) -> responseHandler.onFailure(error));
+        connection.submit((fsm, responseHandler) -> {
+            fsm.fail();
+            responseHandler.onFailure(error);
+        });
     }
 }

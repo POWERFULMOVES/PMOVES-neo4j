@@ -17,30 +17,32 @@
 package org.neo4j.cypher.internal.ast.factory.query
 
 import org.neo4j.cypher.internal.ast
+import org.neo4j.cypher.internal.ast.AdditiveProjection
 import org.neo4j.cypher.internal.ast.AliasedReturnItem
 import org.neo4j.cypher.internal.ast.AscSortItem
 import org.neo4j.cypher.internal.ast.Clause
+import org.neo4j.cypher.internal.ast.FreeProjection
 import org.neo4j.cypher.internal.ast.OrderBy
 import org.neo4j.cypher.internal.ast.Statements
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
+import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
 import org.neo4j.cypher.internal.ast.test.util.AstParsingTestBase
 
 class ProjectionClauseParserTest extends AstParsingTestBase {
 
   test("WITH *") {
-    parsesTo[Clause](ast.With(ast.ReturnItems(includeExisting = true, Seq.empty)(pos))(pos))
+    parsesTo[Clause](ast.With(ast.ReturnItems(AdditiveProjection, Seq.empty)(pos))(pos))
   }
 
   test("WITH 1 AS a") {
     parsesTo[Clause](ast.With(ast.ReturnItems(
-      includeExisting = false,
+      FreeProjection,
       Seq(ast.AliasedReturnItem(literalInt(1), varFor("a"))(pos))
     )(pos))(pos))
   }
 
   test("WITH *, 1 AS a") {
     parsesTo[Clause](ast.With(ast.ReturnItems(
-      includeExisting = true,
+      AdditiveProjection,
       Seq(ast.AliasedReturnItem(literalInt(1), varFor("a"))(pos))
     )(pos))(pos))
   }
@@ -48,9 +50,10 @@ class ProjectionClauseParserTest extends AstParsingTestBase {
   test("WITH * OFFSET 1 LIMIT 1") {
     parsesTo[Clause](ast.With(
       distinct = false,
-      ast.ReturnItems(includeExisting = true, Seq.empty)(pos),
+      ast.ReturnItems(AdditiveProjection, Seq.empty)(pos),
+      groupBy = None,
       orderBy = None,
-      skip = Some(skip(1)),
+      skip = Some(offset(1)),
       limit = Some(limit(1)),
       where = None
     )(pos))
@@ -60,11 +63,12 @@ class ProjectionClauseParserTest extends AstParsingTestBase {
     parsesTo[Clause](ast.With(
       distinct = false,
       ast.ReturnItems(
-        includeExisting = false,
+        FreeProjection,
         Seq(ast.AliasedReturnItem(literalInt(1), varFor("a"))(pos))
       )(pos),
+      groupBy = None,
       orderBy = Some(OrderBy(List(AscSortItem(varFor(name = "a"))(pos)))(pos)),
-      skip = Some(skip(1)),
+      skip = Some(offset(1)),
       limit = Some(limit(1)),
       where = None
     )(pos))
@@ -74,9 +78,10 @@ class ProjectionClauseParserTest extends AstParsingTestBase {
     parsesTo[Clause](ast.With(
       distinct = false,
       ast.ReturnItems(
-        includeExisting = false,
+        FreeProjection,
         Seq(ast.AliasedReturnItem(literalInt(1), varFor("a"))(pos))
       )(pos),
+      groupBy = None,
       orderBy = Some(OrderBy(List(AscSortItem(varFor(name = "a"))(pos)))(pos)),
       skip = Some(skip(1)),
       limit = Some(limit(1)),
@@ -88,21 +93,26 @@ class ProjectionClauseParserTest extends AstParsingTestBase {
     parsesTo[Clause](ast.With(
       distinct = false,
       ast.ReturnItems(
-        includeExisting = true,
+        AdditiveProjection,
         Seq(ast.AliasedReturnItem(literalInt(1), varFor("a"))(pos))
       )(pos),
+      groupBy = None,
       orderBy = None,
-      skip = Some(skip(1)),
+      skip = Some(offset(1)),
       limit = Some(limit(1)),
       where = None
     )(pos))
   }
 
   test("WITH ") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '': expected \"*\", \"DISTINCT\" or an expression")
-      case _ => _.withMessage(
+    parseIn[Statements] {
+      case Cypher5 => _.withSyntaxError(
           """Invalid input '': expected an expression, '*' or 'DISTINCT' (line 1, column 5 (offset: 4))
+            |"WITH"
+            |     ^""".stripMargin
+        )
+      case _ => _.withSyntaxError(
+          """Invalid input '': expected an expression, '*', 'ALL' or 'DISTINCT' (line 1, column 5 (offset: 4))
             |"WITH"
             |     ^""".stripMargin
         )
@@ -110,19 +120,19 @@ class ProjectionClauseParserTest extends AstParsingTestBase {
   }
 
   test("RETURN *") {
-    parsesTo[Clause](ast.Return(ast.ReturnItems(includeExisting = true, Seq.empty)(pos))(pos))
+    parsesTo[Clause](ast.Return(ast.ReturnItems(AdditiveProjection, Seq.empty)(pos))(pos))
   }
 
   test("RETURN 1 AS a") {
     parsesTo[Clause](ast.Return(ast.ReturnItems(
-      includeExisting = false,
+      FreeProjection,
       Seq(ast.AliasedReturnItem(literalInt(1), varFor("a"))(pos))
     )(pos))(pos))
   }
 
   test("RETURN *, 1 AS a") {
     parsesTo[Clause](ast.Return(ast.ReturnItems(
-      includeExisting = true,
+      AdditiveProjection,
       Seq(ast.AliasedReturnItem(literalInt(1), varFor("a"))(pos))
     )(pos))(pos))
   }
@@ -130,7 +140,8 @@ class ProjectionClauseParserTest extends AstParsingTestBase {
   test("RETURN * SKIP 1 LIMIT 1") {
     parsesTo[Clause](ast.Return(
       distinct = false,
-      ast.ReturnItems(includeExisting = true, Seq.empty)(pos),
+      ast.ReturnItems(AdditiveProjection, Seq.empty)(pos),
+      groupBy = None,
       orderBy = None,
       skip = Some(skip(1)),
       limit = Some(limit(1))
@@ -141,7 +152,7 @@ class ProjectionClauseParserTest extends AstParsingTestBase {
     parsesTo[Clause](ast.Return(
       distinct = false,
       ast.ReturnItems(
-        includeExisting = false,
+        FreeProjection,
         items = List(
           AliasedReturnItem(
             literalInt(1),
@@ -149,8 +160,9 @@ class ProjectionClauseParserTest extends AstParsingTestBase {
           )(pos)
         )
       )(pos),
+      groupBy = None,
       orderBy = Some(OrderBy(List(AscSortItem(varFor(name = "a"))(pos)))(pos)),
-      skip = Some(skip(1)),
+      skip = Some(offset(1)),
       limit = Some(limit(1))
     )(pos))
   }
@@ -159,7 +171,7 @@ class ProjectionClauseParserTest extends AstParsingTestBase {
     parsesTo[Clause](ast.Return(
       distinct = false,
       ast.ReturnItems(
-        includeExisting = false,
+        FreeProjection,
         items = List(
           AliasedReturnItem(
             literalInt(1),
@@ -167,6 +179,7 @@ class ProjectionClauseParserTest extends AstParsingTestBase {
           )(pos)
         )
       )(pos),
+      groupBy = None,
       orderBy = Some(OrderBy(List(AscSortItem(varFor(name = "a"))(pos)))(pos)),
       skip = Some(skip(1)),
       limit = Some(limit(1))
@@ -177,7 +190,7 @@ class ProjectionClauseParserTest extends AstParsingTestBase {
     parsesTo[Clause](ast.Return(
       distinct = false,
       ast.ReturnItems(
-        includeExisting = true,
+        AdditiveProjection,
         items = List(
           AliasedReturnItem(
             literalInt(1),
@@ -185,17 +198,22 @@ class ProjectionClauseParserTest extends AstParsingTestBase {
           )(pos)
         )
       )(pos),
+      groupBy = None,
       orderBy = Some(OrderBy(List(AscSortItem(varFor(name = "a"))(pos)))(pos)),
-      skip = Some(skip(1)),
+      skip = Some(offset(1)),
       limit = Some(limit(1))
     )(pos))
   }
 
   test("RETURN ") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '': expected \"*\", \"DISTINCT\" or an expression")
-      case _ => _.withMessage(
+    parseIn[Statements] {
+      case Cypher5 => _.withSyntaxError(
           """Invalid input '': expected an expression, '*' or 'DISTINCT' (line 1, column 7 (offset: 6))
+            |"RETURN"
+            |       ^""".stripMargin
+        )
+      case _ => _.withSyntaxError(
+          """Invalid input '': expected an expression, '*', 'ALL' or 'DISTINCT' (line 1, column 7 (offset: 6))
             |"RETURN"
             |       ^""".stripMargin
         )
@@ -203,13 +221,10 @@ class ProjectionClauseParserTest extends AstParsingTestBase {
   }
 
   test("RETURN GRAPH *") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '': expected \"+\" or \"-\"")
-      case _ => _.withMessage(
-          """Invalid input '': expected an expression (line 1, column 15 (offset: 14))
-            |"RETURN GRAPH *"
-            |               ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withMessage(
+      """Invalid input '': expected an expression (line 1, column 15 (offset: 14))
+        |"RETURN GRAPH *"
+        |               ^""".stripMargin
+    )
   }
 }

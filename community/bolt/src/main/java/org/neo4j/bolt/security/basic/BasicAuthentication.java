@@ -24,8 +24,9 @@ import org.neo4j.bolt.security.Authentication;
 import org.neo4j.bolt.security.AuthenticationResult;
 import org.neo4j.bolt.security.error.AuthenticationException;
 import org.neo4j.internal.kernel.api.connectioninfo.ClientConnectionInfo;
+import org.neo4j.internal.kernel.api.security.AbstractSecurityLog;
 import org.neo4j.internal.kernel.api.security.LoginContext;
-import org.neo4j.kernel.api.exceptions.Status;
+import org.neo4j.internal.kernel.api.security.SecurityExceptionLogger;
 import org.neo4j.kernel.api.security.AuthManager;
 import org.neo4j.kernel.api.security.exception.InvalidAuthTokenException;
 
@@ -34,9 +35,11 @@ import org.neo4j.kernel.api.security.exception.InvalidAuthTokenException;
  */
 public class BasicAuthentication implements Authentication {
     private final AuthManager authManager;
+    private final SecurityExceptionLogger exceptionLog;
 
-    public BasicAuthentication(AuthManager authManager) {
+    public BasicAuthentication(AuthManager authManager, AbstractSecurityLog securityLog) {
         this.authManager = authManager;
+        exceptionLog = new SecurityExceptionLogger(securityLog);
     }
 
     @Override
@@ -50,14 +53,15 @@ public class BasicAuthentication implements Authentication {
                 case PASSWORD_CHANGE_REQUIRED:
                     break;
                 case TOO_MANY_ATTEMPTS:
-                    throw new AuthenticationException(Status.Security.AuthenticationRateLimit);
+                    throw exceptionLog.logAndGet(AuthenticationException.rateLimit());
                 default:
-                    throw AuthenticationException.unauthorized();
+                    throw exceptionLog.logAndGet(AuthenticationException.unauthorized());
             }
 
             return new BasicAuthenticationResult(loginContext);
         } catch (InvalidAuthTokenException e) {
-            throw new AuthenticationException(e.status(), e.getMessage());
+            throw exceptionLog.logAndGet(
+                    new AuthenticationException(e.gqlStatusObject(), e.status(), e.legacyMessage()));
         }
     }
 

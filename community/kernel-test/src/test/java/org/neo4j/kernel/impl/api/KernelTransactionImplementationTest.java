@@ -89,9 +89,9 @@ import org.neo4j.internal.kernel.api.exceptions.TransactionFailureException;
 import org.neo4j.internal.kernel.api.security.LoginContext;
 import org.neo4j.internal.kernel.api.security.SecurityContext;
 import org.neo4j.internal.schema.SchemaDescriptors;
-import org.neo4j.io.pagecache.PageSwapper;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.swapper.PageSwapper;
 import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
 import org.neo4j.io.pagecache.tracing.cursor.DefaultPageCursorTracer;
 import org.neo4j.io.pagecache.tracing.cursor.PageCursorTracer;
@@ -108,7 +108,6 @@ import org.neo4j.kernel.api.query.ExecutingQuery;
 import org.neo4j.kernel.api.security.AnonymousContext;
 import org.neo4j.kernel.api.txstate.TransactionState;
 import org.neo4j.kernel.database.DatabaseIdFactory;
-import org.neo4j.kernel.impl.api.state.TxState;
 import org.neo4j.kernel.impl.api.transaction.trace.TransactionInitializationTrace;
 import org.neo4j.kernel.impl.locking.LockManager;
 import org.neo4j.kernel.impl.monitoring.TransactionMonitor;
@@ -403,8 +402,7 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
         final KernelTransaction transaction = newTransaction(loginContext(isWriteTx));
         transactionInitializer.accept(transaction);
 
-        var executorService = Executors.newSingleThreadExecutor();
-        try {
+        try (var executorService = Executors.newSingleThreadExecutor()) {
             Future<?> terminationFuture = executorService.submit(() -> {
                 latch.waitForAllToStart();
                 transaction.markForTermination(Status.General.UnknownError);
@@ -416,8 +414,6 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
 
             assertNull(terminationFuture.get(1, TimeUnit.MINUTES));
             assertThrows(TransactionTerminatedException.class, transaction::commit);
-        } finally {
-            executorService.shutdownNow();
         }
 
         // THEN
@@ -452,7 +448,8 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
                     DEFAULT_TX_TIMEOUT,
                     1L,
                     EMBEDDED_CONNECTION,
-                    mock(ProcedureView.class));
+                    mock(ProcedureView.class),
+                    startingTime);
             transaction.txState().nodeDoCreate(1L);
             // WHEN committing it at a later point
             clock.forward(5, MILLISECONDS);
@@ -609,7 +606,7 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
     @Test
     void transactionWithCustomTimeout() {
         long transactionTimeout = 5L;
-        KernelTransactionImplementation transaction = newTransaction(transactionTimeout);
+        KernelTransactionImplementation transaction = newTransaction(transactionTimeout, 0L);
         assertEquals(
                 new TransactionTimeout(Duration.ofMillis(transactionTimeout), TransactionTimedOutClientConfiguration),
                 transaction.timeout(),
@@ -618,9 +615,12 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
 
     @Test
     void transactionStartTime() {
-        long startTime = clock.forward(5, TimeUnit.MINUTES).millis();
-        KernelTransactionImplementation transaction = newTransaction(AUTH_DISABLED);
-        assertEquals(startTime, transaction.startTime(), "Transaction start time should be the same as clock time.");
+        long startTime = 1234L;
+        KernelTransactionImplementation transaction = newTransaction(AUTH_DISABLED, startTime);
+        assertEquals(
+                startTime,
+                transaction.startTime(),
+                "Transaction start time should be the same as the `startTimeMillis` parameter supplied to `KernelTransactionImplementation.initialize`.");
     }
 
     @ParameterizedTest
@@ -630,7 +630,8 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
         long userTransactionId = 10;
         Status.Transaction terminationReason = Status.Transaction.Terminated;
 
-        KernelTransactionImplementation tx = newTransaction(2L, AUTH_DISABLED, DEFAULT_TX_TIMEOUT, userTransactionId);
+        KernelTransactionImplementation tx =
+                newTransaction(2L, AUTH_DISABLED, DEFAULT_TX_TIMEOUT, userTransactionId, 0L);
 
         assertTrue(tx.markForTermination(userTransactionId, terminationReason));
 
@@ -645,7 +646,8 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
         long wrongUserTransactionId = userTransactionId + 2;
         Status.Transaction terminationReason = Status.Transaction.Terminated;
 
-        KernelTransactionImplementation tx = newTransaction(2L, AUTH_DISABLED, DEFAULT_TX_TIMEOUT, userTransactionId);
+        KernelTransactionImplementation tx =
+                newTransaction(2L, AUTH_DISABLED, DEFAULT_TX_TIMEOUT, userTransactionId, 0L);
 
         assertFalse(tx.markForTermination(wrongUserTransactionId, terminationReason));
 
@@ -654,7 +656,7 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
 
     @Test
     void resetTransactionStatisticsOnRelease() throws TransactionFailureException {
-        KernelTransactionImplementation transaction = newTransaction(1000);
+        KernelTransactionImplementation transaction = newTransaction(1000, 0);
         transaction.getStatistics().addWaitingTime(1);
         transaction.getStatistics().addWaitingTime(1);
         assertEquals(2, transaction.getStatistics().getWaitingTimeNanos(0));
@@ -664,7 +666,7 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
 
     @Test
     void reportTransactionStatistics() {
-        KernelTransactionImplementation transaction = newTransaction(100);
+        KernelTransactionImplementation transaction = newTransaction(100, 0);
         transaction.memoryTracker().allocateHeap(13);
         transaction.memoryTracker().allocateNative(14);
         KernelTransactionImplementation.Statistics statistics = new KernelTransactionImplementation.Statistics(
@@ -713,7 +715,8 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
                 DEFAULT_TX_TIMEOUT,
                 1L,
                 EMBEDDED_CONNECTION,
-                mock(ProcedureView.class));
+                mock(ProcedureView.class),
+                0L);
         assertEquals("KernelTransaction[lease:" + leaseId + "]", transaction.toString());
     }
 
@@ -729,7 +732,8 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
 
             @Override
             public void ensureValid() throws LeaseException {
-                throw new LeaseException("Invalid lease!", TransactionValidationFailed);
+                throw LeaseException.internalError(
+                        this.getClass().getSimpleName(), "Invalid lease!", TransactionValidationFailed);
             }
         });
         var transaction = newNotInitializedTransaction(leaseService);
@@ -740,7 +744,8 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
                 DEFAULT_TX_TIMEOUT,
                 1L,
                 EMBEDDED_CONNECTION,
-                mock(ProcedureView.class));
+                mock(ProcedureView.class),
+                0L);
 
         // when / then
         assertThrows(LeaseException.class, transaction::txState);
@@ -762,11 +767,18 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
                 DEFAULT_TX_TIMEOUT,
                 1L,
                 EMBEDDED_CONNECTION,
-                mock(ProcedureView.class));
+                mock(ProcedureView.class),
+                0L);
 
         // when / then
         var rte = assertThrows(RuntimeException.class, transaction::txState);
         assertThat(rte).hasCauseInstanceOf(WriteOnReadOnlyAccessDbException.class);
+        var cause = (WriteOnReadOnlyAccessDbException) rte.getCause();
+        assertThat(cause.gqlStatus()).isEqualTo("42N18");
+        assertThat(cause.statusDescription())
+                .isEqualTo(
+                        "error: syntax error or access rule violation - read-only database. The database is in read-only mode.");
+        assertThat(cause.getCause()).isNull();
     }
 
     @Test
@@ -782,7 +794,8 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
                 DEFAULT_TX_TIMEOUT,
                 1L,
                 EMBEDDED_CONNECTION,
-                mock(ProcedureView.class));
+                mock(ProcedureView.class),
+                0L);
 
         verify(config, times(3)).addListener(any(), any());
 
@@ -795,7 +808,7 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
     @Test
     void dynamicChangeTransactionHeapLimit() throws TransactionFailureException {
         config.set(memory_transaction_max_size, mebiBytes(2));
-        try (KernelTransactionImplementation transaction = newTransaction(1000)) {
+        try (KernelTransactionImplementation transaction = newTransaction(1000, 0)) {
             // Limit should prevent this from succeeding
             assertThrows(
                     MemoryLimitExceededException.class,
@@ -811,7 +824,8 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
                     DEFAULT_TX_TIMEOUT,
                     1L,
                     EMBEDDED_CONNECTION,
-                    mock(ProcedureView.class));
+                    mock(ProcedureView.class),
+                    0L);
 
             transaction.memoryTracker().allocateHeap(mebiBytes(3));
         }
@@ -820,47 +834,47 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
     @Test
     void transactionExecutionContexts() throws TransactionFailureException, ExecutionException, InterruptedException {
         int workerCount = 4;
-        ExecutorService executorService = Executors.newFixedThreadPool(workerCount);
-
-        try (var transaction = newTransaction(AUTH_DISABLED);
-                var statement = transaction.acquireStatement()) {
-            List<ExecutionContext> executionContexts = new ArrayList<>(workerCount);
-            List<Future<?>> futures = new ArrayList<>(workerCount);
-            for (int i = 0; i < workerCount; i++) {
-                executionContexts.add(transaction.createExecutionContext());
-            }
-            for (int i = 0; i < workerCount; i++) {
-                ExecutionContext executionContext = executionContexts.get(i);
-                int iterations = i;
-                futures.add(executorService.submit(() -> {
-                    try {
-                        PageCursorTracer cursorTracer =
-                                executionContext.cursorContext().getCursorTracer();
-                        for (int j = 0; j <= iterations; j++) {
-                            PageSwapper swapper = mock(PageSwapper.class, RETURNS_MOCKS);
-                            try (var pinEvent = cursorTracer.beginPin(false, 1, swapper)) {
-                                try (var pageFaultEvent = pinEvent.beginPageFault(1, swapper)) {
-                                    pageFaultEvent.addBytesRead(42);
+        try (ExecutorService executorService = Executors.newFixedThreadPool(workerCount)) {
+            try (var transaction = newTransaction(AUTH_DISABLED);
+                    var statement = transaction.acquireStatement()) {
+                List<ExecutionContext> executionContexts = new ArrayList<>(workerCount);
+                List<Future<?>> futures = new ArrayList<>(workerCount);
+                for (int i = 0; i < workerCount; i++) {
+                    executionContexts.add(transaction.createExecutionContext());
+                }
+                for (int i = 0; i < workerCount; i++) {
+                    ExecutionContext executionContext = executionContexts.get(i);
+                    int iterations = i;
+                    futures.add(executorService.submit(() -> {
+                        try {
+                            PageCursorTracer cursorTracer =
+                                    executionContext.cursorContext().getCursorTracer();
+                            for (int j = 0; j <= iterations; j++) {
+                                PageSwapper swapper = mock(PageSwapper.class, RETURNS_MOCKS);
+                                try (var pinEvent = cursorTracer.beginPin(false, 1, swapper)) {
+                                    try (var pageFaultEvent = pinEvent.beginPageFault(1, swapper)) {
+                                        pageFaultEvent.addBytesRead(42);
+                                    }
                                 }
+                                cursorTracer.unpin(1, swapper);
                             }
-                            cursorTracer.unpin(1, swapper);
+                        } finally {
+                            executionContext.complete();
                         }
-                    } finally {
-                        executionContext.complete();
-                    }
-                }));
+                    }));
+                }
+                Futures.getAll(futures);
+                closeAllUnchecked(executionContexts);
+
+                PageCursorTracer transactionCursor = transaction.cursorContext().getCursorTracer();
+
+                assertEquals(10, transactionCursor.pins());
+                assertEquals(10, transactionCursor.unpins());
+                assertEquals(420, transactionCursor.bytesRead());
+            } finally {
+                executorService.shutdown();
+                assertTrue(executorService.awaitTermination(1, MINUTES));
             }
-            Futures.getAll(futures);
-            closeAllUnchecked(executionContexts);
-
-            PageCursorTracer transactionCursor = transaction.cursorContext().getCursorTracer();
-
-            assertEquals(10, transactionCursor.pins());
-            assertEquals(10, transactionCursor.unpins());
-            assertEquals(420, transactionCursor.bytesRead());
-        } finally {
-            executorService.shutdown();
-            assertTrue(executorService.awaitTermination(1, MINUTES));
         }
     }
 
@@ -874,10 +888,7 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
         @SuppressWarnings("resource")
         final var stateVisitor = mock(TxStateVisitor.class);
 
-        final var storeReader = mock(StorageReader.class);
-        when(storeReader.constraintsGetAll()).thenReturn(Collections.emptyIterator());
-
-        when(storageEngine.newReader()).thenReturn(storeReader);
+        when(storageReader.constraintsGetAll()).thenReturn(Collections.emptyIterator());
         when(storageEngine.createCommands(
                         any(TransactionState.class),
                         any(StorageReader.class),
@@ -906,8 +917,9 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
                     DEFAULT_TX_TIMEOUT,
                     1L,
                     EMBEDDED_CONNECTION,
-                    mock(ProcedureView.class));
-            assertThat(((TxState) transaction.txState()).enrichmentMode()).isEqualTo(mode);
+                    mock(ProcedureView.class),
+                    0L);
+            assertThat((transaction.txState()).enrichmentMode()).isEqualTo(mode);
             if (createNode) {
                 transaction.dataWrite().nodeCreate();
             } else {
@@ -947,6 +959,7 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
                 AUTH_DISABLED,
                 new TransactionTimeout(Duration.ofSeconds(1), TransactionTimedOutClientConfiguration),
                 1L,
+                0L,
                 transaction);
         assertThatCode(transaction::commit).doesNotThrowAnyException();
     }
@@ -960,6 +973,7 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
                 AUTH_DISABLED,
                 new TransactionTimeout(Duration.ofSeconds(1), TransactionTimedOutClientConfiguration),
                 1L,
+                0L,
                 transaction);
         RuntimeException foo = new RuntimeException("foo");
         doThrow(foo).when(locksClient).close();
@@ -1072,27 +1086,36 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
 
     public static Stream<Arguments> locksTracingParameter() {
         return Stream.of(
-                lockTracerParams(l -> l.acquireExclusiveNodeLock(13), (sl, lc, lt) -> verify(sl)
-                        .acquireExclusiveNodeLock(same(lt), anyLong())),
-                lockTracerParams(l -> l.acquireExclusiveRelationshipLock(13), (sl, lc, lt) -> verify(sl)
-                        .acquireExclusiveRelationshipLock(same(lt), anyLong())),
-                lockTracerParams(l -> l.acquireSharedNodeLock(13), (sl, lc, lt) -> verify(sl)
-                        .acquireSharedNodeLock(same(lt), anyLong())),
-                lockTracerParams(l -> l.acquireSharedRelationshipLock(13), (sl, lc, lt) -> verify(sl)
-                        .acquireSharedRelationshipLock(same(lt), anyLong())),
-                lockTracerParams(l -> l.acquireSharedLookupLock(EntityType.NODE), (sl, lc, lt) -> verify(lc)
-                        .acquireShared(same(lt), any(), anyLong())),
+                lockTracerParams(
+                        l -> l.acquireExclusiveNodeLock(13),
+                        (sl, lc, lt) -> verify(sl).acquireExclusiveNodeLock(same(lt), anyLong())),
+                lockTracerParams(
+                        l -> l.acquireExclusiveRelationshipLock(13),
+                        (sl, lc, lt) -> verify(sl).acquireExclusiveRelationshipLock(same(lt), anyLong())),
+                lockTracerParams(
+                        l -> l.acquireSharedNodeLock(13),
+                        (sl, lc, lt) -> verify(sl).acquireSharedNodeLock(same(lt), anyLong())),
+                lockTracerParams(
+                        l -> l.acquireSharedRelationshipLock(13),
+                        (sl, lc, lt) -> verify(sl).acquireSharedRelationshipLock(same(lt), anyLong())),
+                lockTracerParams(
+                        l -> l.acquireSharedLookupLock(EntityType.NODE),
+                        (sl, lc, lt) -> verify(lc).acquireShared(same(lt), any(), anyLong())),
                 lockTracerParams(
                         l -> l.acquireSharedSchemaLock(() -> SchemaDescriptors.forLabel(13, 13)),
                         (sl, lc, lt) -> verify(lc).acquireShared(same(lt), any(), anyLong())),
-                lockTracerParams(l -> l.acquireSharedLabelLock(13), (sl, lc, lt) -> verify(lc)
-                        .acquireShared(same(lt), any(), anyLong())),
-                lockTracerParams(l -> l.acquireSharedRelationshipTypeLock(13), (sl, lc, lt) -> verify(lc)
-                        .acquireShared(same(lt), any(), anyLong())),
-                lockTracerParams(l -> l.acquireSharedIndexEntryLock(13), (sl, lc, lt) -> verify(lc)
-                        .acquireShared(same(lt), any(), anyLong())),
-                lockTracerParams(l -> l.acquireExclusiveIndexEntryLock(13), (sl, lc, lt) -> verify(lc)
-                        .acquireExclusive(same(lt), any(), anyLong())));
+                lockTracerParams(
+                        l -> l.acquireSharedLabelLock(13),
+                        (sl, lc, lt) -> verify(lc).acquireShared(same(lt), any(), anyLong())),
+                lockTracerParams(
+                        l -> l.acquireSharedRelationshipTypeLock(13),
+                        (sl, lc, lt) -> verify(lc).acquireShared(same(lt), any(), anyLong())),
+                lockTracerParams(
+                        l -> l.acquireSharedIndexEntryLock(13),
+                        (sl, lc, lt) -> verify(lc).acquireShared(same(lt), any(), anyLong())),
+                lockTracerParams(
+                        l -> l.acquireExclusiveIndexEntryLock(13),
+                        (sl, lc, lt) -> verify(lc).acquireExclusive(same(lt), any(), anyLong())));
     }
 
     @FunctionalInterface
@@ -1169,7 +1192,7 @@ class KernelTransactionImplementationTest extends KernelTransactionTestBase {
 
     private static class ExpiredLeases implements LeaseService {
         LeaseException expired() {
-            return new LeaseException("Expired", Status.Cluster.NotALeader);
+            return LeaseException.internalError(this.getClass().getSimpleName(), "Expired", Status.Cluster.NotALeader);
         }
 
         @Override

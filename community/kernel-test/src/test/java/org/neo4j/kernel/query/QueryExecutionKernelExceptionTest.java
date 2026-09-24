@@ -20,11 +20,12 @@
 package org.neo4j.kernel.query;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.neo4j.kernel.api.exceptions.Status.General.InvalidArguments;
+import static org.neo4j.kernel.api.exceptions.Status.Statement.ConstraintVerificationFailed;
 
 import org.junit.jupiter.api.Test;
+import org.neo4j.exceptions.ConstraintViolationException;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
 import org.neo4j.gqlstatus.GqlException;
@@ -57,9 +58,12 @@ public class QueryExecutionKernelExceptionTest {
 
     @Test
     void testGqlExceptionWrappingWithCause() {
-        var gqlException = InvalidArgumentsException.requiresPositiveInteger("the_option", -1);
+        var gqlException = InvalidArgumentsException.requiresPositiveIntegerInOptions("the_option", -1);
         var translatedGqlException = QueryExecutionKernelException.wrapError(gqlException);
         assertEquals("22003", translatedGqlException.gqlStatus());
+        assertEquals(
+                "error: data exception - numeric value out of range. The numeric value -1 is outside the required range.",
+                translatedGqlException.statusDescription());
         assertEquals(InvalidArguments, translatedGqlException.status());
         assertEquals(
                 "Option `the_option` requires positive integer argument, got `-1`",
@@ -95,7 +99,7 @@ public class QueryExecutionKernelExceptionTest {
 
     @Test
     void testGqlExceptionWrappingWithJavaCause() {
-        var causeException = InvalidArgumentsException.requiresPositiveInteger("the_option", -1);
+        var causeException = InvalidArgumentsException.requiresPositiveIntegerInOptions("the_option", -1);
         var gqlException = TestUnknownGqlException.create("I am an exception", causeException);
         var translatedGqlException = QueryExecutionKernelException.wrapError(gqlException);
         assertEquals("50N42", translatedGqlException.gqlStatus());
@@ -107,7 +111,7 @@ public class QueryExecutionKernelExceptionTest {
 
         var gqlCause = translatedGqlException.gqlStatusObject().cause().get();
         assertEquals("22003", gqlCause.gqlStatus());
-        assertEquals("22003: The numeric value $value is outside the required range.", gqlCause.getMessage());
+        assertEquals("22003: The numeric value -1 is outside the required range.", gqlCause.getMessage());
 
         assertTrue(gqlCause.cause().isPresent());
         var secondGqlCause = gqlCause.cause().get();
@@ -128,7 +132,7 @@ public class QueryExecutionKernelExceptionTest {
 
         var userCause = translatedGqlException.gqlStatusObject().cause().get();
         assertEquals("22003", userCause.gqlStatus());
-        assertEquals("22003: The numeric value $value is outside the required range.", userCause.getMessage());
+        assertEquals("22003: The numeric value -1 is outside the required range.", userCause.getMessage());
 
         assertTrue(userCause.cause().isPresent());
         var secondUserCause = userCause.cause().get();
@@ -142,19 +146,19 @@ public class QueryExecutionKernelExceptionTest {
     }
 
     @Test
-    void testNonGqlExceptionWrapping() {
-        var notGqlException = new InvalidArgumentsException("message");
+    void testExceptionWrappingForExceptionWithoutGqlStatus() {
+        var notGqlException = new ConstraintViolationException("message", null);
         var translatedGqlException = QueryExecutionKernelException.wrapError(notGqlException);
         assertEquals("50N42", translatedGqlException.gqlStatus());
-        assertEquals(InvalidArguments, translatedGqlException.status());
+        assertEquals("50N42", translatedGqlException.gqlStatusObject().gqlStatus());
+        assertEquals(ConstraintVerificationFailed, translatedGqlException.status());
         assertEquals("message", translatedGqlException.getMessage());
         // It should set a cause since we are not wrapping a gql exception
         assertEquals(notGqlException, translatedGqlException.getCause());
-        assertNull(translatedGqlException.gqlStatusObject());
 
         var userException = translatedGqlException.asUserException();
         assertEquals("50N42", userException.gqlStatus());
-        assertEquals("Neo.ClientError.General.InvalidArguments", userException.getStatusCode());
+        assertEquals("Neo.ClientError.Statement.ConstraintVerificationFailed", userException.getStatusCode());
         assertEquals("message", userException.getMessage());
     }
 

@@ -25,6 +25,7 @@ import static org.neo4j.internal.batchimport.input.csv.DataFactories.parseHeader
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.time.ZoneId;
 import java.util.Arrays;
 import java.util.Locale;
@@ -33,6 +34,7 @@ import org.eclipse.collections.api.map.ImmutableMap;
 import org.eclipse.collections.impl.factory.Lists;
 import org.neo4j.batchimport.api.input.Collector;
 import org.neo4j.batchimport.api.input.IdType;
+import org.neo4j.common.EntityType;
 import org.neo4j.csv.reader.BufferedCharSeeker;
 import org.neo4j.csv.reader.CharReadable;
 import org.neo4j.csv.reader.CharReadableChunker.ChunkImpl;
@@ -42,6 +44,7 @@ import org.neo4j.csv.reader.ClosestNewLineChunker;
 import org.neo4j.csv.reader.Configuration;
 import org.neo4j.csv.reader.Extractors;
 import org.neo4j.csv.reader.HeaderSkipper;
+import org.neo4j.csv.reader.Mark;
 import org.neo4j.csv.reader.MultiLineChunker;
 import org.neo4j.csv.reader.Source;
 import org.neo4j.csv.reader.Source.Chunk;
@@ -73,21 +76,34 @@ class CsvInputIterator implements SourceTraceability, Closeable {
             Collector badCollector,
             Extractors extractors,
             int groupId,
-            boolean autoSkipHeaders) {
+            boolean autoSkipHeaders,
+            boolean delimitIds,
+            EntityType entityType) {
         this.stream = stream;
         this.decorator = decorator;
         this.groupId = groupId;
-        if (config.legacyMultilineFields()) {
+        if (config.legacyMultilineFields(entityType)) {
             // If we're expecting multi-line fields then there's no way to arbitrarily chunk the underlying data source
             // and find record delimiters with certainty. This is why we opt for a chunker that does parsing inside
             // the call that normally just hands out an arbitrary amount of characters to parse outside and in parallel.
             // This chunker is single-threaded, as it was previously too and keeps the functionality of multi-line
             // fields.
             this.chunker = new EagerParserChunker(
-                    stream, idType, header, badCollector, extractors, 1_000, config, decorator, autoSkipHeaders);
+                    stream,
+                    idType,
+                    header,
+                    badCollector,
+                    extractors,
+                    1_000,
+                    config,
+                    decorator,
+                    autoSkipHeaders,
+                    delimitIds,
+                    entityType);
             this.realInputChunkSupplier = EagerCsvInputChunk::new;
         } else {
-            this.chunker = createChunker(stream, config, headerSkip(autoSkipHeaders, config, idType));
+            this.chunker =
+                    createChunker(stream, config, headerSkip(header, autoSkipHeaders, config, idType, entityType));
             this.realInputChunkSupplier = () -> new LazyCsvInputChunk(
                     idType,
                     config.delimiter(),
@@ -96,7 +112,9 @@ class CsvInputIterator implements SourceTraceability, Closeable {
                     chunker.newChunk(),
                     config,
                     decorator,
-                    header);
+                    header,
+                    delimitIds,
+                    entityType);
         }
     }
 
@@ -111,18 +129,22 @@ class CsvInputIterator implements SourceTraceability, Closeable {
             Extractors extractors,
             int groupId,
             boolean autoSkipHeader,
-            Monitor monitor)
+            boolean delimitIds,
+            Monitor monitor,
+            EntityType entityType)
             throws IOException {
         this(
                 stream,
                 decorator,
-                extractHeader(stream, headerFactory, idType, config, groups, monitor),
+                extractHeader(stream, headerFactory, idType, config, groups, monitor, entityType),
                 config,
                 idType,
                 badCollector,
                 extractors,
                 groupId,
-                autoSkipHeader);
+                autoSkipHeader,
+                delimitIds,
+                entityType);
     }
 
     static Header extractHeader(
@@ -131,25 +153,29 @@ class CsvInputIterator implements SourceTraceability, Closeable {
             IdType idType,
             Configuration config,
             Groups groups,
-            Monitor monitor)
+            Monitor monitor,
+            EntityType entityType)
             throws IOException {
         if (!headerFactory.isDefined()) {
-            CharSeeker headerSeeker = seeker(stream.sourceDescription(), config, extractFirstLineFrom(stream));
+            CharSeeker headerSeeker =
+                    seeker(stream.sourceDescription(), config, extractFirstLineFrom(stream), entityType);
             return headerFactory.create(headerSeeker, config, idType, groups, monitor);
         }
 
         return headerFactory.create(null, null, null, null, monitor);
     }
 
-    private static CharSeeker seeker(String sourceDescription, Configuration config, char[] data) {
+    private static CharSeeker seeker(
+            String sourceDescription, Configuration config, char[] data, EntityType entityType) {
         // make the chunk slightly bigger than the header to not have the seeker think that it's reading
         // a value bigger than its max buffer size
         ChunkImpl firstChunk = new ChunkImpl(copyOf(data, data.length + 1));
-        firstChunk.initialize(0, data.length, sourceDescription);
-        return seeker(firstChunk, config);
+        firstChunk.initialize(0, data.length, sourceDescription, 0);
+        return seeker(firstChunk, config, entityType);
     }
 
-    static HeaderSkipper headerSkip(boolean autoSkipHeaders, Configuration config, IdType idType) {
+    static HeaderSkipper headerSkip(
+            Header header, boolean autoSkipHeaders, Configuration config, IdType idType, EntityType entityType) {
         if (!autoSkipHeaders) {
             return HeaderSkipper.NO_SKIP;
         }
@@ -163,33 +189,64 @@ class CsvInputIterator implements SourceTraceability, Closeable {
 
             char[] firstLine = extractFirstLineFrom(data, offset, length);
             if (firstLine.length > 0) {
-                CharSeeker seeker = seeker("", config, firstLine);
-                try {
-                    Header.Entry[] entries = parseHeaderEntries(
-                            seeker,
-                            config,
-                            idType,
-                            new Groups(),
-                            ZoneId::systemDefault,
-                            (sourceDescription, entryIndex, spec, extractors, idExtractor, groups, monitor) ->
-                                    new Header.Entry(
-                                            spec.rawEntry(),
-                                            spec.name(),
-                                            typeFromSpec(spec.type()),
-                                            null,
-                                            extractors.string()),
-                            Header.NO_MONITOR);
-                    // OK were able to parse this line as a header, skip it
-                    if (Arrays.stream(entries).anyMatch(e -> e.type() != Type.PROPERTY && e.type() != Type.IGNORE)) {
-                        // This line really looks like a header line
-                        return initialEolSkipped + firstLine.length;
-                    }
-                } catch (Exception e) {
-                    // This line didn't look like a header, keep it as a data line
+                if (isParsableHeader(config, idType, firstLine, entityType)
+                        || !valueTypesMatchesHeader(header, config, firstLine, entityType)) {
+                    return initialEolSkipped + firstLine.length;
                 }
             }
             return 0;
         };
+    }
+
+    private static boolean valueTypesMatchesHeader(
+            Header header, Configuration config, char[] firstLine, EntityType entityType) {
+        try {
+            CharSeeker seeker = seeker("", config, firstLine, entityType);
+            Mark mark = new Mark();
+            char delimiter = config.delimiter();
+            for (int i = 0; i < header.entries().length; i++) {
+                var entry = header.entries()[i];
+                if (!seeker.seek(mark, delimiter)) {
+                    return false;
+                }
+                if (entry.type() == Type.IGNORE) {
+                    continue;
+                }
+                var extractor = entry.extractor();
+                try {
+                    seeker.tryExtract(mark, extractor, entry.optionalParameter());
+                } catch (Exception e) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private static boolean isParsableHeader(
+            Configuration config, IdType idType, char[] firstLine, EntityType entityType) {
+        CharSeeker seeker = seeker("", config, firstLine, entityType);
+        try {
+            Header.Entry[] entries = parseHeaderEntries(
+                    seeker,
+                    config,
+                    idType,
+                    new Groups(),
+                    ZoneId::systemDefault,
+                    (sourceDescription, entryIndex, spec, extractors, idExtractor, groups, monitor) -> new Header.Entry(
+                            spec.rawEntry(), spec.name(), typeFromSpec(spec.type()), null, extractors.string()),
+                    Header.NO_MONITOR);
+            // OK were able to parse this line as a header, skip it
+            if (Arrays.stream(entries).anyMatch(e -> e.type() != Type.PROPERTY && e.type() != Type.IGNORE)) {
+                // This line really looks like a header line
+                return true;
+            }
+        } catch (Exception e) {
+            // This line didn't look like a header, keep it as a data line
+        }
+        return false;
     }
 
     private static Type typeFromSpec(String specType) {
@@ -234,11 +291,16 @@ class CsvInputIterator implements SourceTraceability, Closeable {
     }
 
     @Override
+    public long lineNumber() {
+        return stream.lineNumber();
+    }
+
+    @Override
     public float compressionRatio() {
         return stream.compressionRatio();
     }
 
-    static CharSeeker seeker(Chunk chunk, Configuration config) {
-        return new BufferedCharSeeker(Source.singleChunk(chunk), config);
+    static CharSeeker seeker(Chunk chunk, Configuration config, EntityType entityType) {
+        return new BufferedCharSeeker(Source.singleChunk(chunk), config, entityType);
     }
 }

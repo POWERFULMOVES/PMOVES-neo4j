@@ -76,6 +76,8 @@ sealed trait ExecutionModel {
    */
   def isSingleThreaded: Boolean
 
+  def isParallel: Boolean = !isSingleThreaded
+
   /**
    * "For Block format, setting a property cursor on a relationship using only
    * the id is much more expensive than setting it using an existing
@@ -116,6 +118,9 @@ object ExecutionModel {
   }
 
   case class BatchedSingleThreaded(smallBatchSize: Int, bigBatchSize: Int) extends Batched {
+
+    def asParallel: BatchedParallel = BatchedParallel(smallBatchSize, bigBatchSize, providedOrderPreserving = true)
+
     override def providedOrderPreserving: Boolean = true
 
     /**
@@ -130,11 +135,10 @@ object ExecutionModel {
         ) =>
         val builder = Seq.newBuilder[Any]
 
-        if (GraphDatabaseInternalSettings.cypher_pipelined_batch_size_small.dynamic())
-          builder.addOne(smallBatchSize)
-
-        if (GraphDatabaseInternalSettings.cypher_pipelined_batch_size_big.dynamic())
-          builder.addOne(bigBatchSize)
+        // NOTE: GraphDatabaseInternalSettings.cypher_pipelined_batch_size_small and
+        //       GraphDatabaseInternalSettings.cypher_pipelined_batch_size_big are dynamic settings,
+        //       that are included in the cache key via derived query options.
+        //       We do not add them here as the assertion would fail.
 
         builder.result()
     }
@@ -142,8 +146,10 @@ object ExecutionModel {
     override def isSingleThreaded: Boolean = true
   }
 
-  case class BatchedParallel(smallBatchSize: Int, bigBatchSize: Int) extends Batched {
-    override def providedOrderPreserving: Boolean = false
+  case class BatchedParallel(smallBatchSize: Int, bigBatchSize: Int, providedOrderPreserving: Boolean = false)
+      extends Batched {
+
+    def asSingleThreaded: BatchedSingleThreaded = BatchedSingleThreaded(smallBatchSize, bigBatchSize)
 
     /**
      * We do not include the ExecutionModel itself, since we also have a compiler for each runtime (see CompilerLibrary).
@@ -153,15 +159,18 @@ object ExecutionModel {
       // to make the author aware and make them think about whether they want to include a new field in the cache key.
       case BatchedParallel(
           smallBatchSize: Int,
-          bigBatchSize: Int
+          bigBatchSize: Int,
+          providedOrderPreserving
         ) =>
         val builder = Seq.newBuilder[Any]
 
-        if (GraphDatabaseInternalSettings.cypher_pipelined_batch_size_small.dynamic())
-          builder.addOne(smallBatchSize)
+        // NOTE: GraphDatabaseInternalSettings.cypher_pipelined_batch_size_small and
+        //       GraphDatabaseInternalSettings.cypher_pipelined_batch_size_big are dynamic settings,
+        //       that are included in the cache key via derived query options.
+        //       We do not add them here as the assertion would fail.
 
-        if (GraphDatabaseInternalSettings.cypher_pipelined_batch_size_big.dynamic())
-          builder.addOne(bigBatchSize)
+        if (GraphDatabaseInternalSettings.parallel_runtime_config.dynamic())
+          builder.addOne(providedOrderPreserving)
 
         builder.result()
     }
@@ -215,7 +224,7 @@ object ExecutionModel {
 
   object Batched {
 
-    val default: Batched = BatchedSingleThreaded(
+    val default: BatchedSingleThreaded = BatchedSingleThreaded(
       GraphDatabaseInternalSettings.cypher_pipelined_batch_size_small.defaultValue(),
       GraphDatabaseInternalSettings.cypher_pipelined_batch_size_big.defaultValue()
     )

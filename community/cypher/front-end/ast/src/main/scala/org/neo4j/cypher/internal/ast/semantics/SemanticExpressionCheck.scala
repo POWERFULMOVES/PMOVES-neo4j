@@ -16,23 +16,35 @@
  */
 package org.neo4j.cypher.internal.ast.semantics
 
-import org.neo4j.cypher.internal.ast.Clause
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.CollectExpression
 import org.neo4j.cypher.internal.ast.CountExpression
 import org.neo4j.cypher.internal.ast.CypherTypeName
 import org.neo4j.cypher.internal.ast.ExistsExpression
+import org.neo4j.cypher.internal.ast.GraphSelection
+import org.neo4j.cypher.internal.ast.ImportingWithSubqueryCall
 import org.neo4j.cypher.internal.ast.IsNormalized
 import org.neo4j.cypher.internal.ast.IsNotNormalized
 import org.neo4j.cypher.internal.ast.IsNotTyped
 import org.neo4j.cypher.internal.ast.IsTyped
-import org.neo4j.cypher.internal.ast.SubqueryCall
+import org.neo4j.cypher.internal.ast.PartQuery
+import org.neo4j.cypher.internal.ast.Query
+import org.neo4j.cypher.internal.ast.ScopeClauseSubqueryCall
+import org.neo4j.cypher.internal.ast.Union
 import org.neo4j.cypher.internal.ast.UnionDistinct
+import org.neo4j.cypher.internal.ast.VectorValueConstructor
 import org.neo4j.cypher.internal.ast.Where
 import org.neo4j.cypher.internal.ast.prettifier.ExpressionStringifier
+import org.neo4j.cypher.internal.ast.semantics.SemanticCheck.fromContext
+import org.neo4j.cypher.internal.ast.semantics.SemanticCheck.fromState
+import org.neo4j.cypher.internal.ast.semantics.SemanticCheck.success
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheck.when
+import org.neo4j.cypher.internal.ast.semantics.SemanticPatternCheck.TokenType
 import org.neo4j.cypher.internal.ast.semantics.SemanticPatternCheck.checkValidLabels
 import org.neo4j.cypher.internal.expressions.Add
 import org.neo4j.cypher.internal.expressions.AllPropertiesSelector
+import org.neo4j.cypher.internal.expressions.AllReducePredicate
+import org.neo4j.cypher.internal.expressions.AllReducePredicate.AccumulatorReductionTypeMismatchMessageGenerator
 import org.neo4j.cypher.internal.expressions.And
 import org.neo4j.cypher.internal.expressions.AndedPropertyInequalities
 import org.neo4j.cypher.internal.expressions.Ands
@@ -46,18 +58,23 @@ import org.neo4j.cypher.internal.expressions.ContainerIndex
 import org.neo4j.cypher.internal.expressions.Contains
 import org.neo4j.cypher.internal.expressions.CountStar
 import org.neo4j.cypher.internal.expressions.DecimalDoubleLiteral
-import org.neo4j.cypher.internal.expressions.DecimalIntegerLiteral
 import org.neo4j.cypher.internal.expressions.DesugaredMapProjection
+import org.neo4j.cypher.internal.expressions.DifferentNodes
 import org.neo4j.cypher.internal.expressions.DifferentRelationships
 import org.neo4j.cypher.internal.expressions.Disjoint
+import org.neo4j.cypher.internal.expressions.DisjointNodes
 import org.neo4j.cypher.internal.expressions.Divide
+import org.neo4j.cypher.internal.expressions.DoubleLiteral
 import org.neo4j.cypher.internal.expressions.DynamicLabelsExpressions
 import org.neo4j.cypher.internal.expressions.DynamicLabelsOrTypeExpressions
 import org.neo4j.cypher.internal.expressions.EndsWith
 import org.neo4j.cypher.internal.expressions.EntityType
 import org.neo4j.cypher.internal.expressions.Equals
 import org.neo4j.cypher.internal.expressions.Expression
+import org.neo4j.cypher.internal.expressions.Expression.DefaultTypeMismatchMessageGenerator
 import org.neo4j.cypher.internal.expressions.Expression.SemanticContext
+import org.neo4j.cypher.internal.expressions.ExtractMapEntriesScope
+import org.neo4j.cypher.internal.expressions.ExtractMapScope
 import org.neo4j.cypher.internal.expressions.ExtractScope
 import org.neo4j.cypher.internal.expressions.FilterScope
 import org.neo4j.cypher.internal.expressions.FilteringExpression
@@ -85,6 +102,8 @@ import org.neo4j.cypher.internal.expressions.ListComprehension
 import org.neo4j.cypher.internal.expressions.ListLiteral
 import org.neo4j.cypher.internal.expressions.ListSlice
 import org.neo4j.cypher.internal.expressions.LiteralEntry
+import org.neo4j.cypher.internal.expressions.MapComprehension
+import org.neo4j.cypher.internal.expressions.MapEntriesComprehension
 import org.neo4j.cypher.internal.expressions.MapExpression
 import org.neo4j.cypher.internal.expressions.MapProjection
 import org.neo4j.cypher.internal.expressions.Modulo
@@ -95,10 +114,13 @@ import org.neo4j.cypher.internal.expressions.NaN
 import org.neo4j.cypher.internal.expressions.NilPathStep
 import org.neo4j.cypher.internal.expressions.NodePathStep
 import org.neo4j.cypher.internal.expressions.NodePattern
+import org.neo4j.cypher.internal.expressions.NoneOfNodes
 import org.neo4j.cypher.internal.expressions.NoneOfRelationships
 import org.neo4j.cypher.internal.expressions.Not
 import org.neo4j.cypher.internal.expressions.NotEquals
 import org.neo4j.cypher.internal.expressions.Null
+import org.neo4j.cypher.internal.expressions.NumberLiteral
+import org.neo4j.cypher.internal.expressions.ObfuscatedLiteral
 import org.neo4j.cypher.internal.expressions.OctalIntegerLiteral
 import org.neo4j.cypher.internal.expressions.Or
 import org.neo4j.cypher.internal.expressions.Ors
@@ -110,6 +132,7 @@ import org.neo4j.cypher.internal.expressions.PatternComprehension
 import org.neo4j.cypher.internal.expressions.PatternExpression
 import org.neo4j.cypher.internal.expressions.Pow
 import org.neo4j.cypher.internal.expressions.Property
+import org.neo4j.cypher.internal.expressions.PropertyExists
 import org.neo4j.cypher.internal.expressions.PropertySelector
 import org.neo4j.cypher.internal.expressions.RELATIONSHIP_TYPE
 import org.neo4j.cypher.internal.expressions.ReduceExpression
@@ -120,11 +143,14 @@ import org.neo4j.cypher.internal.expressions.RepeatPathStep
 import org.neo4j.cypher.internal.expressions.ShortestPathExpression
 import org.neo4j.cypher.internal.expressions.SingleRelationshipPathStep
 import org.neo4j.cypher.internal.expressions.StartsWith
+import org.neo4j.cypher.internal.expressions.StringDecimalInteger
+import org.neo4j.cypher.internal.expressions.StringInterpolation
 import org.neo4j.cypher.internal.expressions.StringLiteral
 import org.neo4j.cypher.internal.expressions.Subtract
 import org.neo4j.cypher.internal.expressions.UnaryAdd
 import org.neo4j.cypher.internal.expressions.UnarySubtract
 import org.neo4j.cypher.internal.expressions.Unique
+import org.neo4j.cypher.internal.expressions.UniqueNodes
 import org.neo4j.cypher.internal.expressions.VarLengthBound
 import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.expressions.VariableSelector
@@ -132,8 +158,7 @@ import org.neo4j.cypher.internal.expressions.Xor
 import org.neo4j.cypher.internal.label_expressions.LabelExpression
 import org.neo4j.cypher.internal.label_expressions.LabelExpression.ColonDisjunction
 import org.neo4j.cypher.internal.label_expressions.LabelExpressionPredicate
-import org.neo4j.cypher.internal.util.helpers.Math
-import org.neo4j.cypher.internal.util.helpers.Try
+import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.symbols.CTAny
 import org.neo4j.cypher.internal.util.symbols.CTBoolean
 import org.neo4j.cypher.internal.util.symbols.CTDate
@@ -146,15 +171,20 @@ import org.neo4j.cypher.internal.util.symbols.CTLocalDateTime
 import org.neo4j.cypher.internal.util.symbols.CTLocalTime
 import org.neo4j.cypher.internal.util.symbols.CTMap
 import org.neo4j.cypher.internal.util.symbols.CTNode
+import org.neo4j.cypher.internal.util.symbols.CTNumber
 import org.neo4j.cypher.internal.util.symbols.CTPath
 import org.neo4j.cypher.internal.util.symbols.CTPoint
 import org.neo4j.cypher.internal.util.symbols.CTRelationship
 import org.neo4j.cypher.internal.util.symbols.CTString
 import org.neo4j.cypher.internal.util.symbols.CTTime
+import org.neo4j.cypher.internal.util.symbols.CTVector
+import org.neo4j.cypher.internal.util.symbols.ClosedDynamicUnionType
 import org.neo4j.cypher.internal.util.symbols.CypherType
 import org.neo4j.cypher.internal.util.symbols.StorableType.storableType
 import org.neo4j.cypher.internal.util.symbols.TypeSpec
-import org.neo4j.gqlstatus.GqlHelper
+import org.neo4j.cypher.internal.util.symbols.TypeSpecRange
+import org.neo4j.cypher.internal.util.symbols.invariantTypeSpec
+import org.neo4j.values.storable.VectorValue
 
 object SemanticExpressionCheck extends SemanticAnalysisTooling {
 
@@ -168,6 +198,7 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
 
   /**
    * Build a semantic check for the given expression using the simple expression context.
+   * The simple expression context disallows aggregating functions.
    */
   def simple(expression: Expression): SemanticCheck = check(SemanticContext.Simple, expression)
 
@@ -208,8 +239,7 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
           expectType(TypeSpec.all, x.lhs) chain
           check(ctx, x.rhs) chain
           expectType(infixAddRhsTypes(x.lhs), x.rhs) chain
-          specifyType(infixAddOutputTypes(x.lhs, x.rhs), x) chain
-          checkAddBoundary(x)
+          specifyType(infixAddOutputTypes(x.lhs, x.rhs), x)
 
       case x: Concatenate =>
         check(ctx, x.arguments) chain
@@ -218,13 +248,11 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
 
       case x: Subtract =>
         check(ctx, x.arguments) chain
-          checkTypes(x, x.signatures) chain
-          checkSubtractBoundary(x)
+          checkTypes(x, x.signatures)
 
       case x: UnarySubtract =>
         check(ctx, x.arguments) chain
-          checkTypes(x, x.signatures) chain
-          checkUnarySubtractBoundary(x)
+          checkTypes(x, x.signatures)
 
       case x: UnaryAdd =>
         check(ctx, x.arguments) chain
@@ -232,8 +260,7 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
 
       case x: Multiply =>
         check(ctx, x.arguments) chain
-          checkTypes(x, x.signatures) chain
-          checkMultiplyBoundary(x)
+          checkTypes(x, x.signatures)
 
       case x: Divide =>
         check(ctx, x.arguments) chain
@@ -259,11 +286,7 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
       case x: NotEquals =>
         check(ctx, x.arguments) chain checkTypes(x, x.signatures)
 
-      case x: InvalidNotEquals =>
-        SemanticError(
-          "Unknown operation '!=' (you probably meant to use '<>', which is the operator for inequality testing)",
-          x.position
-        )
+      case x: InvalidNotEquals => SemanticError.wrongInequalityOperator(x.position)
 
       case x: RegexMatch =>
         check(ctx, x.arguments) chain
@@ -316,6 +339,11 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
         check(ctx, x.arguments) chain
           checkTypes(x, x.signatures)
 
+      case x: PropertyExists =>
+        check(ctx, x.arguments) chain
+          expectType(CTNode.covariant | CTRelationship.covariant, x.element) chain
+          specifyType(CTBoolean, x)
+
       case x: IsTyped =>
         check(ctx, x.arguments) chain
           CypherTypeName(x.typeName).semanticCheck chain
@@ -356,10 +384,22 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
           expectType(CTRelationship, rhs) chain
           specifyType(CTBoolean, x)
 
+      case x @ DifferentNodes(lhs, rhs) =>
+        check(ctx, x.arguments) chain
+          expectType(CTNode, lhs) chain
+          expectType(CTNode, rhs) chain
+          specifyType(CTBoolean, x)
+
       case x @ NoneOfRelationships(relationship, relationshipList) =>
         check(ctx, x.arguments) chain
           expectType(CTRelationship, relationship) chain
           expectType(CTList(CTRelationship), relationshipList) chain
+          specifyType(CTBoolean, x)
+
+      case x @ NoneOfNodes(node, nodeList) =>
+        check(ctx, x.arguments) chain
+          expectType(CTNode, node) chain
+          expectType(CTList(CTNode), nodeList) chain
           specifyType(CTBoolean, x)
 
       case x @ Disjoint(lhs, rhs) =>
@@ -368,15 +408,72 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
           expectType(CTList(CTAny).covariant, rhs) chain
           specifyType(CTBoolean, x)
 
+      case x @ DisjointNodes(lhs, rhs, _, _) =>
+        check(ctx, x.arguments) chain
+          expectType(CTList(CTNode).covariant, lhs) chain
+          expectType(CTList(CTNode).covariant, rhs) chain
+          specifyType(CTBoolean, x)
+
       case x @ Unique(rhs) =>
         check(ctx, x.arguments) chain
           expectType(CTList(CTAny).covariant, rhs) chain
+          specifyType(CTBoolean, x)
+
+      case x @ UniqueNodes(nodeList, relList) =>
+        check(ctx, x.arguments) chain
+          expectType(CTList(CTNode).covariant, nodeList) chain
+          expectType(CTList(CTRelationship).covariant, relList) chain
           specifyType(CTBoolean, x)
 
       case x: VarLengthBound =>
         check(ctx, x.arguments) chain
           expectType(CTList(CTRelationship).covariant, x.relName) chain
           specifyType(CTBoolean, x)
+
+      case x: VectorValueConstructor =>
+        check(ctx, x.arguments) chain
+          CypherTypeName(x.typeName).semanticCheck chain
+          expectType(
+            CTInteger.covariant,
+            x.dimension,
+            TypeMismatchContext.TypeMismatchContextVal(
+              s"argument at index 1 of function vector()"
+            ),
+            DefaultTypeMismatchMessageGenerator
+          ) chain
+          expectType(
+            ClosedDynamicUnionType(Set(CTList(CTNumber), CTString))(InputPosition.NONE).covariant,
+            x.vectorCandidate,
+            TypeMismatchContext.TypeMismatchContextVal(
+              s"argument at index 0 of function vector()"
+            ),
+            DefaultTypeMismatchMessageGenerator
+          ) chain
+          literalShouldBeNumberInRange(
+            x.dimension,
+            "dimension",
+            VectorValue.MIN_VECTOR_DIMENSIONS,
+            VectorValue.MAX_VECTOR_DIMENSIONS
+          ) chain
+          when(
+            !x.validVectorInnerType
+          ) {
+            error(SemanticError.invalidType(
+              x.typeName.toCypherTypeString,
+              List(
+                "INTEGER64",
+                "INTEGER32",
+                "INTEGER16",
+                "INTEGER8",
+                "FLOAT64",
+                "FLOAT32"
+              ),
+              x.typeName.toCypherTypeString,
+              "Invalid vector inner type, expected INTEGER64, INTEGER32, INTEGER16, INTEGER8, FLOAT64 or FLOAT32",
+              x.dimension.position
+            ))
+          } chain
+          specifyType(CTVector, x)
 
       case x: PartialPredicate[_] =>
         check(ctx, x.coveredPredicate)
@@ -404,8 +501,12 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
           expectType(allowedTypes, x.map) chain
           typeSwitch(x.map) {
             // Maybe we can do even more here - Point / Dates probably have type implications too
-            case CTNode.invariant | CTRelationship.invariant => specifyType(storableType, x)
-            case _                                           => specifyType(CTAny.covariant, x)
+            // `invariant` is a `def` on CypherType (TeaVM-friendly); not a stable pattern, so use a guard.
+            case t if t == CTNode.invariant || t == CTRelationship.invariant => specifyType(storableType, x)
+            case TypeSpecRange(_, extendedType: MapExtendedType) =>
+              val entryType = extendedType.getEntryType(x.propertyKey.name)
+              specifyType(entryType, x)
+            case _ => specifyType(CTAny.covariant, x)
           }
 
       case x: CachedProperty =>
@@ -450,12 +551,14 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
 
       case x: LabelExpressionPredicate =>
         check(ctx, x.entity) chain
-          when(x.labelExpression.containsDynamicLabelOrTypeExpression) {
-            error(
-              s"Dynamic Label and Types are only allowed in MATCH, CREATE, MERGE, SET and REMOVE clauses.",
-              x.position
-            )
-          } chain
+          fromContext(semanticCheckContext =>
+            when(
+              semanticCheckContext.cypherVersion == CypherVersion.Cypher5 &&
+                x.labelExpression.containsDynamicLabelOrTypeExpression
+            ) {
+              SemanticError.dynamicEntityTypeNotAllowed(x.position)
+            }
+          ) chain
           expectType(CTNode.covariant | CTRelationship.covariant, x.entity) chain
           checkLabelExpressionForLegacyRelationshipTypeDisjunction(x.entity, x.labelExpression) ifOkChain
           checkLabelExpression(None, x.labelExpression) chain
@@ -498,8 +601,13 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
 
       case x: ListComprehension =>
         FilteringExpressions.semanticCheck(ctx, x) chain
-          checkInnerListComprehension(x) chain
-          FilteringExpressions.failIfAggregating(x.extractExpression)
+          checkInnerListComprehension(x)
+
+      case x: MapComprehension =>
+        checkInnerMapComprehension(ctx, x)
+
+      case x: MapEntriesComprehension =>
+        checkInnerMapEntriesComprehension(ctx, x)
 
       case x: PatternComprehension =>
         SemanticState.recordCurrentScope(x) chain
@@ -514,12 +622,23 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
             specifyType(outerTypes, x)
           }
 
-      case _: FilterScope  => SemanticCheck.success
-      case _: ExtractScope => SemanticCheck.success
-      case _: ReduceScope  => SemanticCheck.success
+      case _: FilterScope            => SemanticCheck.success
+      case _: ExtractScope           => SemanticCheck.success
+      case _: ExtractMapScope        => SemanticCheck.success
+      case _: ExtractMapEntriesScope => SemanticCheck.success
+      case _: ReduceScope            => SemanticCheck.success
 
       case x: CountStar =>
-        specifyType(CTInteger, x)
+        specifyType(CTInteger, x) chain
+          when(ctx == Expression.SemanticContext.Simple) {
+            SemanticCheck.error(
+              SemanticError.aggregateExpressionsNotAllowedInSimpleExpressions(
+                x.asCanonicalStringVal,
+                "count",
+                x.position
+              )
+            )
+          }
 
       case x: PathExpression =>
         specifyType(CTPath, x) chain
@@ -553,28 +672,15 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
           when(x.pattern.element.folder.treeExists {
             case node: NodePattern => node.labelExpression.exists(_.containsGpmSpecificLabelExpression)
           }) {
-            error("Label expressions in shortestPath are not allowed in an expression", x.position)
+            error(SemanticError.invalidLabelExpressionInShortestPath(x.position))
           } chain
           specifyType(if (x.pattern.single) CTPath else CTList(CTPath), x)
 
       case x: PatternExpression =>
         SemanticState.recordCurrentScope(x) chain
           withScopedState {
-            // Check with Pattern.SemanticContext.Match so that we do not get "Variable not defined" error for new variables ...
-            SemanticPatternCheck.check(Pattern.SemanticContext.Match, x.pattern) chain {
-              // ... and instead check for introduced variables here in an extra check
-              (state: SemanticState) =>
-                {
-                  val errors = x.pattern.element.allVariables.toSeq.collect {
-                    case v
-                      if state.recordedScopes(x).symbol(v.name).isEmpty && !SemanticPatternCheck.variableIsGenerated(
-                        v
-                      ) =>
-                      SemanticError.unboundVariablesInPatternExpression(v.name, v.position)
-                  }
-                  SemanticCheckResult(state, errors)
-                }
-            } chain
+            // Check with Pattern.SemanticContext.Match so that we do not get "Variable not defined" error for new variables
+            SemanticPatternCheck.check(Pattern.SemanticContext.Match, x.pattern) chain
               SemanticState.recordCurrentScope(x.pattern)
           } chain
           specifyType(CTList(CTPath), x) chain {
@@ -598,7 +704,7 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
 
             declareVariable(x.variable, indexType) chain
               declareVariable(x.accumulator, accType) chain
-              check(SemanticContext.Simple, x.expression)
+              simple(x.expression)
           } chain
           expectType(
             s => types(x.init)(s) coerceOrConvert types(x.expression)(s),
@@ -606,8 +712,7 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
             TypeMismatchContext.ACCUMULATOR,
             AccumulatorExpressionTypeMismatchMessageGenerator
           ) chain
-          specifyType(s => types(x.init)(s) leastUpperBounds types(x.expression)(s), x) chain
-          FilteringExpressions.failIfAggregating(x.expression)
+          specifyType(s => types(x.init)(s) leastUpperBounds types(x.expression)(s), x)
 
       case x: ListLiteral =>
         def possibleTypes: TypeGenerator = state =>
@@ -690,8 +795,16 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
       // MAPS
 
       case x: MapExpression =>
-        check(ctx, x.items.map(_._2)) chain
-          specifyType(CTMap, x)
+        check(ctx, x.items.map(_._2)) chain {
+          (state: SemanticState) =>
+            val entries =
+              x.items
+                .map { case (propKeyName, expr) =>
+                  (propKeyName.name, state.expressionType(expr).specified)
+                }
+                .toMap
+            state.specifyType(x, TypeSpecRange(CTMap, MapExtendedType(CTMap, entries)))
+        }
 
       case x: MapProjection =>
         check(ctx, x.items) chain
@@ -720,12 +833,12 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
 
       // LITERALS
 
-      case x: DecimalIntegerLiteral =>
+      case x: StringDecimalInteger =>
         when(!validNumber(x)) {
           if (x.stringVal matches "^-?[1-9][0-9]*$") {
             SemanticError.numberTooLarge("integer", x.stringVal, x.position)
           } else {
-            SemanticError("invalid literal number", x.position)
+            SemanticError.invalidLiteralNumber("decimal integer", x.stringVal, x.position)
           }
         } chain specifyType(CTInteger, x)
 
@@ -733,9 +846,9 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
         val stringVal = x.stringVal
         when(!validNumber(x)) {
           if (stringVal matches "^-?0o?[0-7]+$") {
-            SemanticError.numberTooLarge("integer", x.stringVal, x.position)
+            SemanticError.numberTooLarge("integer", stringVal, x.position)
           } else {
-            SemanticError("invalid literal number", x.position)
+            SemanticError.invalidLiteralNumber("octal integer", stringVal, x.position)
           }
         } ifOkChain {
           (state: SemanticState) =>
@@ -747,11 +860,7 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
                     stringVal.indexOf('0') + 1
                   ) != '_'
                 ) {
-                  val newStringVal = stringVal.patch(stringVal.indexOf('0') + 1, "o", 0)
-                  Seq(SemanticError(
-                    s"The octal integer literal syntax `$stringVal` is no longer supported, please use `$newStringVal` instead",
-                    x.position
-                  ))
+                  Seq(SemanticError.invalidOctalIntegerSyntax(stringVal, x.position))
                 } else
                   Seq.empty[SemanticErrorDef]
               SemanticCheckResult(state, errors)
@@ -764,18 +873,14 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
           if (stringVal matches "^-?0x[0-9a-fA-F]+$") {
             SemanticError.numberTooLarge("integer", x.stringVal, x.position)
           } else {
-            SemanticError("invalid literal number", x.position)
+            SemanticError.invalidLiteralNumber("hex integer", stringVal, x.position)
           }
         } ifOkChain {
           (state: SemanticState) =>
             {
               val errors =
                 if (stringVal.charAt(stringVal.indexOf('0') + 1) == 'X') {
-                  val newStringVal = stringVal.replace('X', 'x')
-                  Seq(SemanticError(
-                    s"The hex integer literal syntax `$stringVal` is no longer supported, please use `$newStringVal` instead",
-                    x.position
-                  ))
+                  Seq(SemanticError.invalidHexIntegerSyntax(stringVal, x.position))
                 } else
                   Seq.empty[SemanticErrorDef]
               SemanticCheckResult(state, errors)
@@ -784,11 +889,14 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
 
       case x: DecimalDoubleLiteral =>
         when(!validNumber(x)) {
-          SemanticError("invalid literal number", x.position)
+          SemanticError.invalidLiteralNumber("decimal double", x.stringVal, x.position)
         } ifOkChain
           when(x.value.isInfinite) {
             SemanticError.numberTooLarge("floating point number", x.stringVal, x.position)
           } chain specifyType(CTFloat, x)
+
+      case x: StringInterpolation =>
+        check(ctx, x.stringParts) chain check(ctx, x.expressions) chain specifyType(CTString, x)
 
       case x: StringLiteral =>
         specifyType(CTString, x)
@@ -810,49 +918,102 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
 
       // EXISTS
       case x: ExistsExpression =>
-        SemanticState.recordCurrentScope(x) chain
-          withScopedState {
-            x.query.semanticCheckInSubqueryExpressionContext(canOmitReturn = true) chain
-              when(x.query.containsUpdates) {
-                SemanticError.anExpressionCannotContainUpdates("Exists", x.position)
-              } chain
-              when(x.query.endsWithFinish) {
-                SemanticError("An Exists Expression cannot contain a query ending with FINISH.", x.position)
-              } chain
-              checkForShadowedVariables(x.query.folder.findAllByClass[SubqueryCall]) chain
-              SemanticState.recordCurrentScope(x.query)
-          } chain specifyType(CTBoolean, x)
+        withScopedState {
+          importValuesFromParentInExpressionWithScopeDependencies(x) chain
+            fromState(state => x.query.semanticCheckInSubqueryExpressionContext(canOmitReturn = true, state)) chain
+            when(hasEmptyBody(x.query)) {
+              SemanticError.queryMustConcludeWithClause(x.position)
+            } chain
+            when(x.query.containsUpdates) {
+              SemanticError.anExpressionCannotContainUpdates("Exists", x.position)
+            } chain
+            when(x.query.endsWithFinish) {
+              SemanticError.invalidEndOfQuery("An Exists Expression", x.position)
+            } chain
+            checkForShadowedVariables(
+              x.query.folder.findAllByClass[ImportingWithSubqueryCall],
+              x.query.folder.findAllByClass[ScopeClauseSubqueryCall]
+            ) chain
+            SemanticState.recordCurrentScope(x.query)
+        } chain
+          SemanticState.recordCurrentScope(x) chain
+          specifyType(CTBoolean, x)
 
       // COUNT
       case x: CountExpression =>
-        SemanticState.recordCurrentScope(x) chain
-          withScopedState {
-            x.query.semanticCheckInSubqueryExpressionContext(canOmitReturn = !x.query.isInstanceOf[UnionDistinct]) chain
-              when(x.query.containsUpdates) {
-                SemanticError.aExpressionCannotContainUpdates("Count", x.position)
-              } chain
-              when(x.query.endsWithFinish) {
-                SemanticError("A Count Expression cannot contain a query ending with FINISH.", x.position)
-              } chain
-              checkForShadowedVariables(x.query.folder.findAllByClass[SubqueryCall]) chain
-              SemanticState.recordCurrentScope(x.query)
-          } chain specifyType(CTInteger, x)
+        withScopedState {
+          importValuesFromParentInExpressionWithScopeDependencies(x) chain
+            fromState(state =>
+              x.query.semanticCheckInSubqueryExpressionContext(
+                canOmitReturn =
+                  !x.query.isInstanceOf[UnionDistinct],
+                state
+              )
+            ) chain
+            when(hasEmptyBody(x.query)) {
+              SemanticError.queryMustConcludeWithClause(x.position)
+            } chain
+            when(x.query.containsUpdates) {
+              SemanticError.aExpressionCannotContainUpdates("Count", x.position)
+            } chain
+            when(x.query.endsWithFinish) {
+              SemanticError.invalidEndOfQuery("A Count Expression", x.position)
+            } chain
+            checkForShadowedVariables(
+              x.query.folder.findAllByClass[ImportingWithSubqueryCall],
+              x.query.folder.findAllByClass[ScopeClauseSubqueryCall]
+            ) chain
+            SemanticState.recordCurrentScope(x.query)
+        } chain
+          SemanticState.recordCurrentScope(x) chain
+          specifyType(CTInteger, x)
 
       // COLLECT
       case x: CollectExpression =>
-        SemanticState.recordCurrentScope(x) chain
+        withScopedState {
+          importValuesFromParentInExpressionWithScopeDependencies(x) chain
+            fromState(state => x.query.semanticCheckInSubqueryExpressionContext(canOmitReturn = false, state)) chain
+            when(x.query.containsUpdates) {
+              SemanticError.aExpressionCannotContainUpdates("Collect", x.position)
+            } chain
+            when(x.query.returnVariables.includeExisting || x.query.returnColumns.size != 1) {
+              SemanticError.singleReturnColumnRequired(x.position)
+              // by implication this also ensures that "A Collect Expression cannot contain a query ending with FINISH"
+            } chain
+            checkForShadowedVariables(
+              x.query.folder.findAllByClass[ImportingWithSubqueryCall],
+              x.query.folder.findAllByClass[ScopeClauseSubqueryCall]
+            ) chain
+            SemanticState.recordCurrentScope(x.query)
+        } chain
+          SemanticState.recordCurrentScope(x) chain
+          specifyType(CTList(CTAny).covariant, x)
+
+      case x: AllReducePredicate =>
+        check(ctx, x.init) chain
           withScopedState {
-            x.query.semanticCheckInSubqueryExpressionContext(canOmitReturn = false) chain
-              when(x.query.containsUpdates) {
-                SemanticError.aExpressionCannotContainUpdates("Collect", x.position)
-              } chain
-              when(x.query.returnVariables.includeExisting || x.query.returnColumns.size != 1) {
-                SemanticError.singleReturnColumnRequired(x.position)
-                // by implication this also ensures that "A Collect Expression cannot contain a query ending with FINISH"
-              } chain
-              checkForShadowedVariables(x.query.folder.findAllByClass[SubqueryCall]) chain
-              SemanticState.recordCurrentScope(x.query)
-          } chain specifyType(CTList(CTAny).covariant, x)
+            check(ctx, x.list) chain
+              expectType(CTList(CTAny).covariant, x.list) chain
+              declareVariable(x.accumulator, types(x.init)) chain
+              withScopedState {
+                importValuesFromParentInExpression(x.accumulator) chain
+                  declareVariable(x.reductionStepVariable, unwrapLists(types(x.list)), overriding = true) chain
+                  simple(x.reductionStep) chain
+                  expectType(
+                    s => types(x.init)(s),
+                    x.reductionStep,
+                    TypeMismatchContext.ACCUMULATOR,
+                    AccumulatorReductionTypeMismatchMessageGenerator
+                  ) chain
+                  check(ctx, x.predicate) chain
+                  expectType(CTBoolean.covariant, x.predicate) chain
+                  specifyType(CTBoolean, x)
+              }
+          }
+
+      case _: ObfuscatedLiteral => success
+
+      // FALLBACK
 
       case x: Expression => semanticCheckFallback(ctx, x)
     }
@@ -896,27 +1057,25 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
         val sanitizedLabelExpression = stringifier.stringifyLabelExpression(labelExpression.replaceColonSyntax)
         if (labelExpression.containsIs) {
           error(
-            GqlHelper.getGql42001_42I29(
-              String.valueOf(labelExpression),
-              sanitizedLabelExpression,
-              legacySymbols.head.position.line,
-              legacySymbols.head.position.column,
-              legacySymbols.head.position.offset
-            ),
-            s"Mixing the IS keyword with colon (':') between labels is not allowed. This expression could be expressed as IS $sanitizedLabelExpression.",
-            legacySymbols.head.position
+            SemanticError.mixingColonAndIs(
+              Set("IS " + stringifier.stringifyLabelExpression(labelExpression)),
+              Set("IS " + sanitizedLabelExpression),
+              legacySymbols.head.position
+            )
           )
         } else
           error(
-            s"Mixing label expression symbols ('|', '&', '!', and '%') with colon (':') between labels is not allowed. Please only use one set of symbols. This expression could be expressed as :$sanitizedLabelExpression.",
-            legacySymbols.head.position
+            SemanticError.invalidLabelExpression(Set(s":$sanitizedLabelExpression"), legacySymbols.head.position)
           )
-      } chain
-      checkValidLabels(labelExpression.flatten, labelExpression.position)
+      } chain {
+        val tokenType = if (entityType.contains(RELATIONSHIP_TYPE)) TokenType.RelationshipType else TokenType.NodeLabel
+        checkValidLabels(tokenType, labelExpression.flatten, labelExpression.position)
+      }
   }
 
   /**
    * Build a semantic check over a iterable of expressions.
+   * The simple semantic context disallows aggregating functions.
    */
   def simple(iterable: Iterable[Expression]): SemanticCheck = check(SemanticContext.Simple, iterable)
 
@@ -928,6 +1087,7 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
 
   /**
    * Build a semantic check over an optional expression.
+   * The simple semantic context disallows aggregating functions.
    */
   def simple(option: Option[Expression]): SemanticCheck = check(SemanticContext.Simple, option)
 
@@ -940,79 +1100,30 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
 
     def semanticCheck(ctx: SemanticContext, e: FilteringExpression): SemanticCheck =
       SemanticExpressionCheck.check(ctx, e.expression) chain
-        expectType(CTList(CTAny).covariant, e.expression) chain
-        checkInnerPredicate(e) chain
-        failIfAggregating(e.innerPredicate)
+        expectType(CTList(CTAny).covariant, e.expression) ifOkChain
+        checkInnerPredicate(e)
 
-    def failIfAggregating(expression: Option[Expression]): Option[SemanticError] =
-      expression.flatMap(failIfAggregating)
-
-    def failIfAggregating(expression: Expression): Option[SemanticError] =
-      expression.findAggregate.map(aggregate =>
-        SemanticError(
-          "Can't use aggregating expressions inside of expressions executing over lists",
-          aggregate.position
-        )
-      )
+    def checkInnerPredicate(e: FilteringExpression): SemanticCheck =
+      e.innerPredicate match {
+        case Some(predicate) => withScopedState {
+            declareVariable(e.variable, possibleInnerTypes(e)) chain
+              checkPredicateType(predicate)
+          }
+        case None => SemanticCheck.success
+      }
 
     def checkPredicateDefined(e: FilteringExpression): SemanticCheck =
       when(e.innerPredicate.isEmpty) {
         SemanticError.functionRequiresWhereClause(e.name, e.position)
       }
 
-    private def checkInnerPredicate(e: FilteringExpression): SemanticCheck =
-      e.innerPredicate match {
-        case Some(predicate) => withScopedState {
-            declareVariable(e.variable, possibleInnerTypes(e)) chain
-              SemanticExpressionCheck.check(SemanticContext.Simple, predicate) chain
-              SemanticExpressionCheck.expectType(CTBoolean.covariant, predicate)
-          }
-        case None => SemanticCheck.success
-      }
-
     def possibleInnerTypes(e: FilteringExpression): TypeGenerator = s =>
       (types(e.expression)(s) constrain CTList(CTAny)).unwrapLists
   }
 
-  private def checkAddBoundary(add: Add): SemanticCheck =
-    (add.lhs, add.rhs) match {
-      case (l: IntegerLiteral, r: IntegerLiteral) if Try(Math.addExact(l.value, r.value)).isFailure =>
-        SemanticError.integerOperationCannotBeRepresented(
-          s"${l.stringVal} + ${r.stringVal}",
-          add.position
-        )
-      case _ => SemanticCheck.success
-    }
-
-  private def checkSubtractBoundary(subtract: Subtract): SemanticCheck =
-    (subtract.lhs, subtract.rhs) match {
-      case (l: IntegerLiteral, r: IntegerLiteral) if Try(Math.subtractExact(l.value, r.value)).isFailure =>
-        SemanticError.integerOperationCannotBeRepresented(
-          s"${l.stringVal} - ${r.stringVal}",
-          subtract.position
-        )
-      case _ => SemanticCheck.success
-    }
-
-  private def checkUnarySubtractBoundary(subtract: UnarySubtract): SemanticCheck =
-    subtract.rhs match {
-      case r: IntegerLiteral if Try(Math.subtractExact(0, r.value)).isFailure =>
-        SemanticError.integerOperationCannotBeRepresented(
-          s"-${r.stringVal}",
-          subtract.position
-        )
-      case _ => SemanticCheck.success
-    }
-
-  private def checkMultiplyBoundary(multiply: Multiply): SemanticCheck =
-    (multiply.lhs, multiply.rhs) match {
-      case (l: IntegerLiteral, r: IntegerLiteral) if Try(Math.multiplyExact(l.value, r.value)).isFailure =>
-        SemanticError.integerOperationCannotBeRepresented(
-          s"${l.stringVal} * ${r.stringVal}",
-          multiply.position
-        )
-      case _ => SemanticCheck.success
-    }
+  private val allSimpleTypes = CTBoolean.covariant | CTString.covariant | CTInteger.covariant | CTFloat.covariant |
+    CTDate.covariant | CTLocalTime.covariant | CTTime.covariant | CTLocalDateTime.covariant | CTDateTime.covariant |
+    CTDuration.covariant | CTPoint.covariant | CTVector.covariant
 
   private def infixAddRhsTypes(lhs: Expression): TypeGenerator = s => {
     val lhsTypes = types(lhs)(s)
@@ -1021,6 +1132,8 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
     // "a" + "b" => "ab"
     // "a" + 1 => "a1"
     // "a" + 1.1 => "a1.1"
+    // "a" + T => "axx"
+
     // Numbers
     // 1 + "b" => "1b"
     // 1 + 1 => 2
@@ -1028,12 +1141,24 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
     // 1.1 + "b" => "1.1b"
     // 1.1 + 1 => 2.1
     // 1.1 + 1.1 => 2.2
+
     // Temporals
     // T + Duration => T
     // Duration + T => T
     // Duration + Duration => Duration
-    val valueTypes =
-      if (lhsTypes containsAny (CTInteger.covariant | CTFloat.covariant | CTString.covariant)) {
+
+    // Other types
+    // T + "b" => "xxb"
+
+    val stringTypes =
+      if (lhsTypes containsAny CTString.covariant) {
+        allSimpleTypes
+      } else {
+        TypeSpec.none
+      }
+
+    val numberTypes =
+      if (lhsTypes containsAny (CTInteger.covariant | CTFloat.covariant)) {
         CTString.covariant | CTInteger.covariant | CTFloat.covariant
       } else {
         TypeSpec.none
@@ -1043,17 +1168,25 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
         lhsTypes containsAny (CTDate.covariant | CTTime.covariant | CTLocalTime.covariant |
           CTDateTime.covariant | CTLocalDateTime.covariant | CTDuration.covariant)
       ) {
-        CTDuration.covariant
+        CTString.covariant | CTDuration.covariant
       } else {
         TypeSpec.none
       }
     val durationTypes =
       if (lhsTypes containsAny CTDuration.covariant) {
-        CTDate.covariant | CTTime.covariant | CTLocalTime.covariant |
+        CTString.covariant | CTDate.covariant | CTTime.covariant | CTLocalTime.covariant |
           CTDateTime.covariant | CTLocalDateTime.covariant | CTDuration.covariant
       } else {
         TypeSpec.none
       }
+
+    val otherTypes =
+      if (lhsTypes containsAny (CTBoolean.covariant | CTPoint.covariant | CTVector.covariant)) {
+        CTString.covariant
+      } else {
+        TypeSpec.none
+      }
+
     // [a] + [b] => [a, b]
     val listTypes = (lhsTypes leastUpperBounds CTList(CTAny) constrain CTList(CTAny)).covariant
 
@@ -1063,7 +1196,7 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
     // a + [b] => [a, b]
     val rhsListTypes = CTList(CTAny).covariant
 
-    valueTypes | lhsListTypes | rhsListTypes | temporalTypes | durationTypes
+    stringTypes | numberTypes | lhsListTypes | rhsListTypes | temporalTypes | durationTypes | otherTypes
   }
 
   private def infixAddOutputTypes(lhs: Expression, rhs: Expression): TypeGenerator = s => {
@@ -1081,10 +1214,12 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
     // "a" + "b" => "ab"
     // "a" + 1 => "a1"
     // "a" + 1.1 => "a1.1"
+    // "a" + T => "axx"
     // 1 + "b" => "1b"
     // 1.1 + "b" => "1.1b"
+    // T + "b" => "xxb"
     val stringTypes: TypeSpec =
-      when(CTString.covariant, CTInteger.covariant | CTFloat.covariant | CTString.covariant)(CTString)
+      when(CTString.covariant, allSimpleTypes)(CTString)
 
     // 1 + 1 => 2
     // 1 + 1.1 => 2.1
@@ -1132,7 +1267,7 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
       case Some(e) =>
         withScopedState {
           declareVariable(x.variable, FilteringExpressions.possibleInnerTypes(x)) chain
-            check(SemanticContext.Simple, e)
+            simple(e)
         } chain {
           val outerTypes: TypeGenerator = types(e)(_).wrapInList
           specifyType(outerTypes, x)
@@ -1145,7 +1280,40 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
         }
     }
 
-  private def checkForShadowedVariables(subqueryCallsToFilter: Seq[Clause]): SemanticCheck = (inner: SemanticState) => {
+  private def checkPredicateType(predicate: Expression): SemanticCheck =
+    simple(predicate) chain expectType(CTBoolean.covariant, predicate)
+
+  private def checkInnerMapComprehension(ctx: SemanticContext, x: MapComprehension): SemanticCheck =
+    SemanticExpressionCheck.check(ctx, x.expression) chain
+      expectType(CTList(CTAny).covariant, x.expression) ifOkChain
+      withScopedState {
+        declareVariable(x.variable, FilteringExpressions.possibleInnerTypes(x)) chain
+          x.innerPredicate.foldSemanticCheck(checkPredicateType) chain
+          simple(x.extractKeyExpression) chain
+          expectType(CTString.covariant, x.extractKeyExpression) chain
+          simple(x.extractValueExpression)
+      } chain {
+        specifyType(CTMap, x)
+      }
+
+  private def checkInnerMapEntriesComprehension(ctx: SemanticContext, x: MapEntriesComprehension): SemanticCheck =
+    SemanticExpressionCheck.check(ctx, x.expression) chain
+      expectType(CTMap.invariant, x.expression) ifOkChain
+      withScopedState {
+        declareVariable(x.keyVariable, CTString.covariant) chain
+          declareVariable(x.valueVariable, CTAny.covariant) chain
+          x.innerPredicate.foldSemanticCheck(checkPredicateType) chain
+          simple(x.extractKeyExpression) chain
+          expectType(CTString.covariant, x.extractKeyExpression) chain
+          simple(x.extractValueExpression)
+      } chain {
+        specifyType(CTMap, x)
+      }
+
+  private def checkForShadowedVariables(
+    importingWithSubqueryCallsToFilter: Seq[ImportingWithSubqueryCall],
+    scopeClauseSubqueryCallsToFilter: Seq[ScopeClauseSubqueryCall]
+  ): SemanticCheck = (inner: SemanticState) => {
     // Only check the first time to avoid unnecessary checks after extensive rewriting.
     if (inner.semanticCheckHasRunOnce) SemanticCheckResult(inner, Seq.empty)
     else {
@@ -1155,15 +1323,26 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
       }
       val innerScopeSymbols: Map[String, Set[Symbol]] = inner.currentScope.scope.allSymbols
 
-      // Variables inside of CALL {} are allowed to shadow outside variables and should not be considered errors.
-      val subqueryCallScopes =
-        inner.recordedScopes.filter(recordedScope => subqueryCallsToFilter.contains(recordedScope._1.node))
-      val subqueryCallSymbols = subqueryCallScopes.map { case (_, scope) =>
+      // Variables inside CALL {} are allowed to shadow outside variables and should not be considered errors.
+      val importingWithSubqueryCallScopes =
+        inner.recordedScopes.filter(recordedScope => importingWithSubqueryCallsToFilter.contains(recordedScope._1.node))
+      val importingWithSubqueryCallSymbols = importingWithSubqueryCallScopes.map { case (_, scope) =>
+        scope.parent.map(_.scope.allSymbols).getOrElse(Map.empty)
+      }.flatten.groupMapReduce(_._1)(_._2)(_ ++ _)
+
+      // Variables inside CALL () {} are allowed to shadow outside variables and should not be considered errors.
+      val scopedClauseSubqueryCallScopes =
+        inner.recordedScopes.filter(recordedScope => scopeClauseSubqueryCallsToFilter.contains(recordedScope._1.node))
+      val returnsOfSubquery = scopeClauseSubqueryCallsToFilter.flatMap(_.innerQuery.returnVariables.explicitVariables)
+      val returnVariableNames = returnsOfSubquery.map(_.name)
+      val scopeClauseSubqueryCallSymbols = scopedClauseSubqueryCallScopes.map { case (_, scope) =>
         scope.parent.map(_.scope.allSymbols).getOrElse(Map.empty)
       }.flatten.groupMapReduce(_._1)(_._2)(_ ++ _)
 
       val innerScopeSymbolsWithoutSubquerySymbols: Map[String, Set[Symbol]] =
-        innerScopeSymbols.filterNot { case (x, y) => subqueryCallSymbols.get(x).contains(y) }
+        innerScopeSymbols
+          .filterNot { case (x, _) => scopeClauseSubqueryCallSymbols.exists(_._1 == x) }
+          .filterNot { case (x, y) => importingWithSubqueryCallSymbols.get(x).contains(y) }
 
       // Union symbols are excluded as those always have the position of the UNION keyword regardless of shadowing
       val innerDefinitions = innerScopeSymbolsWithoutSubquerySymbols.map {
@@ -1171,19 +1350,29 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
           (name, symbols.filterNot(symbol => symbol.unionSymbol).map(_.definition))
       }
 
+      val innerVariables = innerDefinitions.values.flatMap(x => x.map(_.asVariable)) ++ returnsOfSubquery
+
       // If a variable of the same name exists in the inner scope and it is not a reference to the outer scope variable.
       // Also the outer variable must come before the inner variable (i.e. have a lower position) for it to be a case of shadowing.
       def isShadowed(s: Symbol): Boolean = {
         val outerName = s.name
         val outerPos = s.definition.positionsAndUniqueIdString._1
 
-        innerDefinitions.contains(outerName) &&
-        innerDefinitions(outerName).exists(inner => inner.positionsAndUniqueIdString._1 > outerPos)
+        (innerDefinitions.contains(outerName) &&
+          innerDefinitions(outerName).exists(inner => inner.positionsAndUniqueIdString._1 > outerPos)) ||
+        returnVariableNames.contains(outerName)
       }
 
-      val shadowedSymbols = outerScopeSymbols.collect {
-        case (name, symbol) if isShadowed(symbol) =>
+      val shadowedSymbols: Map[String, InputPosition] = outerScopeSymbols.collect {
+        // Return variables only need a name match, but inner definitions we need to make sure we don't collect
+        // the wrong position
+        case (name, symbol)
+          if innerDefinitions.contains(name) && innerDefinitions(name).exists(_ != symbol.definition) && isShadowed(
+            symbol
+          ) =>
           name -> innerDefinitions(name).find(_ != symbol.definition).get.asVariable.position
+        case (name, symbol) if isShadowed(symbol) =>
+          name -> innerVariables.find(_.name == name).get.position
       }
 
       val errors = shadowedSymbols.map {
@@ -1192,6 +1381,49 @@ object SemanticExpressionCheck extends SemanticAnalysisTooling {
       }.toSeq
 
       SemanticCheckResult(inner, errors)
+    }
+  }
+
+  /**
+   * True if this subquery expression's body has no clause that could produce or conclude a result,
+   * i.e. it consists of nothing but a USE clause, a WITH clause is okay.
+   */
+  private def hasEmptyBody(query: Query): Boolean = query match {
+    case p: PartQuery =>
+      p.clauses.forall(_.isInstanceOf[GraphSelection])
+    case u: Union =>
+      hasEmptyBody(u.lhs) || hasEmptyBody(u.rhs)
+    case _ =>
+      // Other Query shapes (e.g. CASE/NEXT-expanded composite constructs) always have a concluding clause.
+      false
+  }
+
+  private def literalShouldBeNumberInRange(
+    expression: Expression,
+    name: String,
+    lowerBound: Integer,
+    upperBound: Integer
+  ): SemanticCheck = {
+    try {
+      expression match {
+        case i: IntegerLiteral if i.value >= lowerBound && i.value <= upperBound        => SemanticCheck.success
+        case i: DoubleLiteral if i.value >= 0.0d && i.value <= upperBound.doubleValue() => SemanticCheck.success
+        case lit: NumberLiteral =>
+          SemanticAnalysisToolingErrorWithGqlInfo.specifiedNumberOutOfRangeError(
+            name,
+            "NUMBER",
+            lowerBound,
+            upperBound,
+            lit.asCanonicalStringVal,
+            s"Invalid input. '${lit.asCanonicalStringVal}' is not a valid value. Must be a number in the range $lowerBound to $upperBound.",
+            lit.position
+          )
+        case _ => SemanticCheck.success
+      }
+    } catch {
+      case _: NumberFormatException =>
+        // We rely on getting a SemanticError from Type checking otherwise
+        SemanticCheck.success
     }
   }
 }

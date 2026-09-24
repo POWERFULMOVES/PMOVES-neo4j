@@ -23,6 +23,8 @@ import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.neo4j.batchimport.api.input.IdType.INTEGER;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
 import static org.neo4j.configuration.GraphDatabaseSettings.db_timezone;
 import static org.neo4j.configuration.GraphDatabaseSettings.dense_node_threshold;
@@ -36,6 +38,7 @@ import static org.neo4j.token.api.TokenConstants.ANY_LABEL;
 import static org.neo4j.token.api.TokenConstants.ANY_RELATIONSHIP_TYPE;
 
 import blue.strategic.parquet.Dehydrator;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
@@ -81,10 +84,10 @@ import org.apache.parquet.schema.Type;
 import org.apache.parquet.schema.Types;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.batchimport.api.BatchImporter;
 import org.neo4j.batchimport.api.Monitor;
 import org.neo4j.batchimport.api.input.Collector;
+import org.neo4j.batchimport.api.input.FileGroup;
 import org.neo4j.batchimport.api.input.Group;
 import org.neo4j.batchimport.api.input.IdType;
 import org.neo4j.batchimport.api.input.Input;
@@ -97,21 +100,23 @@ import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.Relationship;
 import org.neo4j.graphdb.ResourceIterable;
 import org.neo4j.graphdb.Transaction;
+import org.neo4j.importer.SchemaCommandSource.ResolvedSchemaCommands;
 import org.neo4j.internal.batchimport.DefaultAdditionalIds;
 import org.neo4j.internal.batchimport.ParallelBatchImporter;
+import org.neo4j.internal.batchimport.input.BadCollector;
 import org.neo4j.internal.batchimport.input.Groups;
 import org.neo4j.internal.batchimport.input.InputEntity;
+import org.neo4j.internal.batchimport.input.InputException;
 import org.neo4j.internal.batchimport.staging.ExecutionMonitor;
 import org.neo4j.internal.helpers.collection.Pair;
 import org.neo4j.internal.recordstorage.RecordStorageEngine;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.recordstorage.RecordDatabaseLayout;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.index.schema.IndexImporterFactoryImpl;
 import org.neo4j.kernel.impl.store.NeoStores;
 import org.neo4j.kernel.impl.store.TokenStore;
-import org.neo4j.kernel.impl.transaction.log.EmptyLogTailMetadata;
-import org.neo4j.kernel.impl.transaction.log.files.TransactionLogInitializer;
 import org.neo4j.kernel.impl.util.AutoCreatingHashMap;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.logging.LogTimeZone;
@@ -122,19 +127,22 @@ import org.neo4j.test.RandomSupport;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.Neo4jLayoutExtension;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.scheduler.ThreadPoolJobScheduler;
 import org.neo4j.test.utils.TestDirectory;
 import org.neo4j.token.api.NamedToken;
 import org.neo4j.values.storable.CoordinateReferenceSystem;
 import org.neo4j.values.storable.PointValue;
+import org.neo4j.wal.EmptyLogTailMetadata;
+import org.neo4j.wal.files.TransactionLogInitializer;
 
 @Neo4jLayoutExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class ParquetInputBatchImportIT {
     /** Don't support these counts at the moment so don't compute them */
     private static final boolean COMPUTE_DOUBLE_SIDED_RELATIONSHIP_COUNTS = false;
 
+    private static final long ROW_GROUP_SIZE = 1024;
     private static final int GENERATED_NODE_COUNT = 4096;
     private static final int GENERATED_RELATIONSHIP_COUNT = 4096 * 3;
 
@@ -176,7 +184,8 @@ class ParquetInputBatchImportIT {
                     TransactionLogInitializer.getLogFilesInitializer(),
                     new IndexImporterFactoryImpl(),
                     INSTANCE,
-                    NULL_CONTEXT_FACTORY);
+                    NULL_CONTEXT_FACTORY,
+                    DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
             Groups groups = new Groups();
             var group = groups.getOrCreate(null);
             List<InputEntity> nodeData = randomNodeData(group);
@@ -190,20 +199,209 @@ class ParquetInputBatchImportIT {
         }
     }
 
-    static Input parquet(Path nodes, Path relationships, IdType idType, Groups groups) {
-        Path[] nodeArray = List.of(nodes).toArray(new Path[] {});
-        Path[] relationshipArray = List.of(relationships).toArray(new Path[] {});
+    @Test
+    void shouldImportParquetWithIntegerIdColumnsAndStringIdType() throws Exception {
+        // Regression test for KRNL-1594: when nodes are registered with String input ids
+        // and relationships carry INT64 ids (no per-column id-type) under a STRING global idType,
+        // the IdMapper's strict node check would compare Long.equals(String) and report a missing
+        // node. The fix in ParquetDataInputChunk converts numeric ids to their String
+        // representation when the effective id type is STRING.
+        Config dbConfig = Config.newBuilder()
+                .set(db_timezone, LogTimeZone.SYSTEM)
+                .set(dense_node_threshold, 5)
+                .build();
+        try (JobScheduler scheduler = new ThreadPoolJobScheduler();
+                var outputStream = new ByteArrayOutputStream();
+                var badCollector = BadCollector.create(outputStream, 0, 20)) {
+            BatchImporter importer = new ParallelBatchImporter(
+                    databaseLayout,
+                    fileSystem,
+                    PageCacheTracer.NULL,
+                    strictSmallBatchSizeConfig(),
+                    NullLogService.getInstance(),
+                    ExecutionMonitor.INVISIBLE,
+                    DefaultAdditionalIds.EMPTY,
+                    new EmptyLogTailMetadata(dbConfig),
+                    dbConfig,
+                    Monitor.NO_MONITOR,
+                    scheduler,
+                    badCollector,
+                    TransactionLogInitializer.getLogFilesInitializer(),
+                    new IndexImporterFactoryImpl(),
+                    INSTANCE,
+                    NULL_CONTEXT_FACTORY,
+                    DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
+            Groups groups = new Groups();
+            groups.getOrCreate(null);
+
+            Path nodesFile = nodesWithStringIdAsFile();
+            Path relationshipsFile = relationshipsWithIntegerIdsAsFile();
+
+            importer.doImport(parquet(nodesFile, relationshipsFile, IdType.STRING, groups));
+
+            try (DatabaseManagementService managementService =
+                    new TestDatabaseManagementServiceBuilder(testDirectory.homePath()).build()) {
+                GraphDatabaseService db = managementService.database(DEFAULT_DATABASE_NAME);
+                try (Transaction tx = db.beginTx()) {
+                    Map<String, Node> nodesById = new HashMap<>();
+                    try (ResourceIterable<Node> allNodes = tx.getAllNodes()) {
+                        for (Node node : allNodes) {
+                            nodesById.put((String) node.getProperty("inputId"), node);
+                        }
+                    }
+                    assertEquals(3, nodesById.size());
+
+                    Map<String, String> actualRelationships = new HashMap<>();
+                    try (ResourceIterable<Relationship> allRelationships = tx.getAllRelationships()) {
+                        for (Relationship relationship : allRelationships) {
+                            String startInputId =
+                                    (String) relationship.getStartNode().getProperty("inputId");
+                            String endInputId =
+                                    (String) relationship.getEndNode().getProperty("inputId");
+                            actualRelationships.put(
+                                    startInputId + "->" + endInputId,
+                                    relationship.getType().name());
+                        }
+                    }
+
+                    assertEquals(
+                            Map.of(
+                                    "9345850217180->6597069807267", "COMMENT_HAS_CREATOR",
+                                    "6597069807267->1", "KNOWS"),
+                            actualRelationships);
+                    tx.commit();
+                }
+            }
+        }
+    }
+
+    private Path nodesWithStringIdAsFile() throws IOException {
+        Path file = testDirectory.file("nodes-string-id.parquet");
+        PrimitiveType idType = Types.required(PrimitiveType.PrimitiveTypeName.BINARY)
+                .as(LogicalTypeAnnotation.stringType())
+                .named("inputId:ID");
+        PrimitiveType labelType = Types.required(PrimitiveType.PrimitiveTypeName.BINARY)
+                .as(LogicalTypeAnnotation.stringType())
+                .named(":LABEL");
+        var writer = new BasicParquetWriterBuilder<>(new TestOutputFile(file))
+                .withRowGroupSize(ROW_GROUP_SIZE)
+                .withType(new MessageType("Nodes", idType, labelType))
+                .withDehydrator((record, valueWriter) -> {
+                    var row = (Object[]) record;
+                    valueWriter.write("inputId:ID", row[0]);
+                    valueWriter.write(":LABEL", row[1]);
+                })
+                .build();
+        writer.write(new Object[] {"9345850217180", "Comment"});
+        writer.write(new Object[] {"6597069807267", "Person"});
+        writer.write(new Object[] {"1", "Person"});
+        writer.close();
+        return file;
+    }
+
+    private Path relationshipsWithIntegerIdsAsFile() throws IOException {
+        Path file = testDirectory.file("relationships-int-id.parquet");
+        PrimitiveType startId =
+                Types.required(PrimitiveType.PrimitiveTypeName.INT64).named(":START_ID");
+        PrimitiveType endId =
+                Types.required(PrimitiveType.PrimitiveTypeName.INT64).named(":END_ID");
+        Type type = Types.required(PrimitiveType.PrimitiveTypeName.BINARY)
+                .as(LogicalTypeAnnotation.stringType())
+                .named(":TYPE");
+        var writer = new BasicParquetWriterBuilder<>(new TestOutputFile(file))
+                .withRowGroupSize(ROW_GROUP_SIZE)
+                .withType(new MessageType("Relationships", startId, endId, type))
+                .withDehydrator((record, valueWriter) -> {
+                    var row = (Object[]) record;
+                    valueWriter.write(":START_ID", row[0]);
+                    valueWriter.write(":END_ID", row[1]);
+                    valueWriter.write(":TYPE", row[2]);
+                })
+                .build();
+        writer.write(new Object[] {9345850217180L, 6597069807267L, "COMMENT_HAS_CREATOR"});
+        writer.write(new Object[] {6597069807267L, 1L, "KNOWS"});
+        writer.close();
+        return file;
+    }
+
+    @Test
+    void shouldYieldCorrectGroupWarning() throws Exception {
+        // GIVEN
+        Config dbConfig = Config.newBuilder()
+                .set(db_timezone, LogTimeZone.SYSTEM)
+                .set(dense_node_threshold, 5)
+                .build();
+        try (JobScheduler scheduler = new ThreadPoolJobScheduler();
+                var outputStream = new ByteArrayOutputStream();
+                var badCollector = BadCollector.create(outputStream, 0, 20)) {
+
+            BatchImporter importer = new ParallelBatchImporter(
+                    databaseLayout,
+                    fileSystem,
+                    PageCacheTracer.NULL,
+                    smallBatchSizeConfig(),
+                    NullLogService.getInstance(),
+                    ExecutionMonitor.INVISIBLE,
+                    DefaultAdditionalIds.EMPTY,
+                    new EmptyLogTailMetadata(dbConfig),
+                    dbConfig,
+                    Monitor.NO_MONITOR,
+                    scheduler,
+                    badCollector,
+                    TransactionLogInitializer.getLogFilesInitializer(),
+                    new IndexImporterFactoryImpl(),
+                    INSTANCE,
+                    NULL_CONTEXT_FACTORY,
+                    DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
+            Groups groups = new Groups();
+            groups.getOrCreate(null);
+            groups.getOrCreate("EndGroup");
+
+            var message = assertThrows(
+                            InputException.class,
+                            () -> importer.doImport(parquet(
+                                    Path.of(ParquetInputBatchImportIT.class
+                                            .getResource("/org/neo4j/internal/batchimport/nodeGroup1.parquet")
+                                            .toURI()),
+                                    Path.of(ParquetInputBatchImportIT.class
+                                            .getResource("/org/neo4j/internal/batchimport/nodeGroup2.parquet")
+                                            .toURI()),
+                                    Path.of(ParquetInputBatchImportIT.class
+                                            .getResource("/org/neo4j/internal/batchimport/relationships.parquet")
+                                            .toURI()),
+                                    groups)))
+                    .getMessage();
+
+            assertThat(message.contains("123 (StartGroup)-[TYPE]->234 (EndGroup) referring to missing node 234"));
+        }
+    }
+
+    static Input parquet(Path nodeGroup1, Path nodeGroup2, Path relationships, Groups groups) {
         return new ParquetInput(
-                Map.of(Set.of(""), Collections.singletonList(nodeArray)),
-                Map.of("", Collections.singletonList(relationshipArray)),
-                idType,
-                ';',
+                Map.of(
+                        Set.of("STARTTHING"),
+                        List.of(new FileGroup(new FileGroup.NumberedFile(0, nodeGroup1))),
+                        Set.of("ENDTHING"),
+                        List.of(new FileGroup(new FileGroup.NumberedFile(1, nodeGroup2)))),
+                Map.of("", List.of(new FileGroup(new FileGroup.NumberedFile(2, relationships)))),
+                ResolvedSchemaCommands.of(),
+                INTEGER,
+                Configuration.newBuilder().build(),
                 groups,
                 new ParquetMonitor(System.out));
     }
 
-    private static Configuration lowBufferSize(Configuration actual) {
-        return actual.toBuilder().withBufferSize(10_000).build();
+    static Input parquet(Path nodes, Path relationships, IdType idType, Groups groups) {
+        FileGroup nodeFileGroup = new FileGroup(new FileGroup.NumberedFile(0, nodes));
+        FileGroup relationshipFileGroup = new FileGroup(new FileGroup.NumberedFile(1, relationships));
+        return new ParquetInput(
+                Map.of(Set.of(""), Collections.singletonList(nodeFileGroup)),
+                Map.of("", Collections.singletonList(relationshipFileGroup)),
+                ResolvedSchemaCommands.of(),
+                idType,
+                Configuration.newBuilder().build(),
+                groups,
+                new ParquetMonitor(System.out));
     }
 
     // ======================================================
@@ -215,19 +413,20 @@ class ParquetInputBatchImportIT {
         for (int i = 0; i < GENERATED_NODE_COUNT; i++) {
             InputEntity node = new InputEntity();
             node.id(UUID.randomUUID().toString(), group);
-            node.property("name", "Node " + i);
-            node.property("pointA", "\"   { x : -4.2, y : " + i % 90 + ", crs: WGS-84 } \"");
-            node.property("pointB", "\" { x : -8, y : " + i + " } \"");
-            node.property("date", LocalDate.of(2018, i % 12 + 1, i % 28 + 1));
-            node.property("time", OffsetTime.of(1, i % 60, 0, 0, ZoneOffset.ofHours(9)));
-            node.property("dateTime", ZonedDateTime.of(2011, 9, 11, 8, i % 60, 0, 0, ZoneId.of("Europe/Stockholm")));
-            node.property("dateTime2", LocalDateTime.of(2011, 9, 11, 8, i % 60, 0, 0)); // No zone specified
-            node.property("localTime", LocalTime.of(1, i % 60, 0));
-            node.property("localDateTime", LocalDateTime.of(2011, 9, 11, 8, i % 60));
-            node.property("duration", Period.of(2, -3, i % 30));
-            node.property("floatArray", new float[] {1.0f, 2.0f, 3.0f});
-            node.property("dateArray", new LocalDate[] {LocalDate.of(2018, i % 12 + 1, i % 28 + 1)});
-            node.property("pointArray", "\" { x : -8, y : " + i + " } \"");
+            node.property("name", "Node " + i, false);
+            node.property("pointA", "\"   { x : -4.2, y : " + i % 90 + ", crs: WGS-84 } \"", false);
+            node.property("pointB", "\" { x : -8, y : " + i + " } \"", false);
+            node.property("date", LocalDate.of(2018, i % 12 + 1, i % 28 + 1), false);
+            node.property("time", OffsetTime.of(1, i % 60, 0, 0, ZoneOffset.ofHours(9)), false);
+            node.property(
+                    "dateTime", ZonedDateTime.of(2011, 9, 11, 8, i % 60, 0, 0, ZoneId.of("Europe/Stockholm")), false);
+            node.property("dateTime2", LocalDateTime.of(2011, 9, 11, 8, i % 60, 0, 0), false); // No zone specified
+            node.property("localTime", LocalTime.of(1, i % 60, 0), false);
+            node.property("localDateTime", LocalDateTime.of(2011, 9, 11, 8, i % 60), false);
+            node.property("duration", Period.of(2, -3, i % 30), false);
+            node.property("floatArray", new float[] {1.0f, 2.0f, 3.0f}, false);
+            node.property("dateArray", new LocalDate[] {LocalDate.of(2018, i % 12 + 1, i % 28 + 1)}, false);
+            node.property("pointArray", "\" { x : -8, y : " + i + " } \"", false);
             node.labels(randomLabels(random.random()));
             nodes.add(node);
         }
@@ -247,6 +446,15 @@ class ParquetInputBatchImportIT {
                 org.neo4j.batchimport.api.Configuration.DEFAULT, 100);
     }
 
+    private static org.neo4j.batchimport.api.Configuration strictSmallBatchSizeConfig() {
+        return new org.neo4j.batchimport.api.Configuration.Overridden(smallBatchSizeConfig()) {
+            @Override
+            public boolean strictNodeCheck() {
+                return true;
+            }
+        };
+    }
+
     private Path relationshipDataAsFile(List<InputEntity> relationshipData) throws IOException {
         Path file = testDirectory.file("relationships.parquet");
         PrimitiveType startId = Types.required(PrimitiveType.PrimitiveTypeName.BINARY)
@@ -259,7 +467,7 @@ class ParquetInputBatchImportIT {
                 .as(LogicalTypeAnnotation.stringType())
                 .named(":TYPE");
         var writer = new BasicParquetWriterBuilder<>(new TestOutputFile(file))
-                .withRowGroupSize(1024L)
+                .withRowGroupSize(ROW_GROUP_SIZE)
                 .withType(new MessageType("Some Data", startId, endId, type))
                 .withDehydrator((record, valueWriter) -> {
                     var relationship = (Object[]) record;
@@ -291,7 +499,7 @@ class ParquetInputBatchImportIT {
                 .as(LogicalTypeAnnotation.stringType())
                 .named("name");
         var writer = new BasicParquetWriterBuilder<>(new TestOutputFile(file))
-                .withRowGroupSize(1024L)
+                .withRowGroupSize(ROW_GROUP_SIZE)
                 .withType(new MessageType("Some Data", idType, labelsType, nameType))
                 .withDehydrator((record, valueWriter) -> {
                     var node = (InputEntity) record;
@@ -349,80 +557,81 @@ class ParquetInputBatchImportIT {
                 expectedRelationshipCounts);
 
         // Do the verification
-        DatabaseManagementService managementService =
-                new TestDatabaseManagementServiceBuilder(testDirectory.homePath()).build();
-        GraphDatabaseService db = managementService.database(DEFAULT_DATABASE_NAME);
-        try (Transaction tx = db.beginTx();
-                ResourceIterable<Node> allNodes = tx.getAllNodes()) {
-            // Verify nodes
-            for (Node node : allNodes) {
-                String name = (String) node.getProperty("name");
-                String[] labels = expectedNodeNames.remove(name);
-                assertEquals(asSet(labels), names(node.getLabels()));
+        try (DatabaseManagementService managementService =
+                new TestDatabaseManagementServiceBuilder(testDirectory.homePath()).build()) {
+            GraphDatabaseService db = managementService.database(DEFAULT_DATABASE_NAME);
+            try (Transaction tx = db.beginTx();
+                    ResourceIterable<Node> allNodes = tx.getAllNodes()) {
+                // Verify nodes
+                for (Node node : allNodes) {
+                    String name = (String) node.getProperty("name");
+                    String[] labels = expectedNodeNames.remove(name);
+                    assertEquals(asSet(labels), names(node.getLabels()));
 
-                // Verify node properties
-                Map<String, Consumer<Object>> expectedPropertyVerifiers = expectedNodePropertyVerifiers.remove(name);
-                Map<String, Object> actualProperties = node.getAllProperties();
-                actualProperties.remove("id"); // The id does not exist in expected properties
-                for (Map.Entry actualProperty : actualProperties.entrySet()) {
-                    Consumer v = expectedPropertyVerifiers.get(actualProperty.getKey());
-                    if (v != null) {
-                        v.accept(actualProperty.getValue());
+                    // Verify node properties
+                    Map<String, Consumer<Object>> expectedPropertyVerifiers =
+                            expectedNodePropertyVerifiers.remove(name);
+                    Map<String, Object> actualProperties = node.getAllProperties();
+                    actualProperties.remove("id"); // The id does not exist in expected properties
+                    for (Map.Entry actualProperty : actualProperties.entrySet()) {
+                        Consumer v = expectedPropertyVerifiers.get(actualProperty.getKey());
+                        if (v != null) {
+                            v.accept(actualProperty.getValue());
+                        }
                     }
                 }
-            }
-            assertEquals(0, expectedNodeNames.size());
+                assertEquals(0, expectedNodeNames.size());
 
-            // Verify relationships
-            try (ResourceIterable<Relationship> allRelationships = tx.getAllRelationships()) {
-                for (Relationship relationship : allRelationships) {
-                    String startNodeName = (String) relationship.getStartNode().getProperty("name");
-                    Map<String, Map<String, AtomicInteger>> inner = expectedRelationships.get(startNodeName);
-                    String endNodeName = (String) relationship.getEndNode().getProperty("name");
-                    Map<String, AtomicInteger> innerInner = inner.get(endNodeName);
-                    String type = relationship.getType().name();
-                    int countAfterwards = innerInner.get(type).decrementAndGet();
-                    assertThat(countAfterwards).isGreaterThanOrEqualTo(0);
-                    if (countAfterwards == 0) {
-                        innerInner.remove(type);
-                        if (innerInner.isEmpty()) {
-                            inner.remove(endNodeName);
-                            if (inner.isEmpty()) {
-                                expectedRelationships.remove(startNodeName);
+                // Verify relationships
+                try (ResourceIterable<Relationship> allRelationships = tx.getAllRelationships()) {
+                    for (Relationship relationship : allRelationships) {
+                        String startNodeName =
+                                (String) relationship.getStartNode().getProperty("name");
+                        Map<String, Map<String, AtomicInteger>> inner = expectedRelationships.get(startNodeName);
+                        String endNodeName = (String) relationship.getEndNode().getProperty("name");
+                        Map<String, AtomicInteger> innerInner = inner.get(endNodeName);
+                        String type = relationship.getType().name();
+                        int countAfterwards = innerInner.get(type).decrementAndGet();
+                        assertThat(countAfterwards).isGreaterThanOrEqualTo(0);
+                        if (countAfterwards == 0) {
+                            innerInner.remove(type);
+                            if (innerInner.isEmpty()) {
+                                inner.remove(endNodeName);
+                                if (inner.isEmpty()) {
+                                    expectedRelationships.remove(startNodeName);
+                                }
                             }
                         }
                     }
                 }
-            }
-            assertEquals(0, expectedRelationships.size());
+                assertEquals(0, expectedRelationships.size());
 
-            RecordStorageEngine storageEngine =
-                    ((GraphDatabaseAPI) db).getDependencyResolver().resolveDependency(RecordStorageEngine.class);
-            NeoStores neoStores = storageEngine.testAccessNeoStores();
-            var counts = storageEngine.countsAccessor();
-            Function<String, Integer> labelTranslationTable =
-                    translationTable(neoStores.getLabelTokenStore(), ANY_LABEL, storageEngine);
-            for (Pair<Integer, Long> count : allNodeCounts(labelTranslationTable, expectedNodeCounts)) {
-                assertEquals(
-                        count.other().longValue(),
-                        counts.nodeCount(count.first(), NULL_CONTEXT),
-                        "Label count mismatch for label " + count.first());
-            }
+                RecordStorageEngine storageEngine =
+                        ((GraphDatabaseAPI) db).getDependencyResolver().resolveDependency(RecordStorageEngine.class);
+                NeoStores neoStores = storageEngine.testAccessNeoStores();
+                var counts = storageEngine.countsAccessor();
+                Function<String, Integer> labelTranslationTable =
+                        translationTable(neoStores.getLabelTokenStore(), ANY_LABEL, storageEngine);
+                for (Pair<Integer, Long> count : allNodeCounts(labelTranslationTable, expectedNodeCounts)) {
+                    assertEquals(
+                            count.other().longValue(),
+                            counts.nodeCount(count.first(), NULL_CONTEXT),
+                            "Label count mismatch for label " + count.first());
+                }
 
-            Function<String, Integer> relationshipTypeTranslationTable =
-                    translationTable(neoStores.getRelationshipTypeTokenStore(), ANY_RELATIONSHIP_TYPE, storageEngine);
-            for (Pair<RelationshipCountKey, Long> count : allRelationshipCounts(
-                    labelTranslationTable, relationshipTypeTranslationTable, expectedRelationshipCounts)) {
-                RelationshipCountKey key = count.first();
-                assertEquals(
-                        count.other().longValue(),
-                        counts.relationshipCount(key.startLabel, key.type, key.endLabel, NULL_CONTEXT),
-                        "Label count mismatch for label " + key);
-            }
+                Function<String, Integer> relationshipTypeTranslationTable = translationTable(
+                        neoStores.getRelationshipTypeTokenStore(), ANY_RELATIONSHIP_TYPE, storageEngine);
+                for (Pair<RelationshipCountKey, Long> count : allRelationshipCounts(
+                        labelTranslationTable, relationshipTypeTranslationTable, expectedRelationshipCounts)) {
+                    RelationshipCountKey key = count.first();
+                    assertEquals(
+                            count.other().longValue(),
+                            counts.relationshipCount(key.startLabel, key.type, key.endLabel, NULL_CONTEXT),
+                            "Label count mismatch for label " + key);
+                }
 
-            tx.commit();
-        } finally {
-            managementService.shutdown();
+                tx.commit();
+            }
         }
     }
 
@@ -510,8 +719,7 @@ class ParquetInputBatchImportIT {
             // Build default verifiers for all the properties that compares the property value using equals
             Assertions.assertFalse(node.hasIntPropertyKeyIds);
             Map<String, Consumer<Object>> propertyVerifiers = new TreeMap<>();
-            for (int i = 0; i < node.propertyCount(); i++) {
-                final Object expectedValue = node.propertyValue(i);
+            node.propertiesAsMap().forEach((key, expectedValue) -> {
                 Consumer verify;
                 if (expectedValue instanceof TemporalAmount) {
                     // Since there is no straightforward comparison for TemporalAmount we add it to a reference
@@ -550,8 +758,8 @@ class ParquetInputBatchImportIT {
                 } else {
                     verify = actualValue -> assertEquals(expectedValue, actualValue);
                 }
-                propertyVerifiers.put((String) node.propertyKey(i), verify);
-            }
+                propertyVerifiers.put(key, verify);
+            });
 
             // Special verifier for pointA property
             Consumer verifyPointA = actualValue -> {
@@ -642,11 +850,11 @@ class ParquetInputBatchImportIT {
     }
 
     private static String nameOf(InputEntity node) {
-        return (String) node.properties()[1];
+        return (String) node.getProperty("name").value();
     }
 
     private static int indexOf(InputEntity node) {
-        return Integer.parseInt(((String) node.properties()[1]).split("\\s")[1]);
+        return Integer.parseInt(nameOf(node).split("\\s")[1]);
     }
 
     private static class TestOutputFile extends LocalOutputFile {
@@ -778,8 +986,9 @@ class ParquetInputBatchImportIT {
                                 .formatted(type.getLogicalTypeAnnotation()));
                     }
                 }
-                default -> throw new UnsupportedOperationException(
-                        "writing of %s primitive types is not supported.".formatted(type.getPrimitiveTypeName()));
+                default ->
+                    throw new UnsupportedOperationException(
+                            "writing of %s primitive types is not supported.".formatted(type.getPrimitiveTypeName()));
             }
             recordConsumer.endField(name, fieldIndex);
         }

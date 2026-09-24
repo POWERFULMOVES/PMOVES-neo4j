@@ -76,7 +76,7 @@ public class ControlledPopulationIndexProvider extends BaseTestingIndexProvider 
             }
 
             @Override
-            public void add(Collection<? extends IndexEntryUpdate<?>> updates, CursorContext cursorContext) {
+            public void add(Collection<? extends IndexEntryUpdate> updates, CursorContext cursorContext) {
                 if (method == PopulationLatchMethod.ADD_BATCH) {
                     barrier.reached();
                 }
@@ -99,7 +99,8 @@ public class ControlledPopulationIndexProvider extends BaseTestingIndexProvider 
             TokenNameLookup tokenNameLookup,
             ElementIdMapper elementIdMapper,
             ImmutableSet<OpenOption> openOptions,
-            StorageEngineIndexingBehaviour indexingBehaviour) {
+            StorageEngineIndexingBehaviour indexingBehaviour,
+            IndexPopulator.Configuration configuration) {
         populatorCallCount.incrementAndGet();
         return mockedPopulator;
     }

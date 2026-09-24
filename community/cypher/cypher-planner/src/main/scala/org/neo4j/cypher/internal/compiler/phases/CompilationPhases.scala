@@ -20,17 +20,21 @@
 package org.neo4j.cypher.internal.compiler.phases
 
 import org.neo4j.cypher.internal.ast.Statement
-import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
+import org.neo4j.cypher.internal.ast.UnaliasedReturnItem
+import org.neo4j.cypher.internal.ast.semantics.SemanticState
+import org.neo4j.cypher.internal.ast.semantics.SemanticTable
+import org.neo4j.cypher.internal.ast.semantics.scoping.WorkingScope
 import org.neo4j.cypher.internal.compiler.AdministrationCommandPlanBuilder
 import org.neo4j.cypher.internal.compiler.SchemaCommandPlanBuilder
 import org.neo4j.cypher.internal.compiler.UnsupportedSystemCommand
+import org.neo4j.cypher.internal.compiler.ast.convert.plannerQuery.GroupInequalitiesStep
 import org.neo4j.cypher.internal.compiler.planner.CheckForUnresolvedTokens
 import org.neo4j.cypher.internal.compiler.planner.ResolveTokens
 import org.neo4j.cypher.internal.compiler.planner.VerifyGraphTarget
-import org.neo4j.cypher.internal.compiler.planner.logical.DeriveEagerAnalyzerOption
 import org.neo4j.cypher.internal.compiler.planner.logical.EmptyRelationshipListEndpointProjection
 import org.neo4j.cypher.internal.compiler.planner.logical.GetDegreeRewriterStep
 import org.neo4j.cypher.internal.compiler.planner.logical.InlineRelationshipTypePredicates
+import org.neo4j.cypher.internal.compiler.planner.logical.LimitBeforeCountRewriter
 import org.neo4j.cypher.internal.compiler.planner.logical.MoveQuantifiedPathPatternPredicates
 import org.neo4j.cypher.internal.compiler.planner.logical.OptionalMatchRemover
 import org.neo4j.cypher.internal.compiler.planner.logical.QueryPlanner
@@ -43,9 +47,10 @@ import org.neo4j.cypher.internal.compiler.planner.logical.plans.rewriter.PlanRew
 import org.neo4j.cypher.internal.compiler.planner.logical.plans.rewriter.eager.EagerRewriter
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.CompressPlanIDs
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.InsertCachedProperties
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.MarkStableLeafPlans
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.RemoveUnusedVariables
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.SortPredicatesBySelectivity
-import org.neo4j.cypher.internal.frontend.phases.AmbiguousAggregationAnalysis
-import org.neo4j.cypher.internal.frontend.phases.AstRewriting
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.TransactionDisjointBy
 import org.neo4j.cypher.internal.frontend.phases.BaseContains
 import org.neo4j.cypher.internal.frontend.phases.BaseState
 import org.neo4j.cypher.internal.frontend.phases.CopyQuantifiedPathPatternPredicatesToJuxtaposedNodes
@@ -54,20 +59,30 @@ import org.neo4j.cypher.internal.frontend.phases.If
 import org.neo4j.cypher.internal.frontend.phases.MoveBoundaryNodePredicates
 import org.neo4j.cypher.internal.frontend.phases.Namespacer
 import org.neo4j.cypher.internal.frontend.phases.ObfuscationMetadataCollection
-import org.neo4j.cypher.internal.frontend.phases.PreparatoryRewriting
-import org.neo4j.cypher.internal.frontend.phases.ProcedureAndFunctionDeprecationWarnings
-import org.neo4j.cypher.internal.frontend.phases.ProcedureWarnings
 import org.neo4j.cypher.internal.frontend.phases.ProjectNamedPathsRewriter
-import org.neo4j.cypher.internal.frontend.phases.SemanticAnalysis
+import org.neo4j.cypher.internal.frontend.phases.SetSemanticsNotUpToDate
 import org.neo4j.cypher.internal.frontend.phases.ShortestPathVariableDeduplicator
 import org.neo4j.cypher.internal.frontend.phases.Transformer
 import org.neo4j.cypher.internal.frontend.phases.collapseMultipleInPredicates
+import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerConfig
 import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerFactory
 import org.neo4j.cypher.internal.frontend.phases.isolateAggregation
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.AstRewriting
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.LocalFunctionsResolved
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.ParsePipelineTransformer
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.PreparatoryRewriting
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.SemanticAnalysis
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.ShadowedFunctionsUnresolved
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.scoping.ComputeExpressionDependencies
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.scoping.ScopeSurveyor
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.scoping.UpToDateScopes
 import org.neo4j.cypher.internal.frontend.phases.rewriting.cnf.CNFNormalizer
 import org.neo4j.cypher.internal.frontend.phases.rewriting.cnf.rewriteEqualityToInPredicate
 import org.neo4j.cypher.internal.frontend.phases.rewriting.cnf.simplifyPredicates
 import org.neo4j.cypher.internal.frontend.phases.transitiveEqualities
+import org.neo4j.cypher.internal.rewriting.conditions.ContainsNoNodesOfType
+import org.neo4j.cypher.internal.rewriting.conditions.PatternExpressionsHaveSemanticInfo
+import org.neo4j.cypher.internal.rewriting.conditions.ProjectionClausesHaveSemanticInfo
 import org.neo4j.cypher.internal.rewriting.rewriters.computeDependenciesForExpressions.ExpressionsHaveComputedDependencies
 import org.neo4j.cypher.internal.util.StepSequencer
 import org.neo4j.cypher.internal.util.StepSequencer.AccumulatedSteps
@@ -80,6 +95,8 @@ object CompilationPhases extends FrontEndCompilationPhases {
       .orderSteps(
         Set(
           SemanticAnalysis,
+          ScopeSurveyor,
+          ComputeExpressionDependencies,
           Namespacer,
           ProjectNamedPathsRewriter,
           isolateAggregation,
@@ -93,12 +110,20 @@ object CompilationPhases extends FrontEndCompilationPhases {
           ShortestPathVariableDeduplicator
         ) ++ CNFNormalizer.steps,
         initialConditions =
-          Set(BaseContains[Statement]())
+          Set(BaseContains[Statement](), ShadowedFunctionsUnresolved, LocalFunctionsResolved)
             ++ PreparatoryRewriting.postConditions
+            ++ ParsePipelineTransformer.postConditions
             ++ AstRewriting.postConditions
-            // ExpressionsHaveComputedDependencies is introduced by SemanticAnalysis.
+            // ExpressionsHaveComputedDependencies is introduced by ComputeExpressionDependencies.
             // It is currently not allowed to then also have it as an initial condition
             - ExpressionsHaveComputedDependencies
+            - UpToDateScopes
+            - BaseContains[WorkingScope]()
+            - PatternExpressionsHaveSemanticInfo
+            - BaseContains[SemanticState]()
+            - BaseContains[SemanticTable]()
+            - ContainsNoNodesOfType[UnaliasedReturnItem]()
+            - ProjectionClausesHaveSemanticInfo
       )
 
   // these steps work on LogicalPlanState.maybeQuery, up until LogicalPlanState.maybeLogicalPlan is created
@@ -110,12 +135,14 @@ object CompilationPhases extends FrontEndCompilationPhases {
           OptionalMatchRemover,
           EmptyRelationshipListEndpointProjection,
           GetDegreeRewriterStep,
+          GroupInequalitiesStep,
           InlineRelationshipTypePredicates,
           UnfulfillableQueryRewriter,
           VarLengthQuantifierMerger,
           CheckForUnresolvedTokens,
           MoveQuantifiedPathPatternPredicates,
-          StatefulShortestPlanningHintsInserter
+          StatefulShortestPlanningHintsInserter,
+          LimitBeforeCountRewriter
         ),
         initialConditions = astPlanPipelinePostConditions
       )
@@ -125,44 +152,52 @@ object CompilationPhases extends FrontEndCompilationPhases {
     StepSequencer[StepSequencer.Step with PlanPipelineTransformerFactory]()
       .orderSteps(
         Set(
-          DeriveEagerAnalyzerOption,
           QueryPlanner,
           PlanRewriter,
+          TransactionDisjointBy,
           InsertCachedProperties,
           CardinalityRewriter,
           CompressPlanIDs,
+          MarkStableLeafPlans,
           EagerRewriter,
+          RemoveUnusedVariables,
           SortPredicatesBySelectivity,
           ParameterToDefaultRewriter
         ),
         initialConditions = irPlanPipelinePostConditions
       )
 
+  val getAstPlanPipelineSteps: Seq[StepSequencer.Step with PlanPipelineTransformerFactory] = astPlanPipelineSteps
+
+  val getLpPlanPipelineSteps: Seq[StepSequencer.Step with PlanPipelineTransformerFactory] = lpPlanPipelineSteps
+
   private val orderedPlanPipelineSteps = astPlanPipelineSteps ++ irPlanPipelineSteps ++ lpPlanPipelineSteps
 
   // Phase 2
-  val prepareForCaching: Transformer[PlannerContext, BaseState, BaseState] =
-    RewriteProcedureCalls andThen
-      AmbiguousAggregationAnalysis() andThen
-      ProcedureAndFunctionDeprecationWarnings andThen
-      ProcedureWarnings andThen
-      ObfuscationMetadataCollection
+  val prepareForCaching: Transformer[PlannerContext, BaseState, BaseState] = ObfuscationMetadataCollection
 
   // Phase 3
   def planPipeLine(
     pushdownPropertyReads: Boolean = true,
-    semanticFeatures: Seq[SemanticFeature] = defaultSemanticFeatures
-  ): Transformer[PlannerContext, BaseState, LogicalPlanState] =
-    SchemaCommandPlanBuilder andThen
+    allowSubqueryDuplicationInCnf: Boolean
+  ): Transformer[PlannerContext, BaseState, LogicalPlanState] = {
+    val planPipelineConfig =
+      PlanPipelineTransformerConfig(pushdownPropertyReads, allowSubqueryDuplicationInCnf)
+
+    SetSemanticsNotUpToDate andThen
+      SchemaCommandPlanBuilder andThen
       If((s: LogicalPlanState) => s.maybeLogicalPlan.isEmpty)(
         Chainer.chainTransformers(
-          orderedPlanPipelineSteps.map(_.getTransformer(pushdownPropertyReads, semanticFeatures))
+          orderedPlanPipelineSteps.map(_.getCheckedTransformer(planPipelineConfig))
         ).asInstanceOf[Transformer[PlannerContext, BaseState, LogicalPlanState]]
       )
+  }
 
   // Alternative Phase 3
   def systemPipeLine: Transformer[PlannerContext, BaseState, LogicalPlanState] =
-    RewriteProcedureCalls andThen
+    ScopeSurveyor andThen
+      SetSemanticsNotUpToDate andThen
+      ResolveCallablesFromPlanContext andThen
       simplifyPredicates andThen
       AdministrationCommandPlanBuilder andThen
       If((s: LogicalPlanState) => s.maybeLogicalPlan.isEmpty)(

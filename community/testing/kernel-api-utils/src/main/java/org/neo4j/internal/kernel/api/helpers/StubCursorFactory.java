@@ -45,11 +45,9 @@ public class StubCursorFactory implements CursorFactory {
     private final Queue<PropertyCursor> propertyCursors = new ArrayDeque<>();
     private final Queue<PropertyCursor> fullPropertyCursors = new ArrayDeque<>();
     private final Queue<NodeValueIndexCursor> nodeValueIndexCursors = new ArrayDeque<>();
-    private final Queue<NodeValueIndexCursor> fullNodeValueIndexCursors = new ArrayDeque<>();
     private final Queue<NodeLabelIndexCursor> nodeLabelIndexCursors = new ArrayDeque<>();
     private final Queue<NodeLabelIndexCursor> fullNodeLabelIndexCursors = new ArrayDeque<>();
     private final Queue<RelationshipValueIndexCursor> relationshipValueIndexCursors = new ArrayDeque<>();
-    private final Queue<RelationshipValueIndexCursor> fullRelationshipValueIndexCursors = new ArrayDeque<>();
     private final Queue<RelationshipTypeIndexCursor> relationshipTypeIndexCursors = new ArrayDeque<>();
     private final Queue<RelationshipTypeIndexCursor> fullRelationshipTypeIndexCursors = new ArrayDeque<>();
 
@@ -111,12 +109,6 @@ public class StubCursorFactory implements CursorFactory {
     }
 
     @Override
-    public NodeValueIndexCursor allocateFullAccessNodeValueIndexCursor(
-            CursorContext cursorContext, MemoryTracker memoryTracker) {
-        return poll(fullNodeValueIndexCursors);
-    }
-
-    @Override
     public NodeLabelIndexCursor allocateNodeLabelIndexCursor(CursorContext cursorContext, MemoryTracker memoryTracker) {
         return poll(nodeLabelIndexCursors);
     }
@@ -130,12 +122,6 @@ public class StubCursorFactory implements CursorFactory {
     public RelationshipValueIndexCursor allocateRelationshipValueIndexCursor(
             CursorContext cursorContext, MemoryTracker memoryTracker) {
         return poll(relationshipValueIndexCursors);
-    }
-
-    @Override
-    public RelationshipValueIndexCursor allocateFullAccessRelationshipValueIndexCursor(
-            CursorContext cursorContext, MemoryTracker memoryTracker) {
-        return poll(fullRelationshipValueIndexCursors);
     }
 
     @Override
@@ -160,6 +146,11 @@ public class StubCursorFactory implements CursorFactory {
         return this;
     }
 
+    public StubCursorFactory withPropertyCursors(PropertyCursor... cursors) {
+        propertyCursors.addAll(Arrays.asList(cursors));
+        return this;
+    }
+
     public StubCursorFactory withFullPropertyCursors(PropertyCursor... cursors) {
         fullPropertyCursors.addAll(Arrays.asList(cursors));
         return this;
@@ -167,6 +158,16 @@ public class StubCursorFactory implements CursorFactory {
 
     public StubCursorFactory withFullNodeCursors(NodeCursor... cursors) {
         fullNodeCursors.addAll(Arrays.asList(cursors));
+        return this;
+    }
+
+    public StubCursorFactory withNodeValueIndexCursors(NodeValueIndexCursor... cursors) {
+        nodeValueIndexCursors.addAll(Arrays.asList(cursors));
+        return this;
+    }
+
+    public StubCursorFactory withRelationshipValueIndexCursors(RelationshipValueIndexCursor... cursors) {
+        relationshipValueIndexCursors.addAll(Arrays.asList(cursors));
         return this;
     }
 

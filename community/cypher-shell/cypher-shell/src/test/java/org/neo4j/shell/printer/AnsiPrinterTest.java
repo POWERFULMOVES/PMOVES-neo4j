@@ -19,6 +19,7 @@
  */
 package org.neo4j.shell.printer;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
@@ -26,18 +27,24 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 import java.io.PrintStream;
+import java.util.Map;
+import java.util.Optional;
 import org.fusesource.jansi.Ansi;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.neo4j.driver.exceptions.ClientException;
+import org.neo4j.driver.exceptions.Neo4jException;
+import org.neo4j.driver.internal.value.IntegerValue;
+import org.neo4j.driver.internal.value.MapValue;
+import org.neo4j.shell.cli.ErrorFormat;
 import org.neo4j.shell.cli.Format;
 import org.neo4j.shell.exception.CommandException;
 
 class AnsiPrinterTest {
     private final PrintStream out = mock(PrintStream.class);
     private final PrintStream err = mock(PrintStream.class);
-    private AnsiPrinter logger = new AnsiPrinter(Format.VERBOSE, out, err);
+    private AnsiPrinter logger = new AnsiPrinter(Format.VERBOSE, ErrorFormat.DEFAULT, out, err);
 
     @BeforeEach
     void setup() {
@@ -58,6 +65,12 @@ class AnsiPrinterTest {
     @Test
     void printException() {
         logger.printError(new Throwable("bam"));
+        verify(err).println("\u001B[91mbam\u001B[m");
+    }
+
+    @Test
+    void printExceptionWithQuery() {
+        logger.printError(new Throwable("bam"), "query");
         verify(err).println("\u001B[91mbam\u001B[m");
     }
 
@@ -91,7 +104,7 @@ class AnsiPrinterTest {
 
     @Test
     void printIfVerbose() {
-        logger = new AnsiPrinter(Format.VERBOSE, out, err);
+        logger = new AnsiPrinter(Format.VERBOSE, ErrorFormat.DEFAULT, out, err);
 
         logger.printIfVerbose("foo");
         logger.printIfPlain("bar");
@@ -102,7 +115,7 @@ class AnsiPrinterTest {
 
     @Test
     void printIfPlain() {
-        logger = new AnsiPrinter(Format.PLAIN, out, err);
+        logger = new AnsiPrinter(Format.PLAIN, ErrorFormat.DEFAULT, out, err);
 
         logger.printIfVerbose("foo");
         logger.printIfPlain("bar");
@@ -113,30 +126,111 @@ class AnsiPrinterTest {
 
     @Test
     void testSimple() {
-        assertEquals("\u001B[91myahoo\u001B[m", logger.getFormattedMessage(new NullPointerException("yahoo")));
+        assertEquals(
+                "\u001B[91myahoo\u001B[m",
+                logger.getFormattedMessage(new NullPointerException("yahoo"), Optional.empty()));
+    }
+
+    @Test
+    void testSimpleWithQuery() {
+        assertEquals(
+                "\u001B[91myahoo\u001B[m",
+                logger.getFormattedMessage(new NullPointerException("yahoo"), Optional.of("my query")));
+    }
+
+    @Test
+    void testGqlError() {
+        final var actual = logger.getFormattedMessage(
+                new Neo4jException(
+                        "42XXX", "status descr", "code", "message", Map.of(), new NullPointerException("yahoo")),
+                Optional.empty());
+        assertThat(actual).isEqualToNormalizingNewlines("\u001B[91m42XXX: status descr\u001B[m");
+    }
+
+    @Test
+    void testGqlErrorWithQuery() {
+        final var actual = logger.getFormattedMessage(
+                new Neo4jException(
+                        "42XXX", "status descr", "code", "message", Map.of(), new NullPointerException("yahoo")),
+                Optional.of("my query"));
+        assertThat(actual).isEqualToNormalizingNewlines("""
+        \u001B[91m42XXX: status descr\u001B[m""");
+    }
+
+    @Test
+    void testGqlErrorWithPosition() {
+        final var actual = logger.getFormattedMessage(
+                new Neo4jException(
+                        "42XXX",
+                        "status descr",
+                        "code",
+                        "message",
+                        Map.of(
+                                "_position",
+                                new MapValue(Map.of(
+                                        "offset",
+                                        new IntegerValue(3),
+                                        "line",
+                                        new IntegerValue(1),
+                                        "column",
+                                        new IntegerValue(4)))),
+                        new NullPointerException("yahoo")),
+                Optional.empty());
+        assertThat(actual).isEqualToNormalizingNewlines("""
+                \u001B[91m42XXX: status descr\u001B[m""");
+    }
+
+    @Test
+    void testGqlErrorWithQueryAndPosition() {
+        final var actual = logger.getFormattedMessage(
+                new Neo4jException(
+                        "42XXX",
+                        "status descr",
+                        "code",
+                        "message",
+                        Map.of(
+                                "_position",
+                                new MapValue(Map.of(
+                                        "offset",
+                                        new IntegerValue(3),
+                                        "line",
+                                        new IntegerValue(1),
+                                        "column",
+                                        new IntegerValue(4)))),
+                        new NullPointerException("yahoo")),
+                Optional.of("my query"));
+        assertThat(actual).isEqualToNormalizingNewlines("""
+                \u001B[91m42XXX: status descr (line 1, column 4 (offset: 3))
+                "my query"
+                    ^\u001B[m""");
     }
 
     @Test
     void testNested() {
         assertEquals(
                 "\u001B[91mouter\u001B[m",
-                logger.getFormattedMessage(new ClientException("outer", new CommandException("nested"))));
+                logger.getFormattedMessage(
+                        new ClientException("outer", new CommandException("nested")), Optional.empty()));
     }
 
     @Test
     void testNestedDeep() {
         assertEquals(
                 "\u001B[91mouter\u001B[m",
-                logger.getFormattedMessage(new ClientException(
-                        "outer", new ClientException("nested", new ClientException("nested deep")))));
+                logger.getFormattedMessage(
+                        new ClientException("outer", new ClientException("nested", new ClientException("nested deep"))),
+                        Optional.empty()));
     }
 
     @Test
     void testNullMessage() {
-        assertEquals("\u001B[91mClientException\u001B[m", logger.getFormattedMessage(new ClientException(null)));
+        assertEquals(
+                "\u001B[91mClientException\u001B[m",
+                logger.getFormattedMessage(new ClientException(null), Optional.empty()));
         assertEquals(
                 "\u001B[91mouter\u001B[m",
-                logger.getFormattedMessage(new ClientException("outer", new NullPointerException(null))));
+                logger.getFormattedMessage(
+                        new ClientException("outer", new NullPointerException(null)), Optional.empty()));
     }
 
     @Test

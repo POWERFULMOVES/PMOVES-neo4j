@@ -23,10 +23,10 @@ import java.net.InetSocketAddress;
 import java.util.Collection;
 import java.util.List;
 import javax.servlet.Filter;
-import org.eclipse.jetty.server.RequestLog;
 import org.neo4j.configuration.helpers.SocketAddress;
 import org.neo4j.server.bind.ComponentsBinder;
 import org.neo4j.ssl.SslPolicy;
+import org.neo4j.util.VisibleForTesting;
 
 public interface WebServer {
     void setHttpAddress(SocketAddress address);
@@ -35,7 +35,7 @@ public interface WebServer {
 
     void setSslPolicy(SslPolicy sslPolicy);
 
-    void setRequestLog(RequestLog requestLog);
+    void setRequestLog(WebServerRequestLog requestLog);
 
     void setMaxThreads(int maxThreads);
 
@@ -55,13 +55,16 @@ public interface WebServer {
 
     void removeFilter(Filter filter, String pathSpec);
 
-    void addStaticContent(String contentLocation, String serverMountPoint);
+    void addStaticContent(StaticContent contentLocation, String serverMountPoint);
 
-    void removeStaticContent(String contentLocation, String serverMountPoint);
+    void removeStaticContent(String serverMountPoint);
 
     void setWadlEnabled(boolean wadlEnabled);
 
     void setComponentsBinder(ComponentsBinder binder);
+
+    @VisibleForTesting
+    String getState();
 
     /**
      * @return local http connector bind port

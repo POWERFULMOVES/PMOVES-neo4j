@@ -25,6 +25,7 @@ import org.neo4j.cypher.internal.frontend.phases.CopyQuantifiedPathPatternPredic
 import org.neo4j.cypher.internal.frontend.phases.CopyQuantifiedPathPatternPredicatesToJuxtaposedNodesRewriter.RewritablePredicate
 import org.neo4j.cypher.internal.frontend.phases.CopyQuantifiedPathPatternPredicatesToJuxtaposedNodesRewriter.RewritableQuantifiedPath
 import org.neo4j.cypher.internal.frontend.phases.CopyQuantifiedPathPatternPredicatesToJuxtaposedNodesRewriter.extractRewritableQppPredicates
+import org.neo4j.cypher.internal.rewriting.rewriters.copyVariables
 import org.neo4j.cypher.internal.util.Foldable.SkipChildren
 import org.neo4j.cypher.internal.util.Foldable.TraverseChildren
 import org.neo4j.cypher.internal.util.Rewriter
@@ -60,7 +61,7 @@ import org.neo4j.cypher.internal.util.topDown
  * variables, or would shadow variables after being rewritten. The method Expression.replaceAllOccurrencesBy, in
  * conjunction with the namespacer, do a lot of the heavy lifting for us.
  */
-case class CopyQuantifiedPathPatternPredicatesToJuxtaposedNodesRewriter private () {
+case class CopyQuantifiedPathPatternPredicatesToJuxtaposedNodesRewriter() {
 
   val rewriter: Rewriter = topDown(Rewriter.lift {
     case RewritableMatchClause(matchClause, allRewritableQPPs) =>
@@ -83,7 +84,7 @@ case class CopyQuantifiedPathPatternPredicatesToJuxtaposedNodesRewriter private 
 
   private def rewritePredicate(predicate: RewritablePredicate): Expression = {
     val RewritablePredicate(outer, inner, innerPredicate) = predicate
-    innerPredicate.replaceAllOccurrencesBy(inner, outer)
+    copyVariables(innerPredicate.replaceAllOccurrencesBy(inner, outer)).asInstanceOf[Expression]
   }
 }
 
@@ -152,15 +153,15 @@ case object CopyQuantifiedPathPatternPredicatesToJuxtaposedNodesRewriter {
           QuantifiedPath(PathPatternPart(innerPattern: RelationshipChain), quantifier, Some(innerPredicate), _),
           rightPattern: SimplePattern
         ) if !quantifier.canBeEmpty =>
-        val left = leftPattern.allTopLevelVariablesLeftToRight.last
-        val right = rightPattern.allTopLevelVariablesLeftToRight.head
+        val left = leftPattern.allSingletonVariablesLeftToRight.last
+        val right = rightPattern.allSingletonVariablesLeftToRight.head
         RewritableQuantifiedPath(left, right, innerPattern, innerPredicate)
     }
 
   private def extractRewritableQppPredicates(rewritableQpp: RewritableQuantifiedPath): ListSet[RewritablePredicate] = {
     val RewritableQuantifiedPath(left, right, innerPattern, innerPredicates) = rewritableQpp
-    val innerLeft = innerPattern.allTopLevelVariablesLeftToRight.head
-    val innerRight = innerPattern.allTopLevelVariablesLeftToRight.last
+    val innerLeft = innerPattern.allSingletonVariablesLeftToRight.head
+    val innerRight = innerPattern.allSingletonVariablesLeftToRight.last
     val innerVariables = innerPattern.allVariables
 
     innerPredicates.folder.treeFold(ListSet.empty[RewritablePredicate]) {

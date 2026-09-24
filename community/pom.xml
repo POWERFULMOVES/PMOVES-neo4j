@@ -1,19 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+
+  <modelVersion>4.0.0</modelVersion>
   <parent>
     <groupId>org.neo4j</groupId>
     <artifactId>parent</artifactId>
-    <version>5.26.0</version>
+    <version>2026.09.0</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
-
-  <modelVersion>4.0.0</modelVersion>
   <groupId>org.neo4j.build</groupId>
   <artifactId>community-build</artifactId>
+  <packaging>pom</packaging>
 
   <name>Neo4j - Community Build</name>
-  <packaging>pom</packaging>
   <description>Project that builds the Neo4j Community distribution.</description>
   <url>http://components.neo4j.org/${project.artifactId}/${project.version}</url>
 
@@ -22,7 +21,6 @@
     <module>zstd-proxy</module>
     <module>token-api</module>
     <module>schema</module>
-    <module>import-util</module>
     <module>id-generator</module>
     <module>lock</module>
     <module>monitoring</module>
@@ -51,15 +49,17 @@
     <module>kernel</module>
     <module>kernel-test-utils</module>
     <module>kernel-test</module>
+    <module>lucene9-shaded</module>
     <module>lucene-index</module>
-    <module>fulltext-index</module>
     <module>graph-algo</module>
     <module>neo4j</module>
     <module>neo4j-community</module>
     <module>import-api</module>
     <module>import-tool</module>
+    <module>import-util</module>
     <module>server-api</module>
     <module>bolt</module>
+    <module>bolt-messages</module>
     <module>server</module>
     <module>server-test-utils</module>
     <module>consistency-check</module>
@@ -76,28 +76,31 @@
     <module>neo4j-exceptions</module>
     <module>layout</module>
     <module>push-to-cloud</module>
+    <module>push-to-cloud-test</module>
     <module>fabric</module>
     <module>capabilities</module>
     <module>storage-engine-util</module>
+    <module>bootcheck-base</module>
     <module>bootcheck</module>
     <module>neo4j-notifications</module>
     <module>cloud</module>
     <module>neo4j-gql-status</module>
     <module>udc</module>
     <module>genai-plugin</module>
+    <module>cypher</module>
+    <module>cypher-shell</module>
+    <module>fleet-management</module>
+    <module>native-index</module>
   </modules>
 
   <profiles>
     <profile>
-      <id>include-cypher</id>
+      <id>jdk25-modules</id>
       <activation>
-        <property>
-          <name>!skipCypher</name>
-        </property>
+        <jdk>25</jdk>
       </activation>
       <modules>
-        <module>cypher</module>
-        <module>cypher-shell</module>
+        <module>import-vector-util</module>
       </modules>
     </profile>
   </profiles>

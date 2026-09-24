@@ -21,9 +21,10 @@ package org.neo4j.csv.reader;
 
 import static org.apache.commons.lang3.builder.ToStringBuilder.reflectionToString;
 import static org.apache.commons.lang3.builder.ToStringStyle.SHORT_PREFIX_STYLE;
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;
+import org.neo4j.common.EntityType;
 
 class ConfigurationTest {
     @Test
@@ -31,7 +32,8 @@ class ConfigurationTest {
         final var before = Configuration.newBuilder().build();
         final var after = before.toBuilder().build();
 
-        assertEquals(reflectionToString(before, SHORT_PREFIX_STYLE), reflectionToString(after, SHORT_PREFIX_STYLE));
+        assertThat(reflectionToString(after, SHORT_PREFIX_STYLE))
+                .isEqualTo(reflectionToString(before, SHORT_PREFIX_STYLE));
     }
 
     @Test
@@ -43,10 +45,12 @@ class ConfigurationTest {
                 .withBufferSize(100500)
                 .withLegacyStyleQuoting(true)
                 .withEmptyQuotedStringsAsNull(true)
-                .withLegacyMultilineBehaviour()
+                .withLegacyMultilineBehaviour(EntityType.NODE)
+                .withLegacyMultilineBehaviour(EntityType.RELATIONSHIP)
                 .withTrimStrings(true)
                 .build();
         final var after = before.toBuilder().build();
-        assertEquals(reflectionToString(before, SHORT_PREFIX_STYLE), reflectionToString(after, SHORT_PREFIX_STYLE));
+        assertThat(reflectionToString(after, SHORT_PREFIX_STYLE))
+                .isEqualTo(reflectionToString(before, SHORT_PREFIX_STYLE));
     }
 }

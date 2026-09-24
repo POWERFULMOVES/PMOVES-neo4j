@@ -21,13 +21,13 @@ package org.neo4j.internal.id.indexed;
 
 import static java.lang.Integer.min;
 import static org.apache.commons.lang3.ArrayUtils.EMPTY_LONG_ARRAY;
-import static org.neo4j.internal.id.indexed.FreeIdScanner.MAX_SLOT_SIZE;
-import static org.neo4j.internal.id.indexed.IndexedIdGenerator.NO_ID;
 import static org.neo4j.util.Preconditions.checkArgument;
 
 import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.neo4j.internal.id.IdGenerator;
+import org.neo4j.internal.id.IdSequence;
+import org.neo4j.internal.id.IdSequence.ConsecutiveId;
 import org.neo4j.internal.id.IdSlotDistribution;
 import org.neo4j.io.pagecache.context.CursorContext;
 
@@ -42,7 +42,6 @@ class IdCache {
     private final ConcurrentLongQueue[] queues;
     private final AtomicInteger size = new AtomicInteger();
     private final int singleIdSlotIndex;
-    private final boolean singleSlotted;
     private final int[] slotIndexBySize;
 
     IdCache(IdSlotDistribution.Slot... slots) {
@@ -52,7 +51,6 @@ class IdCache {
         for (int slotIndex = 0; slotIndex < slots.length; slotIndex++) {
             int slotSize = slotSizes[slotIndex] = slots[slotIndex].slotSize();
             int capacity = slots[slotIndex].capacity();
-            checkArgument(slotSize <= MAX_SLOT_SIZE, "Max slot size is %d", MAX_SLOT_SIZE);
             checkArgument(
                     slotIndex == 0 || slotSize > slotSizes[slotIndex - 1],
                     "Slot sizes should be provided ordered from smaller to bigger");
@@ -62,10 +60,9 @@ class IdCache {
             // large amount of memory.
             var queue = multiSlots || capacity > DYNAMIC_CHUNK_SIZE
                     ? new DynamicConcurrentLongQueue(DYNAMIC_CHUNK_SIZE, capacity)
-                    : new MpmcLongQueue(capacity);
+                    : new SeqMpmcLongQueue(capacity);
             queues[slotIndex] = queue;
         }
-        singleSlotted = isSingleSlotted();
         singleIdSlotIndex = findSingleSlotIndex(slotSizes);
         this.slotIndexBySize = buildSlotIndexBySize(slotSizes);
     }
@@ -77,15 +74,6 @@ class IdCache {
         }
         slotIndexBySize[slotIndexBySize.length - 1] = slotSizes.length - 1;
         return slotIndexBySize;
-    }
-
-    private boolean isSingleSlotted() {
-        for (int slotSize : slotSizes) {
-            if (slotSize != 1) {
-                return false;
-            }
-        }
-        return true;
     }
 
     private static int findSingleSlotIndex(int[] slotSizes) {
@@ -133,14 +121,19 @@ class IdCache {
         return id;
     }
 
-    long takeOrDefault(
-            long defaultValue, int numberOfIds, IndexedIdGenerator.Monitor monitor, IdRangeConsumer wasteNotifier) {
+    ConsecutiveId takeOrDefault(
+            long defaultValue,
+            int numberOfIds,
+            IndexedIdGenerator.Monitor monitor,
+            IdRangeConsumer wasteNotifier,
+            SlotSizeFallback slotSizeFallback) {
         long id = defaultValue;
+        int actualNumberOfIds = numberOfIds;
         for (int slotIndex = lowestSlotIndexCapableOf(numberOfIds);
                 id == defaultValue && slotIndex < slotSizes.length;
                 slotIndex++) {
             id = queues[slotIndex].takeOrDefault(defaultValue);
-            if (id != NO_ID && slotSizes[slotIndex] != numberOfIds) {
+            if (id != defaultValue && slotSizes[slotIndex] != numberOfIds) {
                 var wastedId = id + numberOfIds;
                 var wastedNumberOfIds = slotSizes[slotIndex] - numberOfIds;
                 // We allocated an ID from a slot that was larger than was requested.
@@ -157,16 +150,32 @@ class IdCache {
                 }
             }
         }
+
+        if (id == defaultValue && slotSizeFallback.allowFragmentation()) {
+            int lowThreshold = slotSizeFallback.lowestPossibleFallbackSlotSize(numberOfIds);
+            for (int slotIndex = lowestSlotIndexCapableOf(numberOfIds) - 1;
+                    id == defaultValue && slotIndex >= 0 && slotSizes[slotIndex] >= lowThreshold;
+                    slotIndex--) {
+                id = queues[slotIndex].takeOrDefault(defaultValue);
+                if (id != defaultValue) {
+                    actualNumberOfIds = slotSizes[slotIndex];
+                }
+            }
+        }
+
         if (id != defaultValue) {
             this.size.decrementAndGet();
+            return new ConsecutiveId(id, actualNumberOfIds);
+        } else {
+            return IdSequence.NULL_CONSECUTIVE_ID;
         }
-        return id;
     }
 
-    int[] availableSpaceBySlotIndex() {
+    int[] availableSpaceBySlotIndex(int numPartitions) {
         int[] availableSpace = new int[slotSizes.length];
         for (int i = 0; i < availableSpace.length; i++) {
-            availableSpace[i] = queues[i].availableSpace();
+            int space = queues[i].availableSpace();
+            availableSpace[i] = space > 0 ? Math.max(1, space / numPartitions) : 0;
         }
         return availableSpace;
     }
@@ -193,7 +202,6 @@ class IdCache {
     }
 
     long[] drainRange(int idsPerPage) {
-        assert singleSlotted;
         long[] ids = null;
         int position = 0;
         long idPageLowerBoundary = Long.MIN_VALUE;
@@ -221,6 +229,19 @@ class IdCache {
         return size.get();
     }
 
+    int size(int atLeastSlotSize) {
+        if (atLeastSlotSize == 0 || slotSizes.length == 1) {
+            return size.get();
+        } else {
+            int slotIndex = lowestSlotIndexCapableOf(atLeastSlotSize);
+            int size = 0;
+            for (int index = slotIndex; index < slotSizes.length; index++) {
+                size += queues[index].size();
+            }
+            return size;
+        }
+    }
+
     boolean isFull() {
         for (ConcurrentLongQueue queue : queues) {
             if (queue.availableSpace() > 0) {
@@ -230,7 +251,7 @@ class IdCache {
         return true;
     }
 
-    private int lowestSlotIndexCapableOf(int numberOfIds) {
+    int lowestSlotIndexCapableOf(int numberOfIds) {
         for (int slotIndex = 0; slotIndex < slotSizes.length; slotIndex++) {
             if (slotSizes[slotIndex] >= numberOfIds) {
                 return slotIndex;
@@ -253,5 +274,35 @@ class IdCache {
 
     interface IdRangeConsumer {
         void accept(long id, int size);
+    }
+
+    enum SlotSizeFallback {
+        none(false),
+        some(true) {
+            @Override
+            int lowestPossibleFallbackSlotSize(int slotSize) {
+                return slotSize / 4;
+            }
+        },
+        full(true) {
+            @Override
+            int lowestPossibleFallbackSlotSize(int slotSize) {
+                return 1;
+            }
+        };
+
+        private final boolean allowFragmentation;
+
+        SlotSizeFallback(boolean allowFragmentation) {
+            this.allowFragmentation = allowFragmentation;
+        }
+
+        boolean allowFragmentation() {
+            return allowFragmentation;
+        }
+
+        int lowestPossibleFallbackSlotSize(int slotSize) {
+            return slotSize;
+        }
     }
 }

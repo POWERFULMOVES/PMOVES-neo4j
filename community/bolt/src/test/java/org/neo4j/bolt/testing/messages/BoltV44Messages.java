@@ -19,9 +19,9 @@
  */
 package org.neo4j.bolt.testing.messages;
 
-import org.neo4j.bolt.negotiation.ProtocolVersion;
-import org.neo4j.bolt.protocol.common.message.request.RequestMessage;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 import org.neo4j.bolt.protocol.v44.BoltProtocolV44;
+import org.neo4j.boltmessages.request.RequestMessage;
 
 public class BoltV44Messages extends BoltV43Messages {
     private static final BoltV44Messages INSTANCE = new BoltV44Messages();

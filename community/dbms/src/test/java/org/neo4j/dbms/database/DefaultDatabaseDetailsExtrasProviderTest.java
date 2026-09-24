@@ -26,8 +26,10 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.neo4j.collection.Dependencies.dependenciesOf;
 import static org.neo4j.dbms.database.DatabaseDetailsExtras.EMPTY;
+import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_CONSENSUS_INDEX;
 
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -35,11 +37,12 @@ import org.neo4j.dbms.database.TopologyInfoService.RequestedExtras;
 import org.neo4j.kernel.database.Database;
 import org.neo4j.kernel.database.DatabaseId;
 import org.neo4j.kernel.database.DatabaseIdFactory;
-import org.neo4j.kernel.impl.transaction.log.AppendBatchInfo;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
 import org.neo4j.storageengine.api.ExternalStoreId;
+import org.neo4j.storageengine.api.LogMetadataProvider;
 import org.neo4j.storageengine.api.MetadataProvider;
 import org.neo4j.storageengine.api.StoreId;
+import org.neo4j.wal.AppendBatchInfo;
+import org.neo4j.wal.LogPosition;
 
 class DefaultDatabaseDetailsExtrasProviderTest {
     private final DatabaseId databaseId = DatabaseIdFactory.from(UUID.randomUUID());
@@ -56,13 +59,14 @@ class DefaultDatabaseDetailsExtrasProviderTest {
         databaseContextProvider = mock(DatabaseContextProvider.class);
         provider = new DefaultDatabaseDetailsExtrasProvider(databaseContextProvider);
 
+        var logMetadataProvider = mock(LogMetadataProvider.class);
         var metadataProvider = mock(MetadataProvider.class);
         when(metadataProvider.getExternalStoreId()).thenReturn(externalStoreId);
-        when(metadataProvider.getLastCommittedTransactionId()).thenReturn(lastCommittedTxId);
-        when(metadataProvider.getLastCommittedBatch())
-                .thenReturn(new AppendBatchInfo(lastAppendIndex, new LogPosition(5, 512)));
+        when(logMetadataProvider.getLastCommittedTransactionId()).thenReturn(lastCommittedTxId);
+        when(logMetadataProvider.getLastCommittedBatch())
+                .thenReturn(new AppendBatchInfo(lastAppendIndex, new LogPosition(5, 512), UNKNOWN_CONSENSUS_INDEX));
 
-        var dependencies = dependenciesOf(metadataProvider);
+        var dependencies = dependenciesOf(metadataProvider, logMetadataProvider);
         var database = mock(Database.class);
         when(database.getStoreId()).thenReturn(storeId);
         when(database.isStarted()).thenReturn(true);
@@ -93,7 +97,7 @@ class DefaultDatabaseDetailsExtrasProviderTest {
         // then
         assertThat(result)
                 .isEqualTo(new DatabaseDetailsExtras(
-                        Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty()));
+                        OptionalLong.empty(), OptionalLong.empty(), Optional.empty(), Optional.empty()));
         verify(databaseContextProvider).getDatabaseContext(databaseId);
     }
 
@@ -105,7 +109,10 @@ class DefaultDatabaseDetailsExtrasProviderTest {
         // then
         assertThat(result)
                 .isEqualTo(new DatabaseDetailsExtras(
-                        Optional.empty(), Optional.empty(), Optional.of(storeId), Optional.of(externalStoreId)));
+                        OptionalLong.empty(),
+                        OptionalLong.empty(),
+                        Optional.of(storeId),
+                        Optional.of(externalStoreId)));
         verify(databaseContextProvider).getDatabaseContext(databaseId);
     }
 
@@ -117,8 +124,8 @@ class DefaultDatabaseDetailsExtrasProviderTest {
         // then
         assertThat(result)
                 .isEqualTo(new DatabaseDetailsExtras(
-                        Optional.of(lastCommittedTxId),
-                        Optional.of(lastAppendIndex),
+                        OptionalLong.of(lastCommittedTxId),
+                        OptionalLong.of(lastAppendIndex),
                         Optional.empty(),
                         Optional.empty()));
         verify(databaseContextProvider).getDatabaseContext(databaseId);

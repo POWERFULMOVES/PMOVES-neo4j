@@ -24,6 +24,7 @@ import static java.lang.Long.parseLong;
 import static org.neo4j.internal.kernel.api.procs.DefaultParameterValue.ntBoolean;
 import static org.neo4j.internal.kernel.api.procs.DefaultParameterValue.ntFloat;
 import static org.neo4j.internal.kernel.api.procs.DefaultParameterValue.ntInteger;
+import static org.neo4j.internal.kernel.api.procs.DefaultParameterValue.ntUUID;
 import static org.neo4j.internal.kernel.api.procs.DefaultParameterValue.nullValue;
 import static org.neo4j.internal.kernel.api.procs.Neo4jTypes.NTAny;
 import static org.neo4j.internal.kernel.api.procs.Neo4jTypes.NTBoolean;
@@ -40,6 +41,8 @@ import static org.neo4j.internal.kernel.api.procs.Neo4jTypes.NTMap;
 import static org.neo4j.internal.kernel.api.procs.Neo4jTypes.NTNumber;
 import static org.neo4j.internal.kernel.api.procs.Neo4jTypes.NTString;
 import static org.neo4j.internal.kernel.api.procs.Neo4jTypes.NTTime;
+import static org.neo4j.internal.kernel.api.procs.Neo4jTypes.NTUUID;
+import static org.neo4j.internal.kernel.api.procs.Neo4jTypes.NTVector;
 
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
@@ -54,6 +57,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.neo4j.cypher.internal.CypherVersion;
@@ -64,7 +68,6 @@ import org.neo4j.internal.kernel.api.exceptions.ProcedureException;
 import org.neo4j.internal.kernel.api.procs.DefaultParameterValue;
 import org.neo4j.internal.kernel.api.procs.Neo4jTypes;
 import org.neo4j.internal.kernel.api.procs.Neo4jTypes.AnyType;
-import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.procedure.Name;
 import org.neo4j.util.VisibleForTesting;
 import org.neo4j.values.AnyValue;
@@ -80,6 +83,8 @@ import org.neo4j.values.storable.LocalTimeValue;
 import org.neo4j.values.storable.NumberValue;
 import org.neo4j.values.storable.TextValue;
 import org.neo4j.values.storable.TimeValue;
+import org.neo4j.values.storable.UUIDValue;
+import org.neo4j.values.storable.VectorValue;
 import org.neo4j.values.virtual.ListValue;
 import org.neo4j.values.virtual.MapValue;
 
@@ -89,6 +94,7 @@ public class Cypher5TypeCheckers {
     private static final ExpressionEvaluator CYPHER_5_EVALUATOR = Evaluator.expressionEvaluator(CypherVersion.Cypher5);
 
     private static final Function<String, DefaultParameterValue> PARSE_STRING = DefaultParameterValue::ntString;
+    private static final Function<String, DefaultParameterValue> PARSE_UUID = s -> ntUUID(UUID.fromString(s));
     private static final Function<String, DefaultParameterValue> PARSE_INTEGER = s -> ntInteger(parseLong(s));
     private static final Function<String, DefaultParameterValue> PARSE_FLOAT = s -> ntFloat(parseDouble(s));
     private static final Function<String, DefaultParameterValue> PARSE_NUMBER =
@@ -108,10 +114,15 @@ public class Cypher5TypeCheckers {
             PARSE_STRING);
     private static final DefaultValueConverter TO_ANY = new DefaultValueConverter(NTAny, PARSE_ANY);
     private static final DefaultValueConverter TO_STRING = new DefaultValueConverter(NTString, PARSE_STRING);
+    private static final DefaultValueConverter TO_UUID = new DefaultValueConverter(NTUUID, PARSE_UUID);
     private static final DefaultValueConverter TO_INTEGER = new DefaultValueConverter(NTInteger, PARSE_INTEGER);
+    private static final DefaultValueConverter TO_BOXED_INTEGER = TO_INTEGER.orNull();
     private static final DefaultValueConverter TO_FLOAT = new DefaultValueConverter(NTFloat, PARSE_FLOAT);
+    private static final DefaultValueConverter TO_BOXED_FLOAT = TO_FLOAT.orNull();
     private static final DefaultValueConverter TO_NUMBER = new DefaultValueConverter(NTNumber, PARSE_NUMBER);
+    private static final DefaultValueConverter TO_BOXED_NUMBER = TO_NUMBER.orNull();
     private static final DefaultValueConverter TO_BOOLEAN = new DefaultValueConverter(NTBoolean, PARSE_BOOLEAN);
+    private static final DefaultValueConverter TO_BOXED_BOOLEAN = TO_BOOLEAN.orNull();
     private static final DefaultValueConverter TO_MAP = new DefaultValueConverter(NTMap, PARSE_MAP);
     private static final DefaultValueConverter TO_LIST = toList(TO_ANY, Object.class);
     private final DefaultValueConverter TO_BYTE_ARRAY = new DefaultValueConverter(NTByteArray, PARSE_BYTE_ARRAY);
@@ -132,17 +143,18 @@ public class Cypher5TypeCheckers {
     private void registerScalarsAndCollections() {
         registerType(String.class, TO_STRING);
         registerType(TextValue.class, TO_STRING);
+        registerType(UUID.class, TO_UUID);
         registerType(long.class, TO_INTEGER);
-        registerType(Long.class, TO_INTEGER);
-        registerType(IntegralValue.class, TO_INTEGER);
+        registerType(Long.class, TO_BOXED_INTEGER);
+        registerType(IntegralValue.class, TO_BOXED_INTEGER);
         registerType(double.class, TO_FLOAT);
-        registerType(Double.class, TO_FLOAT);
-        registerType(FloatingPointValue.class, TO_FLOAT);
-        registerType(Number.class, TO_NUMBER);
+        registerType(Double.class, TO_BOXED_FLOAT);
+        registerType(FloatingPointValue.class, TO_BOXED_FLOAT);
+        registerType(Number.class, TO_BOXED_NUMBER);
         registerType(NumberValue.class, TO_NUMBER);
         registerType(boolean.class, TO_BOOLEAN);
-        registerType(Boolean.class, TO_BOOLEAN);
-        registerType(BooleanValue.class, TO_BOOLEAN);
+        registerType(Boolean.class, TO_BOXED_BOOLEAN);
+        registerType(BooleanValue.class, TO_BOXED_BOOLEAN);
         registerType(Map.class, TO_MAP);
         registerType(MapValue.class, TO_MAP);
         registerType(List.class, TO_LIST);
@@ -163,6 +175,8 @@ public class Cypher5TypeCheckers {
         registerType(LocalTimeValue.class, new DefaultValueConverter(NTLocalTime));
         registerType(TemporalAmount.class, new DefaultValueConverter(NTDuration));
         registerType(DurationValue.class, new DefaultValueConverter(NTDuration));
+        registerType(UUIDValue.class, new DefaultValueConverter(NTUUID));
+        registerType(VectorValue.class, new DefaultValueConverter(NTVector));
     }
 
     TypeChecker checkerFor(Type javaType) throws ProcedureException {
@@ -242,13 +256,7 @@ public class Cypher5TypeCheckers {
                 .sorted(String::compareTo)
                 .collect(Collectors.toList());
 
-        return new ProcedureException(
-                Status.Statement.TypeError,
-                "Don't know how to map `%s` to the Neo4j Type System.%n"
-                        + "Please refer to to the documentation for full details.%n"
-                        + "For your reference, known types are: %s",
-                cls.getTypeName(),
-                types);
+        return ProcedureException.unsupportedType(cls.getTypeName(), types);
     }
 
     public abstract static class TypeChecker {
@@ -287,15 +295,25 @@ public class Cypher5TypeCheckers {
             }
         }
 
+        protected DefaultValueConverter orNull() {
+            final Function<String, DefaultParameterValue> newParser =
+                    s -> isNull(s) ? nullValue(type) : parser.apply(s);
+            return new DefaultValueConverter(type, newParser);
+        }
+
         private static Function<String, DefaultParameterValue> nullParser(Neo4jTypes.AnyType neoType) {
             return s -> {
-                if (s.equalsIgnoreCase("null")) {
+                if (isNull(s)) {
                     return nullValue(neoType);
                 } else {
                     throw new IllegalArgumentException(
                             String.format("A %s can only have a `defaultValue = \"null\"", neoType.toString()));
                 }
             };
+        }
+
+        private static boolean isNull(String value) {
+            return "null".equalsIgnoreCase(value);
         }
     }
 }

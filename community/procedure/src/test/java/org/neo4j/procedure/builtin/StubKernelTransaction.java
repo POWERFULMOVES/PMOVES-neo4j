@@ -25,6 +25,8 @@ import static org.mockito.Mockito.when;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import org.neo4j.cypher.internal.DefaultQueryLanguageScope;
+import org.neo4j.graphdb.schema.Schema;
 import org.neo4j.internal.kernel.api.CursorFactory;
 import org.neo4j.internal.kernel.api.ExecutionStatistics;
 import org.neo4j.internal.kernel.api.Locks;
@@ -59,8 +61,11 @@ import org.neo4j.kernel.api.TransactionTimeout;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.impl.api.ClockContext;
 import org.neo4j.kernel.impl.coreapi.InternalTransaction;
+import org.neo4j.kernel.impl.coreapi.schema.SchemaImpl;
+import org.neo4j.memory.HeapEstimatorCacheConfig;
 import org.neo4j.memory.MemoryTracker;
-import org.neo4j.storageengine.api.StorageEngineCostCharacteristics;
+import org.neo4j.monitoring.ExceptionHandlerService;
+import org.neo4j.storageengine.api.StorageEngineCharacteristics;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 
 public class StubKernelTransaction implements KernelTransaction {
@@ -88,7 +93,7 @@ public class StubKernelTransaction implements KernelTransaction {
     }
 
     @Override
-    public long commit(KernelTransactionMonitor kernelTransactionMonitor) {
+    public long commit(Monitor monitor) {
         throw new UnsupportedOperationException("not implemented");
     }
 
@@ -158,7 +163,7 @@ public class StubKernelTransaction implements KernelTransaction {
     }
 
     @Override
-    public StorageEngineCostCharacteristics storageEngineCostCharacteristics() {
+    public StorageEngineCharacteristics storageEngineCharacteristics() {
         throw new UnsupportedOperationException("not implemented");
     }
 
@@ -343,12 +348,12 @@ public class StubKernelTransaction implements KernelTransaction {
     }
 
     @Override
-    public ExecutionContext createExecutionContext() {
+    public ExecutionContext createExecutionContext(HeapEstimatorCacheConfig heapEstimatorCacheConfig) {
         throw new UnsupportedOperationException("not implemented");
     }
 
     @Override
-    public MemoryTracker createExecutionContextMemoryTracker() {
+    public MemoryTracker createExecutionContextMemoryTracker(HeapEstimatorCacheConfig heapEstimatorCacheConfig) {
         return null;
     }
 
@@ -380,5 +385,20 @@ public class StubKernelTransaction implements KernelTransaction {
     @Override
     public InnerTransactionHandler getInnerTransactionHandler() {
         throw new UnsupportedOperationException("not implemented");
+    }
+
+    @Override
+    public DefaultQueryLanguageScope defaultQueryLanguageScope() {
+        return null;
+    }
+
+    @Override
+    public ExceptionHandlerService exceptionHandlerService() {
+        throw new UnsupportedOperationException("not implemented");
+    }
+
+    @Override
+    public Schema schema() {
+        return new SchemaImpl(this);
     }
 }

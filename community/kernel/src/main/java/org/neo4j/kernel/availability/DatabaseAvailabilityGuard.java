@@ -37,6 +37,11 @@ import org.neo4j.logging.InternalLog;
  * @see AvailabilityGuard
  */
 public class DatabaseAvailabilityGuard extends LifecycleAdapter implements AvailabilityGuard {
+
+    private static final AvailabilityRequirement UNAVAILABILITY_REQUIREMENT =
+            new AvailabilityRequirement("Database unavailable");
+    public static final AvailabilityRequirement ROLLBACK_REQUIREMENT =
+            new AvailabilityRequirement("Multiversion transactions recovery");
     private static final String DATABASE_AVAILABLE_MSG = "Fulfilling of requirement '%s' makes database %s available.";
     private static final String DATABASE_UNAVAILABLE_MSG = "Requirement `%s` makes database %s unavailable.";
 
@@ -68,15 +73,18 @@ public class DatabaseAvailabilityGuard extends LifecycleAdapter implements Avail
     public void init() {
         shutdown = false;
         startupFailure = null;
+        require(UNAVAILABILITY_REQUIREMENT);
     }
 
     @Override
     public void start() {
         globalGuard.addDatabaseAvailabilityGuard(this);
+        fulfill(UNAVAILABILITY_REQUIREMENT);
     }
 
     @Override
     public void stop() {
+        require(UNAVAILABILITY_REQUIREMENT);
         globalGuard.removeDatabaseAvailabilityGuard(this);
     }
 
@@ -147,18 +155,19 @@ public class DatabaseAvailabilityGuard extends LifecycleAdapter implements Avail
     public void assertDatabaseAvailable() throws UnavailableException {
         Availability availability = availability(databaseTimeMillis);
         switch (availability) {
-            case AVAILABLE:
-                return;
-            case SHUTDOWN:
+            case AVAILABLE -> {}
+            case SHUTDOWN -> {
                 if (startupFailure != null) {
-                    throw new DatabaseShutdownException(startupFailure);
+                    throw DatabaseShutdownException.databaseUnavailable(databaseName(), startupFailure);
                 }
-                throw new DatabaseShutdownException();
-            case UNAVAILABLE:
-                throwUnavailableException(databaseTimeMillis, availability);
-            default:
-                throw new IllegalStateException("Unsupported availability mode: " + availability);
+                throw DatabaseShutdownException.databaseUnavailable(databaseName());
+            }
+            case UNAVAILABLE -> throwUnavailableException(databaseTimeMillis, availability);
         }
+    }
+
+    public String databaseName() {
+        return namedDatabaseId.name();
     }
 
     @Override
@@ -175,7 +184,7 @@ public class DatabaseAvailabilityGuard extends LifecycleAdapter implements Avail
                 ? "Timeout waiting for database to become available and allow new transactions. Waited "
                         + Format.duration(millis) + ". " + describe()
                 : "Database not available because it's shutting down";
-        throw new UnavailableException(description);
+        throw UnavailableException.databaseUnavailable(databaseName(), description);
     }
 
     private Availability availability() {

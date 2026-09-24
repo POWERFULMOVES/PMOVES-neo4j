@@ -28,8 +28,17 @@ import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Deque;
 import java.util.List;
+import java.util.UUID;
+import org.neo4j.values.AnyValue;
 import org.neo4j.values.AnyValueWriter;
 import org.neo4j.values.storable.CoordinateReferenceSystem;
+import org.neo4j.values.storable.Float16Format;
+import org.neo4j.values.storable.Float32Vector;
+import org.neo4j.values.storable.Float64Vector;
+import org.neo4j.values.storable.Int16Vector;
+import org.neo4j.values.storable.Int32Vector;
+import org.neo4j.values.storable.Int64Vector;
+import org.neo4j.values.storable.Int8Vector;
 import org.neo4j.values.storable.TextArray;
 import org.neo4j.values.storable.TextValue;
 import org.neo4j.values.virtual.MapValue;
@@ -82,6 +91,10 @@ public class PrettyPrinter implements AnyValueWriter<RuntimeException> {
         this.stack.push(new ValueWriter(builder, quoteMark, counter));
     }
 
+    public static String stringify(Object value) {
+        return value instanceof AnyValue anyValue ? anyValue.prettify() : String.valueOf(value);
+    }
+
     public void reset() {
         stack.clear();
         stack.push(new ValueWriter(builder, quoteMark, counter));
@@ -102,18 +115,17 @@ public class PrettyPrinter implements AnyValueWriter<RuntimeException> {
     }
 
     @Override
-    public void writeNode(String elementId, long nodeId, TextArray labels, MapValue properties, boolean isDeleted)
-            throws RuntimeException {
+    public void writeNode(String elementId, long nodeId, TextArray labels, MapValue properties, boolean isDeleted) {
         append("(elementId=");
         append(elementId);
         String sep = " ";
         for (int i = 0; i < labels.intSize(); i++) {
             append(sep);
             append(":");
-            append(labels.stringValue(i));
+            append(labels.stringValue(i).stringValue());
             sep = "";
         }
-        if (properties.size() > 0) {
+        if (!properties.isEmpty()) {
             append(" ");
             properties.writeTo(this);
         }
@@ -138,13 +150,12 @@ public class PrettyPrinter implements AnyValueWriter<RuntimeException> {
             long endNodeId,
             TextValue type,
             MapValue properties,
-            boolean isDeleted)
-            throws RuntimeException {
+            boolean isDeleted) {
         append("-[elementId=");
         append(elementId);
         append(" :");
         append(type.stringValue());
-        if (properties.size() > 0) {
+        if (!properties.isEmpty()) {
             append(" ");
             properties.writeTo(this);
         }
@@ -198,8 +209,7 @@ public class PrettyPrinter implements AnyValueWriter<RuntimeException> {
     }
 
     @Override
-    public void writePathReference(VirtualNodeValue[] nodes, VirtualRelationshipValue[] relationships)
-            throws RuntimeException {
+    public void writePathReference(VirtualNodeValue[] nodes, VirtualRelationshipValue[] relationships) {
         if (nodes.length == 0) {
             return;
         }
@@ -213,9 +223,8 @@ public class PrettyPrinter implements AnyValueWriter<RuntimeException> {
     }
 
     @Override
-    public void writePathReference(List<VirtualNodeValue> nodes, List<VirtualRelationshipValue> relationships)
-            throws RuntimeException {
-        if (nodes.size() == 0) {
+    public void writePathReference(List<VirtualNodeValue> nodes, List<VirtualRelationshipValue> relationships) {
+        if (nodes.isEmpty()) {
             return;
         }
         // Path guarantees that nodes.length = edges.length = 1
@@ -242,7 +251,7 @@ public class PrettyPrinter implements AnyValueWriter<RuntimeException> {
     }
 
     @Override
-    public void writePoint(CoordinateReferenceSystem crs, double[] coordinate) throws RuntimeException {
+    public void writePoint(CoordinateReferenceSystem crs, double[] coordinate) {
         append("{geometry: {type: \"Point\", coordinates: ");
         append(Arrays.toString(coordinate));
         append(", crs: {type: link, properties: {href: \"");
@@ -253,7 +262,7 @@ public class PrettyPrinter implements AnyValueWriter<RuntimeException> {
     }
 
     @Override
-    public void writeDuration(long months, long days, long seconds, int nanos) throws RuntimeException {
+    public void writeDuration(long months, long days, long seconds, int nanos) {
         append("{duration: {months: ");
         append(Long.toString(months));
         append(", days: ");
@@ -266,35 +275,35 @@ public class PrettyPrinter implements AnyValueWriter<RuntimeException> {
     }
 
     @Override
-    public void writeDate(LocalDate localDate) throws RuntimeException {
+    public void writeDate(LocalDate localDate) {
         append("{date: ");
         appendQuoted(localDate.toString());
         append("}");
     }
 
     @Override
-    public void writeLocalTime(LocalTime localTime) throws RuntimeException {
+    public void writeLocalTime(LocalTime localTime) {
         append("{localTime: ");
         appendQuoted(localTime.toString());
         append("}");
     }
 
     @Override
-    public void writeTime(OffsetTime offsetTime) throws RuntimeException {
+    public void writeTime(OffsetTime offsetTime) {
         append("{time: ");
         appendQuoted(offsetTime.toString());
         append("}");
     }
 
     @Override
-    public void writeLocalDateTime(LocalDateTime localDateTime) throws RuntimeException {
+    public void writeLocalDateTime(LocalDateTime localDateTime) {
         append("{localDateTime: ");
         appendQuoted(localDateTime.toString());
         append("}");
     }
 
     @Override
-    public void writeDateTime(ZonedDateTime zonedDateTime) throws RuntimeException {
+    public void writeDateTime(ZonedDateTime zonedDateTime) {
         append("{datetime: ");
         appendQuoted(zonedDateTime.toString());
         append("}");
@@ -348,6 +357,57 @@ public class PrettyPrinter implements AnyValueWriter<RuntimeException> {
     @Override
     public void writeString(char value) {
         writeString(Character.toString(value));
+    }
+
+    private void writeVector(String coordinates, int length, String type) {
+        append("vector(");
+        append(coordinates);
+        append(", " + length);
+        append(", ");
+        append(type);
+        append(")");
+    }
+
+    @Override
+    public void writeInt8Vector(byte[] values) {
+        writeVector(Arrays.toString(values), values.length, Int8Vector.NESTED_TYPE_NAME);
+    }
+
+    @Override
+    public void writeInt16Vector(short[] values) {
+        writeVector(Arrays.toString(values), values.length, Int16Vector.NESTED_TYPE_NAME);
+    }
+
+    @Override
+    public void writeInt32Vector(int[] values) {
+        writeVector(Arrays.toString(values), values.length, Int32Vector.NESTED_TYPE_NAME);
+    }
+
+    @Override
+    public void writeInt64Vector(long[] values) {
+        writeVector(Arrays.toString(values), values.length, Int64Vector.NESTED_TYPE_NAME);
+    }
+
+    @Override
+    public void writeFloat16Vector(Float16Format format, short[] values) {
+        writeVector(Arrays.toString(format.toFloat32(values)), values.length, format.nestedTypeName());
+    }
+
+    @Override
+    public void writeFloat32Vector(float[] values) {
+        writeVector(Arrays.toString(values), values.length, Float32Vector.NESTED_TYPE_NAME);
+    }
+
+    @Override
+    public void writeFloat64Vector(double[] values) {
+        writeVector(Arrays.toString(values), values.length, Float64Vector.NESTED_TYPE_NAME);
+    }
+
+    @Override
+    public void writeUUID(long msb, long lsb) {
+        append("{uid: ");
+        append(new UUID(msb, lsb).toString());
+        append("}");
     }
 
     @Override
@@ -545,6 +605,7 @@ public class PrettyPrinter implements AnyValueWriter<RuntimeException> {
         @Override
         public void nest() {
             write(sep);
+            sep = ", ";
         }
     }
 

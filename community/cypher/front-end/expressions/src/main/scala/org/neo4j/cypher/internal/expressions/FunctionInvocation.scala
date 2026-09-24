@@ -16,10 +16,14 @@
  */
 package org.neo4j.cypher.internal.expressions
 
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.expressions.FunctionInvocation.ArgumentOrder
 import org.neo4j.cypher.internal.expressions.FunctionInvocation.ArgumentUnordered
+import org.neo4j.cypher.internal.expressions.functions.AggregatingFunction
 import org.neo4j.cypher.internal.expressions.functions.DeterministicFunction
+import org.neo4j.cypher.internal.expressions.functions.LocalFunction
 import org.neo4j.cypher.internal.expressions.functions.UnresolvedFunction
+import org.neo4j.cypher.internal.util.FunctionName
 import org.neo4j.cypher.internal.util.InputPosition
 
 import java.util.Locale
@@ -71,12 +75,29 @@ case class FunctionInvocation(
   distinct: Boolean,
   args: IndexedSeq[Expression],
   order: ArgumentOrder = ArgumentUnordered,
-  calledFromUseClause: Boolean = false
-)(val position: InputPosition) extends Expression {
-  val name: String = (functionName.namespace.parts :+ functionName.name).mkString(".")
+  calledFromUseClause: Boolean = false,
+  isShadowed: Boolean = false,
+  maybeLocalFunction: Option[LocalFunction] = None // only set by ResolveLocalFunctions to Some(...)
+)(val position: InputPosition) extends Expression with FunctionInvocationLike {
+  val name: String = functionName.fullName
 
-  val function: functions.Function =
-    functions.Function.lookup.getOrElse(name.toLowerCase(Locale.ROOT), UnresolvedFunction)
+  override def callArguments: Seq[Expression] = args
+  override def isAggregate: Boolean = distinct || function.isInstanceOf[AggregatingFunction]
+  override def isUserDefined: Boolean = false
+  override def isBuiltIn: Boolean = !needsToBeResolved
+  override def asUnresolvedFunction: FunctionInvocation = this
+
+  def function: functions.Function =
+    maybeLocalFunction.getOrElse(
+      if (isShadowed) UnresolvedFunction
+      else functions.Function.lookup.getOrElse(name.toLowerCase(Locale.ROOT), UnresolvedFunction)
+    )
+
+  def functionWithScope(version: CypherVersion): functions.Function =
+    maybeLocalFunction.getOrElse(
+      if (isShadowed) UnresolvedFunction
+      else functions.Function.scopedLookup(version).getOrElse(name.toLowerCase(Locale.ROOT), UnresolvedFunction)
+    )
 
   val isOrdered: Boolean = order != ArgumentUnordered
 
@@ -87,7 +108,12 @@ case class FunctionInvocation(
     case _                  => false
   }
 
-  override def asCanonicalStringVal = s"$name(${args.map(_.asCanonicalStringVal).mkString(",")})"
+  def scopedNeedsToBeResolved(version: CypherVersion): Boolean = functionWithScope(version) match {
+    case UnresolvedFunction => true
+    case _                  => false
+  }
+
+  override def asCanonicalStringVal = s"$name(${args.map(_.asCanonicalStringVal).mkString(", ")})"
 
   override def isConstantForQuery: Boolean =
     !needsToBeResolved &&
@@ -98,21 +124,4 @@ case class FunctionInvocation(
 
   override def isSimple: Boolean =
     isDeterministic && subExpressions.isEmpty
-}
-
-case class FunctionName(namespace: Namespace, name: String)(val position: InputPosition) extends SymbolicName {
-
-  override def equals(x: Any): Boolean = x match {
-    case FunctionName(otherNamespace, otherName) =>
-      otherNamespace == namespace && otherName.toLowerCase(Locale.ROOT) == name.toLowerCase(Locale.ROOT)
-    case _ => false
-  }
-  override def hashCode = name.toLowerCase(Locale.ROOT).hashCode
-}
-
-object FunctionName {
-
-  def apply(name: String)(position: InputPosition): FunctionName = {
-    FunctionName(Namespace()(position), name)(position)
-  }
 }

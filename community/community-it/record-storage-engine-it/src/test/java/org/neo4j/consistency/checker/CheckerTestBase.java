@@ -68,10 +68,10 @@ import org.neo4j.consistency.report.ConsistencyReporter;
 import org.neo4j.consistency.report.ConsistencySummaryStatistics;
 import org.neo4j.consistency.report.InconsistencyMessageLogger;
 import org.neo4j.consistency.report.InconsistencyReport;
-import org.neo4j.consistency.statistics.Counts;
 import org.neo4j.dbms.api.DatabaseManagementService;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.graphdb.Transaction;
+import org.neo4j.internal.batchimport.cache.ByteArray;
 import org.neo4j.internal.batchimport.cache.NumberArrayFactories;
 import org.neo4j.internal.helpers.collection.Iterators;
 import org.neo4j.internal.helpers.progress.ProgressMonitorFactory;
@@ -166,6 +166,7 @@ class CheckerTestBase {
     private PageCache pageCache;
     protected CachedStoreCursors storeCursors;
     protected DynamicAllocatorProvider allocatorProvider;
+    private ByteArray byteArray;
 
     @BeforeEach
     void setUpDb() throws Exception {
@@ -193,10 +194,8 @@ class CheckerTestBase {
         schemaStore = neoStores.getSchemaStore();
         tokenHolders = dependencies.resolveDependency(TokenHolders.class);
         schemaStorage = new SchemaStorage(schemaStore, tokenHolders);
-        cacheAccess = new DefaultCacheAccess(
-                NumberArrayFactories.HEAP.newDynamicByteArray(10_000, new byte[MAX_BYTES], INSTANCE),
-                Counts.NONE,
-                NUMBER_OF_THREADS);
+        byteArray = NumberArrayFactories.OFF_HEAP.newDynamicByteArray(10_000, new byte[MAX_BYTES], INSTANCE);
+        cacheAccess = new DefaultCacheAccess(byteArray);
         cacheAccess.setCacheSlotSizes(DEFAULT_SLOT_SIZES);
         pageCache = dependencies.resolveDependency(PageCache.class);
         storeCursors = new CachedStoreCursors(neoStores, CursorContext.NULL_CONTEXT);
@@ -208,7 +207,7 @@ class CheckerTestBase {
 
     @AfterEach
     void tearDownDb() {
-        closeAllUnchecked(storeCursors, countsState);
+        closeAllUnchecked(storeCursors, countsState, byteArray);
         dbms.shutdown();
     }
 
@@ -426,12 +425,13 @@ class CheckerTestBase {
                         allocatorProvider.allocator(StoreType.PROPERTY_STRING),
                         allocatorProvider.allocator(StoreType.PROPERTY_ARRAY),
                         CursorContext.NULL_CONTEXT,
-                        INSTANCE);
+                        INSTANCE,
+                        "db-format-2000");
         return propertyBlock;
     }
 
     int[] nodeLabels(NodeRecord node) {
-        return NodeLabelsField.get(node, neoStores.getNodeStore(), storeCursors, EmptyMemoryTracker.INSTANCE);
+        return NodeLabelsField.get(node, neoStores.getNodeStore(), storeCursors);
     }
 
     NodeRecord loadNode(long id) {
@@ -441,8 +441,8 @@ class CheckerTestBase {
                 id, nodeStore.newRecord(), RecordLoad.NORMAL, cursor, EmptyMemoryTracker.INSTANCE);
     }
 
-    long node(long id, long nextProp, long nextRel, int... labels) {
-        NodeRecord node = new NodeRecord(id).initialize(true, nextProp, false, NULL, 0);
+    long node(long id, boolean dense, long nextProp, int... labels) {
+        NodeRecord node = new NodeRecord(id).initialize(true, nextProp, dense, NULL, 0);
         InlineNodeLabels.putSorted(
                 node,
                 labels,
@@ -462,28 +462,15 @@ class CheckerTestBase {
             long startNode,
             long endNode,
             int type,
-            long startPrev,
-            long startNext,
-            long endPrev,
-            long endNext,
-            boolean firstInStart,
-            boolean firstInEnd) {
-        return relationship(
-                id, startNode, endNode, type, NULL, startPrev, startNext, endPrev, endNext, firstInStart, firstInEnd);
-    }
-
-    long relationship(
-            long id,
-            long startNode,
-            long endNode,
-            int type,
             long nextProp,
             long startPrev,
             long startNext,
             long endPrev,
             long endNext,
             boolean firstInStart,
-            boolean firstInEnd) {
+            boolean firstInEnd,
+            boolean firstIsGuaranteedDense,
+            boolean secondIsGuaranteedDense) {
         RelationshipRecord relationship = new RelationshipRecord(id)
                 .initialize(
                         true,
@@ -496,7 +483,9 @@ class CheckerTestBase {
                         endPrev,
                         endNext,
                         firstInStart,
-                        firstInEnd);
+                        firstInEnd,
+                        firstIsGuaranteedDense,
+                        secondIsGuaranteedDense);
         try (var storeCursor = storeCursors.writeCursor(RELATIONSHIP_CURSOR)) {
             relationshipStore.updateRecord(relationship, storeCursor, CursorContext.NULL_CONTEXT, storeCursors);
         }
@@ -524,8 +513,8 @@ class CheckerTestBase {
         return id;
     }
 
-    long nodePlusCached(long id, long nextProp, long nextRel, int... labels) {
-        long node = node(id, nextProp, NULL, labels);
+    long nodePlusCached(long id, boolean dense, long nextProp, long nextRel, int... labels) {
+        long node = node(id, dense, nextProp, labels);
         CacheAccess.Client client = cacheAccess.client();
         client.putToCacheSingle(id, CacheSlots.NodeLink.SLOT_IN_USE, 1);
         client.putToCacheSingle(id, CacheSlots.NodeLink.SLOT_RELATIONSHIP_ID, nextRel);

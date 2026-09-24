@@ -21,16 +21,11 @@ package org.neo4j.graphdb.factory.module;
 
 import static org.neo4j.configuration.GraphDatabaseInternalSettings.data_collector_max_recent_query_count;
 import static org.neo4j.configuration.GraphDatabaseInternalSettings.duplication_user_messages;
-import static org.neo4j.configuration.GraphDatabaseSettings.TransactionStateMemoryAllocation;
 import static org.neo4j.configuration.GraphDatabaseSettings.filewatcher_enabled;
 import static org.neo4j.configuration.GraphDatabaseSettings.memory_tracking;
 import static org.neo4j.configuration.GraphDatabaseSettings.memory_transaction_global_max_size;
-import static org.neo4j.configuration.GraphDatabaseSettings.tx_state_max_off_heap_memory;
-import static org.neo4j.configuration.GraphDatabaseSettings.tx_state_memory_allocation;
-import static org.neo4j.configuration.GraphDatabaseSettings.tx_state_off_heap_block_cache_size;
-import static org.neo4j.configuration.GraphDatabaseSettings.tx_state_off_heap_max_cacheable_block_size;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
-import static org.neo4j.kernel.lifecycle.LifecycleAdapter.onShutdown;
+import static org.neo4j.kernel.lifecycle.LifecycleAdapter.onInit;
 import static org.neo4j.logging.log4j.LogConfig.createLoggerFromXmlConfig;
 
 import java.nio.file.Path;
@@ -44,16 +39,19 @@ import org.neo4j.configuration.FulltextSettings;
 import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.configuration.connectors.ConnectorPortRegister;
-import org.neo4j.cypher.internal.frontend.phases.InternalSyntaxUsageStats;
-import org.neo4j.cypher.internal.util.InternalNotificationStats;
+import org.neo4j.cypher.internal.frontend.notification.InternalNotificationStats;
+import org.neo4j.cypher.internal.frontend.phases.InternalUsageStats;
+import org.neo4j.fleetmanagement.configuration.State;
+import org.neo4j.graphdb.event.DatabaseEventContext;
 import org.neo4j.graphdb.event.DatabaseEventListener;
+import org.neo4j.graphdb.event.DatabaseEventListenerAdapter;
 import org.neo4j.graphdb.facade.DatabaseManagementServiceFactory;
 import org.neo4j.graphdb.facade.ExternalDependencies;
+import org.neo4j.index.internal.gbptree.SharedMultiRootLfuCache;
 import org.neo4j.internal.collector.RecentQueryBuffer;
 import org.neo4j.internal.diagnostics.DiagnosticsManager;
 import org.neo4j.internal.nativeimpl.NativeAccess;
 import org.neo4j.internal.nativeimpl.NativeAccessProvider;
-import org.neo4j.internal.unsafe.UnsafeUtil;
 import org.neo4j.io.fs.DefaultFileSystemAbstraction;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.fs.FileSystemLifecycleAdapter;
@@ -77,11 +75,6 @@ import org.neo4j.kernel.impl.factory.DbmsInfo;
 import org.neo4j.kernel.impl.pagecache.ConfiguringPageCacheFactory;
 import org.neo4j.kernel.impl.pagecache.PageCacheLifecycle;
 import org.neo4j.kernel.impl.scheduler.JobSchedulerFactory;
-import org.neo4j.kernel.impl.util.collection.CachingOffHeapBlockAllocator;
-import org.neo4j.kernel.impl.util.collection.CapacityLimitingBlockAllocatorDecorator;
-import org.neo4j.kernel.impl.util.collection.CollectionsFactorySupplier;
-import org.neo4j.kernel.impl.util.collection.OffHeapBlockAllocator;
-import org.neo4j.kernel.impl.util.collection.OffHeapCollectionsFactory;
 import org.neo4j.kernel.impl.util.watcher.DefaultFileSystemWatcherService;
 import org.neo4j.kernel.impl.util.watcher.FileSystemWatcherService;
 import org.neo4j.kernel.info.JvmChecker;
@@ -94,6 +87,7 @@ import org.neo4j.kernel.internal.locker.GlobalLockerService;
 import org.neo4j.kernel.internal.locker.LockerLifecycleAdapter;
 import org.neo4j.kernel.lifecycle.LifeSupport;
 import org.neo4j.kernel.monitoring.DatabaseEventListeners;
+import org.neo4j.kernel.monitoring.ExceptionalDatabaseEvent;
 import org.neo4j.kernel.monitoring.tracing.DefaultTracers;
 import org.neo4j.kernel.monitoring.tracing.Tracers;
 import org.neo4j.logging.InternalLog;
@@ -106,6 +100,7 @@ import org.neo4j.logging.log4j.Neo4jLoggerContext;
 import org.neo4j.memory.GlobalMemoryGroupTracker;
 import org.neo4j.memory.MemoryGroup;
 import org.neo4j.memory.MemoryPools;
+import org.neo4j.monitoring.ExceptionHandlerService;
 import org.neo4j.monitoring.Monitors;
 import org.neo4j.scheduler.Group;
 import org.neo4j.scheduler.JobScheduler;
@@ -132,7 +127,6 @@ public class GlobalModule {
     private final Iterable<ExtensionFactory<?>> extensionFactories;
     private final JobScheduler jobScheduler;
     private final SystemNanoClock globalClock;
-    private final CollectionsFactorySupplier collectionsFactorySupplier;
     private final ConnectorPortRegister connectorPortRegister;
     private final CompositeDatabaseAvailabilityGuard globalAvailabilityGuard;
     private final FileSystemWatcherService fileSystemWatcher;
@@ -142,13 +136,14 @@ public class GlobalModule {
     private final FileLockerService fileLockerService;
     private final MemoryPools memoryPools;
     private final InternalNotificationStats cypherNotificationStats;
-    private final InternalSyntaxUsageStats cypherSyntaxUsageStats;
+    private final InternalUsageStats cypherUsageStats;
     private final GlobalMemoryGroupTracker transactionsMemoryPool;
     private final GlobalMemoryGroupTracker otherMemoryPool;
     private final CapabilitiesService capabilitiesService;
     private final BinarySupportedKernelVersions binarySupportedKernelVersions;
     private final CommandCommitListeners defaultCommitListeners;
     private final PagePrefetcher pagePrefetcher;
+    private final ExceptionHandlerService exceptionHandlerService;
 
     /**
      * @param globalConfig         configuration affecting global aspects of the system.
@@ -179,15 +174,18 @@ public class GlobalModule {
         globalDependencies.satisfyDependency(fileSystem);
         globalLife.add(new FileSystemLifecycleAdapter(fileSystem));
 
-        // If no logging was passed in from the outside then create logging and register
-        // with this life
-        logService = globalDependencies.satisfyDependency(
-                createLogService(externalDependencies.userLogProvider(), daemonMode));
+        // If entire LogService was passed in from the outside, use it
+        logService = tryResolveOrCreate(
+                LogService.class, () -> createLogService(externalDependencies.userLogProvider(), daemonMode));
+        // Then register LogService with this life
+        globalDependencies.satisfyDependency(logService);
         globalConfig.setLogger(logService.getInternalLog(Config.class));
 
         // Component monitoring
         globalMonitors = externalDependencies.monitors() == null ? new Monitors() : externalDependencies.monitors();
         globalDependencies.satisfyDependency(globalMonitors);
+        exceptionHandlerService = new ExceptionHandlerService(logService.getInternalLogProvider());
+        globalDependencies.satisfyDependency(exceptionHandlerService);
 
         JobScheduler createdOrResolvedScheduler = tryResolveOrCreate(JobScheduler.class, this::createJobScheduler);
         jobScheduler = globalLife.add(globalDependencies.satisfyDependency(createdOrResolvedScheduler));
@@ -233,8 +231,6 @@ public class GlobalModule {
         globalDependencies.satisfyDependency(tracers);
         globalDependencies.satisfyDependency(tracers.getPageCacheTracer());
 
-        collectionsFactorySupplier = createCollectionsFactorySupplier(globalConfig, globalLife, logService);
-
         pageCache = tryResolveOrCreate(
                 PageCache.class,
                 () -> createPageCache(
@@ -246,7 +242,7 @@ public class GlobalModule {
         dbmsDiagnosticsManager = new DbmsDiagnosticsManager(globalDependencies, logService);
         globalDependencies.satisfyDependency(dbmsDiagnosticsManager);
 
-        dbmsDiagnosticsManager.dumpSystemDiagnostics();
+        globalLife.add(onInit(dbmsDiagnosticsManager::dumpSystemDiagnostics));
 
         fileSystemWatcher = createFileSystemWatcherService(fileSystem, logService, jobScheduler, globalConfig);
         globalLife.add(fileSystemWatcher);
@@ -264,13 +260,21 @@ public class GlobalModule {
         for (DatabaseEventListener databaseListener : externalListeners) {
             databaseEventListeners.registerDatabaseEventListener(databaseListener);
         }
+        databaseEventListeners.registerDatabaseEventListener(new DatabaseEventListenerAdapter() {
+            @Override
+            public void databasePanic(DatabaseEventContext eventContext) {
+                exceptionHandlerService.raiseException(
+                        "Database panic", ((ExceptionalDatabaseEvent) eventContext).getCause());
+            }
+        });
+
         globalDependencies.satisfyDependencies(databaseEventListeners);
 
         cypherNotificationStats = new InternalNotificationStats();
         globalDependencies.satisfyDependencies(cypherNotificationStats);
 
-        cypherSyntaxUsageStats = InternalSyntaxUsageStats.newImpl();
-        globalDependencies.satisfyDependencies(cypherSyntaxUsageStats);
+        cypherUsageStats = InternalUsageStats.newImpl();
+        globalDependencies.satisfyDependencies(cypherUsageStats);
 
         var outOfDiskSpaceListener =
                 new OutOfDiskSpaceListener(globalConfig, logService.getInternalLog(OutOfDiskSpaceListener.class));
@@ -282,12 +286,17 @@ public class GlobalModule {
         connectorPortRegister = new ConnectorPortRegister();
         globalDependencies.satisfyDependency(connectorPortRegister);
 
+        var fleetManagerState = new State();
+        globalDependencies.satisfyDependency(fleetManagerState);
+
         capabilitiesService = loadCapabilities();
         globalDependencies.satisfyDependency(capabilitiesService);
         globalDependencies.satisfyDependency(
                 tryResolveOrCreate(NativeAccess.class, NativeAccessProvider::getNativeAccess));
         pagePrefetcher = tryResolveOrCreate(PagePrefetcher.class, this::createPrefetcher);
         globalLife.add(pagePrefetcher);
+        globalDependencies.satisfyDependency(new SharedMultiRootLfuCache(
+                globalConfig.get(GraphDatabaseInternalSettings.dense_relationships_store_root_cache_size)));
     }
 
     private PagePrefetcher createPrefetcher() {
@@ -296,7 +305,8 @@ public class GlobalModule {
                     .create(
                             pageCache,
                             jobScheduler,
-                            new CursorContextFactory(tracers.getPageCacheTracer(), EMPTY_CONTEXT_SUPPLIER));
+                            new CursorContextFactory(tracers.getPageCacheTracer(), EMPTY_CONTEXT_SUPPLIER),
+                            logService.getInternalLog(PagePrefetcher.class));
         }
         return PagePrefetcher.DISABLED;
     }
@@ -313,9 +323,7 @@ public class GlobalModule {
     }
 
     private <T> T tryResolveOrCreate(Class<T> clazz, Supplier<T> newInstanceMethod) {
-        return externalDependencyResolver.containsDependency(clazz)
-                ? externalDependencyResolver.resolveDependency(clazz)
-                : newInstanceMethod.get();
+        return externalDependencyResolver.resolveOptionalDependency(clazz).orElseGet(newInstanceMethod);
     }
 
     protected FileLockerService createFileLockerService() {
@@ -369,8 +377,14 @@ public class GlobalModule {
                     allowDefaultXmlConfig,
                     daemonMode,
                     globalConfig::configStringLookup,
-                    log -> dbmsDiagnosticsManager.dumpAll(
-                            log), // dbmsDiagnosticsManager is null here, but will be assigned later
+                    log -> {
+                        // dbmsDiagnosticsManager is null when setting up here, but will be assigned later
+                        // In the unlikely case that the below log message triggers a rotation (because the previous
+                        // log file was at rotation size on start up) it will not have been initialized yet though
+                        if (dbmsDiagnosticsManager != null) {
+                            dbmsDiagnosticsManager.dumpAll(log);
+                        }
+                    },
                     DiagnosticsManager.class.getCanonicalName());
 
             loggerContext.getLogger(getClass()).info("Logging config in use: " + loggerContext.getConfigSourceInfo());
@@ -389,7 +403,7 @@ public class GlobalModule {
 
     private JobScheduler createJobScheduler() {
         JobScheduler jobScheduler =
-                JobSchedulerFactory.createInitialisedScheduler(globalClock, logService.getInternalLogProvider());
+                JobSchedulerFactory.createScheduler(globalClock, logService.getInternalLogProvider());
         jobScheduler.setParallelism(
                 Group.INDEX_SAMPLING, globalConfig.get(GraphDatabaseInternalSettings.index_sampling_parallelism));
         jobScheduler.setParallelism(
@@ -422,38 +436,6 @@ public class GlobalModule {
         return pageCache;
     }
 
-    private static CollectionsFactorySupplier createCollectionsFactorySupplier(
-            Config config, LifeSupport life, LogService logService) {
-        final TransactionStateMemoryAllocation allocation = config.get(tx_state_memory_allocation);
-        if (allocation == TransactionStateMemoryAllocation.OFF_HEAP) {
-            if (!UnsafeUtil.unsafeByteBufferAccessAvailable()) {
-                var log = logService.getInternalLog(GlobalModule.class);
-                log.warn(tx_state_memory_allocation.name() + " is set to " + TransactionStateMemoryAllocation.OFF_HEAP
-                        + " but unsafe access to java.nio.DirectByteBuffer is not available. Defaulting to "
-                        + TransactionStateMemoryAllocation.ON_HEAP + ".");
-                return CollectionsFactorySupplier.ON_HEAP;
-            }
-
-            return createOffHeapCollectionsFactory(config, life);
-        }
-        return CollectionsFactorySupplier.ON_HEAP;
-    }
-
-    private static CollectionsFactorySupplier createOffHeapCollectionsFactory(Config config, LifeSupport life) {
-        final CachingOffHeapBlockAllocator allocator = new CachingOffHeapBlockAllocator(
-                config.get(tx_state_off_heap_max_cacheable_block_size), config.get(tx_state_off_heap_block_cache_size));
-        final OffHeapBlockAllocator sharedBlockAllocator;
-        final long maxMemory = config.get(tx_state_max_off_heap_memory);
-        if (maxMemory > 0) {
-            sharedBlockAllocator = new CapacityLimitingBlockAllocatorDecorator(
-                    allocator, maxMemory, tx_state_max_off_heap_memory.name());
-        } else {
-            sharedBlockAllocator = allocator;
-        }
-        life.add(onShutdown(sharedBlockAllocator::release));
-        return () -> new OffHeapCollectionsFactory(sharedBlockAllocator);
-    }
-
     private CapabilitiesService loadCapabilities() {
         var service = CapabilitiesService.newCapabilities(globalConfig, globalDependencies);
         service.set(DBMSCapabilities.dbms_instance_version, Version.getNeo4jVersion());
@@ -468,10 +450,6 @@ public class GlobalModule {
 
     public ConnectorPortRegister getConnectorPortRegister() {
         return connectorPortRegister;
-    }
-
-    CollectionsFactorySupplier getCollectionsFactorySupplier() {
-        return collectionsFactorySupplier;
     }
 
     public SystemNanoClock getGlobalClock() {
@@ -576,5 +554,9 @@ public class GlobalModule {
 
     public PagePrefetcher getPagePrefetcher() {
         return pagePrefetcher;
+    }
+
+    public ExceptionHandlerService getExceptionHandlerService() {
+        return exceptionHandlerService;
     }
 }

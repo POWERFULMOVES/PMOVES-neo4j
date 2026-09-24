@@ -40,7 +40,11 @@ import static org.neo4j.values.virtual.VirtualValues.list;
 import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.neo4j.values.AnyValue;
 import org.neo4j.values.storable.CoordinateReferenceSystem;
 import org.neo4j.values.storable.DateTimeValue;
@@ -113,7 +117,9 @@ class PrettyPrinterTest {
     void shouldHandleNodeValueWithoutLabels() {
         // Given
         NodeValue node = node(
-                42L, Values.stringArray(), props("foo", intValue(42), "bar", list(intValue(1337), stringValue("baz"))));
+                42L,
+                Values.EMPTY_TEXT_ARRAY,
+                props("foo", intValue(42), "bar", list(intValue(1337), stringValue("baz"))));
         PrettyPrinter printer = new PrettyPrinter();
 
         // When
@@ -139,7 +145,7 @@ class PrettyPrinterTest {
     @Test
     void shouldHandleNodeValueWithoutLabelsNorProperties() {
         // Given
-        NodeValue node = node(42L, Values.stringArray(), EMPTY_MAP);
+        NodeValue node = node(42L, Values.EMPTY_TEXT_ARRAY, EMPTY_MAP);
         PrettyPrinter printer = new PrettyPrinter();
 
         // When
@@ -219,7 +225,7 @@ class PrettyPrinterTest {
     @Test
     void shouldHandleRelationshipValueWithoutLabelsNorProperties() {
         // Given
-        NodeValue node = node(42L, Values.stringArray(), EMPTY_MAP);
+        NodeValue node = node(42L, Values.EMPTY_TEXT_ARRAY, EMPTY_MAP);
         PrettyPrinter printer = new PrettyPrinter();
 
         // When
@@ -288,26 +294,26 @@ class PrettyPrinterTest {
     void shouldHandleNestedLists() {
         // Given
         PrettyPrinter printer = new PrettyPrinter();
-        ListValue list = list(intValue(1), list(intValue(2), intValue(3)), intValue(4));
+        ListValue list = list(list(intValue(1), intValue(2)), intValue(3), list(list(intValue(4)), intValue(5)));
 
         // When
         list.writeTo(printer);
 
         // Then
-        assertThat(printer.value()).isEqualTo("[1, [2, 3], 4]");
+        assertThat(printer.value()).isEqualTo("[[1, 2], 3, [[4], 5]]");
     }
 
     @Test
     void shouldHandleListsWithListsAndMaps() {
         // Given
         PrettyPrinter printer = new PrettyPrinter();
-        ListValue list = list(intValue(1), list(intValue(2), props("k", intValue(3))));
+        ListValue list = list(props("a", intValue(1)), list(intValue(2), props("k", intValue(3))));
 
         // When
         list.writeTo(printer);
 
         // Then
-        assertThat(printer.value()).isEqualTo("[1, [2, {k: 3}]]");
+        assertThat(printer.value()).isEqualTo("[{a: 1}, [2, {k: 3}]]");
     }
 
     @Test
@@ -484,6 +490,24 @@ class PrettyPrinterTest {
         datetime.writeTo(printer);
 
         assertEquals("{datetime: \"1988-04-19T10:12:59.112233445+03:15\"}", printer.value());
+    }
+
+    @ParameterizedTest
+    @MethodSource("vectors")
+    void shouldHandleVectors(String expected, Value value) {
+        PrettyPrinter printer = new PrettyPrinter();
+        value.writeTo(printer);
+        assertEquals(expected, printer.value());
+    }
+
+    private static Stream<Arguments> vectors() {
+        return Stream.of(
+                Arguments.of("vector([1, 2], 2, INTEGER8)", Values.int8Vector((byte) 1, (byte) 2)),
+                Arguments.of("vector([1, 2], 2, INTEGER16)", Values.int16Vector((short) 1, (short) 2)),
+                Arguments.of("vector([1, 2], 2, INTEGER32)", Values.int32Vector(1, 2)),
+                Arguments.of("vector([1, 2], 2, INTEGER64)", Values.int64Vector(1, 2)),
+                Arguments.of("vector([1.0, 2.0], 2, FLOAT32)", Values.float32Vector(1f, 2f)),
+                Arguments.of("vector([1.0, 2.0], 2, FLOAT64)", Values.float64Vector(1d, 2d)));
     }
 
     @Test

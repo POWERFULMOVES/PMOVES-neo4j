@@ -19,9 +19,12 @@
  */
 package org.neo4j.cypher.internal.runtime.interpreted.pipes
 
-import org.neo4j.cypher.internal.macros.AssertMacros
+import org.neo4j.cypher.internal.GQLExceptionsHelper.requireImplicitTransaction
+import org.neo4j.cypher.internal.macros.AssertMacros3
+import org.neo4j.cypher.internal.notification.AggregationSkippedNull
+import org.neo4j.cypher.internal.notification.InternalNotification
+import org.neo4j.cypher.internal.planner.spi.IndexComparatorFactory
 import org.neo4j.cypher.internal.runtime.CypherRow
-import org.neo4j.cypher.internal.runtime.ExpressionCursors
 import org.neo4j.cypher.internal.runtime.InputDataStream
 import org.neo4j.cypher.internal.runtime.MapCypherRow
 import org.neo4j.cypher.internal.runtime.NoInput
@@ -30,20 +33,19 @@ import org.neo4j.cypher.internal.runtime.QueryStatistics
 import org.neo4j.cypher.internal.runtime.ReadableRow
 import org.neo4j.cypher.internal.runtime.RuntimeNotifier
 import org.neo4j.cypher.internal.runtime.SelectivityTrackerStorage
+import org.neo4j.cypher.internal.runtime.cursors.ExpressionCursors
 import org.neo4j.cypher.internal.runtime.interpreted.CSVResources
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.QueryState.createDefaultInCache
 import org.neo4j.cypher.internal.runtime.interpreted.profiler.InterpretedProfileInformation
 import org.neo4j.cypher.internal.runtime.interpreted.profiler.Profiler
 import org.neo4j.cypher.internal.runtime.memory.MemoryTrackerForOperatorProvider
 import org.neo4j.cypher.internal.runtime.memory.QueryMemoryTracker
-import org.neo4j.cypher.internal.util.InternalNotification
-import org.neo4j.graphdb.TransactionFailureException
+import org.neo4j.exceptions.InternalException
 import org.neo4j.internal.kernel
 import org.neo4j.internal.kernel.api.IndexReadSession
 import org.neo4j.internal.kernel.api.TokenReadSession
 import org.neo4j.io.IOUtils.closeAll
 import org.neo4j.kernel.api.KernelTransaction
-import org.neo4j.kernel.api.exceptions.Status
 import org.neo4j.kernel.impl.query.QuerySubscriber
 import org.neo4j.scheduler.CallableExecutor
 import org.neo4j.values.AnyValue
@@ -67,19 +69,24 @@ class QueryState(
   val decorator: PipeDecorator = NullPipeDecorator,
   val initialContext: Option[CypherRow] = None,
   val cachedIn: InCache = createDefaultInCache(),
+  val indexComparatorFactory: IndexComparatorFactory,
   val lenientCreateRelationship: Boolean = false,
   val prePopulateResults: Boolean = false,
   val input: InputDataStream = NoInput,
   val profileInformation: InterpretedProfileInformation = null,
-  val transactionWorkerExecutor: Option[CallableExecutor] = None
+  val transactionWorkerExecutor: Option[CallableExecutor] = None,
+  val notifications: util.Set[InternalNotification] = new util.HashSet[InternalNotification](),
+  val warnOnAggregationSkipNull: Boolean = false
 ) extends AutoCloseable with RuntimeNotifier {
 
   private var _rowFactory: CypherRowFactory = _
   private var _closed = false
 
-  // NOTE: used as a simple cache to avoid flooding the map with adding the same object
-  private[this] var lastCachedNotification: InternalNotification = _
-  private[this] val _notifications = new util.HashSet[InternalNotification]()
+  // NOTE: used as a simple cache to avoid flooding the map with adding the same object,
+  //       assigning it as AggregationSkippedNull when we shouldn't produce this error is a somewhat
+  //       silly micro optimization to avoid an extra equality check.
+  private[this] var lastCachedNotification: InternalNotification =
+    if (!warnOnAggregationSkipNull) AggregationSkippedNull else null
 
   def newRow(rowFactory: CypherRowFactory): CypherRow = {
     initialContext match {
@@ -90,12 +97,12 @@ class QueryState(
 
   def newRuntimeNotification(notification: InternalNotification): Unit = {
     if (notification ne lastCachedNotification) {
-      _notifications.add(notification)
+      if (warnOnAggregationSkipNull || (notification ne AggregationSkippedNull)) {
+        notifications.add(notification)
+      }
       lastCachedNotification = notification
     }
   }
-
-  def notifications(): util.Set[InternalNotification] = _notifications
 
   /**
    * When running on the RHS of an Apply, this method will fill the new row with argument data
@@ -126,11 +133,13 @@ class QueryState(
       decorator,
       initialContext,
       cachedIn,
+      indexComparatorFactory,
       lenientCreateRelationship,
       prePopulateResults,
       input,
       profileInformation,
-      transactionWorkerExecutor
+      transactionWorkerExecutor,
+      notifications
     )
 
   def withInitialContext(initialContext: CypherRow): QueryState =
@@ -150,11 +159,13 @@ class QueryState(
       decorator,
       Some(initialContext),
       cachedIn,
+      indexComparatorFactory,
       lenientCreateRelationship,
       prePopulateResults,
       input,
       profileInformation,
-      transactionWorkerExecutor
+      transactionWorkerExecutor,
+      notifications
     )
 
   def withInitialContextAndDecorator(initialContext: CypherRow, newDecorator: PipeDecorator): QueryState =
@@ -174,11 +185,13 @@ class QueryState(
       newDecorator,
       Some(initialContext),
       cachedIn,
+      indexComparatorFactory,
       lenientCreateRelationship,
       prePopulateResults,
       input,
       profileInformation,
-      transactionWorkerExecutor
+      transactionWorkerExecutor,
+      notifications
     )
 
   def withQueryContext(query: QueryContext): QueryState =
@@ -198,18 +211,19 @@ class QueryState(
       decorator,
       initialContext,
       cachedIn,
+      indexComparatorFactory,
       lenientCreateRelationship,
       prePopulateResults,
       input,
       profileInformation,
-      transactionWorkerExecutor
+      transactionWorkerExecutor,
+      notifications
     )
 
   def withNewTransaction(concurrentAccess: Boolean): QueryState = {
     if (query.getTransactionType != KernelTransaction.Type.IMPLICIT) {
-      throw new TransactionFailureException(
-        "A query with 'CALL { ... } IN TRANSACTIONS' can only be executed in an implicit transaction, " + "but tried to execute in an explicit transaction.",
-        Status.Transaction.TransactionStartFailed
+      throw requireImplicitTransaction(
+        "A query with 'CALL { ... } IN TRANSACTIONS' can only be executed in an implicit transaction, " + "but tried to execute in an explicit transaction."
       )
     }
     val newQuery = query.contextWithNewTransaction()
@@ -217,7 +231,7 @@ class QueryState(
     val newCursors = newQuery.createExpressionCursors()
 
     // This method is not supported when we run with PERIODIC COMMIT, so we assert that we do not have such resources.
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(resources.isInstanceOf[CSVResources])
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(resources.isInstanceOf[CSVResources])
     val newResources = new CSVResources(newQuery.resources)
 
     // IndexReadSession and TokenReadSession are bound to the outer transaction.
@@ -267,11 +281,14 @@ class QueryState(
       newDecorator,
       initialContext,
       newCachedIn,
+      indexComparatorFactory,
       lenientCreateRelationship,
       prePopulateResults,
       input,
       newProfileInformation,
-      transactionWorkerExecutor
+      transactionWorkerExecutor,
+      notifications,
+      warnOnAggregationSkipNull
     )
   }
 
@@ -292,11 +309,13 @@ class QueryState(
       decorator,
       initialContext,
       cachedIn,
+      indexComparatorFactory,
       lenientCreateRelationship,
       prePopulateResults,
       input,
       profileInformation,
-      transactionWorkerExecutor
+      transactionWorkerExecutor,
+      notifications
     )
   }
 
@@ -350,6 +369,10 @@ class QueryState(
       _closed = true
     }
   }
+
+  override def toString: String = {
+    s"${this.getClass.getSimpleName}(interpreted, doProfile=${profileInformation != null}, numberOfParams=${params.length}, prePopulateResults=$prePopulateResults)"
+  }
 }
 
 object QueryState {
@@ -375,11 +398,14 @@ object QueryState {
     decorator: PipeDecorator,
     initialContext: Option[CypherRow],
     cachedIn: InCache,
+    indexComparatorFactory: IndexComparatorFactory,
     lenientCreateRelationship: Boolean,
     prePopulateResults: Boolean,
     input: InputDataStream,
     profileInformation: InterpretedProfileInformation,
-    transactionWorkerExecutor: Option[CallableExecutor]
+    transactionWorkerExecutor: Option[CallableExecutor],
+    notifications: util.Set[InternalNotification],
+    warnOnAggregationSkipNull: Boolean
   ): QueryState = {
     val memoryTrackerForOperatorProvider =
       queryHeapHighWatermarkTracker.newMemoryTrackerForOperatorProvider(query.transactionalContext.memoryTracker)
@@ -399,11 +425,14 @@ object QueryState {
       decorator,
       initialContext,
       cachedIn,
+      indexComparatorFactory,
       lenientCreateRelationship,
       prePopulateResults,
       input,
       profileInformation,
-      transactionWorkerExecutor
+      transactionWorkerExecutor,
+      notifications,
+      warnOnAggregationSkipNull
     )
   }
 }
@@ -441,12 +470,18 @@ case class CommunityCypherRowFactory() extends CypherRowFactory {
   override def copyWith(row: ReadableRow): CypherRow = row match {
     case context: MapCypherRow =>
       context.createClone()
+
+    case x =>
+      throw InternalException.internalError(getClass.getSimpleName, s"Unexpected row type $x")
   }
 
   // Not using polymorphism here, instead cast since the cost of being megamorhpic is too high
   override def copyWith(row: ReadableRow, key: String, value: AnyValue): CypherRow = row match {
     case context: MapCypherRow =>
       context.copyWith(key, value)
+
+    case x =>
+      throw InternalException.internalError(getClass.getSimpleName, s"Unexpected row type $x")
   }
 
   // Not using polymorphism here, instead cast since the cost of being megamorhpic is too high
@@ -454,6 +489,9 @@ case class CommunityCypherRowFactory() extends CypherRowFactory {
     row match {
       case context: MapCypherRow =>
         context.copyWith(key1, value1, key2, value2)
+
+      case x =>
+        throw InternalException.internalError(getClass.getSimpleName, s"Unexpected row type $x")
     }
 
   // Not using polymorphism here, instead cast since the cost of being megamorhpic is too high
@@ -468,5 +506,8 @@ case class CommunityCypherRowFactory() extends CypherRowFactory {
   ): CypherRow = row match {
     case context: MapCypherRow =>
       context.copyWith(key1, value1, key2, value2, key3, value3)
+
+    case x =>
+      throw InternalException.internalError(getClass.getSimpleName, s"Unexpected row type $x")
   }
 }

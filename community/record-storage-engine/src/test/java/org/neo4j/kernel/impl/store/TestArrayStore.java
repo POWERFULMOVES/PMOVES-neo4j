@@ -33,7 +33,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.stream.Stream;
-import org.eclipse.collections.api.factory.Sets;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -47,11 +46,11 @@ import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.store.AbstractDynamicStore.HeavyRecordData;
 import org.neo4j.kernel.impl.store.format.RecordFormats;
 import org.neo4j.kernel.impl.store.format.aligned.PageAligned;
 import org.neo4j.kernel.impl.store.record.DynamicRecord;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
@@ -98,8 +97,7 @@ public class TestArrayStore {
                 NullLogProvider.getInstance(),
                 CursorContextFactory.NULL_CONTEXT_FACTORY,
                 false,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
-                Sets.immutable.empty());
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
 
         neoStores = factory.openAllNeoStores();
         allocatorProvider = DynamicAllocatorProviders.nonTransactionalAllocator(neoStores);

@@ -19,15 +19,18 @@
  */
 package org.neo4j.cypher.internal
 
+import org.neo4j.cypher.internal.compiler.ExecutionModel
 import org.neo4j.cypher.internal.options.CypherDebugOptions
 import org.neo4j.cypher.internal.options.CypherInterpretedPipesFallbackOption
 import org.neo4j.cypher.internal.options.CypherOperatorEngineOption
+import org.neo4j.cypher.internal.planner.spi.IndexComparatorFactory
 import org.neo4j.cypher.internal.planner.spi.ReadTokenContext
 import org.neo4j.cypher.internal.runtime.CypherRuntimeConfiguration
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.internal.kernel.api.Procedures
 import org.neo4j.internal.kernel.api.SchemaRead
 import org.neo4j.kernel.api.AssertOpen
+import org.neo4j.kernel.impl.query.TransactionalContext
 import org.neo4j.logging.InternalLog
 
 import java.time.Clock
@@ -43,7 +46,8 @@ case class CommunityRuntimeContext(
   log: InternalLog,
   config: CypherRuntimeConfiguration,
   anonymousVariableNameGenerator: AnonymousVariableNameGenerator,
-  assertOpen: AssertOpen
+  assertOpen: AssertOpen,
+  indexComparatorFactory: IndexComparatorFactory
 ) extends RuntimeContext {
 
   override def compileExpressions: Boolean = false
@@ -57,8 +61,7 @@ case class CommunityRuntimeContextManager(log: InternalLog, config: CypherRuntim
   override def create(
     cypherVersion: CypherVersion,
     tokenContext: ReadTokenContext,
-    schemaRead: SchemaRead,
-    procedures: Procedures,
+    transactionalContext: TransactionalContext,
     clock: Clock,
     debugOptions: CypherDebugOptions,
     ignore: Boolean,
@@ -66,18 +69,26 @@ case class CommunityRuntimeContextManager(log: InternalLog, config: CypherRuntim
     ignore3: CypherOperatorEngineOption,
     ignore4: CypherInterpretedPipesFallbackOption,
     anonymousVariableNameGenerator: AnonymousVariableNameGenerator,
-    assertOpen: AssertOpen
-  ): CommunityRuntimeContext =
+    ignore5: ExecutionModel,
+    indexComparatorFactory: IndexComparatorFactory
+  ): CommunityRuntimeContext = {
+    val kernelTransaction = transactionalContext.kernelTransaction()
+    val configToUse = transactionalContext.databaseMode() match {
+      case TransactionalContext.DatabaseMode.SHARDED => config.snapshot().forceEnableNonFusedMerge()
+      case _                                         => config.snapshot()
+    }
     CommunityRuntimeContext(
       cypherVersion,
       tokenContext,
-      schemaRead,
-      procedures,
+      kernelTransaction.schemaRead(),
+      kernelTransaction.procedures(),
       log,
-      config,
+      configToUse,
       anonymousVariableNameGenerator,
-      assertOpen
+      kernelTransaction,
+      indexComparatorFactory
     )
+  }
 
   // As we rely completely on transaction bound resources in community,
   // there is no need for further assertions here.

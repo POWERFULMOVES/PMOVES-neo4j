@@ -20,20 +20,22 @@
 package org.neo4j.batchimport.api.input;
 
 import java.io.IOException;
-import java.util.List;
+import java.io.Serializable;
 import java.util.Map;
 import org.neo4j.batchimport.api.BatchImporter;
 import org.neo4j.batchimport.api.InputIterable;
 import org.neo4j.batchimport.api.InputIterator;
-import org.neo4j.internal.schema.SchemaCommand;
+import org.neo4j.importer.SchemaCommandSource;
+import org.neo4j.importer.SchemaCommandSource.ResolvedSchemaCommands;
 import org.neo4j.internal.schema.SchemaDescriptor;
-import org.neo4j.internal.schema.SchemaTokens;
 import org.neo4j.token.TokenHolders;
 
 /**
  * Unifies all data input given to a {@link BatchImporter} to allow for more coherent implementations.
  */
 public interface Input extends AutoCloseable {
+    String CONFIG_IDENTIFIER = "identifier";
+
     /**
      * @param numberOfNodes estimated number of nodes for the entire input.
      * @param numberOfRelationships estimated number of relationships for the entire input.
@@ -57,7 +59,10 @@ public interface Input extends AutoCloseable {
             long numberOfRelationshipProperties,
             long sizeOfNodeProperties,
             long sizeOfRelationshipProperties,
-            long numberOfNodeLabels) {}
+            long numberOfNodeLabels,
+            boolean containsNodeUpdates,
+            boolean containsRelationshipUpdates)
+            implements Serializable {}
 
     /**
      * Provides all node data for an import.
@@ -76,7 +81,8 @@ public interface Input extends AutoCloseable {
     InputIterable relationships(Collector badCollector);
 
     /**
-     * @return {@link IdType} which matches the type of ids this {@link Input} generates.
+     * @return {@link IdType} that is suitable for instantiating an IdMapper that will work
+     * for all {@link IdType}s present in this {@link Input}.
      * Will get populated by node import and later queried by relationship import
      * to resolve potentially temporary input node ids to actual node ids in the database.
      */
@@ -98,10 +104,11 @@ public interface Input extends AutoCloseable {
      *     <li>that any header information is valid and consistent</li>
      * </ul>
      * @param valueSizeCalculator for calculating property sizes on disk.
+     * @param numberOfThreads number of threads to use for estimation, sampling and validation work.
      * @return {@link Estimates} for this input w/o reading through it entirely.
      * @throws IOException on I/O error.
      */
-    Estimates validateAndEstimate(PropertySizeCalculator valueSizeCalculator) throws IOException;
+    Estimates validateAndEstimate(PropertySizeCalculator valueSizeCalculator, int numberOfThreads) throws IOException;
 
     /**
      * @return a {@link Map} where key is group name and value which {@link SchemaDescriptor index} it refers to.
@@ -114,26 +121,25 @@ public interface Input extends AutoCloseable {
     /**
      * @return the schema commands to be applied after the data has been imported.
      */
-    default List<SchemaCommand> schemaCommands() {
-        return List.of();
+    default SchemaCommandSource schemaCommandSource() {
+        return ResolvedSchemaCommands.of();
     }
 
     /**
-     * @return all the tokens required by the schema entities specified by this input
+     * @return if the {@link Input} is known to contain any vector data
      */
-    default SchemaTokens schemaTokens() {
-        return SchemaTokens.collect(schemaCommands());
-    }
+    boolean containsVectorData();
 
     @Override
-    default void close() {}
+    default void close() throws IOException {}
 
     static Input input(
             InputIterable nodes,
             InputIterable relationships,
             IdType idType,
             Estimates estimates,
-            ReadableGroups groups) {
+            ReadableGroups groups,
+            boolean containsVectorData) {
         return new Input() {
             @Override
             public InputIterable relationships(Collector badCollector) {
@@ -156,8 +162,13 @@ public interface Input extends AutoCloseable {
             }
 
             @Override
-            public Estimates validateAndEstimate(PropertySizeCalculator valueSizeCalculator) {
+            public Estimates validateAndEstimate(PropertySizeCalculator valueSizeCalculator, int numberOfThreads) {
                 return estimates;
+            }
+
+            @Override
+            public boolean containsVectorData() {
+                return containsVectorData;
             }
         };
     }
@@ -170,6 +181,28 @@ public interface Input extends AutoCloseable {
             long sizeOfNodeProperties,
             long sizeOfRelationshipProperties,
             long numberOfNodeLabels) {
+        return knownEstimates(
+                numberOfNodes,
+                numberOfRelationships,
+                numberOfNodeProperties,
+                numberOfRelationshipProperties,
+                sizeOfNodeProperties,
+                sizeOfRelationshipProperties,
+                numberOfNodeLabels,
+                false,
+                false);
+    }
+
+    static Estimates knownEstimates(
+            long numberOfNodes,
+            long numberOfRelationships,
+            long numberOfNodeProperties,
+            long numberOfRelationshipProperties,
+            long sizeOfNodeProperties,
+            long sizeOfRelationshipProperties,
+            long numberOfNodeLabels,
+            boolean containsNodeUpdates,
+            boolean containsRelationshipUpdates) {
         return new Estimates(
                 numberOfNodes,
                 numberOfRelationships,
@@ -177,11 +210,12 @@ public interface Input extends AutoCloseable {
                 numberOfRelationshipProperties,
                 sizeOfNodeProperties,
                 sizeOfRelationshipProperties,
-                numberOfNodeLabels);
+                numberOfNodeLabels,
+                containsNodeUpdates,
+                containsRelationshipUpdates);
     }
 
     class Delegate implements Input {
-
         protected final Input delegate;
 
         public Delegate(Input delegate) {
@@ -209,8 +243,9 @@ public interface Input extends AutoCloseable {
         }
 
         @Override
-        public Estimates validateAndEstimate(PropertySizeCalculator valueSizeCalculator) throws IOException {
-            return delegate.validateAndEstimate(valueSizeCalculator);
+        public Estimates validateAndEstimate(PropertySizeCalculator valueSizeCalculator, int numberOfThreads)
+                throws IOException {
+            return delegate.validateAndEstimate(valueSizeCalculator, numberOfThreads);
         }
 
         @Override
@@ -219,13 +254,33 @@ public interface Input extends AutoCloseable {
         }
 
         @Override
-        public List<SchemaCommand> schemaCommands() {
-            return delegate.schemaCommands();
+        public SchemaCommandSource schemaCommandSource() {
+            return delegate.schemaCommandSource();
         }
 
         @Override
-        public void close() {
+        public boolean containsVectorData() {
+            return delegate.containsVectorData();
+        }
+
+        @Override
+        public void close() throws IOException {
             delegate.close();
         }
+    }
+
+    static Input estimatesCachingInput(Input actual) {
+        return new Input.Delegate(actual) {
+            private Input.Estimates estimates;
+
+            @Override
+            public Estimates validateAndEstimate(PropertySizeCalculator valueSizeCalculator, int numberOfThreads)
+                    throws IOException {
+                if (estimates == null) {
+                    estimates = super.validateAndEstimate(valueSizeCalculator, numberOfThreads);
+                }
+                return estimates;
+            }
+        };
     }
 }

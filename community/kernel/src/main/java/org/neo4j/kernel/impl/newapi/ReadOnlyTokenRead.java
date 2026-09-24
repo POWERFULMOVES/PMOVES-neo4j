@@ -45,7 +45,7 @@ public class ReadOnlyTokenRead implements TokenRead {
         try {
             return tokenHolders.labelTokens().getTokenById(labelId).name();
         } catch (TokenNotFoundException e) {
-            throw new LabelNotFoundKernelException(labelId, e);
+            throw LabelNotFoundKernelException.labelNotFound(labelId, e);
         }
     }
 
@@ -62,7 +62,7 @@ public class ReadOnlyTokenRead implements TokenRead {
                     .getTokenById(relationshipTypeId)
                     .name();
         } catch (TokenNotFoundException e) {
-            throw new RelationshipTypeIdNotFoundKernelException(relationshipTypeId, e);
+            throw RelationshipTypeIdNotFoundKernelException.relationshipTypeNotFound(relationshipTypeId, e);
         }
     }
 
@@ -76,7 +76,7 @@ public class ReadOnlyTokenRead implements TokenRead {
         try {
             return tokenHolders.propertyKeyTokens().getTokenById(propertyKeyId).name();
         } catch (TokenNotFoundException e) {
-            throw new PropertyKeyIdNotFoundKernelException(propertyKeyId, e);
+            throw PropertyKeyIdNotFoundKernelException.propertyKeyIdNotFound(propertyKeyId, e);
         }
     }
 

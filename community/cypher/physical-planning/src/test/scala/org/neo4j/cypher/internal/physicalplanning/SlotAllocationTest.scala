@@ -20,11 +20,10 @@
 package org.neo4j.cypher.internal.physicalplanning
 
 import org.neo4j.cypher.internal.ast.ASTAnnotationMap
+import org.neo4j.cypher.internal.ast.AstConstructionTestSupport
 import org.neo4j.cypher.internal.ast.semantics.CachableSemanticTable
 import org.neo4j.cypher.internal.ast.semantics.ExpressionTypeInfo
 import org.neo4j.cypher.internal.ast.semantics.SemanticTable
-import org.neo4j.cypher.internal.compiler.planner.LogicalPlanningTestSupport2
-import org.neo4j.cypher.internal.compiler.planner.logical.PlanMatchHelp
 import org.neo4j.cypher.internal.expressions.CountStar
 import org.neo4j.cypher.internal.expressions.Equals
 import org.neo4j.cypher.internal.expressions.Expression
@@ -32,6 +31,8 @@ import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.SemanticDirection
 import org.neo4j.cypher.internal.ir.VarPatternLength
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createNode
+import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createRelationship
+import org.neo4j.cypher.internal.logical.builder.IndexSeek
 import org.neo4j.cypher.internal.logical.plans
 import org.neo4j.cypher.internal.logical.plans.AbstractSemiApply
 import org.neo4j.cypher.internal.logical.plans.Aggregation
@@ -42,6 +43,7 @@ import org.neo4j.cypher.internal.logical.plans.Argument
 import org.neo4j.cypher.internal.logical.plans.Ascending
 import org.neo4j.cypher.internal.logical.plans.CartesianProduct
 import org.neo4j.cypher.internal.logical.plans.Create
+import org.neo4j.cypher.internal.logical.plans.DirectedAllRelationshipsScan
 import org.neo4j.cypher.internal.logical.plans.Distinct
 import org.neo4j.cypher.internal.logical.plans.DoNotGetValue
 import org.neo4j.cypher.internal.logical.plans.Expand
@@ -51,10 +53,10 @@ import org.neo4j.cypher.internal.logical.plans.Expand.VariablePredicate
 import org.neo4j.cypher.internal.logical.plans.ForeachApply
 import org.neo4j.cypher.internal.logical.plans.GetValue
 import org.neo4j.cypher.internal.logical.plans.IndexOrderNone
-import org.neo4j.cypher.internal.logical.plans.IndexSeek
 import org.neo4j.cypher.internal.logical.plans.Input
 import org.neo4j.cypher.internal.logical.plans.LeftOuterHashJoin
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
+import org.neo4j.cypher.internal.logical.plans.Merge
 import org.neo4j.cypher.internal.logical.plans.NestedPlanExpression
 import org.neo4j.cypher.internal.logical.plans.NodeByLabelScan
 import org.neo4j.cypher.internal.logical.plans.NodeHashJoin
@@ -66,10 +68,11 @@ import org.neo4j.cypher.internal.logical.plans.RightOuterHashJoin
 import org.neo4j.cypher.internal.logical.plans.RollUpApply
 import org.neo4j.cypher.internal.logical.plans.Selection
 import org.neo4j.cypher.internal.logical.plans.SemiApply
-import org.neo4j.cypher.internal.logical.plans.TraversalMatchMode
+import org.neo4j.cypher.internal.logical.plans.TraversalPathMode
 import org.neo4j.cypher.internal.logical.plans.Union
 import org.neo4j.cypher.internal.logical.plans.UnwindCollection
 import org.neo4j.cypher.internal.logical.plans.ValueHashJoin
+import org.neo4j.cypher.internal.logical.plans.ValueMergeJoin
 import org.neo4j.cypher.internal.logical.plans.VarExpand
 import org.neo4j.cypher.internal.physicalplanning.PhysicalPlanningAttributes.LiveVariables
 import org.neo4j.cypher.internal.physicalplanning.PipelineBreakingPolicy.breakFor
@@ -80,6 +83,8 @@ import org.neo4j.cypher.internal.runtime.expressionVariableAllocation.AvailableE
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.cypher.internal.util.CancellationChecker
 import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.cypher.internal.util.attribution.IdGen
+import org.neo4j.cypher.internal.util.attribution.SequentialIdGen
 import org.neo4j.cypher.internal.util.symbols.CTAny
 import org.neo4j.cypher.internal.util.symbols.CTInteger
 import org.neo4j.cypher.internal.util.symbols.CTList
@@ -89,8 +94,8 @@ import org.neo4j.cypher.internal.util.symbols.ListType
 import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 
 //noinspection NameBooleanParameters
-class SlotAllocationTest extends CypherFunSuite with LogicalPlanningTestSupport2 with PlanMatchHelp {
-
+class SlotAllocationTest extends CypherFunSuite with AstConstructionTestSupport {
+  implicit val idGen: IdGen = new SequentialIdGen()
   private val LABEL = labelName("label")
   private val semanticTable = CachableSemanticTable(SemanticTable())
   private val NO_EXPR_VARS = new AvailableExpressionVariables()
@@ -316,7 +321,8 @@ class SlotAllocationTest extends CypherFunSuite with LogicalPlanningTestSupport2
       Seq.empty,
       varFor("z"),
       varFor("r"),
-      ExpandAll
+      ExpandAll,
+      None
     )
 
     // when
@@ -355,7 +361,8 @@ class SlotAllocationTest extends CypherFunSuite with LogicalPlanningTestSupport2
       Seq.empty,
       varFor("x"),
       varFor("r"),
-      ExpandInto
+      ExpandInto,
+      None
     )
 
     // when
@@ -393,13 +400,13 @@ class SlotAllocationTest extends CypherFunSuite with LogicalPlanningTestSupport2
       SemanticDirection.INCOMING,
       SemanticDirection.INCOMING,
       Seq.empty,
-      varFor("z"),
-      varFor("r"),
+      Some(varFor("z")),
+      Some(varFor("r")),
       varLength,
       ExpandAll,
       Seq(VariablePredicate(exprVar(0, "r_NODES"), trueLiteral)),
       Seq(VariablePredicate(exprVar(1, "r_EDGES"), trueLiteral)),
-      TraversalMatchMode.Trail
+      TraversalPathMode.Trail
     )
 
     // when
@@ -440,13 +447,13 @@ class SlotAllocationTest extends CypherFunSuite with LogicalPlanningTestSupport2
       SemanticDirection.INCOMING,
       SemanticDirection.INCOMING,
       Seq.empty,
-      varFor("y"),
-      varFor("r2"),
+      Some(varFor("y")),
+      Some(varFor("r2")),
       varLength,
       ExpandInto,
       Seq(VariablePredicate(exprVar(0, "r_NODES"), trueLiteral)),
       Seq(VariablePredicate(exprVar(1, "r_EDGES"), trueLiteral)),
-      TraversalMatchMode.Trail
+      TraversalPathMode.Trail
     )
 
     // when
@@ -786,6 +793,11 @@ class SlotAllocationTest extends CypherFunSuite with LogicalPlanningTestSupport2
         left = scan,
         right = projection,
         join = Equals(x, x)(InputPosition.NONE)
+      ),
+      ValueMergeJoin(
+        left = scan,
+        right = projection,
+        join = Equals(x, x)(InputPosition.NONE)
       )
     )
 
@@ -935,7 +947,8 @@ class SlotAllocationTest extends CypherFunSuite with LogicalPlanningTestSupport2
         CartesianProduct(lhs, rhs),
         NodeHashJoin(Set(varFor("x")), lhs, rhs),
         LeftOuterHashJoin(Set(varFor("x")), lhs, rhs),
-        ValueHashJoin(lhs, rhs, equals(varFor("x"), varFor("x")))
+        ValueHashJoin(lhs, rhs, equals(varFor("x"), varFor("x"))),
+        ValueMergeJoin(lhs, rhs, equals(varFor("x"), varFor("x")))
       )
 
     for (join <- joins) {
@@ -1587,8 +1600,8 @@ class SlotAllocationTest extends CypherFunSuite with LogicalPlanningTestSupport2
 
     val semanticTableWithList =
       SemanticTable(ASTAnnotationMap(list -> ExpressionTypeInfo(
-        ListType(CTInteger, isNullable = true)(InputPosition.NONE),
-        Some(ListType(CTAny, isNullable = true)(InputPosition.NONE))
+        ListType(CTInteger, isNullable = true)(InputPosition.NONE).invariant,
+        Some(ListType(CTAny, isNullable = true)(InputPosition.NONE).invariant)
       )))
 
     // when
@@ -1632,8 +1645,8 @@ class SlotAllocationTest extends CypherFunSuite with LogicalPlanningTestSupport2
 
     val semanticTableWithList =
       SemanticTable(ASTAnnotationMap(list -> ExpressionTypeInfo(
-        ListType(CTNode, isNullable = true)(InputPosition.NONE),
-        Some(ListType(CTNode, isNullable = true)(InputPosition.NONE))
+        ListType(CTNode, isNullable = true)(InputPosition.NONE).invariant,
+        Some(ListType(CTNode, isNullable = true)(InputPosition.NONE).invariant)
       )))
 
     // when
@@ -1665,6 +1678,62 @@ class SlotAllocationTest extends CypherFunSuite with LogicalPlanningTestSupport2
     )
 
     allocations(foreach.id) shouldBe theSameInstanceAs(lhsSlots)
+  }
+
+  test("non-lenient merge relationships") {
+    // given
+    val merge = Merge(
+      DirectedAllRelationshipsScan(varFor("r"), varFor("x"), varFor("x"), Set(varFor("x"))),
+      Seq.empty,
+      Seq(createRelationship("r", "x", "R", "x")),
+      Seq.empty,
+      Seq.empty,
+      Set.empty
+    )
+
+    // when
+    val allocations = allocateSlots(
+      merge,
+      semanticTable,
+      BREAK_FOR_LEAFS,
+      NO_EXPR_VARS,
+      config,
+      new AnonymousVariableNameGenerator()
+    ).slotConfigurations
+
+    // then
+    allocations should have size 2
+    allocations(merge.id) should equal(SlotConfigurationBuilder.empty
+      .newLong("r", nullable = false, CTRelationship)
+      .newLong("x", nullable = false, CTNode))
+  }
+
+  test("lenient merge relationships") {
+    // given
+    val merge = Merge(
+      DirectedAllRelationshipsScan(varFor("r"), varFor("x"), varFor("x"), Set(varFor("x"))),
+      Seq.empty,
+      Seq(createRelationship("r", "x", "R", "x")),
+      Seq.empty,
+      Seq.empty,
+      Set.empty
+    )
+
+    // when
+    val allocations = allocateSlots(
+      merge,
+      semanticTable,
+      BREAK_FOR_LEAFS,
+      NO_EXPR_VARS,
+      config.copy(lenientCreateRelationship = true)(config.cypherConfiguration),
+      new AnonymousVariableNameGenerator()
+    ).slotConfigurations
+
+    // then
+    allocations should have size 2
+    allocations(merge.id) should equal(SlotConfigurationBuilder.empty
+      .newLong("r", nullable = true, CTRelationship)
+      .newLong("x", nullable = false, CTNode))
   }
 
   def exprVar(offset: Int, name: String): ExpressionVariable = ExpressionVariable(offset, name)

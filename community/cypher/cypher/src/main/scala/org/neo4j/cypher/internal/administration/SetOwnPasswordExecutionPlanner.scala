@@ -23,9 +23,6 @@ import org.neo4j.configuration.Config
 import org.neo4j.cypher.internal.AdministrationCommandRuntime.getPasswordExpression
 import org.neo4j.cypher.internal.AdministrationCommandRuntime.getValidPasswordParameter
 import org.neo4j.cypher.internal.AdministrationCommandRuntime.internalKey
-import org.neo4j.cypher.internal.AdministrationCommandRuntime.userCredPropKey
-import org.neo4j.cypher.internal.AdministrationCommandRuntime.userLabel
-import org.neo4j.cypher.internal.AdministrationCommandRuntime.userPwChangeReqPropKey
 import org.neo4j.cypher.internal.AdministrationCommandRuntime.validateStringParameterType
 import org.neo4j.cypher.internal.ExecutionEngine
 import org.neo4j.cypher.internal.ExecutionPlan
@@ -38,11 +35,18 @@ import org.neo4j.cypher.internal.procs.NonTransactionalUpdatingSystemCommandExec
 import org.neo4j.cypher.internal.procs.ParameterTransformer
 import org.neo4j.cypher.internal.procs.QueryHandler
 import org.neo4j.cypher.internal.procs.ThrowException
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_CREDENTIALS_EXPIRED_PROPERTY
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_CREDENTIALS_PROPERTY
 import org.neo4j.exceptions.CypherExecutionException
 import org.neo4j.exceptions.DatabaseAdministrationOnFollowerException
+import org.neo4j.exceptions.InternalException
 import org.neo4j.exceptions.InvalidArgumentException
 import org.neo4j.exceptions.Neo4jException
+import org.neo4j.exceptions.SecurityAdministrationException
+import org.neo4j.internal.kernel.api.security.AbstractSecurityLog
 import org.neo4j.internal.kernel.api.security.SecurityAuthorizationHandler
+import org.neo4j.internal.kernel.api.security.SecurityExceptionLogger
 import org.neo4j.kernel.api.exceptions.Status
 import org.neo4j.kernel.api.exceptions.Status.HasStatus
 import org.neo4j.server.security.SecureHasher
@@ -58,7 +62,8 @@ import org.neo4j.values.virtual.VirtualValues
 case class SetOwnPasswordExecutionPlanner(
   normalExecutionEngine: ExecutionEngine,
   securityAuthorizationHandler: SecurityAuthorizationHandler,
-  config: Config
+  config: Config,
+  securityLog: AbstractSecurityLog
 ) {
   private val secureHasher = new SecureHasher
 
@@ -72,12 +77,13 @@ case class SetOwnPasswordExecutionPlanner(
     val (currentKeyBytes, currentValueBytes, currentConverterBytes) = getPasswordFieldsCurrent(currentPassword)
     def currentUser(p: MapValue): String = p.get(usernameKey).asInstanceOf[TextValue].stringValue()
     val query =
-      s"""MATCH (user:$userLabel {name: $$`$usernameKey`})
-         |WITH user, user.$userCredPropKey AS oldCredentials
-         |SET user.$userCredPropKey = $$`${newPw.key}`
-         |SET user.$userPwChangeReqPropKey = false
+      s"""MATCH (user:$USER {name: $$`$usernameKey`})
+         |WITH user, user.$USER_CREDENTIALS_PROPERTY AS oldCredentials
+         |SET user.$USER_CREDENTIALS_PROPERTY = $$`${newPw.key}`
+         |SET user.$USER_CREDENTIALS_EXPIRED_PROPERTY = false
          |RETURN oldCredentials""".stripMargin
 
+    val exceptionLogger = new SecurityExceptionLogger(securityLog)
     NonTransactionalUpdatingSystemCommandExecutionPlan(
       "AlterCurrentUserSetPassword",
       normalExecutionEngine,
@@ -97,24 +103,27 @@ case class SetOwnPasswordExecutionPlanner(
             )
           case (error: Neo4jException, _) => error
           case (error, p) =>
-            CypherExecutionException.alterOwnPassword(currentUser(p), error)
+            exceptionLogger.logAndGet(CypherExecutionException.alterOwnPassword(currentUser(p), error))
         }
         .handleResult((_, value, p) => {
           if (value.isInstanceOf[NoValue]) {
-            ThrowException(new InvalidArgumentException(
-              s"User '${currentUser(p)}' failed to alter their own password: Invalid principal or credentials."
-            ))
+            ThrowException(
+              exceptionLogger.logAndGet(InvalidArgumentException.invalidCredentialsDuringAlterPassword(currentUser(p)))
+            )
           }
           val oldCredentials =
             SystemGraphCredential.deserialize(value.asInstanceOf[TextValue].stringValue(), secureHasher)
           val newValue = p.get(newPw.bytesKey).asInstanceOf[ByteArray].asObject()
           val currentValue = p.get(currentKeyBytes).asInstanceOf[ByteArray].asObject()
-          if (!oldCredentials.matchesPassword(currentValue))
-            ThrowException(new InvalidArgumentException(
-              s"User '${currentUser(p)}' failed to alter their own password: Invalid principal or credentials."
-            ))
-          else if (oldCredentials.matchesPassword(newValue))
-            ThrowException(InvalidArgumentException.oldPasswordEqualsNew(currentUser(p), true))
+          if (!oldCredentials.matchesPassword(currentValue)) {
+            ThrowException(
+              exceptionLogger.logAndGet(InvalidArgumentException.invalidCredentialsDuringAlterPassword(currentUser(p)))
+            )
+          } else if (oldCredentials.matchesPassword(newValue))
+            ThrowException(exceptionLogger.logAndGet(InvalidArgumentException.oldPasswordEqualsNew(
+              currentUser(p),
+              true
+            )))
           else
             Continue
         })
@@ -122,11 +131,13 @@ case class SetOwnPasswordExecutionPlanner(
           if (
             currentUser(p).isEmpty
           ) // This is true if the securityContext is AUTH_DISABLED (both for community and enterprise)
-            Some(ThrowException(new IllegalStateException(
+            Some(ThrowException(SecurityAdministrationException.unsupportedWithAuthDisabled(
+              "ALTER CURRENT USER SET PASSWORD",
               "User failed to alter their own password: Command not available with auth disabled."
             )))
           else // The 'current user' doesn't exist in the system graph
-            Some(ThrowException(new IllegalStateException(
+            Some(ThrowException(InternalException.internalError(
+              this.getClass.getSimpleName,
               s"User '${currentUser(p)}' failed to alter their own password: User does not exist."
             )))
         }),
@@ -154,7 +165,10 @@ case class SetOwnPasswordExecutionPlanner(
           params.updatedWith(renamedParameter, Values.byteArray(encodedPassword))
         }
         (renamedParameter, Values.NO_VALUE, convertPasswordParameters)
-      case _ => throw new IllegalStateException(s"Internal error when processing password.")
+      case _ => throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"Internal error when processing password."
+        )
     }
   }
 }

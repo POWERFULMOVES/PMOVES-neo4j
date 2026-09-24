@@ -21,32 +21,35 @@ package org.neo4j.internal.kernel.api.exceptions;
 
 import static java.lang.String.format;
 import static org.apache.commons.lang3.exception.ExceptionUtils.getRootCause;
+import static org.neo4j.configuration.GraphDatabaseSettings.procedure_unrestricted;
 import static org.neo4j.kernel.api.exceptions.Status.Database.DatabaseNotFound;
+import static org.neo4j.kernel.api.exceptions.Status.Database.Unknown;
+import static org.neo4j.kernel.api.exceptions.Status.Procedure.ProcedureCallFailed;
 
+import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import javax.management.ObjectName;
+import org.neo4j.configuration.connectors.ConnectorType;
 import org.neo4j.exceptions.KernelException;
-import org.neo4j.gqlstatus.ErrorClassification;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
 import org.neo4j.gqlstatus.GqlHelper;
 import org.neo4j.gqlstatus.GqlParams;
 import org.neo4j.gqlstatus.GqlStatusInfoCodes;
-import org.neo4j.internal.kernel.api.procs.DescribedSignature;
-import org.neo4j.internal.kernel.api.procs.ProcedureSignature;
 import org.neo4j.internal.kernel.api.procs.QualifiedName;
 import org.neo4j.kernel.api.exceptions.Status;
+import org.neo4j.kernel.api.exceptions.Status.Security;
 import org.neo4j.procedure.Context;
 import org.neo4j.procedure.Name;
 import org.neo4j.procedure.UserAggregationResult;
 import org.neo4j.procedure.UserAggregationUpdate;
 
 public class ProcedureException extends KernelException {
-    @Deprecated
-    public ProcedureException(Status statusCode, Throwable cause, String message, Object... parameters) {
-        super(statusCode, cause, message, parameters);
-    }
 
-    public ProcedureException(
+    private ProcedureException(
             ErrorGqlStatusObject gqlStatusObject,
             Status statusCode,
             Throwable cause,
@@ -55,20 +58,62 @@ public class ProcedureException extends KernelException {
         super(gqlStatusObject, statusCode, cause, message, parameters);
     }
 
-    @Deprecated
-    public ProcedureException(Status statusCode, String message, Object... parameters) {
-        super(statusCode, message, parameters);
-    }
-
-    public ProcedureException(
+    protected ProcedureException(
             ErrorGqlStatusObject gqlStatusObject, Status statusCode, String message, Object... parameters) {
         super(gqlStatusObject, statusCode, message, parameters);
+    }
+
+    // KNL-034
+    public static ProcedureException indexInFailedState(String indexName, String errorMessage) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N62)
+                .withParam(GqlParams.StringParam.idx, indexName)
+                .build();
+        return new ProcedureException(gql, Status.Schema.IndexCreationFailed, errorMessage);
+    }
+
+    public static ProcedureException indexDidNotComeOnline(
+            String procedureName, String indexDescription, long timeout, TimeUnit timeoutUnits) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N02)
+                .withParam(GqlParams.StringParam.proc, procedureName)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N01)
+                        .withParam(GqlParams.StringParam.proc, procedureName)
+                        .withParam(GqlParams.NumberParam.timeAmount, timeout)
+                        .withParam(
+                                GqlParams.StringParam.timeUnit,
+                                timeoutUnits.toString().toLowerCase(Locale.ROOT))
+                        .build())
+                .build();
+        return new ProcedureException(
+                gql,
+                Status.Procedure.ProcedureTimedOut,
+                "Index on '%s' did not come online within %s %s",
+                indexDescription,
+                timeout,
+                timeoutUnits);
     }
 
     public static ProcedureException noSuchProcedure(QualifiedName name) {
         var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42001)
                 .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N08)
                         .withParam(GqlParams.StringParam.procFun, name.toString())
+                        .build())
+                .build();
+        return new ProcedureException(
+                gql,
+                Status.Procedure.ProcedureNotFound,
+                "There is no procedure with the name `%s` registered for this database instance. "
+                        + "Please ensure you've spelled the procedure name correctly and that the "
+                        + "procedure is properly deployed.",
+                name);
+    }
+
+    public static ProcedureException noSuchProcedureWithVersionHint(QualifiedName name, int cypherVersion) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42001)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N08)
+                        .withParam(GqlParams.StringParam.procFun, name.toString())
+                        .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42I78)
+                                .withParam(GqlParams.NumberParam.version1, cypherVersion)
+                                .build())
                         .build())
                 .build();
         return new ProcedureException(
@@ -117,8 +162,36 @@ public class ProcedureException extends KernelException {
                 name);
     }
 
+    public static ProcedureException unsupportedProcedureOnComposite(QualifiedName name) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N7B)
+                .withParam(GqlParams.StringParam.feat, "Unsupported procedure call")
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N08)
+                        .withParam(GqlParams.StringParam.procFun, name.toString())
+                        .build())
+                .build();
+        return new ProcedureException(
+                gql,
+                Status.Procedure.ProcedureCallFailed,
+                "Procedure `%s` is not supported in a composite database.",
+                name);
+    }
+
+    public static ProcedureException unsupportedProcedureOnShardedDb(QualifiedName name) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N71)
+                .withParam(GqlParams.StringParam.feat, "Unsupported procedure call")
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N08)
+                        .withParam(GqlParams.StringParam.procFun, name.toString())
+                        .build())
+                .build();
+        return new ProcedureException(
+                gql,
+                Status.Procedure.ProcedureCallFailed,
+                "Procedure `%s` is not supported in a sharded database.",
+                name);
+    }
+
     public static ProcedureException noSuchConstituentGraph(String graphName, String ctxDatabaseName) {
-        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42002)
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42001)
                 .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N01)
                         .withParam(GqlParams.StringParam.graph, graphName)
                         .withParam(GqlParams.StringParam.db, ctxDatabaseName)
@@ -385,7 +458,7 @@ public class ProcedureException extends KernelException {
         return new ProcedureException(
                 gql,
                 Status.Procedure.ProcedureRegistrationFailed,
-                "Procedures with zero output fields must be declared as VOID");
+                "Procedures with zero return columns must be declared as VOID");
     }
 
     public static ProcedureException procedureNameAlreadyInUse(String name) {
@@ -510,12 +583,21 @@ public class ProcedureException extends KernelException {
                 gql, statusCode, "The following namespaces are not reloadable: %s.".formatted(nonReloadableNamespaces));
     }
 
-    public static ProcedureException loadFailedSandboxed(DescribedSignature signature) {
-        var gql = GqlHelper.get52N34(String.valueOf(signature.name()));
-        return new ProcedureException(
-                gql,
-                Status.Procedure.ProcedureRegistrationFailed,
-                signature.description().orElse("Failed to load " + signature.name()));
+    public static ProcedureException loadFailedProcedureRestricted(String proc) {
+        var gql = GqlHelper.get52N34(proc);
+        return new ProcedureException(gql, Status.Procedure.ProcedureRegistrationFailed, restrictedOldMessage(proc));
+    }
+
+    public static ProcedureException loadFailedFunctionRestricted(String func) {
+        var gql = GqlHelper.get53N34(func);
+        return new ProcedureException(gql, Status.Procedure.ProcedureRegistrationFailed, restrictedOldMessage(func));
+    }
+
+    private static String restrictedOldMessage(String name) {
+        return name + " is unavailable because it is sandboxed and has dependencies outside of the sandbox. "
+                + "Sandboxing is controlled by the "
+                + procedure_unrestricted.name() + " setting. "
+                + "Only unrestrict procedures you can trust with access to database internals.";
     }
 
     public static ProcedureException noSuchIndex(String indexName, String procedureName, Boolean formatIndex) {
@@ -555,47 +637,87 @@ public class ProcedureException extends KernelException {
         return exc;
     }
 
-    public static ProcedureException innerExceptionFailed(Throwable throwable, ProcedureSignature signature) {
-        Throwable cause = getRootCause(throwable); // Do we risk losing valuable information here
-        var gql = GqlHelper.get52N33(
-                String.valueOf(signature.name()), (cause != null ? String.valueOf(cause) : String.valueOf(throwable)));
+    public static ProcedureException compilationFailed(boolean isProcedure, String name, Throwable cause) {
+        ErrorGqlStatusObject gql;
+        if (isProcedure) {
 
-        if (throwable instanceof Status.HasStatus statusException) {
-            return new ProcedureException(gql, statusException.status(), throwable, throwable.getMessage());
+            gql = GqlHelper.get51N00_52N35(name, cause.getMessage());
         } else {
-            return new ProcedureException(
-                    gql,
-                    Status.Procedure.ProcedureCallFailed,
-                    throwable,
-                    "Failed to invoke procedure `%s`: %s",
-                    signature.name(),
-                    "Caused by: " + (cause != null ? cause : throwable));
+            gql = GqlHelper.get51N00_53N35(name, cause.getMessage());
         }
-    }
-
-    public static ProcedureException compilationFailed(String routine, String procedureName, Throwable cause) {
-        var gql = GqlHelper.get51N00_52N35(procedureName, cause.getMessage());
         return new ProcedureException(
                 gql,
                 Status.Procedure.ProcedureRegistrationFailed,
                 cause,
                 "Failed to compile %s defined in `%s`: %s",
-                routine,
-                procedureName,
+                isProcedure ? "procedure" : "function",
+                name,
                 cause.getMessage());
     }
 
-    public static ProcedureException invocationFailed(String typeAndName, Throwable cause) {
+    public static ProcedureException invocationFailed(String type, String name, Throwable cause) {
         Throwable rootCause = getRootCause(cause); // Do we risk losing valuable information here
-        var gql = GqlHelper.get52N33(
-                typeAndName, (rootCause != null ? String.valueOf(rootCause) : String.valueOf(cause)));
-        return new ProcedureException(
-                gql,
-                Status.Procedure.ProcedureCallFailed,
-                cause,
-                "Failed to invoke %s: %s",
-                typeAndName,
-                "Caused by: " + (rootCause != null ? rootCause : cause));
+        String typeAndName = String.format("%s `%s`", type, name);
+        ErrorGqlStatusObject gql = getInvocationFailedGqlStatus(cause, rootCause, type, name);
+
+        if (cause instanceof Status.HasStatus statusException) {
+            var message = cause.getMessage();
+            if (cause instanceof ErrorGqlStatusObject gqlStatusObject) {
+                message = gqlStatusObject.legacyMessage();
+            }
+            return new ProcedureException(gql, statusException.status(), cause, message);
+        } else {
+            return new ProcedureException(
+                    gql,
+                    Status.Procedure.ProcedureCallFailed,
+                    cause,
+                    "Failed to invoke %s: %s",
+                    typeAndName,
+                    "Caused by: " + (rootCause != null ? rootCause : cause));
+        }
+    }
+
+    public static ProcedureException functionError(String name, String msg) {
+        ErrorGqlStatusObject gql = GqlHelper.get53N37(
+                name,
+                ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_53U00)
+                        .withParam(GqlParams.StringParam.fun, name)
+                        .withParam(GqlParams.StringParam.msgTitle, ProcedureException.class.getSimpleName())
+                        .withParam(GqlParams.StringParam.msg, msg)
+                        .build());
+        return new ProcedureException(gql, Status.Procedure.ProcedureCallFailed, msg);
+    }
+
+    private static ErrorGqlStatusObject getInvocationFailedGqlStatus(
+            Throwable cause, Throwable rootCause, String type, String name) {
+        if (type.equals("procedure")) {
+            if (cause instanceof ErrorGqlStatusObject errorGqlStatusObject) {
+                return GqlHelper.get52N37(name, errorGqlStatusObject);
+            } else if (rootCause instanceof ErrorGqlStatusObject errorGqlStatusObject) {
+                return GqlHelper.get52N37(name, errorGqlStatusObject);
+            } else {
+                return GqlHelper.get52N37(name, GqlHelper.get52U00(name, cause));
+            }
+        } else {
+            if (cause instanceof ErrorGqlStatusObject errorGqlStatusObject) {
+                return GqlHelper.get53N37(name, errorGqlStatusObject);
+            } else if (rootCause instanceof ErrorGqlStatusObject errorGqlStatusObject) {
+                return GqlHelper.get53N37(name, errorGqlStatusObject);
+            } else {
+                return GqlHelper.get53N37(name, GqlHelper.get53U00(name, cause));
+            }
+        }
+    }
+
+    public static <EX extends Throwable & Status.HasStatus & ErrorGqlStatusObject>
+            ProcedureException invocationFailedWithInnerError(EX error, String type, String name) {
+        ErrorGqlStatusObject gql;
+        if (type.equals("procedure")) {
+            gql = GqlHelper.get52N37(name, error);
+        } else {
+            gql = GqlHelper.get53N37(name, error);
+        }
+        return new ProcedureException(gql, error.status(), error, error.getMessage(), error);
     }
 
     public static ProcedureException invalidReturnType(String methodName, String badReturnValue) {
@@ -609,9 +731,7 @@ public class ProcedureException extends KernelException {
 
     public static ProcedureException invalidReturnTypeExtended(String methodName, Class<?> userClass) {
         var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N00)
-                .withClassification(ErrorClassification.CLIENT_ERROR)
                 .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N18)
-                        .withClassification(ErrorClassification.CLIENT_ERROR)
                         .withParam(GqlParams.StringParam.procMethod, methodName)
                         .build())
                 .build();
@@ -690,5 +810,294 @@ public class ProcedureException extends KernelException {
                 "Unable to inject component to field `%s`, please ensure it is public and non-final: %s",
                 procField,
                 cause.getMessage());
+    }
+
+    public static ProcedureException unableToCheckLicense(String procedureName) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N09)
+                .withParam(GqlParams.StringParam.proc, procedureName)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N60)
+                        .build())
+                .build();
+
+        return new ProcedureException(gql, ProcedureCallFailed, "Unable to determine license acceptance status");
+    }
+
+    public static ProcedureException jmxError(ObjectName name, Throwable e) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N25)
+                .withParam(GqlParams.StringParam.param, name.getCanonicalName())
+                .build();
+        return new ProcedureException(
+                gql,
+                Status.General.UnknownError,
+                e,
+                "JMX error while accessing `%s`, please report this. Message was: %s",
+                name,
+                e.getMessage());
+    }
+
+    public static ProcedureException notWriter(String name) {
+        return new ProcedureException(
+                ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N02)
+                        .withParam(GqlParams.StringParam.proc, name)
+                        .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_08N07)
+                                .build())
+                        .build(),
+                Status.Cluster.NotALeader,
+                "No write operations are allowed directly on this database. Writes must pass through the writer.");
+    }
+
+    public static ProcedureException mustInvokeProcedureOnSecondary(String dbName) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N05)
+                .withParam(GqlParams.StringParam.db, dbName)
+                .build();
+        return new ProcedureException(
+                gql,
+                Unknown,
+                String.format(
+                        "Can't invoke procedure on this server because it is not a read replica for database '%s'",
+                        dbName));
+    }
+
+    public static ProcedureException checkConnectivityWrongNumberArguments(int count) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N16)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N06)
+                        .withParam(GqlParams.NumberParam.count, count)
+                        .build())
+                .build();
+        return new ProcedureException(
+                gql,
+                Status.Procedure.ProcedureCallFailed,
+                "Unexpected number of parameters: should have 0-2 parameters, but was %d",
+                count);
+    }
+
+    public static ProcedureException checkConnectivityinvalidPortArgument(
+            String port, Set<ConnectorType> portSet, Throwable e) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N16)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N07)
+                        .withParam(GqlParams.StringParam.port, port)
+                        .withParam(
+                                GqlParams.ListParam.portList, portSet.stream().toList())
+                        .build())
+                .build();
+        return new ProcedureException(
+                gql,
+                Status.Procedure.ProcedureCallFailed,
+                e,
+                "Unrecognised port name '%s'. Valid values are: %s",
+                port,
+                Arrays.toString(portSet.toArray()));
+    }
+
+    public static ProcedureException checkConnectivityInvalidServerId(String server, String rawServer, Throwable e) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N16)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N08)
+                        .withParam(GqlParams.StringParam.server, server)
+                        .build())
+                .build();
+        return new ProcedureException(
+                gql,
+                Status.Procedure.ProcedureCallFailed,
+                e,
+                "Provided identifier '%s' is not a valid server name or id",
+                rawServer);
+    }
+
+    public static ProcedureException quarantineChangeFailed(String procedureName, Throwable e, boolean generalMessage) {
+        var message = generalMessage ? "Please refer to the server's debug log for more information." : e.getMessage();
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N02)
+                .withParam(GqlParams.StringParam.proc, procedureName)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N17)
+                        .withParam(GqlParams.StringParam.msg, message)
+                        .build())
+                .build();
+        return new ProcedureException(
+                gql, ProcedureCallFailed, e, "Setting/removing the quarantine marker failed: " + message);
+    }
+
+    public static ProcedureException topologyProcedureGeneralException(
+            String procedureName, Throwable e, boolean generalMessage) {
+        var message = generalMessage ? "Please refer to the server's debug log for more information." : e.getMessage();
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N02)
+                .withParam(GqlParams.StringParam.proc, procedureName)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N11)
+                        .withParam(GqlParams.StringParam.msg, message)
+                        .build())
+                .build();
+        return new ProcedureException(gql, ProcedureCallFailed, e, "An unexpected error has occurred: " + message);
+    }
+
+    /**
+     * This one does not set 52N11 as the cause.
+     */
+    public static ProcedureException generalProcedureExceptionNoCause(String procedure, Status status, Throwable e) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N02)
+                .withParam(GqlParams.StringParam.proc, procedure)
+                .build();
+        return new ProcedureException(gql, status, e, e.getMessage());
+    }
+
+    public static ProcedureException invalidProcedureArgument(
+            String invalidArgumentValue,
+            String invalidArgumentProcParamName,
+            String invalidArgumentProcName,
+            String invalidArgumentProcParamFmt,
+            Status statusCode,
+            String legacyMessage) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N16)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N36)
+                        .withParam(GqlParams.StringParam.field, invalidArgumentValue)
+                        .withParam(GqlParams.StringParam.procParam, invalidArgumentProcParamName)
+                        .withParam(GqlParams.StringParam.proc, invalidArgumentProcName)
+                        .withParam(GqlParams.StringParam.procParamFmt, invalidArgumentProcParamFmt)
+                        .build())
+                .build();
+        return new ProcedureException(gql, statusCode, legacyMessage);
+    }
+
+    public static ProcedureException invalidFunctionArgument(String signature, String msg) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_53N33)
+                .withParam(GqlParams.StringParam.sig, signature)
+                .withParam(GqlParams.StringParam.msg, msg)
+                .build();
+        return new ProcedureException(gql, ProcedureCallFailed, msg + ".");
+    }
+
+    public static ProcedureException invalidEmptyStringFunctionArgument(
+            String argumentName, String signature, String legacyMessage) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_53N33)
+                .withParam(GqlParams.StringParam.sig, signature)
+                .withParam(GqlParams.StringParam.msg, argumentName + " is not allowed to be an empty string")
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NB6)
+                        .withParam(GqlParams.StringParam.item, argumentName)
+                        .build())
+                .build();
+        return new ProcedureException(gql, Status.Procedure.ProcedureCallFailed, legacyMessage);
+    }
+
+    public static ProcedureException graphPropertiesNotFound(String graphName) {
+        var gql = GqlHelper.getGql42001_42N00(graphName);
+
+        return new ProcedureException(
+                gql,
+                Status.Procedure.ProcedureCallFailed,
+                "Graph properties not found for graph '%s'".formatted(graphName));
+    }
+
+    public static ProcedureException failedToReloadProcedures(Throwable cause, String legacyMessage) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N24)
+                .build();
+        return new ProcedureException(gql, ProcedureCallFailed, cause, legacyMessage);
+    }
+
+    public static ProcedureException wrongParameter(
+            String providedInvalidArgument,
+            String argumentName,
+            String procedureName,
+            String expectedFormat,
+            String legacyMessage) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N16)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N22)
+                        .withParam(GqlParams.StringParam.field, providedInvalidArgument)
+                        .withParam(GqlParams.StringParam.procParam, argumentName)
+                        .withParam(GqlParams.StringParam.proc, procedureName)
+                        .withParam(GqlParams.StringParam.procParamFmt, expectedFormat)
+                        .build())
+                .build();
+        return new ProcedureException(gql, ProcedureCallFailed, legacyMessage);
+    }
+
+    public static ProcedureException shouldBeExecutedAgainstSystemDb() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N28)
+                .withParam(GqlParams.StringParam.db, "system")
+                .build();
+        return new ProcedureException(
+                gql,
+                ProcedureCallFailed,
+                "This is an administration command and it should be executed against the system database");
+    }
+
+    public static ProcedureException shouldBeExecutedAgainstSystemDb(String procedure) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N28)
+                .withParam(GqlParams.StringParam.db, "system")
+                .build();
+        return new ProcedureException(
+                gql,
+                ProcedureCallFailed,
+                "This is an administration command and it should be executed against the system database: %s",
+                procedure);
+    }
+
+    public static ProcedureException failedToCleanSystemGraph(Exception e) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N21)
+                .build();
+        return new ProcedureException(gql, ProcedureCallFailed, e, "Failed to clean the system graph");
+    }
+
+    public static ProcedureException unsupportedType(String input, List<String> cypherTypes) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NB8)
+                .withParam(GqlParams.StringParam.input, input)
+                .build();
+        return new ProcedureException(
+                gql,
+                Status.Statement.TypeError,
+                "Don't know how to map `%s` to the Neo4j Type System.%n"
+                        + "Please refer to to the documentation for full details.%n"
+                        + "For your reference, known types are: %s",
+                input,
+                cypherTypes);
+    }
+
+    public static ProcedureException argumentWithUnsupportedType(
+            String arg, int pos, String method, String javaType, ProcedureException cause) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NB8)
+                .withParam(GqlParams.StringParam.input, javaType)
+                .build();
+        return new ProcedureException(
+                gql,
+                cause.status(),
+                "Argument `%s` at position %d in `%s` with%n" + "type `%s` cannot be converted to a Neo4j type: %s",
+                arg,
+                pos,
+                method,
+                javaType,
+                cause.getMessage());
+    }
+
+    public static ProcedureException fieldWithUnsupportedType(
+            String field, String userClass, ProcedureException cause) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NB8)
+                .withParam(GqlParams.StringParam.input, userClass)
+                .build();
+        return new ProcedureException(
+                gql,
+                cause.status(),
+                cause,
+                "Field `%s` in record `%s` cannot be converted to a Neo4j type: %s",
+                field,
+                userClass,
+                cause.getMessage());
+    }
+
+    public static ProcedureException internalError(String msgTitle, String message, Status status, Throwable cause) {
+        var gql = GqlHelper.get50N00(msgTitle, message);
+        return new ProcedureException(gql, status, cause, message);
+    }
+
+    public static ProcedureException internalError(String msgTitle, String message, Status status) {
+        var gql = GqlHelper.get50N00(msgTitle, message);
+        return new ProcedureException(gql, status, message);
+    }
+
+    public static ProcedureException permissionDenied(String message) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42NFF)
+                .build();
+        return new ProcedureException(gql, Security.Forbidden, message);
+    }
+
+    public static ProcedureException reconcilerFailed() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_52N40)
+                .build();
+        return new ProcedureException(gql, ProcedureCallFailed, gql.getMessage());
     }
 }

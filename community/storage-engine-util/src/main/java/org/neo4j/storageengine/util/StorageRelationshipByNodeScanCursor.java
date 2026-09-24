@@ -70,12 +70,6 @@ public class StorageRelationshipByNodeScanCursor
     }
 
     @Override
-    public void setForceLoad() {
-        nodeCursor.setForceLoad();
-        relationshipCursor.setForceLoad();
-    }
-
-    @Override
     public void close() {
         IOUtils.closeAllUnchecked(nodeCursor, relationshipCursor);
     }
@@ -101,7 +95,7 @@ public class StorageRelationshipByNodeScanCursor
     }
 
     @Override
-    public void scan() {
+    public void scan(boolean includeChangesFromThisTransaction) {
         throw new UnsupportedOperationException("Not implemented yet");
     }
 

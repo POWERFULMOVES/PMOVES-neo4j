@@ -42,6 +42,7 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.NotDirectoryException;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Clock;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -161,12 +162,45 @@ public class EphemeralFileSystemAbstraction implements FileSystemAbstraction {
 
     @Override
     public synchronized StoreChannel open(Path fileName, Set<OpenOption> options) throws IOException {
-        return getStoreChannel(fileName);
+        if (options.contains(StandardOpenOption.APPEND)) {
+            if (options.contains(StandardOpenOption.READ)) {
+                throw new IllegalArgumentException("READ + APPEND not allowed");
+            }
+            if (options.contains(StandardOpenOption.TRUNCATE_EXISTING)) {
+                throw new IllegalArgumentException("APPEND + TRUNCATE_EXISTING not allowed");
+            }
+        }
+
+        // A real file system ignores CREATE, CREATE_NEW and TRUNCATE_EXISTING unless opening for writing
+        boolean forWriting = options.contains(StandardOpenOption.WRITE) || options.contains(StandardOpenOption.APPEND);
+        boolean createNew = forWriting && options.contains(StandardOpenOption.CREATE_NEW);
+        boolean mayCreate = createNew || (forWriting && options.contains(StandardOpenOption.CREATE));
+        if (!mayCreate && !files.containsKey(canonicalFile(fileName))) {
+            throw new NoSuchFileException(fileName.toString());
+        }
+
+        StoreChannel channel = getStoreChannel(fileName, createNew);
+        if (forWriting && options.contains(StandardOpenOption.TRUNCATE_EXISTING)) {
+            channel.truncate(0);
+        }
+        if (options.contains(StandardOpenOption.APPEND)) {
+            channel.position(channel.size());
+        }
+        return channel;
     }
 
     @Override
-    public OutputStream openAsOutputStream(Path fileName, boolean append) throws IOException {
-        return new ChannelOutputStream(write(fileName), append, INSTANCE);
+    public OutputStream openAsOutputStream(Path fileName, boolean append, int bufferSize) throws IOException {
+        var channel = write(fileName);
+        if (!append) {
+            channel.truncate(0);
+        }
+        return new ChannelOutputStream(channel, append, INSTANCE, bufferSize);
+    }
+
+    @Override
+    public OutputStream openAsOutputStream(Path fileName, Set<OpenOption> options, int bufferSize) throws IOException {
+        return new ChannelOutputStream(open(fileName, options), false, INSTANCE, bufferSize);
     }
 
     @Override
@@ -189,7 +223,7 @@ public class EphemeralFileSystemAbstraction implements FileSystemAbstraction {
 
     @Override
     public synchronized StoreChannel read(Path fileName) throws IOException {
-        return getStoreChannel(fileName);
+        return open(fileName, Set.of(StandardOpenOption.READ));
     }
 
     @Override
@@ -238,7 +272,7 @@ public class EphemeralFileSystemAbstraction implements FileSystemAbstraction {
     }
 
     @Override
-    public void deleteFile(Path fileName) throws IOException {
+    public synchronized void deleteFile(Path fileName) throws IOException {
         fileName = canonicalFile(fileName);
         EphemeralFileData removed = files.remove(fileName);
         if (removed != null) {
@@ -258,7 +292,7 @@ public class EphemeralFileSystemAbstraction implements FileSystemAbstraction {
     }
 
     @Override
-    public void deleteRecursively(Path directory) throws IOException {
+    public synchronized void deleteRecursively(Path directory) throws IOException {
         if (!fileExists(directory)) {
             return;
         }
@@ -287,7 +321,7 @@ public class EphemeralFileSystemAbstraction implements FileSystemAbstraction {
     }
 
     @Override
-    public void deleteRecursively(Path directory, Predicate<Path> removeFilePredicate) throws IOException {
+    public synchronized void deleteRecursively(Path directory, Predicate<Path> removeFilePredicate) throws IOException {
         if (!fileExists(directory)) {
             return;
         }
@@ -324,7 +358,7 @@ public class EphemeralFileSystemAbstraction implements FileSystemAbstraction {
     }
 
     @Override
-    public void renameFile(Path from, Path to, CopyOption... copyOptions) throws IOException {
+    public synchronized void renameFile(Path from, Path to, CopyOption... copyOptions) throws IOException {
         from = canonicalFile(from);
         to = canonicalFile(to);
 
@@ -335,20 +369,17 @@ public class EphemeralFileSystemAbstraction implements FileSystemAbstraction {
             directories.add(to);
             // Rename the directory, meaning all its files instead
             for (var child : listFiles(from)) {
+                Path childTarget = to.resolve(child.getFileName().toString());
                 if (isDirectory(child)) {
-                    internalRenameDirectory(to, child);
+                    renameFile(child, childTarget, copyOptions);
                 } else {
-                    internalRenameFile(child, to.resolve(child.getFileName().toString()), copyOptions);
+                    internalRenameFile(child, childTarget, copyOptions);
                 }
             }
+            directories.remove(from);
         } else {
             internalRenameFile(from, to, copyOptions);
         }
-    }
-
-    private void internalRenameDirectory(Path to, Path child) {
-        directories.remove(child);
-        directories.add(to.resolve(child.getFileName().toString()));
     }
 
     private void internalRenameFile(Path from, Path to, CopyOption[] copyOptions)
@@ -420,9 +451,12 @@ public class EphemeralFileSystemAbstraction implements FileSystemAbstraction {
         return found.toArray(new Path[0]);
     }
 
-    private StoreChannel getStoreChannel(Path fileName) throws IOException {
+    private synchronized StoreChannel getStoreChannel(Path fileName, boolean createExclusive) throws IOException {
         EphemeralFileData data = files.get(canonicalFile(fileName));
         if (data != null) {
+            if (createExclusive) {
+                throw new FileAlreadyExistsException("'" + fileName + "' already exists");
+            }
             return new StoreFileChannel(new EphemeralFileChannel(
                     data,
                     () -> new EphemeralFileStillOpenException(
@@ -480,7 +514,7 @@ public class EphemeralFileSystemAbstraction implements FileSystemAbstraction {
         return new EphemeralFileSystemAbstraction(directories, copiedFiles, clock);
     }
 
-    private void copyRecursivelyFromOtherFs(Path from, FileSystemAbstraction fromFs, Path to) throws IOException {
+    public void copyRecursivelyFromOtherFs(Path from, FileSystemAbstraction fromFs, Path to) throws IOException {
         copyRecursivelyFromOtherFs(from, fromFs, to, newCopyBuffer());
     }
 
@@ -535,7 +569,7 @@ public class EphemeralFileSystemAbstraction implements FileSystemAbstraction {
     }
 
     @Override
-    public void deleteFileOrThrow(Path file) throws IOException {
+    public synchronized void deleteFileOrThrow(Path file) throws IOException {
         file = canonicalFile(file);
         if (!fileExists(file)) {
             throw new NoSuchFileException(file.toAbsolutePath().toString());
@@ -585,5 +619,10 @@ public class EphemeralFileSystemAbstraction implements FileSystemAbstraction {
             tmp = parent.resolve(prefix + Long.toUnsignedString(UNIQUE_TEMP_FILE.getAndIncrement()));
         } while (!directories.add(tmp));
         return tmp;
+    }
+
+    @Override
+    public boolean supportsDirectoryChannel(Path directory) {
+        return false;
     }
 }

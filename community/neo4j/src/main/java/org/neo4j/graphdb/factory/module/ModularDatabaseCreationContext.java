@@ -19,6 +19,8 @@
  */
 package org.neo4j.graphdb.factory.module;
 
+import static org.neo4j.io.fs.FileSystemAbstraction.IS_DEFAULT_TMP_SUFFIX;
+
 import java.util.function.Function;
 import java.util.function.LongFunction;
 import java.util.function.Predicate;
@@ -30,10 +32,7 @@ import org.neo4j.dbms.identity.ServerIdentity;
 import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.HostedOnMode;
 import org.neo4j.function.Factory;
 import org.neo4j.function.Predicates;
-import org.neo4j.graphdb.factory.module.id.DatabaseIdContext;
 import org.neo4j.internal.id.BufferingIdGeneratorFactory;
-import org.neo4j.internal.id.IdController;
-import org.neo4j.internal.id.IdGeneratorFactory;
 import org.neo4j.io.device.DeviceMapper;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.fs.watcher.DatabaseLayoutWatcher;
@@ -41,13 +40,17 @@ import org.neo4j.io.fs.watcher.FileWatcher;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.layout.Neo4jLayout;
 import org.neo4j.io.pagecache.PageCache;
-import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.prefetch.PagePrefetcher;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.api.procedure.GlobalProcedures;
 import org.neo4j.kernel.availability.DatabaseAvailabilityGuard;
+import org.neo4j.kernel.database.CursorContextFactorySupplier;
 import org.neo4j.kernel.database.DatabaseCreationContext;
+import org.neo4j.kernel.database.DatabaseMonitorsFactory;
 import org.neo4j.kernel.database.DatabaseStartupController;
 import org.neo4j.kernel.database.DatabaseTracers;
+import org.neo4j.kernel.database.IdContextFactory;
+import org.neo4j.kernel.database.IdGeneratorSettings;
 import org.neo4j.kernel.database.NamedDatabaseId;
 import org.neo4j.kernel.database.StorageEngineFactorySupplier;
 import org.neo4j.kernel.extension.ExtensionFactory;
@@ -63,24 +66,26 @@ import org.neo4j.kernel.impl.index.DatabaseIndexStats;
 import org.neo4j.kernel.impl.pagecache.IOControllerService;
 import org.neo4j.kernel.impl.pagecache.VersionStorageFactory;
 import org.neo4j.kernel.impl.query.QueryEngineProvider;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.StoreCopyCheckPointMutex;
-import org.neo4j.kernel.impl.transaction.log.files.TransactionLogFilesHelper;
 import org.neo4j.kernel.impl.transaction.stats.DatabaseTransactionStats;
-import org.neo4j.kernel.impl.util.collection.CollectionsFactorySupplier;
 import org.neo4j.kernel.impl.util.watcher.DefaultFileDeletionListenerFactory;
 import org.neo4j.kernel.internal.event.GlobalTransactionEventListeners;
 import org.neo4j.kernel.internal.locker.FileLockerService;
 import org.neo4j.kernel.monitoring.DatabaseEventListeners;
 import org.neo4j.kernel.monitoring.DatabaseHealthEventGenerator;
 import org.neo4j.logging.InternalLog;
+import org.neo4j.logging.internal.DatabaseLogIdentifier;
 import org.neo4j.logging.internal.DatabaseLogService;
 import org.neo4j.logging.internal.LogService;
 import org.neo4j.memory.GlobalMemoryGroupTracker;
 import org.neo4j.monitoring.DatabaseHealth;
-import org.neo4j.monitoring.Monitors;
+import org.neo4j.monitoring.ExceptionHandlerService;
 import org.neo4j.scheduler.JobScheduler;
+import org.neo4j.storageengine.VectorStoreCreator;
 import org.neo4j.time.SystemNanoClock;
 import org.neo4j.token.TokenHolders;
+import org.neo4j.wal.checkpoint.StoreCopyCheckPointMutex;
+import org.neo4j.wal.files.TransactionLogFilesHelper;
+import org.neo4j.wal.pruning.LogPruneStrategyFactory;
 
 public class ModularDatabaseCreationContext implements DatabaseCreationContext {
     private final ServerIdentity serverIdentity;
@@ -88,7 +93,8 @@ public class ModularDatabaseCreationContext implements DatabaseCreationContext {
     private final DatabaseConfig databaseConfig;
     private final QueryEngineProvider queryEngineProvider;
     private final ExternalIdReuseConditionProvider externalIdReuseConditionProvider;
-    private final IdGeneratorFactory idGeneratorFactory;
+    private final IdContextFactory idContextFactory;
+    private final IdGeneratorSettings idGeneratorSettings;
     private final DatabaseLogService databaseLogService;
     private final JobScheduler scheduler;
     private final DependencyResolver globalDependencies;
@@ -100,20 +106,17 @@ public class ModularDatabaseCreationContext implements DatabaseCreationContext {
     private final TransactionalProcessFactory commitProcessFactory;
     private final PageCache pageCache;
     private final ConstraintSemantics constraintSemantics;
-    private final Monitors parentMonitors;
     private final DatabaseTracers tracers;
     private final GlobalProcedures globalProcedures;
     private final IOControllerService ioControllerService;
     private final LongFunction<DatabaseAvailabilityGuard> databaseAvailabilityGuardFactory;
     private final SystemNanoClock clock;
     private final StoreCopyCheckPointMutex storeCopyCheckPointMutex;
-    private final IdController idController;
     private final DbmsInfo dbmsInfo;
     private final HostedOnMode mode;
-    private final CursorContextFactory contextFactory;
+    private final CursorContextFactorySupplier cursorContextFactorySupplier;
     private final VersionStorageFactory versionStorageFactory;
     private final DeviceMapper deviceMapper;
-    private final CollectionsFactorySupplier collectionsFactorySupplier;
     private final Iterable<ExtensionFactory<?>> extensionFactories;
     private final Function<DatabaseLayout, DatabaseLayoutWatcher> watcherServiceFactory;
     private final DatabaseLayout databaseLayout;
@@ -126,22 +129,29 @@ public class ModularDatabaseCreationContext implements DatabaseCreationContext {
     private final DatabaseStartupController startupController;
     private final GlobalMemoryGroupTracker transactionsMemoryPool;
     private final GlobalMemoryGroupTracker otherMemoryPool;
+    private final VectorStoreCreator vectorStoreCreator;
+    private final DatabaseMonitorsFactory databaseMonitorsFactory;
     private final ReadOnlyDatabases readOnlyDatabases;
     private final CommandCommitListeners commandCommitListeners;
     private final TransactionsFactory transactionsFactory;
     private final PagePrefetcher pagePrefetcher;
+    private final ExceptionHandlerService exceptionHandlerService;
+    private final DatabaseCreationOptions databaseCreationOptions;
+    private final LogPruneStrategyFactory logPruneStrategyFactory;
+    private final boolean raftTriggersUpgrade;
+    private final boolean mergedLogs;
 
     public ModularDatabaseCreationContext(
             HostedOnMode mode,
             ServerIdentity serverIdentity,
             NamedDatabaseId namedDatabaseId,
+            DatabaseLogIdentifier databaseLogIdentifier,
             GlobalModule globalModule,
             Dependencies globalDependencies,
-            CursorContextFactory contextFactory,
+            CursorContextFactorySupplier cursorContextFactorySupplier,
             DeviceMapper deviceMapper,
             VersionStorageFactory versionStorageFactory,
             DatabaseConfig databaseConfig,
-            Monitors parentMonitors,
             LeaseService leaseService,
             StorageEngineFactorySupplier storageEngineFactorySupplier,
             ConstraintSemantics constraintSemantics,
@@ -151,33 +161,47 @@ public class ModularDatabaseCreationContext implements DatabaseCreationContext {
             Predicate<String> databaseFileFilter,
             AccessCapabilityFactory accessCapabilityFactory,
             ExternalIdReuseConditionProvider externalIdReuseConditionProvider,
-            DatabaseIdContext databaseIdContext,
+            IdContextFactory idContextFactory,
+            IdGeneratorSettings idGeneratorSettings,
             TransactionalProcessFactory commitProcessFactory,
             TokenHolders tokenHolders,
+            VectorStoreCreator vectorStoreCreator,
             DatabaseStartupController databaseStartupController,
             ReadOnlyDatabases readOnlyDatabases,
             IOControllerService ioControllerService,
             DatabaseTracers tracers,
             CommandCommitListeners commandCommitListeners,
-            TransactionsFactory transactionsFactory) {
+            TransactionsFactory transactionsFactory,
+            DatabaseMonitorsFactory databaseMonitorsFactory,
+            ExceptionHandlerService exceptionHandlerService,
+            DatabaseCreationOptions databaseCreationOptions,
+            LogPruneStrategyFactory logPruneStrategyFactory,
+            boolean raftTriggersUpgrade,
+            boolean mergedLogs) {
         this.serverIdentity = serverIdentity;
         this.namedDatabaseId = namedDatabaseId;
         this.databaseConfig = databaseConfig;
-        this.contextFactory = contextFactory;
+        this.cursorContextFactorySupplier = cursorContextFactorySupplier;
         this.deviceMapper = deviceMapper;
         this.versionStorageFactory = versionStorageFactory;
         this.queryEngineProvider = queryEngineProvider;
         this.externalIdReuseConditionProvider = externalIdReuseConditionProvider;
-        this.idGeneratorFactory = databaseIdContext.getIdGeneratorFactory();
-        this.idController = databaseIdContext.getIdController();
+        this.idContextFactory = idContextFactory;
+        this.idGeneratorSettings = idGeneratorSettings;
         this.transactionsMemoryPool = globalModule.getTransactionsMemoryPool();
         this.otherMemoryPool = globalModule.getOtherMemoryPool();
-        this.databaseLogService = new DatabaseLogService(namedDatabaseId, globalModule.getLogService());
+        this.vectorStoreCreator = vectorStoreCreator;
+        this.databaseMonitorsFactory = databaseMonitorsFactory;
+        this.exceptionHandlerService = exceptionHandlerService;
+        this.databaseCreationOptions = databaseCreationOptions;
+        this.logPruneStrategyFactory = logPruneStrategyFactory;
+        this.raftTriggersUpgrade = raftTriggersUpgrade;
+        this.mergedLogs = mergedLogs;
+        this.databaseLogService = new DatabaseLogService(databaseLogIdentifier, globalModule.getLogService());
         this.scheduler = globalModule.getJobScheduler();
         this.globalDependencies = globalDependencies;
         this.tokenHolders = tokenHolders;
         this.transactionEventListeners = globalModule.getTransactionEventListeners();
-        this.parentMonitors = parentMonitors;
         this.fs = globalModule.getFileSystem();
         this.transactionStats = transactionStats;
         this.indexStats = indexStats;
@@ -195,7 +219,6 @@ public class ModularDatabaseCreationContext implements DatabaseCreationContext {
         this.storeCopyCheckPointMutex = new StoreCopyCheckPointMutex();
         this.dbmsInfo = globalModule.getDbmsInfo();
         this.mode = mode;
-        this.collectionsFactorySupplier = globalModule.getCollectionsFactorySupplier();
         this.extensionFactories = globalModule.getExtensionFactories();
         this.watcherServiceFactory = databaseLayout -> createDatabaseFileSystemWatcher(
                 globalModule.getFileWatcher(), databaseLayout, globalModule.getLogService(), databaseFileFilter);
@@ -235,8 +258,13 @@ public class ModularDatabaseCreationContext implements DatabaseCreationContext {
     }
 
     @Override
-    public IdGeneratorFactory getIdGeneratorFactory() {
-        return idGeneratorFactory;
+    public IdContextFactory idContextFactory() {
+        return idContextFactory;
+    }
+
+    @Override
+    public IdGeneratorSettings idGeneratorSettings() {
+        return idGeneratorSettings;
     }
 
     @Override
@@ -300,11 +328,6 @@ public class ModularDatabaseCreationContext implements DatabaseCreationContext {
     }
 
     @Override
-    public Monitors getMonitors() {
-        return parentMonitors;
-    }
-
-    @Override
     public DatabaseTracers getTracers() {
         return tracers;
     }
@@ -335,11 +358,6 @@ public class ModularDatabaseCreationContext implements DatabaseCreationContext {
     }
 
     @Override
-    public IdController getIdController() {
-        return idController;
-    }
-
-    @Override
     public DbmsInfo getDbmsInfo() {
         return dbmsInfo;
     }
@@ -347,11 +365,6 @@ public class ModularDatabaseCreationContext implements DatabaseCreationContext {
     @Override
     public HostedOnMode getMode() {
         return mode;
-    }
-
-    @Override
-    public CollectionsFactorySupplier getCollectionsFactorySupplier() {
-        return collectionsFactorySupplier;
     }
 
     @Override
@@ -415,8 +428,8 @@ public class ModularDatabaseCreationContext implements DatabaseCreationContext {
     }
 
     @Override
-    public CursorContextFactory getContextFactory() {
-        return contextFactory;
+    public CursorContextFactorySupplier getCursorContextFactorySupplier() {
+        return cursorContextFactorySupplier;
     }
 
     @Override
@@ -445,8 +458,43 @@ public class ModularDatabaseCreationContext implements DatabaseCreationContext {
     }
 
     @Override
+    public DatabaseMonitorsFactory getDatabaseMonitorsFactory() {
+        return databaseMonitorsFactory;
+    }
+
+    @Override
+    public ExceptionHandlerService getExceptionHandlerService() {
+        return exceptionHandlerService;
+    }
+
+    @Override
     public TransactionsFactory getTransactionsFactory() {
         return transactionsFactory;
+    }
+
+    @Override
+    public DatabaseCreationOptions getDatabaseCreationOptions() {
+        return databaseCreationOptions;
+    }
+
+    @Override
+    public LogPruneStrategyFactory logPruneStrategyFactory() {
+        return logPruneStrategyFactory;
+    }
+
+    @Override
+    public VectorStoreCreator getVectorStoreCreator() {
+        return vectorStoreCreator;
+    }
+
+    @Override
+    public boolean raftTriggersUpgrade() {
+        return raftTriggersUpgrade;
+    }
+
+    @Override
+    public boolean mergedLogs() {
+        return mergedLogs;
     }
 
     private DatabaseAvailabilityGuard databaseAvailabilityGuardFactory(
@@ -465,6 +513,7 @@ public class ModularDatabaseCreationContext implements DatabaseCreationContext {
     public static Predicate<String> defaultFileWatcherFilter() {
         return Predicates.any(
                 TransactionLogFilesHelper.DEFAULT_FILENAME_PREDICATE,
-                BufferingIdGeneratorFactory.PAGED_ID_BUFFER_FILE_NAME_FILTER);
+                BufferingIdGeneratorFactory.PAGED_ID_BUFFER_FILE_NAME_FILTER,
+                IS_DEFAULT_TMP_SUFFIX);
     }
 }

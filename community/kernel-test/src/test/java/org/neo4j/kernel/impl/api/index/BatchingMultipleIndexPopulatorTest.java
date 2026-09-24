@@ -20,6 +20,7 @@
 package org.neo4j.kernel.impl.api.index;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
@@ -31,6 +32,7 @@ import static org.mockito.Mockito.when;
 import static org.neo4j.common.Subject.AUTH_DISABLED;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
 import static org.neo4j.kernel.api.index.IndexQueryHelper.add;
+import static org.neo4j.kernel.impl.api.TransactionVisibilityProvider.EMPTY_VISIBILITY_PROVIDER;
 import static org.neo4j.kernel.impl.api.index.IndexPopulationFailure.failure;
 import static org.neo4j.kernel.impl.api.index.StoreScan.NO_EXTERNAL_UPDATES;
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
@@ -49,10 +51,12 @@ import org.neo4j.common.EntityType;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.internal.helpers.collection.Iterables;
+import org.neo4j.internal.kernel.api.IndexMonitor;
 import org.neo4j.internal.kernel.api.PopulationProgress;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.SchemaState;
 import org.neo4j.internal.schema.StorageEngineIndexingBehaviour;
+import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.api.index.IndexPopulator;
@@ -64,11 +68,11 @@ import org.neo4j.lock.LockService;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.scheduler.JobScheduler;
 import org.neo4j.scheduler.JobSchedulerExtension;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.storageengine.api.EntityUpdates;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
 import org.neo4j.storageengine.api.StorageEngine;
 import org.neo4j.storageengine.api.StorageReader;
-import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.test.InMemoryTokens;
 import org.neo4j.test.extension.Inject;
@@ -87,8 +91,8 @@ public class BatchingMultipleIndexPopulatorTest {
     @Inject
     private JobScheduler jobScheduler;
 
-    private final IndexDescriptor index1 = TestIndexDescriptorFactory.forLabel(1, 1);
-    private final IndexDescriptor index42 = TestIndexDescriptorFactory.forLabel(42, 42);
+    private final IndexDescriptor index1 = TestIndexDescriptorFactory.forLabel(1L, 1, 1);
+    private final IndexDescriptor index42 = TestIndexDescriptorFactory.forLabel(2L, 42, 42);
     private final InMemoryTokens tokens = new InMemoryTokens();
 
     @Test
@@ -104,20 +108,24 @@ public class BatchingMultipleIndexPopulatorTest {
                 INSTANCE,
                 "",
                 AUTH_DISABLED,
-                Config.defaults(GraphDatabaseInternalSettings.index_population_queue_threshold, 5));
+                Config.defaults(GraphDatabaseInternalSettings.index_population_queue_threshold, 5),
+                EMPTY_VISIBILITY_PROVIDER,
+                IndexMonitor.NO_MONITOR,
+                CursorContext.NULL_CONTEXT,
+                false);
 
         IndexPopulator populator = addPopulator(batchingPopulator, index1);
         IndexUpdater updater = mock(IndexUpdater.class);
         when(populator.newPopulatingUpdater(any())).thenReturn(updater);
 
-        IndexEntryUpdate<?> update1 = add(1, index1, "foo");
-        IndexEntryUpdate<?> update2 = add(2, index1, "bar");
-        batchingPopulator.queueConcurrentUpdate(update1);
-        batchingPopulator.queueConcurrentUpdate(update2);
+        IndexEntryUpdate update1 = add(1, index1, "foo");
+        IndexEntryUpdate update2 = add(2, index1, "bar");
+        batchingPopulator.queueConcurrentUpdate(update1, CursorContext.NULL_CONTEXT);
+        batchingPopulator.queueConcurrentUpdate(update2, CursorContext.NULL_CONTEXT);
 
         assertThat(batchingPopulator.needToApplyExternalUpdates()).isFalse();
 
-        verify(updater, never()).process(any(ValueIndexEntryUpdate.class));
+        verify(updater, never()).process(any(EagerValueIndexEntryUpdate.class));
         verify(populator, never()).newPopulatingUpdater(any());
     }
 
@@ -143,7 +151,11 @@ public class BatchingMultipleIndexPopulatorTest {
                 INSTANCE,
                 "",
                 AUTH_DISABLED,
-                Config.defaults(GraphDatabaseInternalSettings.index_population_queue_threshold, 2));
+                Config.defaults(GraphDatabaseInternalSettings.index_population_queue_threshold, 2),
+                EMPTY_VISIBILITY_PROVIDER,
+                IndexMonitor.NO_MONITOR,
+                CursorContext.NULL_CONTEXT,
+                false);
 
         IndexPopulator populator1 = addPopulator(batchingPopulator, index1);
         IndexUpdater updater1 = mock(IndexUpdater.class);
@@ -154,12 +166,14 @@ public class BatchingMultipleIndexPopulatorTest {
         when(populator2.newPopulatingUpdater(any())).thenReturn(updater2);
 
         batchingPopulator.createStoreScan(CONTEXT_FACTORY);
-        IndexEntryUpdate<?> update1 = add(1, index1, "foo");
-        IndexEntryUpdate<?> update2 = add(2, index42, "bar");
-        IndexEntryUpdate<?> update3 = add(3, index1, "baz");
-        batchingPopulator.queueConcurrentUpdate(update1);
-        batchingPopulator.queueConcurrentUpdate(update2);
-        batchingPopulator.queueConcurrentUpdate(update3);
+        IndexEntryUpdate update1 = add(1, index1, "foo");
+        IndexEntryUpdate update2 = add(2, index42, "bar");
+        IndexEntryUpdate update3 = add(3, index1, "baz");
+        batchingPopulator.queueConcurrentUpdate(update1, CursorContext.NULL_CONTEXT);
+        batchingPopulator.queueConcurrentUpdate(update2, CursorContext.NULL_CONTEXT);
+        batchingPopulator.queueConcurrentUpdate(update3, CursorContext.NULL_CONTEXT);
+
+        await().atMost(10, TimeUnit.SECONDS).until(batchingPopulator::needToApplyExternalUpdates);
 
         batchingPopulator.applyExternalUpdates(42);
 
@@ -187,7 +201,11 @@ public class BatchingMultipleIndexPopulatorTest {
                 INSTANCE,
                 "",
                 AUTH_DISABLED,
-                Config.defaults());
+                Config.defaults(),
+                EMPTY_VISIBILITY_PROVIDER,
+                IndexMonitor.NO_MONITOR,
+                CursorContext.NULL_CONTEXT,
+                false);
 
         IndexPopulator populator1 = addPopulator(batchingPopulator, index1);
         IndexPopulator populator42 = addPopulator(batchingPopulator, index42);
@@ -207,36 +225,41 @@ public class BatchingMultipleIndexPopulatorTest {
         RuntimeException batchFlushError = new RuntimeException("Batch failed");
 
         IndexPopulator populator;
-        ExecutorService executor = Executors.newSingleThreadExecutor();
-        ThreadPoolJobScheduler jobScheduler = new ThreadPoolJobScheduler(executor);
-        try {
-            MultipleIndexPopulator batchingPopulator = new MultipleIndexPopulator(
-                    storeView,
-                    NullLogProvider.getInstance(),
-                    EntityType.NODE,
-                    mock(SchemaState.class),
-                    jobScheduler,
-                    tokens,
-                    CONTEXT_FACTORY,
-                    INSTANCE,
-                    "",
-                    AUTH_DISABLED,
-                    Config.defaults(GraphDatabaseInternalSettings.index_population_batch_max_byte_size, 1L));
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            ThreadPoolJobScheduler jobScheduler = new ThreadPoolJobScheduler(executor);
+            try {
+                MultipleIndexPopulator batchingPopulator = new MultipleIndexPopulator(
+                        storeView,
+                        NullLogProvider.getInstance(),
+                        EntityType.NODE,
+                        mock(SchemaState.class),
+                        jobScheduler,
+                        tokens,
+                        CONTEXT_FACTORY,
+                        INSTANCE,
+                        "",
+                        AUTH_DISABLED,
+                        Config.defaults(GraphDatabaseInternalSettings.index_population_batch_max_byte_size, 1L),
+                        EMPTY_VISIBILITY_PROVIDER,
+                        IndexMonitor.NO_MONITOR,
+                        CursorContext.NULL_CONTEXT,
+                        false);
 
-            populator = addPopulator(batchingPopulator, index1);
-            List<IndexEntryUpdate<IndexDescriptor>> expected = forUpdates(index1, update1, update2);
-            doThrow(batchFlushError).when(populator).add(eq(expected), any());
+                populator = addPopulator(batchingPopulator, index1);
+                List<IndexEntryUpdate> expected = forUpdates(index1, update1, update2);
+                doThrow(batchFlushError).when(populator).add(eq(expected), any());
 
-            batchingPopulator.createStoreScan(CONTEXT_FACTORY).run(NO_EXTERNAL_UPDATES);
-        } finally {
-            jobScheduler.shutdown();
-            executor.awaitTermination(1, TimeUnit.MINUTES);
+                batchingPopulator.createStoreScan(CONTEXT_FACTORY).run(NO_EXTERNAL_UPDATES);
+            } finally {
+                jobScheduler.shutdown();
+                executor.awaitTermination(1, TimeUnit.MINUTES);
+            }
         }
 
         verify(populator).markAsFailed(failure(batchFlushError).asString());
     }
 
-    private static List<IndexEntryUpdate<IndexDescriptor>> forUpdates(IndexDescriptor index, Update... updates) {
+    private static List<IndexEntryUpdate> forUpdates(IndexDescriptor index, Update... updates) {
         var entityUpdates = Arrays.stream(updates)
                 .map(update -> EntityUpdates.forEntity(update.id, true)
                         .withTokens(update.labels)
@@ -244,7 +267,7 @@ public class BatchingMultipleIndexPopulatorTest {
                         .build())
                 .collect(Collectors.toList());
         return Iterables.asList(Iterables.concat(
-                Iterables.map(update -> update.valueUpdatesForIndexKeys(Iterables.asIterable(index)), entityUpdates)));
+                Iterables.map(entityUpdates, update -> update.valueUpdatesForIndexKeys(Iterables.asIterable(index)))));
     }
 
     private static Update nodeUpdate(int nodeId, int propertyId, String propertyValue, int... labelIds) {
@@ -293,8 +316,8 @@ public class BatchingMultipleIndexPopulatorTest {
             }
             var batch = consumer.newBatch();
             Arrays.stream(updates)
-                    .forEach(update ->
-                            batch.addRecord(update.id, update.labels, Map.of(update.propertyId, update.propertyValue)));
+                    .forEach(update -> batch.addRecord(
+                            update.id, update.labels, Map.of(update.propertyId, update.propertyValue), INSTANCE));
             batch.process();
         }
 

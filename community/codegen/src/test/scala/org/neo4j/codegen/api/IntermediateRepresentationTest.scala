@@ -27,6 +27,7 @@ import org.neo4j.codegen.api.IntermediateRepresentation.booleanValue
 import org.neo4j.codegen.api.IntermediateRepresentation.comment
 import org.neo4j.codegen.api.IntermediateRepresentation.condition
 import org.neo4j.codegen.api.IntermediateRepresentation.constant
+import org.neo4j.codegen.api.IntermediateRepresentation.falseValue
 import org.neo4j.codegen.api.IntermediateRepresentation.getStatic
 import org.neo4j.codegen.api.IntermediateRepresentation.ifElse
 import org.neo4j.codegen.api.IntermediateRepresentation.invoke
@@ -45,12 +46,11 @@ import org.neo4j.codegen.api.IntermediateRepresentation.ternary
 import org.neo4j.codegen.api.IntermediateRepresentation.trueValue
 import org.neo4j.codegen.api.IntermediateRepresentation.tryCatchIfNecessary
 import org.neo4j.codegen.api.IntermediateRepresentation.typeRefOf
-import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 import org.neo4j.values.AnyValue
 import org.neo4j.values.storable.BooleanValue
 import org.neo4j.values.storable.Values
 
-class IntermediateRepresentationTest extends CypherFunSuite {
+class IntermediateRepresentationTest extends CodegenTestSuite {
 
   test("isEmpty") {
     isEmpty(noop()) shouldBe true
@@ -168,6 +168,108 @@ class IntermediateRepresentationTest extends CypherFunSuite {
     } shouldBe condition(block(print(constant("hello")), load[Boolean]("foo")))(print(constant("hello")))
     condition(IntermediateRepresentation.equal(
       trueValue,
+      block(print(constant("hello")), IntermediateRepresentation.booleanValue(load[Boolean]("foo")))
+    )) {
+      print(constant("hello"))
+    } shouldBe condition(block(print(constant("hello")), load[Boolean]("foo")))(print(constant("hello")))
+
+  }
+
+  test("rewrite if (booleanValue(a) != TRUE) to if (!a)") {
+    condition(IntermediateRepresentation.notEqual(
+      IntermediateRepresentation.booleanValue(load[Boolean]("foo")),
+      trueValue
+    )) {
+      print(constant("hello"))
+    } shouldBe condition(IntermediateRepresentation.not(load[Boolean]("foo")))(print(constant("hello")))
+
+    condition(IntermediateRepresentation.notEqual(
+      trueValue,
+      IntermediateRepresentation.booleanValue(load[Boolean]("foo"))
+    )) {
+      print(constant("hello"))
+    } shouldBe condition(IntermediateRepresentation.not(load[Boolean]("foo")))(print(constant("hello")))
+
+    condition(IntermediateRepresentation.notEqual(
+      block(print(constant("hello")), IntermediateRepresentation.booleanValue(load[Boolean]("foo"))),
+      trueValue
+    )) {
+      print(constant("hello"))
+    } shouldBe condition(block(
+      print(constant("hello")),
+      IntermediateRepresentation.not(load[Boolean]("foo"))
+    ))(print(constant("hello")))
+    condition(IntermediateRepresentation.notEqual(
+      trueValue,
+      block(print(constant("hello")), IntermediateRepresentation.booleanValue(load[Boolean]("foo")))
+    )) {
+      print(constant("hello"))
+    } shouldBe condition(block(
+      print(constant("hello")),
+      IntermediateRepresentation.not(load[Boolean]("foo"))
+    ))(print(constant("hello")))
+
+  }
+
+  test("rewrite if (booleanValue(a) == FALSE) to if (!a)") {
+    condition(IntermediateRepresentation.equal(
+      IntermediateRepresentation.booleanValue(load[Boolean]("foo")),
+      falseValue
+    )) {
+      print(constant("hello"))
+    } shouldBe condition(IntermediateRepresentation.not(load[Boolean]("foo")))(print(constant("hello")))
+
+    condition(IntermediateRepresentation.equal(
+      falseValue,
+      IntermediateRepresentation.booleanValue(load[Boolean]("foo"))
+    )) {
+      print(constant("hello"))
+    } shouldBe condition(IntermediateRepresentation.not(load[Boolean]("foo")))(print(constant("hello")))
+
+    condition(IntermediateRepresentation.equal(
+      block(print(constant("hello")), IntermediateRepresentation.booleanValue(load[Boolean]("foo"))),
+      falseValue
+    )) {
+      print(constant("hello"))
+    } shouldBe condition(block(
+      print(constant("hello")),
+      IntermediateRepresentation.not(load[Boolean]("foo"))
+    ))(print(constant("hello")))
+    condition(IntermediateRepresentation.equal(
+      falseValue,
+      block(print(constant("hello")), IntermediateRepresentation.booleanValue(load[Boolean]("foo")))
+    )) {
+      print(constant("hello"))
+    } shouldBe condition(block(
+      print(constant("hello")),
+      IntermediateRepresentation.not(load[Boolean]("foo"))
+    ))(print(constant("hello")))
+
+  }
+
+  test("rewrite if (booleanValue(a) != FALSE) to if (a)") {
+    condition(IntermediateRepresentation.notEqual(
+      IntermediateRepresentation.booleanValue(load[Boolean]("foo")),
+      falseValue
+    )) {
+      print(constant("hello"))
+    } shouldBe condition(load[Boolean]("foo"))(print(constant("hello")))
+
+    condition(IntermediateRepresentation.notEqual(
+      falseValue,
+      IntermediateRepresentation.booleanValue(load[Boolean]("foo"))
+    )) {
+      print(constant("hello"))
+    } shouldBe condition(load[Boolean]("foo"))(print(constant("hello")))
+
+    condition(IntermediateRepresentation.notEqual(
+      block(print(constant("hello")), IntermediateRepresentation.booleanValue(load[Boolean]("foo"))),
+      falseValue
+    )) {
+      print(constant("hello"))
+    } shouldBe condition(block(print(constant("hello")), load[Boolean]("foo")))(print(constant("hello")))
+    condition(IntermediateRepresentation.notEqual(
+      falseValue,
       block(print(constant("hello")), IntermediateRepresentation.booleanValue(load[Boolean]("foo")))
     )) {
       print(constant("hello"))

@@ -23,14 +23,14 @@ import org.neo4j.cypher.internal.ast.semantics.SemanticTable
 import org.neo4j.cypher.internal.compiler.ast.convert.plannerQuery.PlannerQueryBuilder
 import org.neo4j.cypher.internal.compiler.ast.convert.plannerQuery.StatementConverters
 import org.neo4j.cypher.internal.compiler.ast.convert.plannerQuery.composite.CompositeQuery.Fragment
-import org.neo4j.cypher.internal.compiler.helpers.SeqSupport.RichSeq
 import org.neo4j.cypher.internal.ir
 import org.neo4j.cypher.internal.ir.QueryProjection
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.cypher.internal.util.CancellationChecker
+import org.neo4j.cypher.internal.util.SeqSupport.RichSeq
 import org.neo4j.cypher.rendering.QueryRenderer
 
-object CompositeQueryConverter {
+case class CompositeQueryConverter(statementConverters: StatementConverters) {
 
   /**
    * Builds a planner query, the intermediate representation of a query, out of the fragments making up a composite query.
@@ -55,7 +55,7 @@ object CompositeQueryConverter {
     foreign: CompositeQuery.Single.Foreign
   ): ir.SinglePlannerQuery = {
     val argumentIds = foreign.importsAsParameters.view.values.toSet.union(foreign.graphReference.dependencies)
-    val builder = PlannerQueryBuilder(semanticTable, argumentIds)
+    val builder = PlannerQueryBuilder(semanticTable, argumentIds, builderConfig)
     builder
       .withHorizon(ir.RunQueryAtProjection(
         graphReference = foreign.graphReference,
@@ -80,7 +80,7 @@ object CompositeQueryConverter {
     fragments: CompositeQuery.Single.Fragments
   ): ir.SinglePlannerQuery = {
     // A top-level query does not have arguments.
-    val builder = PlannerQueryBuilder(semanticTable, argumentIds = Set.empty)
+    val builder = PlannerQueryBuilder(semanticTable, argumentIds = Set.empty, builderConfig)
     val withFragments = fragments.fragments.initAndLastOption match {
       // if the query ends in standard clauses
       case Some((initFragments, Fragment.Standard(lastClauses))) =>
@@ -94,7 +94,7 @@ object CompositeQueryConverter {
         )
 
         // and add the last clauses, marked as being in final position. This is used for eagerness analysis.
-        StatementConverters.addClausesToPlannerQueryBuilder(
+        statementConverters.addClausesToPlannerQueryBuilder(
           lastClauses,
           withInitFragments,
           nameGenerator,
@@ -158,7 +158,7 @@ object CompositeQueryConverter {
     single match {
       case foreign: CompositeQuery.Single.Foreign => convertForeign(semanticTable, foreign)
       case fragments: CompositeQuery.Single.Fragments =>
-        val builder = PlannerQueryBuilder(semanticTable, fragments.arguments)
+        val builder = PlannerQueryBuilder(semanticTable, fragments.arguments, builderConfig)
         val withFragments = addFragmentsToPlannerQueryBuilder(
           cancellationChecker,
           nameGenerator,
@@ -183,7 +183,7 @@ object CompositeQueryConverter {
     fragments.foldLeft(builder) { (builder, fragment) =>
       fragment match {
         case standard: Fragment.Standard =>
-          StatementConverters.addClausesToPlannerQueryBuilder(
+          statementConverters.addClausesToPlannerQueryBuilder(
             standard.clauses,
             builder,
             nameGenerator,
@@ -198,9 +198,12 @@ object CompositeQueryConverter {
             yielding = subQuery.isYielding,
             inTransactionsParameters = subQuery.inTransactionsParameters,
             optional = subQuery.optional,
-            importedVariables = Set.empty
+            importedVariables = Set.empty,
+            importedSymbolsFromLastCallSubquery = builder.importedVariables
           )
       }
     }
   }
+
+  private def builderConfig: PlannerQueryBuilder.Config = statementConverters.builderConfig
 }

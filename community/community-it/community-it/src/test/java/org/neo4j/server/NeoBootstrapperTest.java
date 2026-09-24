@@ -29,9 +29,9 @@ import static org.mockito.Mockito.when;
 import java.io.IOException;
 import java.lang.management.MemoryUsage;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Predicate;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -227,11 +227,13 @@ class NeoBootstrapperTest {
         neoBootstrapper.setMachineMemory(mockedMemory);
 
         assertThat(neoBootstrapper.start(dir, Map.of())).isEqualTo(NeoBootstrapper.OK);
-        Predicate<String> hasWarning = line -> line.contains("disabling of compressed ordinary object pointers");
+        final var opDisabled = "disabling of compressed ordinary object pointers";
+        final var userLogFiles = getUserLogFiles();
         if (expectWarning) {
-            assertThat(getUserLogFiles()).anyMatch(hasWarning);
+            final var jvmHeap = "The JVM heap memory is currently set to " + heapInGB;
+            assertThat(userLogFiles).anyMatch(line -> line.contains(opDisabled) && line.contains(jvmHeap));
         } else {
-            assertThat(getUserLogFiles()).noneMatch(hasWarning);
+            assertThat(userLogFiles).noneMatch(line -> line.contains(opDisabled));
         }
     }
 
@@ -252,6 +254,11 @@ class NeoBootstrapperTest {
         protected DatabaseManagementService createNeo(
                 Config config, boolean daemonMode, GraphDatabaseDependencies dependencies) {
             return mock(DatabaseManagementService.class);
+        }
+
+        @Override
+        protected Instant getDatabaseCreationDate() {
+            return Instant.now();
         }
     }
 }

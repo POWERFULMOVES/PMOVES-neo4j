@@ -20,6 +20,9 @@
 package org.neo4j.cypher.internal.compiler.planner
 
 import org.neo4j.cypher.internal.expressions.Equals
+import org.neo4j.cypher.internal.expressions.HasLabels
+import org.neo4j.cypher.internal.expressions.ImpliedLabel
+import org.neo4j.cypher.internal.expressions.LabelName
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.util.InputPosition
 
@@ -28,9 +31,15 @@ package object logical {
 
   def equalsPredicate(left: LogicalVariable, right: LogicalVariable): Equals = {
     val pos = InputPosition.NONE
-    Equals(
-      left,
-      right
-    )(pos)
+    Equals(left, right)(pos)
+  }
+
+  def impliedLabelPredicate(v: LogicalVariable, label: LabelName): ImpliedLabel =
+    ImpliedLabel(HasLabels(v, Seq(label))(InputPosition.NONE))(InputPosition.NONE)
+
+  // Marker for code blocks that rely on priority planning of SEARCH leaf plans
+  // (vector or fulltext) and should be updated or removed together.
+  case object PrioritizeSearchLeafPlannerFeature {
+    def apply[T](a: T): T = a
   }
 }

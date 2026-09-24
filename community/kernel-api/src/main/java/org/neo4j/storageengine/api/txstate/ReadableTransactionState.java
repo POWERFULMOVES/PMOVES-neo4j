@@ -22,13 +22,16 @@ package org.neo4j.storageengine.api.txstate;
 import java.util.Iterator;
 import java.util.NavigableMap;
 import org.eclipse.collections.api.set.primitive.MutableIntSet;
+import org.eclipse.collections.api.set.primitive.MutableLongSet;
 import org.eclipse.collections.impl.UnmodifiableMap;
 import org.neo4j.collection.diffset.DiffSets;
+import org.neo4j.collection.diffset.IntDiffSets;
 import org.neo4j.collection.diffset.LongDiffSets;
-import org.neo4j.exceptions.KernelException;
 import org.neo4j.internal.schema.ConstraintDescriptor;
 import org.neo4j.internal.schema.IndexDescriptor;
+import org.neo4j.internal.schema.IndexRemovalSnapshot;
 import org.neo4j.internal.schema.SchemaDescriptor;
+import org.neo4j.storageengine.api.RelationshipSelection;
 import org.neo4j.storageengine.api.RelationshipVisitor;
 import org.neo4j.values.storable.ValueTuple;
 
@@ -36,9 +39,7 @@ import org.neo4j.values.storable.ValueTuple;
  * This interface contains the methods for reading transaction state from the transaction state.
  * The implementation of these methods should be free of any side effects (such as initialising lazy state).
  */
-public interface ReadableTransactionState {
-    void accept(TxStateVisitor visitor) throws KernelException;
-
+public interface ReadableTransactionState extends VisitableTransactionState {
     boolean hasChanges();
 
     // ENTITY RELATED
@@ -82,7 +83,9 @@ public interface ReadableTransactionState {
 
     boolean relationshipIsDeletedInThisBatch(long relationshipId);
 
-    LongDiffSets nodeStateLabelDiffSets(long nodeId);
+    boolean relationshipsIsModifiedInThisBatch(long relationshipId);
+
+    IntDiffSets nodeStateLabelDiffSets(long nodeId);
 
     boolean nodeIsAddedInThisBatch(long nodeId);
 
@@ -122,19 +125,30 @@ public interface ReadableTransactionState {
     // INDEX UPDATES
 
     /**
-     * A readonly view of all index updates for the provided schema. Returns {@code null}, if the index
-     * updates for this schema have not been initialized.
+     * @return {@code true} if there are updates for the provided schema.
      */
-    UnmodifiableMap<ValueTuple, ? extends LongDiffSets> getIndexUpdates(IndexDescriptor descriptor);
+    boolean hasIndexUpdates(IndexDescriptor descriptor);
 
     /**
-     * A readonly view of all index updates for the provided schema, in sorted order. The returned
+     * A readonly view of all index additions for the provided schema. Returns {@code null}, if the index
+     * updates for this schema have not been initialized.
+     */
+    UnmodifiableMap<ValueTuple, MutableLongSet> getAddedIndexUpdates(IndexDescriptor descriptor);
+
+    /**
+     * A readonly view of all index additions for the provided schema, in sorted order. The returned
      * Map is unmodifiable. Returns {@code null}, if the index updates for this schema have not been initialized.
      * <p>
-     * Ensure sorted index updates for a given index. This is needed for range query support and
-     * ay involve converting the existing hash map first.
+     * Ensure sorted index additions for a given index. This is needed for range query support and
+     * may involve converting the existing hash map first.
      */
-    NavigableMap<ValueTuple, ? extends LongDiffSets> getSortedIndexUpdates(IndexDescriptor descriptor);
+    NavigableMap<ValueTuple, MutableLongSet> getSortedAddedIndexUpdates(IndexDescriptor descriptor);
+
+    /**
+     * A snapshot of the current values removed from the index, includes a function that returns if a specific value was removed.
+     * Returns {@code null}, if the index updates for this schema have not been initialized.
+     */
+    IndexRemovalSnapshot getRemovedFromIndex(IndexDescriptor descriptor);
 
     // OTHER
 
@@ -174,4 +188,12 @@ public interface ReadableTransactionState {
      * @return {@code true} if this transaction state is multi chunked
      */
     boolean isMultiChunk();
+
+    /**
+     * Computes the degree of a node by just looking in what is in the transaction state.
+     * @param node the node which degree to compute
+     * @param selection the selection to use for the computation
+     * @return the degree of the node in the transaction state.
+     */
+    long calculateDegreeInTxState(long node, RelationshipSelection selection);
 }

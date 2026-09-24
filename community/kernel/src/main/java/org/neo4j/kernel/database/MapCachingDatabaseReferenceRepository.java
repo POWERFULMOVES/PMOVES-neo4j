@@ -26,66 +26,69 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class MapCachingDatabaseReferenceRepository implements DatabaseReferenceRepository.Caching {
-    private DatabaseReferenceRepository delegate;
-    private volatile Map<NormalizedDatabaseName, DatabaseReference> databaseRefsByName;
+    private final DatabaseReferenceRepository delegate;
+    private volatile Map<NormalizedDatabaseName, DatabaseReference> databaseRefsByAlias;
+    private volatile Map<NormalizedDatabaseName, DatabaseReference> databaseRefsByDisplayName;
     private volatile Map<NormalizedCatalogEntry, DatabaseReference> databaseRefsByCatalogEntry;
     private volatile Map<UUID, DatabaseReference> databaseRefsByUUID;
 
     public MapCachingDatabaseReferenceRepository(DatabaseReferenceRepository delegate) {
-        this.databaseRefsByName = new ConcurrentHashMap<>();
+        this.databaseRefsByAlias = new ConcurrentHashMap<>();
+        this.databaseRefsByDisplayName = new ConcurrentHashMap<>();
         this.databaseRefsByCatalogEntry = new ConcurrentHashMap<>();
         this.databaseRefsByUUID = new ConcurrentHashMap<>();
         this.delegate = delegate;
     }
 
-    public MapCachingDatabaseReferenceRepository() {
-        this(null);
-    }
-
-    public void setDelegate(DatabaseReferenceRepository delegate) {
-        this.delegate = delegate;
-    }
-
     @Override
     public Optional<DatabaseReference> getByAlias(NormalizedCatalogEntry catalogEntry) {
-        return Optional.ofNullable(databaseRefsByCatalogEntry.computeIfAbsent(catalogEntry, (entry) -> {
-            var databaseRef = lookupReferenceOnDelegate(entry);
-            if (databaseRef == null) {
-                return null;
-            }
+        var databaseRef = Optional.ofNullable(
+                databaseRefsByCatalogEntry.computeIfAbsent(catalogEntry, this::lookupReferenceOnDelegate));
 
-            databaseRefsByName.putIfAbsent(databaseRef.fullName(), databaseRef);
-            databaseRefsByUUID.putIfAbsent(databaseRef.id(), databaseRef);
-            return databaseRef;
-        }));
+        // do not update databaseRefsByName, as this may have a different result that is preferred if the name is
+        // ambiguous
+        databaseRef.ifPresent(
+                databaseReference -> databaseRefsByUUID.putIfAbsent(databaseReference.id(), databaseReference));
+        return databaseRef;
     }
 
     @Override
     public Optional<DatabaseReference> getByAlias(NormalizedDatabaseName databaseAlias) {
-        return Optional.ofNullable(databaseRefsByName.computeIfAbsent(databaseAlias, (alias) -> {
-            var databaseRef = lookupReferenceOnDelegate(alias);
-            if (databaseRef == null) {
-                return null;
-            }
+        var databaseRef = Optional.ofNullable(
+                databaseRefsByAlias.computeIfAbsent(databaseAlias, this::lookupReferenceOnDelegate));
+        databaseRef.ifPresent(databaseReference -> {
+            databaseRefsByCatalogEntry.putIfAbsent(databaseReference.catalogEntry(), databaseReference);
+            databaseRefsByUUID.putIfAbsent(databaseReference.id(), databaseReference);
+        });
+        return databaseRef;
+    }
 
-            databaseRefsByCatalogEntry.putIfAbsent(databaseRef.catalogEntry(), databaseRef);
-            databaseRefsByUUID.putIfAbsent(databaseRef.id(), databaseRef);
-            return databaseRef;
-        }));
+    @Override
+    public Optional<DatabaseReference> getByDisplayName(NormalizedDatabaseName displayName) {
+        var databaseRef = Optional.ofNullable(
+                databaseRefsByDisplayName.computeIfAbsent(displayName, this::lookupDisplayNameReferenceOnDelegate));
+
+        // do not update databaseRefsByName, as this may have a different result that is preferred if the name is
+        // ambiguous
+        databaseRef.ifPresent(databaseReference -> {
+            databaseRefsByCatalogEntry.putIfAbsent(databaseReference.catalogEntry(), databaseReference);
+            databaseRefsByUUID.putIfAbsent(databaseReference.id(), databaseReference);
+        });
+        return databaseRef;
     }
 
     @Override
     public Optional<DatabaseReference> getByUuid(UUID uuid) {
-        return Optional.ofNullable(databaseRefsByUUID.computeIfAbsent(uuid, (uuid1) -> {
-            var databaseRef = lookupReferenceByUuidOnDelegate(uuid1);
-            if (databaseRef == null) {
-                return null;
-            }
+        var databaseRef =
+                Optional.ofNullable(databaseRefsByUUID.computeIfAbsent(uuid, this::lookupReferenceByUuidOnDelegate));
 
-            databaseRefsByName.putIfAbsent(databaseRef.fullName(), databaseRef);
-            databaseRefsByCatalogEntry.putIfAbsent(databaseRef.catalogEntry(), databaseRef);
-            return databaseRef;
-        }));
+        // do not update databaseRefsByName, as this may have a different result that is preferred if the name is
+        // ambiguous
+        databaseRef.ifPresent(databaseReference -> {
+            databaseRefsByAlias.putIfAbsent(databaseReference.fullName(), databaseReference);
+            databaseRefsByCatalogEntry.putIfAbsent(databaseReference.catalogEntry(), databaseReference);
+        });
+        return databaseRef;
     }
 
     /**
@@ -93,6 +96,10 @@ public class MapCachingDatabaseReferenceRepository implements DatabaseReferenceR
      */
     private DatabaseReference lookupReferenceOnDelegate(NormalizedDatabaseName databaseName) {
         return delegate.getByAlias(databaseName).orElse(null);
+    }
+
+    private DatabaseReference lookupDisplayNameReferenceOnDelegate(NormalizedDatabaseName displayName) {
+        return delegate.getByDisplayName(displayName).orElse(null);
     }
 
     private DatabaseReference lookupReferenceOnDelegate(NormalizedCatalogEntry catalogEntry) {
@@ -113,18 +120,6 @@ public class MapCachingDatabaseReferenceRepository implements DatabaseReferenceR
     }
 
     @Override
-    public Set<DatabaseReferenceImpl.Internal> getInternalDatabaseReferences() {
-        // Can't cache getAll call
-        return delegate.getInternalDatabaseReferences();
-    }
-
-    @Override
-    public Set<DatabaseReferenceImpl.External> getExternalDatabaseReferences() {
-        // Can't cache getAll call
-        return delegate.getExternalDatabaseReferences();
-    }
-
-    @Override
     public Set<DatabaseReferenceImpl.Composite> getCompositeDatabaseReferences() {
         // Can't cache getAll call
         return delegate.getCompositeDatabaseReferences();
@@ -132,7 +127,8 @@ public class MapCachingDatabaseReferenceRepository implements DatabaseReferenceR
 
     @Override
     public void invalidateAll() {
-        this.databaseRefsByName = new ConcurrentHashMap<>();
+        this.databaseRefsByAlias = new ConcurrentHashMap<>();
+        this.databaseRefsByDisplayName = new ConcurrentHashMap<>();
         this.databaseRefsByCatalogEntry = new ConcurrentHashMap<>();
         this.databaseRefsByUUID = new ConcurrentHashMap<>();
     }

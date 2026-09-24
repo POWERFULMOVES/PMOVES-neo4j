@@ -24,11 +24,11 @@ import org.neo4j.cypher.internal.physicalplanning.SlotConfigurationUtils.makeGet
 import org.neo4j.cypher.internal.physicalplanning.SlotConfigurationUtils.makeGetPrimitiveRelationshipFromSlotFunctionFor
 import org.neo4j.cypher.internal.runtime.CastSupport
 import org.neo4j.cypher.internal.runtime.CypherRow
-import org.neo4j.cypher.internal.runtime.ExpressionCursors
 import org.neo4j.cypher.internal.runtime.NodeOperations
 import org.neo4j.cypher.internal.runtime.Operations
 import org.neo4j.cypher.internal.runtime.QueryContext
 import org.neo4j.cypher.internal.runtime.RelationshipOperations
+import org.neo4j.cypher.internal.runtime.cursors.ExpressionCursors
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Expression
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.AbstractSetPropertyFromMapOperation
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.AbstractSetPropertyOperation
@@ -54,7 +54,9 @@ case class SlottedSetLabelsOperation(nodeSlot: Slot, labels: Seq[LazyLabel], dyn
     val node = getFromNodeFunction.applyAsLong(executionContext)
     if (node != StatementConstants.NO_SUCH_NODE) {
       val labelIds = labels.map(_.getOrCreateId(state.query)) ++ dynamicLabels.flatMap(e => {
-        CypherFunctions.asStringList(e(executionContext, state)).asScala.map(l => state.query.getOrCreateLabelId(l))
+        CypherFunctions.nodeLabelsAsStringList(e(executionContext, state)).asScala.map(l =>
+          state.query.getOrCreateLabelId(l)
+        )
       })
       state.query.setLabelsOnNode(node, labelIds.iterator).toLong
     } else {

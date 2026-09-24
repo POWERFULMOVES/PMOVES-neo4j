@@ -28,21 +28,20 @@ import org.neo4j.cypher.ExecutionPlanCacheMetricsMonitor
 import org.neo4j.cypher.LogicalPlanCacheMetricsMonitor
 import org.neo4j.cypher.PreParserCacheMetricsMonitor
 import org.neo4j.cypher.internal.CacheabilityInfo
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.DefaultPlanStalenessCaller
 import org.neo4j.cypher.internal.ExecutableQuery
 import org.neo4j.cypher.internal.ExecutingQueryTracer
 import org.neo4j.cypher.internal.ExecutionPlan
-import org.neo4j.cypher.internal.InputQuery
 import org.neo4j.cypher.internal.PlanStalenessCaller
-import org.neo4j.cypher.internal.PreParsedQuery
 import org.neo4j.cypher.internal.QueryCache
 import org.neo4j.cypher.internal.QueryCache.CacheKey
 import org.neo4j.cypher.internal.QueryCache.ParameterTypeMap
-import org.neo4j.cypher.internal.QueryOptions
 import org.neo4j.cypher.internal.ReusabilityState
 import org.neo4j.cypher.internal.ast.Statement
 import org.neo4j.cypher.internal.cache.CypherQueryCaches.AstCache
 import org.neo4j.cypher.internal.cache.CypherQueryCaches.CacheCommon
+import org.neo4j.cypher.internal.cache.CypherQueryCaches.CacheStrategy.updateDefaultValue
 import org.neo4j.cypher.internal.cache.CypherQueryCaches.Config.ExecutionPlanCacheSize
 import org.neo4j.cypher.internal.cache.CypherQueryCaches.Config.ExecutionPlanCacheSize.Default
 import org.neo4j.cypher.internal.cache.CypherQueryCaches.Config.ExecutionPlanCacheSize.Disabled
@@ -51,28 +50,38 @@ import org.neo4j.cypher.internal.cache.CypherQueryCaches.Config.SoftCacheSize
 import org.neo4j.cypher.internal.cache.CypherQueryCaches.ExecutableQueryCache
 import org.neo4j.cypher.internal.cache.CypherQueryCaches.ExecutionPlanCache
 import org.neo4j.cypher.internal.cache.CypherQueryCaches.LogicalPlanCache
+import org.neo4j.cypher.internal.cache.CypherQueryCaches.LogicalPlanCache.CacheableLogicalPlan
 import org.neo4j.cypher.internal.cache.CypherQueryCaches.PreParserCache
 import org.neo4j.cypher.internal.cache.CypherQueryCaches.PredefinedCacheTracers
-import org.neo4j.cypher.internal.cache.CypherQueryCaches.QueryCacheStaleLogger
+import org.neo4j.cypher.internal.cache.CypherQueryCaches.QueryCacheLogger
 import org.neo4j.cypher.internal.cache.CypherQueryCaches.withDebugMonitor
 import org.neo4j.cypher.internal.compiler.StatsDivergenceCalculator
 import org.neo4j.cypher.internal.compiler.phases.CachableLogicalPlanState
 import org.neo4j.cypher.internal.config.CypherConfiguration
 import org.neo4j.cypher.internal.config.StatsDivergenceCalculatorConfig
+import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.frontend.phases.BaseState
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
+import org.neo4j.cypher.internal.notification.InternalNotification
+import org.neo4j.cypher.internal.options.CypherCacheOption
+import org.neo4j.cypher.internal.options.CypherQueryOptions
 import org.neo4j.cypher.internal.planner.spi.ImmutablePlanningAttributes
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributesCacheKey
-import org.neo4j.cypher.internal.util.InternalNotification
+import org.neo4j.cypher.internal.preparser.InputQuery
+import org.neo4j.cypher.internal.preparser.PreParsedQuery
+import org.neo4j.cypher.internal.preparser.QueryOptions
+import org.neo4j.cypher.internal.util.ASTNode
 import org.neo4j.function.Observable
 import org.neo4j.kernel.api.query.ExecutingQuery
 import org.neo4j.kernel.impl.query.CacheMetrics
 import org.neo4j.kernel.impl.query.QueryCacheStatistics
 import org.neo4j.logging.InternalLogProvider
+import org.neo4j.memory.HeapEstimator
 import org.neo4j.monitoring.Monitors
+import org.neo4j.util.VisibleForTesting
 import org.neo4j.values.virtual.MapValue
 
-import java.lang
+import java.io.Closeable
 import java.time.Clock
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -188,7 +197,7 @@ object CypherQueryCaches {
     }
   }
 
-  trait CacheCommon {
+  trait CacheCommon extends Closeable {
     def kind: String = companion.kind
 
     def companion: CacheCompanion
@@ -201,7 +210,7 @@ object CypherQueryCaches {
   // --- Cache types ------------------------------------------------
 
   object PreParserCache extends CacheCompanion("preparser") with CacheMonitorHelpers {
-    type Key = String
+    type Key = PreParsedQuery.CacheKey
     type Value = PreParsedQuery
 
     class Cache(
@@ -256,7 +265,8 @@ object CypherQueryCaches {
       CacheKey(
         KeyParams(statement, queryOptions.logicalPlanCacheKey),
         QueryCache.extractParameterTypeMap(params, useParameterSizeHint),
-        txStateHasChanges
+        txStateHasChanges,
+        queryOptions.resolvedLanguage
       )
 
     type Key = CacheKey[LogicalPlanCache.KeyParams]
@@ -287,6 +297,10 @@ object CypherQueryCaches {
           LogicalPlanCacheQueryTracer
         ) with CacheCommon {
       def companion: CacheCompanion = LogicalPlanCache
+
+      override protected def shouldBeCached(cacheStrategy: CacheStrategy): Boolean = {
+        cacheStrategy.logicalPlanShouldBeCached
+      }
     }
 
     class SoftCache(
@@ -308,7 +322,8 @@ object CypherQueryCaches {
   case class ExecutionPlanCacheKey(
     runtimeKey: String,
     logicalPlan: LogicalPlan,
-    planningAttributesCacheKey: PlanningAttributesCacheKey
+    planningAttributesCacheKey: PlanningAttributesCacheKey,
+    resolvedLanguage: CypherVersion
   )
 
   case class CachedExecutionPlan(
@@ -321,8 +336,13 @@ object CypherQueryCaches {
     type Key = ExecutionPlanCacheKey
     type Value = CachedExecutionPlan
 
+    /**
+     * Result of a cache lookup, indicating whether the value was freshly computed.
+     */
+    case class CacheResult(value: Value, isNewEntry: Boolean)
+
     abstract class Cache extends CacheCommon {
-      def computeIfAbsent(cacheWhen: => Boolean, key: => Key, compute: => Value): Value
+      def computeIfAbsent(cacheWhen: => Boolean, key: => Key, compute: => Value): CacheResult
 
       override def companion: CacheCompanion = ExecutionPlanCache
     }
@@ -351,6 +371,10 @@ object CypherQueryCaches {
           ExecutableQueryCacheQueryTracer
         ) with CacheCommon {
       def companion: CacheCompanion = ExecutableQueryCache
+
+      override protected def shouldBeCached(cacheStrategy: CacheStrategy): Boolean = {
+        cacheStrategy.executableQueryShouldBeCached
+      }
     }
 
     class SoftCache(
@@ -372,18 +396,22 @@ object CypherQueryCaches {
 
   // --- Logging ----------------------------------------------------
 
-  trait QueryCacheStaleLogger[Key] extends CacheTracer[Key] {
+  trait QueryCacheLogger[Key] extends CacheTracer[Key] {
 
     protected val itemType: String
     protected val doLog: String => Unit
 
     override def cacheStale(key: Key, secondsSinceReplan: Int, queryId: String, maybeReason: Option[String]): Unit = {
       super.cacheStale(key, secondsSinceReplan, queryId, maybeReason)
-      doLog(
-        (Seq(s"Discarded stale $itemType from the $itemType cache after $secondsSinceReplan seconds.") ++
-          maybeReason.map(r => s"Reason: $r.").toSeq ++
-          Seq(s"Query id: $queryId.")).mkString(" ")
+      logText(
+        (Seq(s"Discarded stale $itemType from the $itemType cache after $secondsSinceReplan seconds") ++
+          maybeReason.map(r => s". Reason: $r").toSeq).mkString(""),
+        queryId
       )
+    }
+
+    override def logText(text: String, queryId: String): Unit = {
+      doLog(s"$text. Query id: $queryId.")
     }
   }
 
@@ -415,6 +443,147 @@ object CypherQueryCaches {
       ).map(tracer => tracer.cacheKind -> tracer).toMap
     }
   }
+
+  case class CacheStrategy(
+    executableQueryCache: CypherCacheOption,
+    preParserCache: CypherCacheOption,
+    astCache: CypherCacheOption,
+    logicalPlanCache: CypherCacheOption,
+    executionPlanCache: CypherCacheOption
+  )(config: CypherConfiguration = null) {
+
+    def executableQueryShouldBeCached: Boolean = CacheStrategy.shouldBeCached(executableQueryCache)
+    def preParserShouldBeCached: Boolean = CacheStrategy.shouldBeCached(preParserCache)
+    def astShouldBeCached: Boolean = CacheStrategy.shouldBeCached(astCache)
+    def logicalPlanShouldBeCached: Boolean = CacheStrategy.shouldBeCached(logicalPlanCache)
+    def executionPlanShouldBeCached: Boolean = CacheStrategy.shouldBeCached(executionPlanCache)
+
+    // Used for testing and benchmarking
+    def unknownKindShouldBeCached: Boolean = CacheStrategy.shouldBeCached(executableQueryCache)
+
+    def withConfig(config: CypherConfiguration): CacheStrategy = this.copy()(config)
+
+    def updateFromQueryOptions(options: CypherQueryOptions): CacheStrategy = {
+      options.cache match {
+        case CypherCacheOption.force => CacheStrategy.forceAll
+        case CypherCacheOption.skip  => CacheStrategy.skipAll
+        case _                       => this
+      }
+    }
+
+    def updateFromQueryText(queryText: String): CacheStrategy = {
+      if (
+        (executableQueryCache eq CypherCacheOption.default) ||
+        (preParserCache eq CypherCacheOption.default) ||
+        (astCache eq CypherCacheOption.default)
+      ) {
+        // If any of these three are set to default, we need to check the size to see if it is below the threshold
+        val maxQueryTextSize = config.queryCacheMaxQueryTextSize
+        val shouldBeCached = maxQueryTextSize > 0 && {
+          val queryTextSize = HeapEstimator.sizeOf(queryText)
+          val isBelowTheLimit = queryTextSize <= maxQueryTextSize
+          isBelowTheLimit
+        }
+        this.copy(
+          executableQueryCache = updateDefaultValue(executableQueryCache, shouldBeCached),
+          preParserCache = updateDefaultValue(preParserCache, shouldBeCached),
+          astCache = updateDefaultValue(astCache, shouldBeCached)
+        )(config)
+      } else {
+        this.copy()(config)
+      }
+    }
+
+    def updateFromAst(ast: Statement): CacheStrategy = {
+      logicalPlanCache match {
+        case CypherCacheOption.default =>
+          val maxAstSize = config.queryCacheMaxAstSize
+          // NOTE: Negative value means unlimited
+          val shouldBeCached = maxAstSize < 0 || maxAstSize > 0 && {
+            val astSize = estimateAstSize(ast)
+            val isBelowTheLimit = astSize <= maxAstSize
+            isBelowTheLimit
+          }
+          this.copy(logicalPlanCache = updateDefaultValue(logicalPlanCache, shouldBeCached))(config)
+        case _ =>
+          this
+      }
+    }
+
+    def updateFromLogicalPlan(cacheableLogicalPlan: CacheableLogicalPlan): CacheStrategy = {
+      executionPlanCache match {
+        case CypherCacheOption.force | CypherCacheOption.default if !cacheableLogicalPlan.shouldBeCached =>
+          // Some conditions determined by the planner prevents caching and even overrides force
+          this.copy(executionPlanCache = CypherCacheOption.skip)(config)
+        case CypherCacheOption.default =>
+          val maxLogicalPlanSize = config.queryCacheMaxLogicalPlanSize
+          // NOTE: Negative value means unlimited
+          val shouldBeCached = maxLogicalPlanSize < 0 || maxLogicalPlanSize > 0 && {
+            val logicalPlanSize = estimateLogicalPlanSize(cacheableLogicalPlan.logicalPlanState.logicalPlan)
+            val isBelowTheLimit = logicalPlanSize <= maxLogicalPlanSize
+            isBelowTheLimit
+          }
+          this.copy(executionPlanCache = updateDefaultValue(executionPlanCache, shouldBeCached))(config)
+        case _ =>
+          this
+      }
+    }
+
+  }
+
+  object CacheStrategy {
+
+    private def shouldBeCached(option: CypherCacheOption): Boolean = option != CypherCacheOption.skip
+
+    private def updateDefaultValue(current: CypherCacheOption, shouldBeCached: Boolean): CypherCacheOption = {
+      current match {
+        case CypherCacheOption.default if shouldBeCached  => CypherCacheOption.force
+        case CypherCacheOption.default if !shouldBeCached => CypherCacheOption.skip
+        case _                                            => current
+      }
+    }
+
+    val default: CacheStrategy = CacheStrategy(
+      CypherCacheOption.default,
+      CypherCacheOption.default,
+      CypherCacheOption.default,
+      CypherCacheOption.default,
+      CypherCacheOption.default
+    )()
+
+    val skipAll: CacheStrategy = CacheStrategy(
+      CypherCacheOption.skip,
+      CypherCacheOption.skip,
+      CypherCacheOption.skip,
+      CypherCacheOption.skip,
+      CypherCacheOption.skip
+    )()
+
+    val forceAll: CacheStrategy = CacheStrategy(
+      CypherCacheOption.force,
+      CypherCacheOption.force,
+      CypherCacheOption.force,
+      CypherCacheOption.force,
+      CypherCacheOption.force
+    )()
+
+    @VisibleForTesting
+    val defaultDefault: CacheStrategy =
+      default.withConfig(CypherConfiguration.fromConfig(org.neo4j.configuration.Config.defaults()))
+  }
+
+  def estimateAstSize(ast: Statement): Long = {
+    ast.folder.treeCount {
+      case _: ASTNode => ()
+    }
+  }
+
+  def estimateLogicalPlanSize(logicalPlan: LogicalPlan): Long = {
+    logicalPlan.folder.treeCount {
+      case _: LogicalPlan => ()
+      case _: Expression  => ()
+    }
+  }
 }
 
 /**
@@ -434,7 +603,7 @@ class CypherQueryCaches(
   clock: Clock,
   kernelMonitors: Monitors,
   logProvider: InternalLogProvider
-) {
+) extends Closeable {
 
   private val log = logProvider.getLog(getClass)
 
@@ -443,13 +612,13 @@ class CypherQueryCaches(
   private object cacheTracers extends PredefinedCacheTracers {
 
     override val logicalPlan: LogicalPlanCacheMetricsMonitor =
-      new LogicalPlanCacheMetricsMonitor with QueryCacheStaleLogger[CypherQueryCaches.LogicalPlanCache.Key] {
+      new LogicalPlanCacheMetricsMonitor with QueryCacheLogger[CypherQueryCaches.LogicalPlanCache.Key] {
         override protected val itemType: String = "plan"
         override protected val doLog: String => Unit = log.debug
       }
 
     override val executablePlan: ExecutableQueryCacheMetricsMonitor =
-      new ExecutableQueryCacheMetricsMonitor with QueryCacheStaleLogger[ExecutableQueryCache.Key] {
+      new ExecutableQueryCacheMetricsMonitor with QueryCacheLogger[ExecutableQueryCache.Key] {
         override protected val itemType: String = "query"
         override protected val doLog: String => Unit = log.info
       }
@@ -536,17 +705,24 @@ class CypherQueryCaches(
         Some(new InnerCache(cacheFactory.resolveCacheKind(kind), CacheSize.Static(cacheSize), tracer))
     }
 
+    def close(): Unit = maybeCache match {
+      case Some(closable: java.io.Closeable) => closable.close()
+      case _                                 => ()
+    }
+
     def computeIfAbsent(
       cacheWhen: => Boolean,
       key: => ExecutionPlanCache.Key,
       compute: => ExecutionPlanCache.Value
-    ): ExecutionPlanCache.Value =
+    ): ExecutionPlanCache.CacheResult =
       maybeCache match {
         case Some(cache) if cacheWhen =>
-          cache.computeIfAbsent(key, compute)
+          var isNew = false
+          val value = cache.computeIfAbsent(key, { isNew = true; compute })
+          ExecutionPlanCache.CacheResult(value, isNew)
 
         case _ =>
-          compute
+          ExecutionPlanCache.CacheResult(compute, isNewEntry = false)
       }
 
     def clear(): Long = maybeCache match {
@@ -554,8 +730,7 @@ class CypherQueryCaches(
       case None        => 0
     }
 
-    override def estimatedSize(): Long =
-      maybeCache.fold(0L)(_.estimatedSize())
+    override def estimatedSize(): Long = maybeCache.fold(0L)(_.estimatedSize())
   })
 
   /**
@@ -595,32 +770,35 @@ class CypherQueryCaches(
     cache
   }
 
+  def close(): Unit =
+    allCaches.forEach(_.close())
+
   private object stats extends QueryCacheStatistics {
 
-    override def preParserCacheEntries(): lang.Long =
+    override def preParserCacheEntries(): Long =
       preParserCache.estimatedSize()
 
-    override def astCacheEntries(): lang.Long =
+    override def astCacheEntries(): Long =
       allCaches.asScala
         .collect { case c: AstCache.Cache => c.estimatedSize() }
         .sum
 
-    override def logicalPlanCacheEntries(): lang.Long =
+    override def logicalPlanCacheEntries(): Long =
       allCaches.asScala
         .collect { case c: LogicalPlanCache.Cache => c.estimatedSize() }
         .sum
 
-    override def executionPlanCacheEntries(): lang.Long =
-      executionPlanCache.estimatedSize()
+    override def executionPlanCacheEntries(): Long = executionPlanCache.estimatedSize()
 
-    override def executableQueryCacheEntries(): lang.Long =
-      executableQueryCache.estimatedSize()
+    override def executableQueryCacheEntries(): Long = executableQueryCache.estimatedSize()
 
-    override def numberOfReplans(): lang.Long =
-      cacheTracers.executablePlan.numberOfReplans
+    // Warning! This is O(n).
+    override def executableQueryCacheCodeGenSize(): Long =
+      executableQueryCache.values.map(_.value.codeGenByteCodeSize).sum
 
-    override def replanWaitTime(): lang.Long =
-      cacheTracers.executablePlan.replanWaitTime
+    override def numberOfReplans(): Long = cacheTracers.executablePlan.numberOfReplans
+
+    override def replanWaitTime(): Long = cacheTracers.executablePlan.replanWaitTime
 
     override def metricsPerCacheKind(): java.util.Map[String, CacheMetrics] = {
       (cacheTracers.perCacheKind: Map[String, CacheMetrics]).asJava

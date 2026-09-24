@@ -19,8 +19,10 @@
  */
 package org.neo4j.cypher.internal
 
+import org.neo4j.cypher.internal.cache.CypherQueryCaches.CacheStrategy
 import org.neo4j.cypher.internal.frontend.phases.CompilationPhaseTracer
-import org.neo4j.cypher.internal.util.InternalNotificationLogger
+import org.neo4j.cypher.internal.notification.InternalNotificationLogger
+import org.neo4j.cypher.internal.preparser.InputQuery
 import org.neo4j.exceptions.Neo4jException
 import org.neo4j.kernel.database.DatabaseReference
 import org.neo4j.kernel.impl.query.TransactionalContext
@@ -37,6 +39,8 @@ trait Compiler {
    * @param query                   query to convert
    * @param tracer                  compilation tracer to which events of the compilation process are reported
    * @param transactionalContext    transactional context to use during compilation (in logical and physical planning)
+   * @param isOutermostQuery        whether this is the outermost, user-facing query, as opposed to an inner query
+   *                                issued on its behalf (e.g. by an administration command)
    * @throws Neo4jException public cypher exceptions on compilation problems
    * @return a compiled and executable query
    */
@@ -47,6 +51,8 @@ trait Compiler {
     transactionalContext: TransactionalContext,
     params: MapValue,
     notificationLogger: InternalNotificationLogger,
-    sessionDatabase: DatabaseReference
+    sessionDatabase: DatabaseReference,
+    cacheStrategy: CacheStrategy,
+    isOutermostQuery: Boolean
   ): ExecutableQuery
 }

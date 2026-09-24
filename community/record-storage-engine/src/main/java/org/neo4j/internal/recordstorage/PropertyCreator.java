@@ -20,8 +20,8 @@
 package org.neo4j.internal.recordstorage;
 
 import org.neo4j.internal.id.IdSequence;
+import org.neo4j.internal.id.IdSequenceProvider;
 import org.neo4j.internal.recordstorage.RecordAccess.RecordProxy;
-import org.neo4j.internal.recordstorage.id.IdSequenceProvider;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.kernel.impl.store.DynamicRecordAllocator;
 import org.neo4j.kernel.impl.store.PropertyStore;
@@ -40,18 +40,21 @@ public class PropertyCreator {
     private final PropertyTraverser traverser;
     private final CursorContext cursorContext;
     private final IdSequence propertyIdSequence;
+    private final String storeFormat;
 
     public PropertyCreator(
             DynamicRecordAllocator stringRecordAllocator,
             DynamicRecordAllocator arrayRecordAllocator,
             PropertyTraverser traverser,
             IdSequenceProvider idSequenceProvider,
-            CursorContext cursorContext) {
+            CursorContext cursorContext,
+            String storeFormat) {
         this.stringRecordAllocator = stringRecordAllocator;
         this.arrayRecordAllocator = arrayRecordAllocator;
         this.traverser = traverser;
         this.cursorContext = cursorContext;
         this.propertyIdSequence = idSequenceProvider.getIdSequence(StoreType.PROPERTY);
+        this.storeFormat = storeFormat;
     }
 
     public <P extends PrimitiveRecord> void primitiveSetProperty(
@@ -187,7 +190,14 @@ public class PropertyCreator {
     private PropertyBlock encodePropertyValue(int propertyKey, Value value, MemoryTracker memoryTracker) {
         PropertyBlock block = new PropertyBlock();
         PropertyStore.encodeValue(
-                block, propertyKey, value, stringRecordAllocator, arrayRecordAllocator, cursorContext, memoryTracker);
+                block,
+                propertyKey,
+                value,
+                stringRecordAllocator,
+                arrayRecordAllocator,
+                cursorContext,
+                memoryTracker,
+                storeFormat);
         return block;
     }
 }

@@ -21,7 +21,7 @@ package org.neo4j.kernel.impl.index.schema;
 
 import static org.neo4j.internal.schema.IndexPrototype.forSchema;
 import static org.neo4j.internal.schema.SchemaDescriptors.forLabel;
-import static org.neo4j.internal.schema.SchemaDescriptors.fulltext;
+import static org.neo4j.internal.schema.SchemaDescriptors.forSemanticSearch;
 import static org.neo4j.kernel.api.impl.index.storage.DirectoryFactory.directoryFactory;
 import static org.neo4j.kernel.impl.api.index.TestIndexProviderDescriptor.PROVIDER_DESCRIPTOR;
 
@@ -38,28 +38,61 @@ import org.neo4j.internal.schema.IndexType;
 import org.neo4j.internal.schema.SchemaDescriptor;
 import org.neo4j.internal.schema.SchemaDescriptors;
 import org.neo4j.io.fs.FileSystemAbstraction;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneContext;
 import org.neo4j.kernel.api.impl.schema.vector.VectorIndexProvider;
 import org.neo4j.kernel.api.impl.schema.vector.VectorIndexVersion;
 import org.neo4j.kernel.api.schema.vector.VectorTestUtils.VectorIndexSettings;
+import org.neo4j.logging.NullLogProvider;
+import org.neo4j.test.LatestVersions;
 import org.neo4j.test.scheduler.ThreadPoolJobScheduler;
 
 class VectorIndexProviderTest {
     @Nested
-    class V1 extends VectorIndexProviderTestBase {
-        V1() {
-            super(VectorIndexVersion.V1_0);
+    class V1Lucene9 extends V1 {
+        V1Lucene9() {
+            super(LuceneContext.LUCENE_9);
         }
+    }
 
-        private VectorIndexSettings validSettings() {
-            return VectorIndexSettings.create()
-                    .withDimensions(version.maxDimensions())
-                    .withSimilarityFunction(
-                            version.supportedSimilarityFunctions().getAny());
+    @Nested
+    class V1Lucene10 extends V1 {
+        V1Lucene10() {
+            super(LuceneContext.LUCENE_10);
+        }
+    }
+
+    @Nested
+    class V2Lucene9 extends V2 {
+        V2Lucene9() {
+            super(LuceneContext.LUCENE_9);
+        }
+    }
+
+    @Nested
+    class V2Lucene10 extends V2 {
+        V2Lucene10() {
+            super(LuceneContext.LUCENE_10);
+        }
+    }
+
+    @Nested
+    class V3Lucene10 extends V3 {
+        V3Lucene10() {
+            super(LuceneContext.LUCENE_10);
+        }
+    }
+
+    abstract static class V1 extends VectorIndexProviderTestBase {
+        V1(LuceneContext luceneContext) {
+            super(luceneContext, VectorIndexVersion.V1_0);
         }
 
         @Override
-        IndexPrototype validPrototype() {
-            return super.validPrototype().withIndexConfig(validSettings().toIndexConfig());
+        protected VectorIndexSettings minimalValidSettings() {
+            return VectorIndexSettings.create()
+                    .withDimensions(version.maxDimensions())
+                    .withSimilarityFunction(
+                            version.supportedSimilarityFunctions().iterator().next());
         }
 
         @Override
@@ -71,39 +104,43 @@ class VectorIndexProviderTest {
 
                     //   invalid dimension
                     vectorPrototype()
-                            .withIndexConfig(validSettings().withDimensions(-1).toIndexConfig())
+                            .withIndexConfig(
+                                    minimalValidSettings().withDimensions(-1).toIndexConfig())
                             .withName("unsupported"),
 
                     //   unsupported similarity function
                     vectorPrototype()
-                            .withIndexConfig(validSettings()
+                            .withIndexConfig(minimalValidSettings()
                                     .withSimilarityFunction("malmo")
                                     .toIndexConfig())
                             .withName("unsupported"),
 
                     //   unrecognised vector index setting
                     validPrototype()
-                            .withIndexConfig(validSettings()
+                            .withIndexConfig(minimalValidSettings()
                                     .set(IndexSetting.fulltext_Analyzer(), "swedish")
                                     .toIndexConfig())
                             .withName("unsupported"),
 
                     //   unrecognised vector settings for version
                     validPrototype()
+                            .withIndexConfig(minimalValidSettings()
+                                    .withQuantizationDisabled()
+                                    .toIndexConfig())
+                            .withName("unsupported"),
+                    validPrototype()
                             .withIndexConfig(
-                                    validSettings().withQuantizationDisabled().toIndexConfig())
+                                    minimalValidSettings().withHnswM(32).toIndexConfig())
                             .withName("unsupported"),
                     validPrototype()
-                            .withIndexConfig(validSettings().withHnswM(32).toIndexConfig())
-                            .withName("unsupported"),
-                    validPrototype()
-                            .withIndexConfig(validSettings().withHnswM(256).toIndexConfig())
+                            .withIndexConfig(
+                                    minimalValidSettings().withHnswM(256).toIndexConfig())
                             .withName("unsupported"),
 
                     // Unsupported index types
                     forSchema(SchemaDescriptors.ANY_TOKEN_NODE_SCHEMA_DESCRIPTOR)
                             .withName("unsupported"),
-                    forSchema(fulltext(EntityType.NODE, new int[] {labelId}, new int[] {propId}))
+                    forSchema(forSemanticSearch(EntityType.NODE, new int[] {labelId}, new int[] {propId}))
                             .withName("unsupported"),
                     forSchema(schemaDescriptor()).withIndexType(IndexType.POINT).withName("unsupported"),
                     forSchema(schemaDescriptor()).withIndexType(IndexType.TEXT).withName("unsupported"),
@@ -113,10 +150,9 @@ class VectorIndexProviderTest {
         }
     }
 
-    @Nested
-    class V2 extends VectorIndexProviderTestBase {
-        V2() {
-            super(VectorIndexVersion.V2_0);
+    abstract static class V2 extends VectorIndexProviderTestBase {
+        V2(LuceneContext luceneContext) {
+            super(luceneContext, VectorIndexVersion.V2_0);
         }
 
         @Override
@@ -147,7 +183,50 @@ class VectorIndexProviderTest {
                     // Unsupported index types
                     forSchema(SchemaDescriptors.ANY_TOKEN_NODE_SCHEMA_DESCRIPTOR)
                             .withName("unsupported"),
-                    forSchema(fulltext(EntityType.NODE, new int[] {labelId}, new int[] {propId}))
+                    forSchema(forSemanticSearch(EntityType.NODE, new int[] {labelId}, new int[] {propId}))
+                            .withName("unsupported"),
+                    forSchema(schemaDescriptor()).withIndexType(IndexType.POINT).withName("unsupported"),
+                    forSchema(schemaDescriptor()).withIndexType(IndexType.TEXT).withName("unsupported"),
+                    forSchema(schemaDescriptor(), PROVIDER_DESCRIPTOR)
+                            .withIndexType(IndexType.LOOKUP)
+                            .withName("unsupported"));
+        }
+    }
+
+    abstract static class V3 extends VectorIndexProviderTestBase {
+        V3(LuceneContext luceneContext) {
+            super(luceneContext, VectorIndexVersion.V3_0);
+        }
+
+        @Override
+        List<IndexPrototype> invalidPrototypes() {
+            return List.of(
+                    // Bad configurations
+                    //   invalid dimension
+                    vectorPrototype()
+                            .withIndexConfig(VectorIndexSettings.create()
+                                    .withDimensions(-1)
+                                    .toIndexConfig())
+                            .withName("unsupported"),
+
+                    //   unsupported similarity function
+                    vectorPrototype()
+                            .withIndexConfig(VectorIndexSettings.create()
+                                    .withSimilarityFunction("malmo")
+                                    .toIndexConfig())
+                            .withName("unsupported"),
+
+                    //   unrecognised vector index setting
+                    validPrototype()
+                            .withIndexConfig(VectorIndexSettings.create()
+                                    .set(IndexSetting.fulltext_Analyzer(), "swedish")
+                                    .toIndexConfig())
+                            .withName("unsupported"),
+
+                    // Unsupported index types
+                    forSchema(SchemaDescriptors.ANY_TOKEN_NODE_SCHEMA_DESCRIPTOR)
+                            .withName("unsupported"),
+                    forSchema(forSemanticSearch(EntityType.NODE, new int[] {labelId}, new int[] {propId}))
                             .withName("unsupported"),
                     forSchema(schemaDescriptor()).withIndexType(IndexType.POINT).withName("unsupported"),
                     forSchema(schemaDescriptor()).withIndexType(IndexType.TEXT).withName("unsupported"),
@@ -160,8 +239,8 @@ class VectorIndexProviderTest {
     abstract static class VectorIndexProviderTestBase extends IndexProviderTests {
         protected final VectorIndexVersion version;
 
-        VectorIndexProviderTestBase(VectorIndexVersion version) {
-            super(factory(version));
+        VectorIndexProviderTestBase(LuceneContext luceneContext, VectorIndexVersion version) {
+            super(factory(luceneContext, version));
             this.version = version;
         }
 
@@ -175,9 +254,15 @@ class VectorIndexProviderTest {
                     .withIndexProvider(version.descriptor());
         }
 
+        protected VectorIndexSettings minimalValidSettings() {
+            return VectorIndexSettings.create();
+        }
+
         @Override
         IndexPrototype validPrototype() {
-            return vectorPrototype().withName("valid");
+            return vectorPrototype()
+                    .withName("valid")
+                    .withIndexConfig(minimalValidSettings().toIndexConfigWith(version));
         }
 
         @Override
@@ -197,7 +282,7 @@ class VectorIndexProviderTest {
 
         private static final AtomicInteger THREAD_POOL_JOB_SCHEDULER_ID = new AtomicInteger();
 
-        private static ProviderFactory factory(VectorIndexVersion version) {
+        private static ProviderFactory factory(LuceneContext luceneContext, VectorIndexVersion version) {
             return (pageCache,
                     fs,
                     dir,
@@ -208,17 +293,20 @@ class VectorIndexProviderTest {
                     contextFactory,
                     pageCacheTracer) -> new VectorIndexProvider(
                     version,
+                    luceneContext,
                     fs,
-                    directoryFactory(fs),
+                    directoryFactory(luceneContext, fs),
                     dir,
                     monitors,
                     Config.defaults(),
+                    LatestVersions.LATEST_KERNEL_VERSION_PROVIDER,
                     readOnlyChecker,
                     new ThreadPoolJobScheduler("%s-%s-%s"
                             .formatted(
                                     VectorIndexProviderTest.class.getSimpleName(),
                                     version,
-                                    THREAD_POOL_JOB_SCHEDULER_ID.getAndIncrement())));
+                                    THREAD_POOL_JOB_SCHEDULER_ID.getAndIncrement())),
+                    NullLogProvider.getInstance());
         }
     }
 }

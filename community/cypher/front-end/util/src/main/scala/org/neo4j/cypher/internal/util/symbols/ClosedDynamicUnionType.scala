@@ -21,8 +21,10 @@ import org.neo4j.cypher.internal.util.InputPosition
 case class ClosedDynamicUnionType(innerTypes: Set[CypherType])(val position: InputPosition) extends CypherType {
   val parentType: CypherType = CTAny
 
+  override def isNotNullContaining: Boolean = !isNullable || innerTypes.exists(_.isNotNullContaining)
+
   val sortedInnerTypes: List[CypherType] = innerTypes.map(_.simplify).toList.sorted
-  override val toString: String = sortedInnerTypes.map(_.toString).mkString(" | ")
+  override val toClassString: String = sortedInnerTypes.map(_.toString).mkString(" | ")
   override val toCypherTypeString: String = sortedInnerTypes.map(_.description).mkString(" | ")
   override def normalizedCypherTypeString(): String = CypherType.normalizeTypes(this).toCypherTypeString
 
@@ -34,6 +36,10 @@ case class ClosedDynamicUnionType(innerTypes: Set[CypherType])(val position: Inp
   override def isNullable: Boolean = sortedInnerTypes.head.isNullable
 
   override def description: String = toCypherTypeString
+
+  override def couldBeStoredInProperty: Boolean = innerTypes.exists(_.couldBeStoredInProperty)
+
+  override def canBeStoredInProperty: Boolean = innerTypes.forall(_.couldBeStoredInProperty)
 
   override def simplify: CypherType = {
     val flattenedInner = sortedInnerTypes.flatMap {
@@ -69,8 +75,8 @@ case class ClosedDynamicUnionType(innerTypes: Set[CypherType])(val position: Inp
 
   override def parents: Seq[CypherType] = innerTypes.flatMap(_.parents).toList
 
-  override lazy val covariant: TypeSpec = innerTypes.tail.foldLeft(innerTypes.head.invariant)(_ union _).covariant
-  override lazy val invariant: TypeSpec = TypeSpec.exact(this.innerTypes)
+  override def covariant: TypeSpec = this.invariant.covariant
+  override def invariant: TypeSpec = TypeSpec.exact(this.innerTypes)
 
   override def leastUpperBound(other: CypherType): CypherType =
     innerTypes.foldLeft(other)(_ leastUpperBound _)

@@ -27,6 +27,9 @@ import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorBreak
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorContinue
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorFail
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsRetryParameters
+import org.neo4j.cypher.internal.expressions.FunctionInvocation
+import org.neo4j.cypher.internal.frontend.phases.ResolvedFunctionInvocation
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createNode
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createNodeWithProperties
 import org.neo4j.cypher.internal.logical.plans.IndexOrderNone
@@ -43,28 +46,32 @@ import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RandomValuesTestSupport
 import org.neo4j.cypher.internal.runtime.spec.RecordingRuntimeResult
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
-import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSupport
 import org.neo4j.cypher.internal.runtime.spec.SideEffectingInputStream
 import org.neo4j.cypher.internal.runtime.spec.rewriters.RussianRoulette
 import org.neo4j.cypher.internal.runtime.spec.rewriters.TestPlanCombinationRewriter.NoRewrites
 import org.neo4j.cypher.internal.runtime.spec.tests.RandomisedTransactionForEachTests.genRandomTestSetup
 import org.neo4j.cypher.internal.runtime.spec.tests.TransactionApplyTestBase.ComplexRhsTestSetup
 import org.neo4j.cypher.internal.util.CancellationChecker
+import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.RewriterWithParent
+import org.neo4j.cypher.internal.util.bottomUp
 import org.neo4j.cypher.internal.util.bottomUpWithParent
 import org.neo4j.cypher.internal.util.test_helpers.CypherScalaCheckDrivenPropertyChecks
 import org.neo4j.exceptions.StatusWrapCypherException
 import org.neo4j.graphdb.ConstraintViolationException
-import org.neo4j.graphdb.GraphDatabaseService
 import org.neo4j.graphdb.Label
 import org.neo4j.graphdb.schema.IndexType
 import org.neo4j.internal.helpers.collection.Iterables
+import org.neo4j.internal.kernel.api.procs.Neo4jTypes
+import org.neo4j.internal.kernel.api.procs.QualifiedName
+import org.neo4j.internal.kernel.api.procs.UserFunctionSignature
 import org.neo4j.kernel.api.KernelTransaction.Type
+import org.neo4j.kernel.api.procedure.CallableUserFunction.BasicUserFunction
+import org.neo4j.kernel.api.procedure.Context
 import org.neo4j.kernel.impl.coreapi.InternalTransaction
 import org.neo4j.kernel.impl.factory.GraphDatabaseFacade
 import org.neo4j.kernel.impl.transaction.stats.DatabaseTransactionStats
 import org.neo4j.kernel.impl.util.ValueUtils
-import org.neo4j.logging.InternalLogProvider
 import org.neo4j.values.AnyValue
 import org.neo4j.values.storable.BooleanValue
 import org.neo4j.values.storable.CoordinateReferenceSystem
@@ -78,6 +85,7 @@ import org.neo4j.values.storable.Values.stringValue
 import org.neo4j.values.virtual.MapValue
 import org.neo4j.values.virtual.MapValueBuilder
 import org.neo4j.values.virtual.VirtualValues
+import org.scalactic.anyvals.PosInt
 import org.scalatest.LoneElement
 
 import java.util.concurrent.atomic.AtomicInteger
@@ -95,31 +103,15 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
 ) extends RuntimeTestSuite[CONTEXT](edition, runtime, testPlanCombinationRewriterHints = Set(NoRewrites))
     with SideEffectingInputStream[CONTEXT]
     with RandomisedTransactionApplyTests[CONTEXT]
-    with RandomValuesTestSupport
+    with RandomValuesTestSupport[CONTEXT]
     with LoneElement {
 
-  override protected def createRuntimeTestSupport(
-    graphDb: GraphDatabaseService,
-    edition: Edition[CONTEXT],
-    runtime: CypherRuntime[CONTEXT],
-    workloadMode: Boolean,
-    logProvider: InternalLogProvider
-  ): RuntimeTestSupport[CONTEXT] = {
-    new RuntimeTestSupport[CONTEXT](
-      graphDb,
-      edition,
-      runtime,
-      workloadMode,
-      logProvider,
-      debugOptions,
-      defaultTransactionType = Type.IMPLICIT
-    )
-  }
+  override protected def defaultTransactionType: Type = Type.IMPLICIT
 
   test("batchSize 0") {
     val query = new LogicalQueryBuilder(this)
       .produceResults("n")
-      .transactionApply(0, onErrorBehaviour = randomErrorBehaviour())
+      .transactionApplyRandomErrorBehaviour(this)(0)
       .|.create(createNode("n", "N"))
       .|.argument()
       .unwind("[1, 2] AS x")
@@ -136,7 +128,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
   test("batchSize -1") {
     val query = new LogicalQueryBuilder(this)
       .produceResults("x")
-      .transactionApply(-1, onErrorBehaviour = randomErrorBehaviour())
+      .transactionApplyRandomErrorBehaviour(this)(-1)
       .|.create(createNode("n", "N"))
       .|.argument()
       .unwind("[1, 2] AS x")
@@ -153,7 +145,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
   test("batchSize -1 on an empty input") {
     val query = new LogicalQueryBuilder(this)
       .produceResults("x")
-      .transactionApply(-1, onErrorBehaviour = randomErrorBehaviour())
+      .transactionApplyRandomErrorBehaviour(this)(-1)
       .|.create(createNode("n", "N"))
       .|.argument()
       .unwind("[] AS x")
@@ -170,7 +162,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
   test("should create data from returning subqueries") {
     val query = new LogicalQueryBuilder(this)
       .produceResults("n")
-      .transactionApply(onErrorBehaviour = randomErrorBehaviour())
+      .transactionApplyRandomErrorBehaviour(this)()
       .|.create(createNode("n", "N"))
       .|.argument()
       .unwind("[1, 2, 3] AS x")
@@ -188,7 +180,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
     val query = new LogicalQueryBuilder(this)
       .produceResults("prop")
       .projection("n.prop AS prop")
-      .transactionApply(3, onErrorBehaviour = randomErrorBehaviour())
+      .transactionApplyRandomErrorBehaviour(this)(3)
       .|.create(createNodeWithProperties("n", Seq("N"), "{prop: x}"))
       .|.argument("x")
       .unwind("range(1, 10) AS x")
@@ -213,7 +205,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
       .produceResults("c")
       .aggregation(Seq.empty, Seq("count(prop) AS c"))
       .projection("n.prop AS prop")
-      .transactionApply(3, onErrorBehaviour = randomErrorBehaviour())
+      .transactionApplyRandomErrorBehaviour(this)(3)
       .|.create(createNodeWithProperties("n", Seq("N"), "{prop: x}"))
       .|.argument("x")
       .unwind("range(1, 10) AS x")
@@ -236,7 +228,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
   test("should work with aggregation on RHS") {
     val query = new LogicalQueryBuilder(this)
       .produceResults("c")
-      .transactionApply(3, onErrorBehaviour = randomErrorBehaviour())
+      .transactionApplyRandomErrorBehaviour(this)(3)
       .|.aggregation(Seq.empty, Seq("count(i) AS c"))
       .|.unwind("range(1, x) AS i")
       .|.create(createNodeWithProperties("n", Seq("N"), "{prop: x}"))
@@ -261,7 +253,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
   test("should work with grouping aggregation on RHS") {
     val query = new LogicalQueryBuilder(this)
       .produceResults("c")
-      .transactionApply(3, onErrorBehaviour = randomErrorBehaviour())
+      .transactionApplyRandomErrorBehaviour(this)(3)
       .|.aggregation(Seq("1 AS group"), Seq("count(i) AS c"))
       .|.unwind("range(1, x) AS i")
       .|.create(createNodeWithProperties("n", Seq("N"), "{prop: x}"))
@@ -324,7 +316,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("x")
       .aggregation(Seq.empty, Seq("count(*) AS x"))
-      .transactionApply(batchSize = batchSize, onErrorBehaviour = randomErrorBehaviour())
+      .transactionApplyRandomErrorBehaviour(this)(batchSize = batchSize)
       .|.union()
       .|.|.create(createNode("cc", "C"))
       .|.|.eager()
@@ -355,7 +347,8 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
       .produceResults("prop")
       .projection("n.prop AS prop")
       .setProperty("n", "prop", "17")
-      .transactionApply(onErrorBehaviour = randomErrorBehaviour())
+      .eager() // Top-level transaction state needs to be empty for transactionApply to work
+      .transactionApplyRandomErrorBehaviour(this)()
       .|.create(createNode("n", "N"))
       .|.argument()
       .unwind("[1, 2, 3] AS x")
@@ -376,7 +369,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
       .projection("n.prop AS prop")
       .setProperty("n", "prop", "n.prop + 1")
       .eager()
-      .transactionApply(3, onErrorBehaviour = randomErrorBehaviour())
+      .transactionApplyRandomErrorBehaviour(this)(3)
       .|.create(createNodeWithProperties("n", Seq("N"), "{prop: x}"))
       .|.argument("x")
       .unwind("range(1, 10) AS x")
@@ -415,7 +408,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
 
     val query = new LogicalQueryBuilder(this)
       .produceResults("n")
-      .transactionApply(1, onErrorBehaviour = randomErrorBehaviour())
+      .transactionApplyRandomErrorBehaviour(this)(1)
       .|.prober(txProbe)
       .|.prober(probe)
       .|.create(createNode("n", "N"))
@@ -455,7 +448,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
 
     val query = new LogicalQueryBuilder(this)
       .produceResults("n")
-      .transactionApply(batchSize, onErrorBehaviour = randomErrorBehaviour())
+      .transactionApplyRandomErrorBehaviour(this)(batchSize)
       .|.prober(txProbe)
       .|.prober(probe)
       .|.create(createNode("n", "N"))
@@ -502,7 +495,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
 
     val query = new LogicalQueryBuilder(this)
       .produceResults("n")
-      .transactionApply(1, onErrorBehaviour = randomErrorBehaviour())
+      .transactionApplyRandomErrorBehaviour(this)(1)
       .|.prober(txProbe)
       .|.prober(probe)
       .|.create(createNode("n", "N"))
@@ -550,7 +543,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
 
     val query = new LogicalQueryBuilder(this)
       .produceResults("b")
-      .transactionApply(1, onErrorBehaviour = randomErrorBehaviour())
+      .transactionApplyRandomErrorBehaviour(this)(1)
       .|.prober(txProbe)
       .|.prober(probe)
       .|.create(createNodeWithProperties("b", Seq("Label"), "{prop: 2}"))
@@ -570,7 +563,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
     val query = new LogicalQueryBuilder(this)
       .produceResults("prop")
       .projection("n.prop AS prop")
-      .transactionApply(1, onErrorBehaviour = randomErrorBehaviour())
+      .transactionApplyRandomErrorBehaviour(this)(1)
       .|.create(createNodeWithProperties("n", Seq("N"), "{prop: x}"))
       .|.argument()
       .unwind("range(1, 10) AS x")
@@ -594,7 +587,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
     val query = new LogicalQueryBuilder(this)
       .produceResults("prop")
       .projection("n.prop AS prop")
-      .transactionApply(3, onErrorBehaviour = randomErrorBehaviour())
+      .transactionApplyRandomErrorBehaviour(this)(3)
       .|.create(createNodeWithProperties("n", Seq("N"), "{prop: x}"))
       .|.argument()
       .unwind("range(1, 10) AS x")
@@ -618,7 +611,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
     val query = new LogicalQueryBuilder(this)
       .produceResults("prop")
       .projection("n.prop AS prop")
-      .transactionApply(onErrorBehaviour = randomErrorBehaviour())
+      .transactionApplyRandomErrorBehaviour(this)(batchSize = random.between(2, 16))
       .|.create(createNodeWithProperties("n", Seq("N"), "{prop: x}"))
       .|.argument()
       .unwind("[1, 2] AS x")
@@ -653,7 +646,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("x")
-      .transactionApply(batchSize, onErrorBehaviour = randomErrorBehaviour())
+      .transactionApplyRandomErrorBehaviour(this)(batchSize)
       .|.eager()
       .|.create(createNode("n"))
       .|.argument("x")
@@ -689,7 +682,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("x")
-      .transactionApply(batchSize, onErrorBehaviour = randomErrorBehaviour())
+      .transactionApplyRandomErrorBehaviour(this)(batchSize)
       .|.sort("y ASC")
       .|.create(createNode("n"))
       .|.eager()
@@ -720,7 +713,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
       .nonFuseable() // Needed because of limitation in prober
       // Discarded but should not be removed because there's no eager buffer after this point
       .projection("0 as hello")
-      .transactionApply(onErrorBehaviour = randomErrorBehaviour())
+      .transactionApplyRandomErrorBehaviour(this)()
       .|.projection("discardLhs + discardRhs as comesFromDiscarded")
       .|.projection("keepRhs as keepRhs")
       .|.projection("'bla' + (a+2) as keepRhs", "'blö' + (a+3) as discardRhs")
@@ -755,7 +748,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
       .prober(probe)
       // Discarded but should not be removed because there's no eager buffer after this point
       .projection("0 as hello")
-      .transactionApply(onErrorBehaviour = randomErrorBehaviour())
+      .transactionApplyRandomErrorBehaviour(this)()
       .|.projection("discardLhs + discardRhs as comesFromDiscarded")
       .|.projection("keepRhs as keepRhs")
       .|.projection("'bla' + (a+2) as keepRhs", "'blö' + (a+3) as discardRhs")
@@ -789,10 +782,10 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
     val iterations = 3
     val batchSize = random.nextInt(iterations + 1) + 1
     val concurrency = TransactionConcurrency.Serial
-    ComplexRhsTestSetup(batchSize, concurrency, iterations, OnErrorFail, None)
+    ComplexRhsTestSetup(batchSize, concurrency, iterations, OnErrorFail, None, None)
   }
 
-  private def setupComplexRhsTest(
+  protected def setupComplexRhsTest(
     graph: ComplexGraph,
     setup: ComplexRhsTestSetup = defaultComplexRhsSetup()
   ): (LogicalQueryBuilder, Seq[Seq[Array[Object]]]) = {
@@ -803,7 +796,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
 
     val planBuilder = new LogicalQueryBuilder(this)
       .produceResults(produce: _*)
-      .transactionApply(setup.batchSize, setup.concurrency, setup.onError, setup.status)
+      .transactionApply(setup.batchSize, setup.concurrency, setup.onError, setup.status, setup.retryParams)
       .|.valueHashJoin("left=right")
 
       // Join RHS (identical to LHS)
@@ -832,7 +825,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
       .|.|.|.|.|.nodeHashJoin("d_inner")
       .|.|.|.|.|.|.limit(Long.MaxValue)
       .|.|.|.|.|.|.allNodeScan("d_inner")
-      .|.|.|.|.|.filterExpression(isRepeatTrailUnique("r2_inner"))
+      .|.|.|.|.|.filter(isRepeatTrailUnique("r2_inner"))
       .|.|.|.|.|.expandAll("(c_inner)-[r2_inner]->(d_inner)")
       .|.|.|.|.|.argument("middle", "c_inner")
       .|.|.|.|.argument("middle")
@@ -844,7 +837,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
       .|.|.|.|.nodeHashJoin("b_inner")
       .|.|.|.|.|.allNodeScan("b_inner")
       .|.|.|.|.limit(Long.MaxValue)
-      .|.|.|.|.filterExpression(isRepeatTrailUnique("r1_inner"))
+      .|.|.|.|.filter(isRepeatTrailUnique("r1_inner"))
       .|.|.|.|.expandAll("(a_inner)-[r1_inner]->(b_inner)")
       .|.|.|.|.optional("start")
       .|.|.|.|.argument("firstMiddle", "a_inner")
@@ -852,7 +845,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
       .|.|.|.|.nodeHashJoin("anon_end_inner")
       .|.|.|.|.|.filter("anon_end_inner:MIDDLE")
       .|.|.|.|.|.allNodeScan("anon_end_inner")
-      .|.|.|.|.filterExpression(isRepeatTrailUnique("anon_r_inner"))
+      .|.|.|.|.filter(isRepeatTrailUnique("anon_r_inner"))
       .|.|.|.|.expandAll("(anon_start_inner)-[anon_r_inner]->(anon_end_inner)")
       .|.|.|.|.argument("start", "anon_start_inner")
       .|.|.|.nodeByLabelScan("start", "START", IndexOrderNone)
@@ -863,7 +856,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
       .|.|.|.|.filter("d_inner:LOOP")
       .|.|.|.|.nodeHashJoin("d_inner")
       .|.|.|.|.|.allNodeScan("d_inner")
-      .|.|.|.|.filterExpression(isRepeatTrailUnique("r2_inner"))
+      .|.|.|.|.filter(isRepeatTrailUnique("r2_inner"))
       .|.|.|.|.expandAll("(c_inner)-[r2_inner]->(d_inner)")
       .|.|.|.|.argument("middle", "c_inner")
       .|.|.|.argument("middle")
@@ -874,14 +867,14 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
       .|.|.|.filter("b_inner:MIDDLE")
       .|.|.|.nodeHashJoin("b_inner")
       .|.|.|.|.allNodeScan("b_inner")
-      .|.|.|.filterExpression(isRepeatTrailUnique("r1_inner"))
+      .|.|.|.filter(isRepeatTrailUnique("r1_inner"))
       .|.|.|.expandAll("(a_inner)-[r1_inner]->(b_inner)")
       .|.|.|.argument("firstMiddle", "a_inner")
       .|.|.repeatTrail(RepeatTrailTestBase.`(start:START) [()-[]->(:MIDDLE)]{1, 1} (firstMiddle:MIDDLE)`)
       .|.|.|.nodeHashJoin("anon_end_inner")
       .|.|.|.|.filter("anon_end_inner:MIDDLE")
       .|.|.|.|.allNodeScan("anon_end_inner")
-      .|.|.|.filterExpression(isRepeatTrailUnique("anon_r_inner"))
+      .|.|.|.filter(isRepeatTrailUnique("anon_r_inner"))
       .|.|.|.expandAll("(anon_start_inner)-[anon_r_inner]->(anon_end_inner)")
       .|.|.|.argument("start", "anon_start_inner")
       .|.|.nodeByLabelScan("start", "START", IndexOrderNone)
@@ -896,7 +889,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
       .|.|.|.filter("d_inner:LOOP")
       .|.|.|.nodeHashJoin("d_inner")
       .|.|.|.|.allNodeScan("d_inner")
-      .|.|.|.filterExpression(isRepeatTrailUnique("r2_inner"))
+      .|.|.|.filter(isRepeatTrailUnique("r2_inner"))
       .|.|.|.expandAll("(c_inner)-[r2_inner]->(d_inner)")
       .|.|.|.argument("middle", "c_inner")
       .|.|.argument("middle")
@@ -908,14 +901,14 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
       .|.|.filter("b_inner:MIDDLE")
       .|.|.nodeHashJoin("b_inner")
       .|.|.|.allNodeScan("b_inner")
-      .|.|.filterExpression(isRepeatTrailUnique("r1_inner"))
+      .|.|.filter(isRepeatTrailUnique("r1_inner"))
       .|.|.expandAll("(a_inner)-[r1_inner]->(b_inner)")
       .|.|.argument("firstMiddle", "a_inner")
       .|.repeatTrail(RepeatTrailTestBase.`(start:START) [()-[]->(:MIDDLE)]{1, 1} (firstMiddle:MIDDLE)`)
       .|.|.nodeHashJoin("anon_end_inner")
       .|.|.|.filter("anon_end_inner:MIDDLE")
       .|.|.|.allNodeScan("anon_end_inner")
-      .|.|.filterExpression(isRepeatTrailUnique("anon_r_inner"))
+      .|.|.filter(isRepeatTrailUnique("anon_r_inner"))
       .|.|.expandAll("(anon_start_inner)-[anon_r_inner]->(anon_end_inner)")
       .|.|.argument("start", "anon_start_inner")
       .|.nodeByLabelScan("start", "START", IndexOrderNone)
@@ -928,7 +921,8 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
   test("complex case: complex RHS") {
     // given
     val graph = givenGraph(complexGraph())
-    val setup = defaultComplexRhsSetup().copy(onError = randomErrorBehaviour())
+    val (errorBehaviour, retryParams) = LogicalQueryBuilder.randomErrorBehaviour(this)
+    val setup = defaultComplexRhsSetup().copy(onError = errorBehaviour, retryParams = retryParams)
     val (planBuilder, expected) = setupComplexRhsTest(graph, setup)
 
     val query = planBuilder.build()
@@ -946,8 +940,14 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
 
     val query = planBuilder.build()
 
-    val rewriter = RussianRoulette(0.005, 0.25, planBuilder.idGen, random)
+    val randFunction = restartTxWithSeededRandFunction()
+
+    val rewriter = RussianRoulette(0.005, 0.25, planBuilder.idGen, random, bangFunction = randFunction)
     val rewritten = query.logicalPlan.endoRewrite(rewriter)
+      .endoRewrite(bottomUp(Rewriter.lift {
+        case fi: FunctionInvocation if fi.needsToBeResolved =>
+          ResolvedFunctionInvocation.fromUnresolved(functionSignature)(fi).coerceArguments
+      }))
 
     Try(executeAndConsume(query.copy(logicalPlan = rewritten), runtime)) match {
       case Failure(error) =>
@@ -983,19 +983,26 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
       concurrency = TransactionConcurrency.Serial,
       iterations = iterations,
       onError = OnErrorContinue,
-      status = Some("s")
+      status = Some("s"),
+      retryParams = None
     )
     val (planBuilder, expected) = setupComplexRhsTest(graph, setup)
 
     val query = planBuilder.build()
 
+    val randFunction = restartTxWithSeededRandFunction()
+
     val rewritten = query.logicalPlan.endoRewrite(bottomUpWithParent(
       RewriterWithParent.lift {
         case (rhs: LogicalPlan, Some(parent: TransactionApply)) if parent.right == rhs =>
-          rhs.endoRewrite(RussianRoulette(0.0005, 0.25, planBuilder.idGen))
+          rhs.endoRewrite(RussianRoulette(0.0005, 0.25, planBuilder.idGen, random, bangFunction = randFunction))
       },
       cancellation = CancellationChecker.neverCancelled()
     ))
+      .endoRewrite(bottomUp(Rewriter.lift {
+        case fi: FunctionInvocation if fi.needsToBeResolved =>
+          ResolvedFunctionInvocation.fromUnresolved(functionSignature)(fi).coerceArguments
+      }))
 
     // The result Seqs represent 1) tx batch, 2) rows in tx batch 3) columns in row
     def batches(rows: Seq[Array[_ <: AnyRef]]): Seq[Seq[Seq[AnyValue]]] = {
@@ -1009,7 +1016,6 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
         .toSeq
     }
 
-    val resultBatches = batches(executeAndConsume(query.copy(logicalPlan = rewritten), runtime).awaitAll())
     val expectedBatches = batches(expected.flatten)
 
     withClue(
@@ -1018,6 +1024,13 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
          |$rewritten
          |""".stripMargin
     ) {
+      val resultBatches =
+        try {
+          batches(executeAndConsume(query.copy(logicalPlan = rewritten), runtime).awaitAll())
+        } catch {
+          case e: Throwable => fail(e)
+        }
+
       resultBatches.size shouldBe expectedBatches.size
       resultBatches.zip(expectedBatches).foreach {
         case (result, expected) =>
@@ -1047,9 +1060,8 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("x", "status", "bang", "hello")
       .projection(s"1 / (x - $failAtRow) as bang")
-      .transactionApply(
+      .transactionApplyRandomErrorBehaviour(this)(
         batchSize,
-        onErrorBehaviour = randomAmong(Seq(OnErrorContinue, OnErrorBreak)),
         maybeReportAs = Some("status")
       )
       .|.projection("'im innocent' as hello")
@@ -1073,9 +1085,8 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("x", "status", "bang", "hello")
-      .transactionApply(
+      .transactionApplyRandomErrorBehaviour(this)(
         batchSize,
-        onErrorBehaviour = randomAmong(Seq(OnErrorContinue, OnErrorBreak)),
         maybeReportAs = Some("status")
       )
       .|.projection("'im innocent' as hello")
@@ -1151,7 +1162,7 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
       .withRows(expected)
   }
 
-  private def testIntegrityFailInsideBuffer() {
+  private def testIntegrityFailInsideBuffer(): Unit = {
     val throwingPlan = new LogicalQueryBuilder(this)
       .produceResults("x", "y")
       .transactionApply(1, onErrorBehaviour = OnErrorFail)
@@ -1527,15 +1538,150 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
 
     val expected = rowIn.flatMap(i => nodes.map(n => Array[Any](i, n, n, n, n, n)))
     withClue(s"batchSize=$batchSize, rowIn=${rowIn.mkString("[", ",", "]")}\n") {
-      execute(buildPlan(logicalQuery, runtime), readOnly = false) should beColumns("i", "n1", "n2", "n3", "n4", "n5")
+      execute(buildPlan(logicalQuery, runtime)) should beColumns("i", "n1", "n2", "n3", "n4", "n5")
         .withRows(inOrder(expected))
     }
   }
 
-  private def executeAndConsume(logicalQuery: LogicalQuery, runtime: CypherRuntime[CONTEXT]) = {
+  // Regression tests for error handling with hash join bugs
+  // The 3 tests below are the behavioral tests of bugs fixed by the BufferTraversalMode.AllWork
+  // registrations in PipelineTreeBuilder, and, for the cursor leak, by closing reaped tasks with
+  // the resources of their pipeline's transactional scope (WorkerQueryState.queryStateForClosing).
+  test("should not leak cursors when task is cancelled after recovered error ON ERROR CONTINUE") {
+    setInitialSeed(-5122609937924451453L)
+    givenGraph(complexGraph())
+
+    // A function that fails the query on exactly its 2nd evaluation. The first batch then fails
+    // after the trail pipelines have started executing: the failing task is closed and
+    // outstanding work is eagerly cleaned up, but input morsels already buffered for the
+    // cursor-holding pipeline feeding the hash join still spawn new tasks. Those execute with
+    // the inner transaction's scoped resources, suspend with open cursors, and are reaped later
+    // through lazy argument cancellation, which closes them with the outer scheduling worker's
+    // resources, freeing the cursors into the wrong pool.
+    registerTickFunction()
+
+    val query = new LogicalQueryBuilder(this)
+      .withMorselSize(4)
+      .produceResults("middle", "end", "iteration", "s")
+      .transactionApply(7, onErrorBehaviour = OnErrorContinue, maybeReportAs = Some("s"))
+      .|.repeatTrail(RepeatTrailTestBase.`(middle) [(c)-[r2]->(d:LOOP)]{0, *} (end:LOOP)`.copy(
+        previouslyBoundRelationshipGroups = Set.empty,
+        groupNodes = Set.empty,
+        groupRelationships = Set.empty
+      )).withLeveragedOrder()
+      .|.|.nodeHashJoin("d_inner")
+      .|.|.|.allNodeScan("d_inner")
+      .|.|.filter("CASE WHEN `test.tick`() = 2 THEN 1/0 > 0 ELSE true END")
+      .|.|.filter(isRepeatTrailUnique("r2_inner"))
+      .|.|.expandAll("(c_inner)-[r2_inner]->(d_inner)")
+      .|.|.argument("middle", "c_inner")
+      .|.nodeByLabelScan("middle", "LOOP", IndexOrderNone)
+      .unwind("range(1, 3) AS iteration")
+      .argument()
+      .build()
+
+    // Main assertion is that consuming succeeds without leaking cursors: the division error
+    // is recovered by ON ERROR CONTINUE and reported via the status column.
+    executeAndConsume(resolveTickFunction(query), runtime).awaitAll()
+  }
+
+  test("should not execute work of a cancelled batch after recovered error ON ERROR CONTINUE") {
+    setInitialSeed(-5122609937924451453L)
+    givenGraph(complexGraph())
+
+    // A function that fails the query on exactly its 2nd evaluation, as in the test above. When the
+    // error is recovered, rows of the failed batch are still buffered in the execution graph,
+    // including in the buffers feeding the hash join's LHS. Work cancellers must reach those buffers
+    // so the rows are discarded when they are reaped. If cancellation does not reach them, the rows
+    // execute against the rolled back inner transaction and evaluate the function additional times.
+    val tickCounter = registerTickFunction()
+
+    val query = new LogicalQueryBuilder(this)
+      .withMorselSize(4)
+      .produceResults("middle", "end", "iteration", "s")
+      .transactionApply(7, onErrorBehaviour = OnErrorContinue, maybeReportAs = Some("s"))
+      .|.repeatTrail(RepeatTrailTestBase.`(middle) [(c)-[r2]->(d:LOOP)]{0, *} (end:LOOP)`.copy(
+        previouslyBoundRelationshipGroups = Set.empty,
+        groupNodes = Set.empty,
+        groupRelationships = Set.empty
+      )).withLeveragedOrder()
+      .|.|.nodeHashJoin("d_inner")
+      .|.|.|.allNodeScan("d_inner")
+      .|.|.filter("CASE WHEN `test.tick`() = 2 THEN 1/0 > 0 ELSE true END")
+      .|.|.filter(isRepeatTrailUnique("r2_inner"))
+      .|.|.expandAll("(c_inner)-[r2_inner]->(d_inner)")
+      .|.|.argument("middle", "c_inner")
+      .|.nodeByLabelScan("middle", "LOOP", IndexOrderNone)
+      .unwind("range(1, 3) AS iteration")
+      .argument()
+      .build()
+
+    executeAndConsume(resolveTickFunction(query), runtime).awaitAll()
+
+    // The 1st evaluation passes and the 2nd fails the batch. No evaluation may happen after that:
+    // all remaining rows of the failed batch must be cancelled before they reach the operators.
+    tickCounter.get() shouldBe 2L
+  }
+
+  test("should not complete a transaction batch while rows are buffered behind a hash join LHS") {
+    givenGraph(nodeGraph(8))
+
+    // The trail free analog of the two tests above. A hash join sits directly on the RHS of the
+    // transaction apply, so the join's accumulating LHS is fed by its own single row delegate of the
+    // transaction apply buffer, separate from the one feeding the streaming RHS. The argument tracker
+    // that decides when a batch has fully drained must hold a share for that delegate too. Without it
+    // the batch completes and its argument state is removed while the delegate still buffers rows of
+    // the batch, which the reinstated isStaleArgument assertion catches when such a row is taken.
+    val tickCounter = registerTickFunction()
+
+    val query = new LogicalQueryBuilder(this)
+      .withMorselSize(4)
+      .produceResults("i", "s")
+      .transactionApply(2, onErrorBehaviour = OnErrorContinue, maybeReportAs = Some("s"))
+      .|.nodeHashJoin("n")
+      .|.|.allNodeScan("n")
+      .|.filter("CASE WHEN `test.tick`() = 2 THEN 1/0 > 0 ELSE true END")
+      .|.allNodeScan("n")
+      .unwind("range(1, 6) AS i")
+      .argument()
+      .build()
+
+    executeAndConsume(resolveTickFunction(query), runtime).awaitAll()
+
+    // The 1st evaluation passes and the 2nd fails the first batch. The two later batches are not
+    // affected by the recovered error, so they evaluate the function for their own rows.
+    tickCounter.get() should be > 2L
+  }
+
+  protected def executeAndConsume(logicalQuery: LogicalQuery, runtime: CypherRuntime[CONTEXT]) = {
     val result = execute(logicalQuery, runtime)
     consume(result)
     result
+  }
+
+  // Registers `test.tick()`, a user function counting its own evaluations, and restarts the
+  // transaction so the new registration is visible to the query about to be built.
+  private def registerTickFunction(): AtomicLong = {
+    val tickCounter = new AtomicLong(0)
+    registerFunction(new BasicUserFunction(
+      UserFunctionSignature.functionSignature(new QualifiedName("test.tick"))
+        .out(Neo4jTypes.NTInteger).threadSafe().build()
+    ) {
+      override def apply(ctx: Context, input: Array[AnyValue]): AnyValue =
+        Values.longValue(tickCounter.incrementAndGet())
+    })
+    restartTx()
+    tickCounter
+  }
+
+  // Resolves the `test.tick()` invocation registered by registerTickFunction so the fused
+  // runtime can generate code for it.
+  private def resolveTickFunction(logicalQuery: LogicalQuery): LogicalQuery = {
+    val resolved = logicalQuery.logicalPlan.endoRewrite(bottomUp(Rewriter.lift {
+      case fi: FunctionInvocation if fi.needsToBeResolved =>
+        ResolvedFunctionInvocation.fromUnresolved(functionSignature)(fi).coerceArguments
+    }))
+    logicalQuery.copy(logicalPlan = resolved)
   }
 
   protected def txAssertionProbe(assertion: InternalTransaction => Unit): Prober.Probe = {
@@ -1545,9 +1691,6 @@ abstract class TransactionApplyTestBase[CONTEXT <: RuntimeContext](
       }
     }
   }
-
-  private def randomErrorBehaviour(): InTransactionsOnErrorBehaviour =
-    randomAmong(Seq(OnErrorFail, OnErrorContinue, OnErrorBreak))
 }
 
 object TransactionApplyTestBase {
@@ -1557,21 +1700,22 @@ object TransactionApplyTestBase {
     concurrency: TransactionConcurrency,
     iterations: Int,
     onError: InTransactionsOnErrorBehaviour,
-    status: Option[String]
+    status: Option[String],
+    retryParams: Option[InTransactionsRetryParameters]
   )
 }
 
 /**
  * Tests transaction foreach in queries like.
- * 
+ *
  * .produceResult()
  * .transactionApply()
  * .|.create("(n {props})")
  * .|.unwind("randomProps AS props")
  * .input("randomProps")
- * 
+ *
  * With random:
- * 
+ *
  * - Number of input rows.
  * - Size of rhs (the unwind list)
  * - Failures
@@ -1592,7 +1736,7 @@ trait RandomisedTransactionApplyTests[CONTEXT <: RuntimeContext]
       node.setProperty("p", 42)
     }
 
-    forAll(genRandomTestSetup(sizeHint), minSuccessful(100)) { setup =>
+    forAll(genRandomTestSetup(sizeHint), minSuccessful(PosInt.from(100).get)) { setup =>
       val query = new LogicalQueryBuilder(this)
         .produceResults("i", "i2", "started", "committed", "errorMessage")
         .projection(
@@ -1662,7 +1806,7 @@ trait RandomisedTransactionApplyTests[CONTEXT <: RuntimeContext]
       node.setProperty("p", 42)
     }
 
-    forAll(genRandomTestSetup(sizeHint), minSuccessful(100)) { setup =>
+    forAll(genRandomTestSetup(sizeHint), minSuccessful(PosInt.from(100).get)) { setup =>
       val query = new LogicalQueryBuilder(this)
         .produceResults("i", "i2")
         .transactionApply(
@@ -1724,7 +1868,7 @@ trait RandomisedTransactionApplyTests[CONTEXT <: RuntimeContext]
       node.setProperty("p", 42)
     }
 
-    forAll(genRandomTestSetup(sizeHint), minSuccessful(100)) { setup =>
+    forAll(genRandomTestSetup(sizeHint), minSuccessful(PosInt.from(100).get)) { setup =>
       val query = new LogicalQueryBuilder(this)
         .produceResults("i", "i2", "started", "committed")
         .projection(
@@ -1807,7 +1951,7 @@ trait RandomisedTransactionApplyTests[CONTEXT <: RuntimeContext]
     }
 
     // TODO Are we leaking memory, got failure when I turned up minSuccessful?
-    forAll(genRandomTestSetup(sizeHint), minSuccessful(50)) { setup =>
+    forAll(genRandomTestSetup(sizeHint), minSuccessful(PosInt.from(50).get)) { setup =>
       val query = new LogicalQueryBuilder(this)
         .produceResults("i", "i2", "started", "committed")
         .projection(

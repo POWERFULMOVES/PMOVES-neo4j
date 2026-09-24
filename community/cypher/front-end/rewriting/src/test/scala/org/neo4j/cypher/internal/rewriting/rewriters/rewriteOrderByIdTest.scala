@@ -16,18 +16,22 @@
  */
 package org.neo4j.cypher.internal.rewriting.rewriters
 
+import org.neo4j.cypher.internal.CypherVersionHelpers
 import org.neo4j.cypher.internal.ast.Statement
 import org.neo4j.cypher.internal.ast.prettifier.ExpressionStringifier
 import org.neo4j.cypher.internal.ast.prettifier.Prettifier
-import org.neo4j.cypher.internal.ast.semantics.SemanticCheckContext
 import org.neo4j.cypher.internal.ast.semantics.SemanticState
+import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.rewriting.AstRewritingTestSupport
-import org.neo4j.cypher.internal.util.OpenCypherExceptionFactory
+import org.neo4j.cypher.internal.rewriting.rewriters.astRewriters.RewriteOrderById
+import org.neo4j.cypher.internal.util.Neo4jCypherExceptionFactory
 import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 
 class rewriteOrderByIdTest extends CypherFunSuite with AstRewritingTestSupport {
 
-  private val prettifier = Prettifier(ExpressionStringifier(_.asCanonicalStringVal))
+  private val prettifier = Prettifier(
+    ExpressionStringifier((e: Expression) => e.asCanonicalStringVal)
+  )
 
   test("Rewrites ORDER BY ID(node)") {
     assertRewrite("MATCH (n) RETURN n ORDER BY id(n)", "MATCH (n) RETURN n ORDER BY n")
@@ -46,11 +50,11 @@ class rewriteOrderByIdTest extends CypherFunSuite with AstRewritingTestSupport {
   }
 
   private def assertRewrite(originalQuery: String, expectedQuery: String): Unit = {
-    val original = parse(originalQuery, OpenCypherExceptionFactory(None))
-    val expected = parse(expectedQuery, OpenCypherExceptionFactory(None))
+    val original = parse(originalQuery, Neo4jCypherExceptionFactory(originalQuery, None))
+    val expected = parse(expectedQuery, Neo4jCypherExceptionFactory(expectedQuery, None))
 
-    val checkResult = original.semanticCheck.run(SemanticState.clean, SemanticCheckContext.default)
-    val rewriter = rewriteOrderById(checkResult.state)
+    val checkResult = original.semanticCheck.run(SemanticState.clean, CypherVersionHelpers.arbitrarySemanticContext())
+    val rewriter = RewriteOrderById(checkResult.state)
 
     val result = original.rewrite(rewriter)
     assert(
@@ -60,10 +64,10 @@ class rewriteOrderByIdTest extends CypherFunSuite with AstRewritingTestSupport {
   }
 
   private def assertIsNotRewritten(query: String): Unit = {
-    val original = parse(query, OpenCypherExceptionFactory(None))
+    val original = parse(query, Neo4jCypherExceptionFactory(query, None))
 
-    val checkResult = original.semanticCheck.run(SemanticState.clean, SemanticCheckContext.default)
-    val rewriter = rewriteOrderById(checkResult.state)
+    val checkResult = original.semanticCheck.run(SemanticState.clean, CypherVersionHelpers.arbitrarySemanticContext())
+    val rewriter = RewriteOrderById(checkResult.state)
 
     val result = original.rewrite(rewriter)
     assert(

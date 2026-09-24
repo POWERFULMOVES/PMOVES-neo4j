@@ -21,7 +21,7 @@ package org.neo4j.internal.id;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assertions.fail;
+import static org.assertj.core.api.Fail.fail;
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
 import static org.neo4j.test.Race.throwing;
 
@@ -40,22 +40,22 @@ import org.apache.commons.lang3.tuple.Pair;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.collection.trackable.HeapTrackingLongArrayList;
 import org.neo4j.internal.id.BufferingIdGeneratorFactory.IdBuffer;
 import org.neo4j.internal.id.IdController.TransactionSnapshot;
 import org.neo4j.io.ByteUnit;
 import org.neo4j.io.fs.DelegatingFileSystemAbstraction;
 import org.neo4j.io.fs.FileSystemAbstraction;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.test.Race;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
 import org.neo4j.values.storable.RandomValues;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 @TestDirectoryExtension
 class DiskBufferedIdsTest {
     @Inject
@@ -77,7 +77,7 @@ class DiskBufferedIdsTest {
     }
 
     private void openBuffer(FileSystemAbstraction fs) throws IOException {
-        buffer = new DiskBufferedIds(fs, basePath, INSTANCE, (int) ByteUnit.kibiBytes(500));
+        buffer = new DiskBufferedIds(fs, new StoreFile(basePath), INSTANCE, (int) ByteUnit.kibiBytes(500));
     }
 
     @AfterEach
@@ -104,7 +104,7 @@ class DiskBufferedIdsTest {
         var source = List.of(Pair.of(snapshot1, buffers1), Pair.of(snapshot2, buffers2))
                 .iterator();
         buffer.read(new VerifyingReader(() -> source.hasNext() ? source.next() : null));
-        assertThat(source.hasNext()).isFalse();
+        assertThat(source).isExhausted();
     }
 
     @Test
@@ -314,14 +314,16 @@ class DiskBufferedIdsTest {
         // then
         var source = List.of(Pair.of(snapshotAfterClear, bufferAfterClear)).iterator();
         buffer.read(new VerifyingReader(() -> source.hasNext() ? source.next() : null));
-        assertThat(source.hasNext()).isFalse();
+        assertThat(source).isExhausted();
     }
 
     private int numberOfSegments() {
         try {
-            return fs.listFiles(basePath.getParent(), entry -> entry.getFileName()
-                            .toString()
-                            .contains(basePath.getFileName().toString()))
+            return fs.listFiles(
+                            basePath.getParent(),
+                            entry -> entry.getFileName()
+                                    .toString()
+                                    .contains(basePath.getFileName().toString()))
                     .length;
         } catch (IOException e) {
             throw new UncheckedIOException(e);

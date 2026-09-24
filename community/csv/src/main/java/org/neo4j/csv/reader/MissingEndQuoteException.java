@@ -19,8 +19,37 @@
  */
 package org.neo4j.csv.reader;
 
-public class MissingEndQuoteException extends FormatException {
-    public MissingEndQuoteException(SourceTraceability source, int startingLine, char quoteChar) {
-        super(source, "Missing end for quote (" + quoteChar + ") which started on line " + startingLine);
+import org.neo4j.exceptions.ObfuscatableException;
+import org.neo4j.gqlstatus.GqlHelper;
+import org.neo4j.gqlstatus.GqlRuntimeException;
+
+public class MissingEndQuoteException extends GqlRuntimeException implements ObfuscatableException {
+    private static final String messageTemplate = "Missing end quote at position %s in '%s'.";
+    private final SourceTraceability source;
+    private final String sourceDescription;
+    private final long position;
+
+    public MissingEndQuoteException(SourceTraceability source) {
+        super(
+                GqlHelper.get22NAD(source.sourceDescription(), source.position()),
+                messageTemplate.formatted(source.position(), source.sourceDescription()),
+                null);
+        this.source = source;
+        this.sourceDescription = source.sourceDescription();
+        this.position = source.position();
+    }
+
+    public SourceTraceability source() {
+        return source;
+    }
+
+    @Override
+    public String getMessage() {
+        return messageTemplate.formatted(position, sourceDescription);
+    }
+
+    @Override
+    public String obfuscatedMessage(String obfuscatedValue) {
+        return messageTemplate.formatted(position, obfuscatedValue);
     }
 }

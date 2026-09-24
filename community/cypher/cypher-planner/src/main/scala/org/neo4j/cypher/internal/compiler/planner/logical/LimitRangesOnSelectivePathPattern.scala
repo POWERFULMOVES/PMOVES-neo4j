@@ -21,7 +21,6 @@ package org.neo4j.cypher.internal.compiler.planner.logical
 
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
-import org.neo4j.cypher.internal.expressions.FunctionName
 import org.neo4j.cypher.internal.expressions.GreaterThanOrEqual
 import org.neo4j.cypher.internal.expressions.LessThanOrEqual
 import org.neo4j.cypher.internal.expressions.LogicalVariable
@@ -32,6 +31,7 @@ import org.neo4j.cypher.internal.ir.Selections
 import org.neo4j.cypher.internal.ir.SelectivePathPattern
 import org.neo4j.cypher.internal.ir.VarPatternLength
 import org.neo4j.cypher.internal.ir.helpers.ExpressionConverters.PredicateConverter
+import org.neo4j.cypher.internal.util.FunctionName
 import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.UpperBound
 
@@ -117,7 +117,7 @@ case class LimitRangesOnSelectivePathPattern(rewriteQuantifiersAbove: Int) {
     val pos = InputPosition.NONE
     GreaterThanOrEqual(
       FunctionInvocation(FunctionName("size")(pos), variable)(pos),
-      SignedDecimalIntegerLiteral(min)(pos)
+      SignedDecimalIntegerLiteral(min)(pos.zeroLength)
     )(pos)
   }
 
@@ -125,7 +125,7 @@ case class LimitRangesOnSelectivePathPattern(rewriteQuantifiersAbove: Int) {
     val pos = InputPosition.NONE
     LessThanOrEqual(
       FunctionInvocation(FunctionName("size")(pos), variable)(pos),
-      SignedDecimalIntegerLiteral(max)(pos)
+      SignedDecimalIntegerLiteral(max)(pos.zeroLength)
     )(pos)
   }
 }

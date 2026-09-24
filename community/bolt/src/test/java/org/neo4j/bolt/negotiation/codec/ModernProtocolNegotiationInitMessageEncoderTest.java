@@ -20,33 +20,29 @@
 package org.neo4j.bolt.negotiation.codec;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.channel.embedded.EmbeddedChannel;
 import java.util.EnumSet;
 import java.util.List;
 import org.assertj.core.api.Assertions;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.neo4j.bolt.negotiation.ProtocolVersion;
 import org.neo4j.bolt.negotiation.message.ModernProtocolNegotiationInitMessage;
 import org.neo4j.bolt.negotiation.message.ProtocolCapability;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
+import org.neo4j.bolt.testing.annotation.StrictBufferExtension;
 import org.neo4j.bolt.testing.assertions.ByteBufAssertions;
 import org.neo4j.bolt.testing.assertions.ProtocolVersionAssertions;
+import org.neo4j.bolt.testing.channel.StrictBufferContext;
 
+@StrictBufferExtension
 class ModernProtocolNegotiationInitMessageEncoderTest {
 
-    private EmbeddedChannel channel;
-
-    @BeforeEach
-    void prepare() {
-        this.channel = new EmbeddedChannel(new ModernProtocolNegotiationInitMessageEncoder());
-    }
-
     @Test
-    void shouldEncodeMessage() {
+    void shouldEncodeMessage(StrictBufferContext ctx) {
+        var channel = ctx.channel(new ModernProtocolNegotiationInitMessageEncoder());
+
         var capabilities = EnumSet.noneOf(ProtocolCapability.class);
         capabilities.add(ProtocolCapability.FABRIC);
 
-        this.channel.writeOutbound(new ModernProtocolNegotiationInitMessage(
+        channel.writeOutbound(new ModernProtocolNegotiationInitMessage(
                 new ProtocolVersion(ProtocolVersion.MAX_MAJOR_BIT, 2, 0),
                 List.of(
                         new ProtocolVersion(4, 2),
@@ -58,7 +54,7 @@ class ModernProtocolNegotiationInitMessageEncoderTest {
                         new ProtocolVersion(5, 11)),
                 capabilities));
 
-        var buffer = this.channel.<ByteBuf>readOutbound();
+        var buffer = ctx.output(channel.<ByteBuf>readOutbound());
 
         ByteBufAssertions.assertThat(buffer).isNotNull().hasReadableBytes(9);
 

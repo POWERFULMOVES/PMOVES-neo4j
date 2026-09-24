@@ -30,26 +30,32 @@ import org.neo4j.cypher.internal.runtime.interpreted.pipes.QueryState
 import org.neo4j.cypher.internal.util.attribution.Id
 
 case class DirectedRelationshipTypeScanSlottedPipe(
-  relOffset: Int,
-  fromOffset: Int,
+  relOffset: Option[Int],
+  fromOffset: Option[Int],
   typ: LazyTypeStatic,
-  toOffset: Int,
-  indexOrder: IndexOrder
+  toOffset: Option[Int],
+  indexOrder: IndexOrder,
+  includeChangesFromThisTransaction: Boolean
 )(val id: Id = Id.INVALID_ID) extends Pipe {
+
+  private val relationshipWriter = Relationships.compileRelationshipWriter(relOffset, fromOffset, toOffset)
 
   protected def internalCreateResults(state: QueryState): ClosingIterator[CypherRow] = {
 
     val typeId = typ.getId(state.query)
     if (typeId == LazyType.UNKNOWN) ClosingIterator.empty
     else {
-      val relIterator = state.query.getRelationshipsByType(state.relTypeTokenReadSession.get, typeId, indexOrder)
+      val relIterator = state.query.getRelationshipsByType(
+        state.relTypeTokenReadSession.get,
+        typeId,
+        indexOrder,
+        includeChangesFromThisTransaction
+      )
       PrimitiveLongHelper.map(
         relIterator,
         { relId =>
           val context = state.newRowWithArgument(rowFactory)
-          context.setLongAt(relOffset, relId)
-          context.setLongAt(fromOffset, relIterator.startNodeId())
-          context.setLongAt(toOffset, relIterator.endNodeId())
+          relationshipWriter.writeRow(context, relId, relIterator)
           context
         }
       )

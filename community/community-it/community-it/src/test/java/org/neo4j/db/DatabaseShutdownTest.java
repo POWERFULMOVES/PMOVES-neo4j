@@ -38,6 +38,7 @@ import org.neo4j.graphdb.facade.DatabaseManagementServiceFactory;
 import org.neo4j.graphdb.facade.ExternalDependencies;
 import org.neo4j.graphdb.factory.module.GlobalModule;
 import org.neo4j.graphdb.factory.module.edition.CommunityEditionModule;
+import org.neo4j.io.async.AsyncBlockAccessor;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.pagecache.DelegatingPageCache;
@@ -46,7 +47,9 @@ import org.neo4j.io.pagecache.IOController;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.PagedFile;
 import org.neo4j.io.pagecache.impl.muninn.EvictionBouncer;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.impl.muninn.VersionStorage;
+import org.neo4j.io.pagecache.segment.FileSegmentTracker;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.kernel.impl.factory.DbmsInfo;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
@@ -59,6 +62,7 @@ import org.neo4j.scheduler.JobScheduler;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.EphemeralNeo4jLayoutExtension;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.time.SystemNanoClock;
 
 @EphemeralNeo4jLayoutExtension
@@ -76,7 +80,7 @@ class DatabaseShutdownTest {
                         databaseLayout.databaseDirectory(), fs);
         DatabaseManagementService managementService = factory.build();
         GraphDatabaseAPI databaseService = (GraphDatabaseAPI) managementService.database(DEFAULT_DATABASE_NAME);
-        DatabaseStateService dbStateService =
+        DatabaseStateService<?> dbStateService =
                 databaseService.getDependencyResolver().resolveDependency(DatabaseStateService.class);
         factory.setFailFlush(true);
 
@@ -86,6 +90,7 @@ class DatabaseShutdownTest {
     }
 
     @Test
+    @SkipOnSpd(reason = "Database shutdown count will be more in spd")
     void invokeDatabaseShutdownListenersOnShutdown() {
         DatabaseManagementService managementService = new TestDatabaseManagementServiceBuilder(databaseLayout)
                 .setFileSystem(fs)
@@ -131,30 +136,45 @@ class DatabaseShutdownTest {
                             return new DelegatingPageCache(pageCache) {
                                 @Override
                                 public PagedFile map(
-                                        Path path,
+                                        StoreFile storePath,
                                         int pageSize,
                                         String databaseName,
                                         ImmutableSet<OpenOption> openOptions,
                                         IOController ioController,
                                         EvictionBouncer evictionGuard,
-                                        VersionStorage versionStorage)
+                                        VersionStorage versionStorage,
+                                        FileSegmentTracker segmentTracker)
                                         throws IOException {
                                     PagedFile pagedFile = super.map(
-                                            path,
+                                            storePath,
                                             pageSize,
                                             databaseName,
                                             openOptions,
                                             ioController,
                                             evictionGuard,
-                                            versionStorage);
+                                            versionStorage,
+                                            segmentTracker);
                                     return new DelegatingPagedFile(pagedFile) {
                                         @Override
-                                        public void flushAndForce(FileFlushEvent flushEvent) throws IOException {
+                                        public void flush(
+                                                FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor)
+                                                throws IOException {
                                             if (failFlush) {
                                                 // this is simulating a failing check pointing on shutdown
                                                 throw new IOException("Boom!");
                                             }
-                                            super.flushAndForce(flushEvent);
+                                            super.flush(flushEvent, asyncBlockAccessor);
+                                        }
+
+                                        @Override
+                                        public void flushAndForce(
+                                                FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor)
+                                                throws IOException {
+                                            if (failFlush) {
+                                                // this is simulating a failing check pointing on shutdown
+                                                throw new IOException("Boom!");
+                                            }
+                                            super.flushAndForce(flushEvent, asyncBlockAccessor);
                                         }
                                     };
                                 }

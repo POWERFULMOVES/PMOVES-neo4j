@@ -155,6 +155,9 @@ public class SslPolicyLoader {
         Path baseDirectory = config.get(policyConfig.base_directory);
         Path revokedCertificatesDir = config.get(policyConfig.revoked_dir);
 
+        Path privateKeyFile = config.get(policyConfig.private_key);
+        Path certificateFile = config.get(policyConfig.public_certificate);
+
         if (!fileSystem.fileExists(baseDirectory)) {
             throw new IllegalArgumentException(format(
                     "Base directory '%s' for SSL policy with name '%s' does not exist.",
@@ -178,15 +181,11 @@ public class SslPolicyLoader {
         List<String> tlsVersions = config.get(policyConfig.tls_versions);
         List<String> ciphers = config.get(policyConfig.ciphers);
 
-        if (!verifyHostname && !config.isExplicitlySet(policyConfig.verify_hostname)) {
-            log.warn(
-                    "SSL Hostname verification is disabled by default. Consider explicitly setting %s",
-                    policyConfig.verify_hostname.name());
-        }
-
         return new SslPolicy(
                 keyAndChain.privateKey,
+                privateKeyFile,
                 keyAndChain.keyCertChain,
+                certificateFile,
                 tlsVersions,
                 ciphers,
                 clientAuth,

@@ -57,16 +57,16 @@ class NativeIndexUpdater<KEY extends NativeIndexKey<KEY>> implements IndexUpdate
     }
 
     @Override
-    public void process(IndexEntryUpdate<?> update) throws IndexEntryConflictException {
+    public void process(IndexEntryUpdate update) throws IndexEntryConflictException {
         assertOpen();
-        ValueIndexEntryUpdate<?> valueUpdate = asValueUpdate(update);
+        ValueIndexEntryUpdate valueUpdate = asValueUpdate(update);
         processUpdate(treeKey, valueUpdate, writer, conflictDetectingValueMerger, ignoreStrategy);
     }
 
     @Override
     public void close() {
         closed = true;
-        IOUtils.closeAllUnchecked(writer);
+        IOUtils.closeUnchecked(writer);
     }
 
     private void assertOpen() {
@@ -82,7 +82,7 @@ class NativeIndexUpdater<KEY extends NativeIndexKey<KEY>> implements IndexUpdate
 
     static <KEY extends NativeIndexKey<KEY>> void processUpdate(
             KEY treeKey,
-            ValueIndexEntryUpdate<?> update,
+            ValueIndexEntryUpdate update,
             Writer<KEY, NullValue> writer,
             ConflictDetectingValueMerger<KEY, Value[]> conflictDetectingValueMerger,
             IndexUpdateIgnoreStrategy ignoreStrategy)
@@ -93,7 +93,7 @@ class NativeIndexUpdater<KEY extends NativeIndexKey<KEY>> implements IndexUpdate
                 break;
             case CHANGED:
                 processRemove(treeKey, update.getEntityId(), update.beforeValues(), writer, ignoreStrategy);
-                // fallthrough
+            // fallthrough
             case ADDED:
                 processAdd(
                         treeKey,

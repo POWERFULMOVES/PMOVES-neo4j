@@ -16,29 +16,12 @@
  */
 package org.neo4j.cypher.internal.expressions
 
-import org.neo4j.cypher.internal.expressions.functions.AggregatingFunction
-import org.neo4j.cypher.internal.expressions.functions.UserDefinedFunctionInvocation
-
 object IsAggregate {
 
-  def unapply(v: Any) = v match {
-    case expr: CountStar =>
-      Some(expr)
-
-    case fi: FunctionInvocation if fi.distinct =>
-      Some(fi)
-
-    case fi: FunctionInvocation =>
-      fi.function match {
-        case _: AggregatingFunction => Some(fi)
-        case _                      => None
-      }
-
-    case fi: UserDefinedFunctionInvocation if fi.isAggregate =>
-      Some(fi)
-
-    case _ =>
-      None
+  def unapply(v: Any): Option[AnyRef] = v match {
+    case expr: CountStar                              => Some(expr)
+    case fi: FunctionInvocationLike if fi.isAggregate => Some(fi)
+    case _                                            => None
   }
 
   def apply(e: Expression): Boolean = unapply(e).nonEmpty

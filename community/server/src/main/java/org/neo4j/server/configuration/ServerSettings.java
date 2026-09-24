@@ -20,17 +20,21 @@
 package org.neo4j.server.configuration;
 
 import static java.util.Collections.emptyList;
+import static org.neo4j.configuration.GraphDatabaseSettings.neo4j_home;
 import static org.neo4j.configuration.SettingConstraints.range;
 import static org.neo4j.configuration.SettingImpl.newBuilder;
 import static org.neo4j.configuration.SettingValueParsers.BOOL;
 import static org.neo4j.configuration.SettingValueParsers.DURATION;
+import static org.neo4j.configuration.SettingValueParsers.GLOBBING_PATTERN;
 import static org.neo4j.configuration.SettingValueParsers.INT;
 import static org.neo4j.configuration.SettingValueParsers.NORMALIZED_RELATIVE_URI;
+import static org.neo4j.configuration.SettingValueParsers.PATH;
 import static org.neo4j.configuration.SettingValueParsers.STRING;
 import static org.neo4j.configuration.SettingValueParsers.listOf;
 import static org.neo4j.configuration.SettingValueParsers.setOfEnums;
 
 import java.net.URI;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.EnumSet;
 import java.util.List;
@@ -41,6 +45,7 @@ import org.neo4j.configuration.Internal;
 import org.neo4j.configuration.SettingValueParser;
 import org.neo4j.configuration.SettingValueParsers;
 import org.neo4j.configuration.SettingsDeclaration;
+import org.neo4j.configuration.helpers.GlobbingPattern;
 import org.neo4j.graphdb.config.Setting;
 import org.neo4j.server.web.JettyThreadCalculator;
 
@@ -130,6 +135,31 @@ public class ServerSettings implements SettingsDeclaration {
                     "dbms.security.http_strict_transport_security", STRING, null)
             .build();
 
+    @Description("Enable processing of X-Forwarded-Host and X-Forwarded-Proto headers. "
+            + "Only enable this if Neo4j is behind a trusted reverse proxy or load balancer. "
+            + "When disabled, X-Forward headers are ignored for security reasons.")
+    public static final Setting<Boolean> http_x_forward_enabled =
+            newBuilder("server.http.x_forward.enabled", BOOL, true).build();
+
+    @Description("List of trusted proxy IP addresses allowed to set X-Forward headers. "
+            + "Only requests from these IPs will have their X-Forward headers processed. "
+            + "Leave empty to accept X-Forward headers from any source (not recommended).")
+    public static final Setting<List<String>> http_x_forward_allow_proxies = newBuilder(
+                    "server.http.x_forward.allow_proxies", listOf(STRING), emptyList())
+            .build();
+
+    @Description("List of allowed hostnames that can appear in X-Forwarded-Host header. "
+            + "This prevents host header injection attacks. "
+            + "Leave empty to accept any hostname (not recommended for production).")
+    public static final Setting<List<String>> http_x_forward_allow_hosts = newBuilder(
+                    "server.http.x_forward.allow_hosts", listOf(STRING), emptyList())
+            .build();
+
+    @Description("Allow private IP addresses (RFC 1918) in X-Forwarded-Host header. "
+            + "Set to false to prevent internal network reconnaissance attacks.")
+    public static final Setting<Boolean> http_x_forward_private_ips_enabled =
+            newBuilder("server.http.x_forward.private_ips_enabled", BOOL, false).build();
+
     @Description("Defines the Content-Security-Policy header to return to content returned on static endpoints.")
     public static final Setting<String> http_static_content_security_policy = newBuilder(
                     "dbms.security.http_static_content_security_policy_header",
@@ -185,7 +215,7 @@ public class ServerSettings implements SettingsDeclaration {
     @Internal
     @Description("The length of the transaction identifier to use in the Query API")
     public static final Setting<Integer> transaction_id_length =
-            newBuilder("internal.server.queryapi.transactionid_length", INT, 4).build();
+            newBuilder("internal.server.queryapi.transactionid_length", INT, 6).build();
 
     @Internal
     @Description("Publicly discoverable bolt:// URI to use for Neo4j Drivers wanting to access the data in this "
@@ -207,6 +237,13 @@ public class ServerSettings implements SettingsDeclaration {
                     "internal.dbms.discoverable_bolt_routing_address",
                     SettingValueParsers.URI,
                     SettingValueParsers.URI.parse(""))
+            .build();
+
+    @Internal
+    @Description(
+            "If set to true, forces the discoverable bolt address to be derived from the request base URI when calling the discovery http endpoint.")
+    public static final Setting<Boolean> bolt_discoverable_address_from_base_uri = newBuilder(
+                    "internal.dbms.discoverable_bolt_address_from_base_uri_enabled", BOOL, false)
             .build();
 
     @SuppressWarnings("unused") // accessed from the browser
@@ -266,5 +303,21 @@ public class ServerSettings implements SettingsDeclaration {
     @Description("Clacks module names")
     public static final Setting<String> clacks_names = newBuilder(
                     "internal.dbms.clacks_names", STRING, "Richard Macaskill")
+            .build();
+
+    @Internal
+    @Description("The location of the browser zip file to be hosted.")
+    public static final Setting<Path> web_dir_path = newBuilder("internal.dbms.web_dir_path", PATH, Path.of("web"))
+            .setDependency(neo4j_home)
+            .immutable()
+            .build();
+
+    @Internal
+    @Description("The prefix of the browser zip file.")
+    public static final Setting<List<GlobbingPattern>> browser_matching_pattern = newBuilder(
+                    "internal.dbms.browser_artefact_pattern",
+                    listOf(GLOBBING_PATTERN),
+                    GlobbingPattern.create("neo4j-browser*.zip"))
+            .immutable()
             .build();
 }

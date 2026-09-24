@@ -20,11 +20,18 @@
 package org.neo4j.io.pagecache.tracing;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import org.neo4j.internal.helpers.MathUtil;
-import org.neo4j.io.pagecache.PageSwapper;
 import org.neo4j.io.pagecache.PagedFile;
+import org.neo4j.io.pagecache.impl.muninn.swapper.PageSwapper;
+import org.neo4j.io.pagecache.tracing.async.AsyncEvictionCompletion;
+import org.neo4j.io.pagecache.tracing.async.AsyncEvictionEvent;
+import org.neo4j.io.pagecache.tracing.async.AsyncEvictionFailure;
+import org.neo4j.io.pagecache.tracing.async.AsyncFlushCompletion;
+import org.neo4j.io.pagecache.tracing.async.AsyncFlushFailure;
+import org.neo4j.io.pagecache.tracing.async.SubmitEvent;
 import org.neo4j.io.pagecache.tracing.cursor.DefaultPageCursorTracer;
 import org.neo4j.io.pagecache.tracing.cursor.PageCursorTracer;
 
@@ -55,6 +62,10 @@ public class DefaultPageCacheTracer implements PageCacheTracer {
     protected final LongAdder filesUnmapped = new LongAdder();
     protected final LongAdder fileTruncations = new LongAdder();
 
+    protected final LongAdder asyncIoSubmit = new LongAdder();
+    protected final LongAdder asyncIoCompleted = new LongAdder();
+    protected final LongAdder asyncIoFailed = new LongAdder();
+
     protected final LongAdder evictionExceptions = new LongAdder();
     protected final LongAdder iopqPerformed = new LongAdder();
     protected final LongAdder globalLimitTimes = new LongAdder();
@@ -65,13 +76,22 @@ public class DefaultPageCacheTracer implements PageCacheTracer {
     protected final LongAdder prefetchedPages = new LongAdder();
     protected final LongAdder prefetchedPagesWithFaults = new LongAdder();
     protected final LongAdder snapshotsLoaded = new LongAdder();
+    protected final LongAdder segmentsCreated = new LongAdder();
+    protected final LongAdder segmentsLoaded = new LongAdder();
+    protected final LongAdder segmentsUnloaded = new LongAdder();
+    protected final LongAdder segmentsDeleted = new LongAdder();
     protected final AtomicLong maxPages = new AtomicLong();
 
     private final boolean tracePageFileIndividually;
 
     private final EvictionEvent evictionEvent = new PageCacheEvictionEvent();
     private final EvictionRunEvent evictionRunEvent = new DefaultEvictionRunEvent();
-    private final DatabaseFlushEvent databaseFlushEvent = new DatabaseFlushEvent(new DefaultPageCacheFileFlushEvent());
+    private final AsyncEvictionEvent asyncEvictionEvent = new AsyncPageCacheEvictionEvent();
+    private final AsyncEvictionCompletionEvent asyncEvictionCompletion = new AsyncEvictionCompletionEvent();
+    private final AsyncEvictionFailure asyncEvictionFailure = new AsyncEvictionFailureEvent();
+    private final AsyncPageCacheSubmitEvent asyncPageCacheSubmitEvent = new AsyncPageCacheSubmitEvent();
+    private final DatabaseFlushEvent databaseFlushEvent = new DatabaseFlushEvent(
+            new DefaultPageCacheFileFlushEvent(), new DefaultAsyncFlushCompletion(), new DefaultAsyncFlushFailure());
 
     public DefaultPageCacheTracer() {
         this(false);
@@ -109,6 +129,16 @@ public class DefaultPageCacheTracer implements PageCacheTracer {
     @Override
     public EvictionRunEvent beginEviction() {
         return evictionRunEvent;
+    }
+
+    @Override
+    public AsyncEvictionCompletion asyncEvictionCompletion() {
+        return asyncEvictionCompletion;
+    }
+
+    @Override
+    public AsyncEvictionFailure asyncEvictionFailure() {
+        return asyncEvictionFailure;
     }
 
     @Override
@@ -159,6 +189,21 @@ public class DefaultPageCacheTracer implements PageCacheTracer {
     @Override
     public long evictions() {
         return evictions.sum();
+    }
+
+    @Override
+    public long asyncIoSubmitted() {
+        return asyncIoSubmit.sum();
+    }
+
+    @Override
+    public long asyncIoCompleted() {
+        return asyncIoCompleted.sum();
+    }
+
+    @Override
+    public long asyncIoFailed() {
+        return asyncIoFailed.sum();
     }
 
     @Override
@@ -292,6 +337,59 @@ public class DefaultPageCacheTracer implements PageCacheTracer {
     }
 
     @Override
+    public long segmentsCreated() {
+        return segmentsCreated.sum();
+    }
+
+    @Override
+    public long segmentsLoaded() {
+        return segmentsLoaded.sum();
+    }
+
+    @Override
+    public long segmentsUnloaded() {
+        return segmentsUnloaded.sum();
+    }
+
+    @Override
+    public long segmentsDeleted() {
+        return segmentsDeleted.sum();
+    }
+
+    @Override
+    public SegmentEvent createSegment(Path basePath, int segmentIndex) {
+        return new CountingSegmentEvent(segmentsCreated);
+    }
+
+    @Override
+    public SegmentEvent loadSegment(Path basePath, int segmentIndex) {
+        return new CountingSegmentEvent(segmentsLoaded);
+    }
+
+    @Override
+    public SegmentEvent unloadSegment(Path basePath, int segmentIndex) {
+        return new CountingSegmentEvent(segmentsUnloaded);
+    }
+
+    @Override
+    public SegmentEvent deleteSegment(Path basePath, int segmentIndex) {
+        return new CountingSegmentEvent(segmentsDeleted);
+    }
+
+    private static final class CountingSegmentEvent implements SegmentEvent {
+        private final LongAdder counter;
+
+        CountingSegmentEvent(LongAdder counter) {
+            this.counter = counter;
+        }
+
+        @Override
+        public void close() {
+            counter.increment();
+        }
+    }
+
+    @Override
     public void iopq(long iopq) {
         iopqPerformed.add(iopq);
     }
@@ -300,6 +398,21 @@ public class DefaultPageCacheTracer implements PageCacheTracer {
     public void limitIO(long millis) {
         globalLimitTimes.increment();
         globalLimitedMillis.add(millis);
+    }
+
+    @Override
+    public void asyncIoSubmitted(long asyncIoSubmitted) {
+        asyncIoSubmit.add(asyncIoSubmitted);
+    }
+
+    @Override
+    public void asyncIoCompleted(long asyncIoCompleted) {
+        this.asyncIoCompleted.add(asyncIoCompleted);
+    }
+
+    @Override
+    public void asyncIoFailed(long asyncIoFailed) {
+        this.asyncIoFailed.add(asyncIoFailed);
     }
 
     @Override
@@ -435,6 +548,40 @@ public class DefaultPageCacheTracer implements PageCacheTracer {
         this.maxPages.set(maxPages);
     }
 
+    private class AsyncEvictionCompletionEvent implements AsyncEvictionCompletion {
+
+        @Override
+        public void addBytesWritten(int bytes, PageFileSwapperTracer swapperTracer) {
+            bytesWritten.add(bytes);
+            swapperTracer.bytesWritten(bytes);
+        }
+
+        @Override
+        public void addPagesCompleted(int pageCount, PageFileSwapperTracer swapperTracer) {
+            asyncIoCompleted.add(pageCount);
+            flushes.add(pageCount);
+            swapperTracer.flushes(pageCount);
+            evictions.add(pageCount);
+            evictionFlushes.add(pageCount);
+        }
+
+        @Override
+        public void close() {}
+
+        @Override
+        public void freeListSize(int size) {}
+    }
+
+    private class AsyncEvictionFailureEvent implements AsyncEvictionFailure {
+
+        @Override
+        public void close() {
+            evictions.increment();
+            asyncIoFailed.increment();
+            evictionExceptions.increment();
+        }
+    }
+
     private class PageCacheFlushEvent implements FlushEvent {
         private PageFileSwapperTracer swapperTracer;
         private long pagesFlushed;
@@ -496,6 +643,11 @@ public class DefaultPageCacheTracer implements PageCacheTracer {
         }
 
         @Override
+        public AsyncEvictionEvent beginAsyncEviction(long cachePageId) {
+            return asyncEvictionEvent;
+        }
+
+        @Override
         public void close() {}
     }
 
@@ -523,6 +675,11 @@ public class DefaultPageCacheTracer implements PageCacheTracer {
                 int mergedPages) {
             flushEvent.swapperTracer = swapper.fileSwapperTracer();
             return flushEvent;
+        }
+
+        @Override
+        public SubmitEvent beginAsyncSubmit() {
+            return asyncPageCacheSubmitEvent;
         }
 
         @Override
@@ -556,7 +713,8 @@ public class DefaultPageCacheTracer implements PageCacheTracer {
 
         @Override
         public long localBytesWritten() {
-            return flushEvent.getLocalBytesWritten();
+            return flushEvent.getLocalBytesWritten()
+                    + databaseFlushEvent.asyncFlushCompletion().getLocalBytesWritten();
         }
 
         @Override
@@ -616,5 +774,134 @@ public class DefaultPageCacheTracer implements PageCacheTracer {
                 swapperTracer.evictions(1);
             }
         }
+    }
+
+    private class AsyncPageCacheSubmitEvent implements SubmitEvent {
+        @Override
+        public void addSubmittedPages(int pageCount) {
+            asyncIoSubmit.add(pageCount);
+        }
+
+        @Override
+        public void addPagesMerged(int pageCount) {
+            merges.add(pageCount);
+        }
+
+        @Override
+        public void setException(Exception e) {}
+
+        @Override
+        public void close() {}
+    }
+
+    private class AsyncPageCacheEvictionEvent implements AsyncEvictionEvent {
+        private PageFileSwapperTracer swapperTracer;
+
+        @Override
+        public void setFilePageId(long filePageId) {}
+
+        @Override
+        public void setSwapper(PageSwapper swapper) {
+            this.swapperTracer = swapper.fileSwapperTracer();
+        }
+
+        @Override
+        public void setException(Exception exception) {
+            evictionExceptions.increment();
+            swapperTracer.evictionExceptions(1);
+        }
+
+        @Override
+        public SubmitEvent beginAsyncSubmit(
+                long pageRef, PageSwapper swapper, PageReferenceTranslator pageReferenceTranslator) {
+            return asyncPageCacheSubmitEvent;
+        }
+
+        @Override
+        public void evicted() {
+            evictions.increment();
+        }
+
+        @Override
+        public void close() {}
+    }
+
+    private class DefaultAsyncFlushCompletion implements AsyncFlushCompletion {
+
+        private long pagesFlushed;
+        private long ioPerformed;
+        private final LongAdder localBytesWritten = new LongAdder();
+
+        @Override
+        public void addBytesWritten(int bytes) {
+            bytesWritten.add(bytes);
+            localBytesWritten.add(bytes);
+        }
+
+        @Override
+        public void addPagesCompleted(int pageCount) {
+            asyncIoCompleted.add(pageCount);
+            pagesFlushed += pageCount;
+            flushes.add(pageCount);
+        }
+
+        @Override
+        public void reportIO(int completedIOs) {
+            ioPerformed += completedIOs;
+            iopqPerformed.add(completedIOs);
+        }
+
+        @Override
+        public void reset() {
+            pagesFlushed = 0;
+            ioPerformed = 0;
+            localBytesWritten.reset();
+        }
+
+        @Override
+        public long pagesFlushed() {
+            return pagesFlushed;
+        }
+
+        @Override
+        public long ioPerformed() {
+            return ioPerformed;
+        }
+
+        @Override
+        public long getLocalBytesWritten() {
+            return localBytesWritten.longValue();
+        }
+
+        @Override
+        public void close() {}
+    }
+
+    private class DefaultAsyncFlushFailure implements AsyncFlushFailure {
+        private long iosPerformed;
+
+        @Override
+        public void addPagesFailed(int pageCount) {
+            asyncIoFailed.add(pageCount);
+        }
+
+        @Override
+        public void reportIO(int completedIOs) {
+            iosPerformed += completedIOs;
+            iopqPerformed.add(completedIOs);
+        }
+
+        @Override
+        public void reset() {
+            this.iosPerformed = 0;
+        }
+
+        @Override
+        public long ioPerformed() {
+            return iosPerformed;
+        }
+
+        @Override
+        public void close() {}
     }
 }

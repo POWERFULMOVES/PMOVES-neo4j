@@ -39,6 +39,7 @@ import org.neo4j.internal.schema.SchemaCache;
 import org.neo4j.internal.schema.SchemaDescriptor;
 import org.neo4j.internal.schema.StorageSchemaReaderSnapshot;
 import org.neo4j.internal.schema.constraints.IndexBackedConstraintDescriptor;
+import org.neo4j.internal.schema.constraints.TypeConstraintDescriptor;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.kernel.impl.store.NeoStores;
 import org.neo4j.kernel.impl.store.NodeStore;
@@ -176,6 +177,17 @@ public class RecordStorageReader implements StorageReader {
     }
 
     @Override
+    public boolean hasAnyTypeConstraintWithDefaultValue(EntityType entityType) {
+        return schemaCache.hasAnyTypeConstraintWithDefaultValue(entityType);
+    }
+
+    @Override
+    public Collection<TypeConstraintDescriptor> typeConstraintsWithDefaultValue(
+            int entityTokenId, EntityType entityType) {
+        return schemaCache.typeConstraintsWithDefaultValue(entityTokenId, entityType);
+    }
+
+    @Override
     public boolean hasRelatedSchema(int[] tokens, int propertyKey, EntityType entityType) {
         return schemaCache.hasRelatedSchema(tokens, propertyKey, entityType);
     }
@@ -236,11 +248,6 @@ public class RecordStorageReader implements StorageReader {
     }
 
     @Override
-    public long estimateCountsForNode(int labelId, CursorContext cursorContext) {
-        return counts.estimateNodeCount(labelId, cursorContext);
-    }
-
-    @Override
     public void visitAllCounts(CountsVisitor visitor, CursorContext cursorContext) {
         counts.accept(visitor, cursorContext);
     }
@@ -251,15 +258,6 @@ public class RecordStorageReader implements StorageReader {
             throw new UnsupportedOperationException("not implemented");
         }
         return counts.relationshipCount(startLabelId, typeId, endLabelId, cursorContext);
-    }
-
-    @Override
-    public long estimateCountsForRelationship(
-            int startLabelId, int typeId, int endLabelId, CursorContext cursorContext) {
-        if (!(startLabelId == ANY_LABEL || endLabelId == ANY_LABEL)) {
-            throw new UnsupportedOperationException("not implemented");
-        }
-        return counts.estimateRelationshipCount(startLabelId, typeId, endLabelId, cursorContext);
     }
 
     @Override
@@ -304,7 +302,7 @@ public class RecordStorageReader implements StorageReader {
     }
 
     @Override
-    public boolean relationshipExists(long id, StoreCursors storeCursors) {
+    public boolean relationshipExists(long id, StoreCursors storeCursors, CursorContext ignored1) {
         return relationshipStore.isInUse(id, storeCursors.readCursor(RecordCursorTypes.RELATIONSHIP_CURSOR));
     }
 

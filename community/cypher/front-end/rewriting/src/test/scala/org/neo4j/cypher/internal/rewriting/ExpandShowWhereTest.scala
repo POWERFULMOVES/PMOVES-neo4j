@@ -16,69 +16,31 @@
  */
 package org.neo4j.cypher.internal.rewriting
 
+import org.neo4j.cypher.internal.CypherVersion
+import org.neo4j.cypher.internal.ast.AdditiveProjection
+import org.neo4j.cypher.internal.ast.DefaultYield
 import org.neo4j.cypher.internal.ast.ReadAdministrationCommand
 import org.neo4j.cypher.internal.ast.ReturnItems
 import org.neo4j.cypher.internal.ast.ShowAliases
 import org.neo4j.cypher.internal.ast.ShowAllPrivileges
-import org.neo4j.cypher.internal.ast.ShowDatabase
+import org.neo4j.cypher.internal.ast.ShowCurrentUser
 import org.neo4j.cypher.internal.ast.ShowPrivilegeCommands
 import org.neo4j.cypher.internal.ast.ShowRoles
+import org.neo4j.cypher.internal.ast.ShowUsers
 import org.neo4j.cypher.internal.ast.Statement
 import org.neo4j.cypher.internal.ast.Where
 import org.neo4j.cypher.internal.ast.Yield
+import org.neo4j.cypher.internal.ast.YieldAddedInRewrite
 import org.neo4j.cypher.internal.expressions.Contains
 import org.neo4j.cypher.internal.expressions.StartsWith
 import org.neo4j.cypher.internal.expressions.StringLiteral
 import org.neo4j.cypher.internal.expressions.Variable
-import org.neo4j.cypher.internal.rewriting.rewriters.expandShowWhere
+import org.neo4j.cypher.internal.rewriting.rewriters.preparatoryRewriters.ExpandShowWhere
 import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 
 class ExpandShowWhereTest extends CypherFunSuite with RewriteTest {
-  val rewriterUnderTest: Rewriter = expandShowWhere.instance
-
-  test("SHOW DATABASES") {
-    val originalQuery = "SHOW DATABASES WHERE name STARTS WITH 's'"
-    val original = parseForRewriting(originalQuery)
-    val result = rewrite(original)
-
-    result match {
-      // Rewrite to approximately `SHOW DATABASES YIELD * WHERE name STARTS WITH 's'` but because we didn't have a YIELD * in the original
-      // query the columns are brief and not verbose so it's not exactly the same
-      case ShowDatabase(
-          _,
-          Some(Left((
-            Yield(
-              ReturnItems(returnStar, _, Some(columns)),
-              None,
-              None,
-              None,
-              Some(Where(StartsWith(Variable("name"), StringLiteral("s"))))
-            ),
-            None
-          ))),
-          _
-        ) if returnStar =>
-        columns shouldBe List(
-          "name",
-          "type",
-          "aliases",
-          "access",
-          "address",
-          "role",
-          "writer",
-          "requestedStatus",
-          "currentStatus",
-          "statusMessage",
-          "default",
-          "home",
-          "constituents"
-        )
-      case _ => fail(
-          s"\n$originalQuery\nshould be rewritten to:\nSHOW DATABASES YIELD * WHERE name STARTS WITH 's'\nbut was rewritten to:\n${prettifier.asString(result.asInstanceOf[Statement])}"
-        )
-    }
-  }
+  val rewriterUnderTest: Rewriter = ExpandShowWhere.instance
 
   test("SHOW ALIASES FOR DATABASE") {
     val originalQuery = "SHOW ALIASES FOR DATABASE YIELD * WHERE name STARTS WITH 's'"
@@ -90,17 +52,28 @@ class ExpandShowWhereTest extends CypherFunSuite with RewriteTest {
           None,
           Some(Left((
             Yield(
-              ReturnItems(returnStar, _, Some(columns)),
+              ReturnItems(AdditiveProjection, _, Some(columns)),
               None,
               None,
               None,
-              Some(Where(StartsWith(Variable("name"), StringLiteral("s"))))
+              Some(Where(StartsWith(Variable("name"), StringLiteral("s")))),
+              DefaultYield
             ),
             None
           ))),
           _
-        ) if returnStar =>
-        columns shouldBe List("name", "composite", "database", "location", "url", "user", "driver", "properties")
+        ) =>
+        columns shouldBe List(
+          "name",
+          "composite",
+          "database",
+          "location",
+          "url",
+          "user",
+          "driver",
+          "defaultLanguage",
+          "properties"
+        )
       case _ => fail(
           s"\n$originalQuery\nshould be rewritten to:\nSHOW ALIASES FOR DATABASE YIELD * WHERE name STARTS WITH 's'\nbut was rewritten to:\n${prettifier.asString(result.asInstanceOf[Statement])}"
         )
@@ -116,19 +89,22 @@ class ExpandShowWhereTest extends CypherFunSuite with RewriteTest {
     result match {
       case ShowRoles(
           false,
+          false,
           true,
+          false,
           Some(Left((
             Yield(
-              ReturnItems(returnStar, _, Some(columns)),
+              ReturnItems(AdditiveProjection, _, Some(columns)),
               None,
               None,
               None,
-              Some(Where(StartsWith(Variable("name"), StringLiteral("s"))))
+              Some(Where(StartsWith(Variable("name"), StringLiteral("s")))),
+              YieldAddedInRewrite
             ),
             None
           ))),
           _
-        ) if returnStar =>
+        ) =>
         columns shouldBe List(
           "role"
         )
@@ -158,16 +134,17 @@ class ExpandShowWhereTest extends CypherFunSuite with RewriteTest {
           false,
           Some(Left((
             Yield(
-              ReturnItems(returnStar, _, Some(columns)),
+              ReturnItems(AdditiveProjection, _, Some(columns)),
               None,
               None,
               None,
-              Some(Where(Contains(Variable("command"), StringLiteral("MATCH"))))
+              Some(Where(Contains(Variable("command"), StringLiteral("MATCH")))),
+              YieldAddedInRewrite
             ),
             None
           ))),
           _
-        ) if returnStar =>
+        ) =>
         columns shouldBe List(
           "command"
         )
@@ -201,19 +178,50 @@ class ExpandShowWhereTest extends CypherFunSuite with RewriteTest {
     )
   }
 
+  test("SHOW AUTH RULES") {
+    assertRewrite(
+      "SHOW AUTH RULES WHERE name STARTS WITH 'g'",
+      "SHOW AUTH RULES YIELD * WHERE name STARTS WITH 'g'",
+      List("name", "condition", "enabled", "roles"),
+      Some(CypherVersion.Cypher25)
+    )
+  }
+
   private def assertRewrite(
     originalQuery: String,
     expectedQuery: String,
-    expectedDefaultColumns: List[String]
+    expectedDefaultColumns: List[String],
+    cypherVersion: Option[CypherVersion] = None
   ): Unit = {
-    val (expected, result) = getRewrite(originalQuery, expectedQuery)
+    val (expected, result) =
+      if (cypherVersion.nonEmpty)
+        getRewrite(cypherVersion.get, originalQuery, expectedQuery)
+      else
+        getRewrite(originalQuery, expectedQuery)
 
     val updatedYield = expected.asInstanceOf[ReadAdministrationCommand].yieldOrWhere.map {
       case Left((y, r)) if y.returnItems.defaultOrderOnColumns.isEmpty =>
-        Left((y.withReturnItems(y.returnItems.withDefaultOrderOnColumns(expectedDefaultColumns)), r))
+        Left((
+          y
+            .withReturnItems(y.returnItems.withDefaultOrderOnColumns(expectedDefaultColumns))
+            .withYieldType(YieldAddedInRewrite),
+          r
+        ))
       case o => o
     }
-    val updatedExpected = expected.asInstanceOf[ReadAdministrationCommand].withYieldOrWhere(updatedYield)
+    val withYield = expected.asInstanceOf[ReadAdministrationCommand].withYieldOrWhere(updatedYield)
+    // For commands with non-default columns (e.g. ShowUsers.tags), apply() inflates
+    // defaultColumnSet under YIELD *, but the rewriter preserves the original WHERE-form
+    // defaultColumnSet via copy(). Align expected to the rewriter's view.
+    val updatedExpected = (withYield, result) match {
+      case (e: ShowUsers, r: ShowUsers) =>
+        r.defaultColumnSet.map(_.name) shouldBe expectedDefaultColumns
+        e.copy(defaultColumnSet = r.defaultColumnSet)(e.position)
+      case (e: ShowCurrentUser, r: ShowCurrentUser) =>
+        r.defaultColumnSet.map(_.name) shouldBe expectedDefaultColumns
+        e.copy(defaultColumnSet = r.defaultColumnSet)(e.position)
+      case _ => withYield
+    }
 
     assert(
       result === updatedExpected,

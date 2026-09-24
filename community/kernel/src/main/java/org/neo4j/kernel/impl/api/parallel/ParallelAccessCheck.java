@@ -44,6 +44,9 @@ public class ParallelAccessCheck {
 
     public static <T> T performWithCheckDisabled(Supplier<T> operation) {
         try {
+            if (DISABLED.get() != null) {
+                throw new IllegalStateException("Parallel access check is already disabled");
+            }
             DISABLED.set(true);
             return operation.get();
         } finally {
@@ -103,9 +106,9 @@ public class ParallelAccessCheck {
         }
 
         @Override
-        public Collection<ActiveLock> activeLocks() {
+        public Collection<ActiveLock> activeLocks(MemoryTracker memoryTracker) {
             checkNotCypherWorkerThread();
-            return wrappedLockClient.activeLocks();
+            return wrappedLockClient.activeLocks(memoryTracker);
         }
 
         @Override
@@ -153,7 +156,11 @@ public class ParallelAccessCheck {
 
         @Override
         public long activeLockCount() {
-            checkNotCypherWorkerThread();
+            /*
+            NOTE, unlike other methods here this method has no thread guard (allows calls from other threads) because:
+            (1) all current implementations of activeLockCount() are thread-safe, i.e., it is safe
+            (2) method gets called by Cypher Worker via ExecutingQuery.snapshot()
+             */
             return wrappedLockClient.activeLockCount();
         }
 

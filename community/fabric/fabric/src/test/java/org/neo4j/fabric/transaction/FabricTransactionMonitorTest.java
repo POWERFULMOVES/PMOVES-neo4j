@@ -31,12 +31,17 @@ import static org.mockito.Mockito.when;
 import static org.neo4j.configuration.GraphDatabaseSettings.transaction_timeout;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentMatchers;
-import org.neo4j.bolt.protocol.common.message.AccessMode;
-import org.neo4j.bolt.protocol.common.message.request.connection.RoutingContext;
+import org.neo4j.boltmessages.AccessMode;
+import org.neo4j.boltmessages.request.connection.RoutingContext;
 import org.neo4j.configuration.Config;
 import org.neo4j.fabric.bookmark.TransactionBookmarkManager;
 import org.neo4j.fabric.config.FabricConfig;
@@ -55,17 +60,29 @@ import org.neo4j.kernel.impl.api.transaction.monitor.TransactionMonitor;
 import org.neo4j.kernel.impl.query.QueryExecutionConfiguration;
 import org.neo4j.logging.InternalLog;
 import org.neo4j.logging.internal.LogService;
+import org.neo4j.scheduler.CallableExecutorService;
 import org.neo4j.time.FakeClock;
 
 class FabricTransactionMonitorTest {
 
     private static final Duration DEFAULT_TX_TIMEOUT = Duration.ofSeconds(10);
+    private static ExecutorService executorService;
 
     private final FakeClock clock = new FakeClock();
     private final TransactionBookmarkManager bookmarkManager = mock(TransactionBookmarkManager.class);
     private final InternalLog log = mock(InternalLog.class);
     private TransactionManager transactionManager;
     private FabricTransactionMonitor transactionMonitor;
+
+    @BeforeAll
+    static void beforeAll() {
+        executorService = Executors.newVirtualThreadPerTaskExecutor();
+    }
+
+    @AfterAll
+    static void afterAll() {
+        executorService.shutdown();
+    }
 
     @BeforeEach
     void beforeEach() {
@@ -74,7 +91,7 @@ class FabricTransactionMonitorTest {
         when(localTransactionContext.isEmptyContext()).thenReturn(true);
 
         var fabricRemoteExecutor = mock(FabricRemoteExecutor.class);
-        when(fabricRemoteExecutor.startTransactionContext(any(), any(), any()))
+        when(fabricRemoteExecutor.startTransactionContext(any(), any(), any(), any()))
                 .thenReturn(localTransactionContext, remoteTransactionContext, localTransactionContext);
 
         var localExecutor = mock(FabricLocalExecutor.class, RETURNS_MOCKS);
@@ -84,7 +101,7 @@ class FabricTransactionMonitorTest {
         var catalogManager = mock(CatalogManager.class);
         var config = Config.defaults(transaction_timeout, DEFAULT_TX_TIMEOUT);
         var globalProcedures = mock(GlobalProcedures.class);
-        var fabricConfig = new FabricConfig(() -> DEFAULT_TX_TIMEOUT, null, false);
+        var fabricConfig = new FabricConfig(() -> DEFAULT_TX_TIMEOUT, null, false, null);
 
         var logService = mock(LogService.class);
         when(logService.getInternalLog(TransactionMonitor.class)).thenReturn(log);
@@ -99,20 +116,21 @@ class FabricTransactionMonitorTest {
                 config,
                 guard,
                 errorReporter,
-                globalProcedures);
+                globalProcedures,
+                new CallableExecutorService(executorService));
     }
 
     @Test
-    void testTransactionMonitorInteraction() {
+    void transactionMonitorInteraction() {
         var tx1 = transactionManager.begin(createTransactionInfo(Duration.ofSeconds(5)), bookmarkManager);
         // tx with the default timeout 10s
         var tx2 = transactionManager.begin(createTransactionInfo(null), bookmarkManager);
 
-        assertThat(transactionMonitor.getActiveTransactions()).size().isEqualTo(2);
+        assertThat(transactionMonitor.getActiveTransactions()).hasSize(2);
 
         transactionMonitor.run();
 
-        assertThat(transactionMonitor.getActiveTransactions()).size().isEqualTo(2);
+        assertThat(transactionMonitor.getActiveTransactions()).hasSize(2);
         assertThat(tx1.getTerminationMark()).isEmpty();
         assertThat(tx2.getTerminationMark()).isEmpty();
 
@@ -120,14 +138,14 @@ class FabricTransactionMonitorTest {
         transactionMonitor.run();
         verify(log, never()).warn(any(String.class), ArgumentMatchers.<Object>any());
 
-        assertThat(transactionMonitor.getActiveTransactions()).size().isEqualTo(2);
+        assertThat(transactionMonitor.getActiveTransactions()).hasSize(2);
         assertThat(tx1.getTerminationMark()).isEmpty();
         assertThat(tx2.getTerminationMark()).isEmpty();
 
         clock.forward(Duration.ofSeconds(4));
         transactionMonitor.run();
 
-        assertThat(transactionMonitor.getActiveTransactions()).size().isEqualTo(2);
+        assertThat(transactionMonitor.getActiveTransactions()).hasSize(2);
         assertThat(tx1.getTerminationMark()).isPresent();
         assertThat(tx2.getTerminationMark()).isEmpty();
 
@@ -138,12 +156,12 @@ class FabricTransactionMonitorTest {
         verify(log, times(1)).warn(any(String.class), ArgumentMatchers.<Object>any());
 
         tx1.rollback();
-        assertThat(transactionMonitor.getActiveTransactions()).size().isEqualTo(1);
+        assertThat(transactionMonitor.getActiveTransactions()).hasSize(1);
 
         clock.forward(Duration.ofSeconds(5));
         transactionMonitor.run();
 
-        assertThat(transactionMonitor.getActiveTransactions()).size().isEqualTo(1);
+        assertThat(transactionMonitor.getActiveTransactions()).hasSize(1);
         assertThat(tx1.getTerminationMark()).isPresent();
         assertThat(tx2.getTerminationMark()).isPresent();
 
@@ -154,7 +172,7 @@ class FabricTransactionMonitorTest {
         verify(log, times(2)).warn(any(String.class), ArgumentMatchers.<Object>any());
 
         tx2.rollback();
-        assertThat(transactionMonitor.getActiveTransactions()).size().isEqualTo(0);
+        assertThat(transactionMonitor.getActiveTransactions()).isEmpty();
     }
 
     private static FabricTransactionInfo createTransactionInfo(Duration timeout) {
@@ -170,6 +188,7 @@ class FabricTransactionMonitorTest {
                 timeout,
                 emptyMap(),
                 new RoutingContext(true, emptyMap()),
-                QueryExecutionConfiguration.DEFAULT_CONFIG);
+                QueryExecutionConfiguration.DEFAULT_CONFIG,
+                List.of());
     }
 }

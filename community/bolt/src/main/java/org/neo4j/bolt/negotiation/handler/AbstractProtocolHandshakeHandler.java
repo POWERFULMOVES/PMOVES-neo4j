@@ -35,9 +35,9 @@ import org.neo4j.bolt.protocol.common.handler.ProtocolLoggingHandler;
 import org.neo4j.bolt.protocol.common.handler.RequestHandler;
 import org.neo4j.bolt.protocol.common.handler.StateSignalFilterHandler;
 import org.neo4j.bolt.protocol.common.handler.messages.GoodbyeMessageHandler;
-import org.neo4j.bolt.protocol.common.message.response.ResponseMessage;
 import org.neo4j.bolt.runtime.throttle.ChannelReadThrottleHandler;
 import org.neo4j.bolt.runtime.throttle.ChannelWriteThrottleHandler;
+import org.neo4j.boltmessages.response.ResponseMessage;
 import org.neo4j.logging.InternalLog;
 import org.neo4j.logging.InternalLogProvider;
 import org.neo4j.packstream.codec.PackstreamStructDecoder;
@@ -88,7 +88,9 @@ public abstract sealed class AbstractProtocolHandshakeHandler<I> extends SimpleC
 
         ChunkFrameDecoder frameDecoder;
         var readLimit = config.maxAuthenticationInboundBytes();
-        if (readLimit != 0) {
+        var isInternalConnector = config.isInternalConnector();
+
+        if (readLimit != 0 && !isInternalConnector) {
             this.log.debug(
                     "Imposing %d byte read-limit on connection '%s' until authentication is completed",
                     readLimit, this.connection.id());

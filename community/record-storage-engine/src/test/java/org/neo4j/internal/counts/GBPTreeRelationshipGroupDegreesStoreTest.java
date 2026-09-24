@@ -30,6 +30,7 @@ import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.imme
 import static org.neo4j.internal.counts.GBPTreeGenericCountsStore.NO_MONITOR;
 import static org.neo4j.internal.counts.GBPTreeRelationshipGroupDegreesStore.degreeKey;
 import static org.neo4j.internal.counts.GBPTreeRelationshipGroupDegreesStore.keyToString;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
@@ -41,7 +42,6 @@ import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_ID;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
-import java.nio.file.Path;
 import org.eclipse.collections.api.factory.Sets;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -50,8 +50,10 @@ import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
-import org.neo4j.io.pagecache.tracing.FileFlushEvent;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
+import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.recovery.RecoveryStartupChecker;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.storageengine.api.RelationshipDirection;
@@ -135,7 +137,7 @@ class GBPTreeRelationshipGroupDegreesStoreTest {
             updater.increment(GROUP_ID_1, INCOMING, 2); // now at 5
         }
 
-        countsStore.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+        countsStore.checkpoint(DatabaseFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
 
         // when/then
         assertEquals(15, countsStore.degree(GROUP_ID_1, OUTGOING, NULL_CONTEXT));
@@ -204,7 +206,7 @@ class GBPTreeRelationshipGroupDegreesStoreTest {
             updater.increment(GROUP_ID_1, INCOMING, 3);
             updater.increment(GROUP_ID_2, LOOP, 7);
         }
-        countsStore.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+        countsStore.checkpoint(DatabaseFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
         closeCountsStore();
 
         // when
@@ -233,17 +235,17 @@ class GBPTreeRelationshipGroupDegreesStoreTest {
     }
 
     private void checkpointAndRestartCountsStore() throws Exception {
-        countsStore.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+        countsStore.checkpoint(DatabaseFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
         closeCountsStore();
         openCountsStore();
     }
 
     private void deleteCountsStore() throws IOException {
-        directory.getFileSystem().deleteFile(countsStoreFile());
+        countsStoreFile().delete(directory.getFileSystem());
     }
 
-    private Path countsStoreFile() {
-        return directory.file("counts.db");
+    private StoreFile countsStoreFile() {
+        return new StoreFile(directory.file("counts.db"));
     }
 
     private void openCountsStore(DegreesRebuilder builder) throws IOException {
@@ -266,7 +268,8 @@ class GBPTreeRelationshipGroupDegreesStoreTest {
                 NullLogProvider.getInstance(),
                 CONTEXT_FACTORY,
                 PageCacheTracer.NULL,
-                Sets.immutable.empty());
+                Sets.immutable.empty(),
+                RecoveryStartupChecker.EMPTY_CHECKER);
     }
 
     private static class TestableCountsBuilder implements DegreesRebuilder {

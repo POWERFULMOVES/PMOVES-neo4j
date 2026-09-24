@@ -24,12 +24,12 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import org.neo4j.bolt.protocol.common.message.AccessMode;
 import org.neo4j.bolt.protocol.common.message.decoder.MessageDecoder;
 import org.neo4j.bolt.protocol.common.message.decoder.util.NotificationsConfigMetadataReader;
 import org.neo4j.bolt.protocol.common.message.decoder.util.TransactionInitiatingMetadataParser;
-import org.neo4j.bolt.protocol.common.message.notifications.NotificationsConfig;
-import org.neo4j.bolt.protocol.common.message.request.transaction.AbstractTransactionInitiatingMessage;
+import org.neo4j.boltmessages.AccessMode;
+import org.neo4j.boltmessages.notifications.NotificationsConfig;
+import org.neo4j.boltmessages.request.transaction.AbstractTransactionInitiatingMessage;
 import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.Relationship;
 import org.neo4j.graphdb.spatial.Point;
@@ -129,7 +129,7 @@ public abstract class AbstractTransactionInitiatingMessageDecoder<M extends Abst
         }
 
         var writer = new TransactionMetadataWriter();
-        var txMeta = new HashMap<String, Object>(mapValue.size());
+        var txMeta = HashMap.<String, Object>newHashMap(mapValue.size());
         mapValue.foreach((key, value) -> txMeta.put(key, writer.valueAsObject(value)));
         return txMeta;
     }

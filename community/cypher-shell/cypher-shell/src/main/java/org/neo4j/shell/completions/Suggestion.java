@@ -35,12 +35,12 @@ public class Suggestion extends Candidate {
         return new Suggestion(completion, SuggestionType.KEYWORD, null, false);
     }
 
-    public static Suggestion labelOrRelType(String completion) {
-        return new Suggestion(completion, SuggestionType.LABEL_OR_RELATIONSHIP, null, false);
+    public static Suggestion labelOrRelType(String completion, String display) {
+        return new Suggestion(completion, display, SuggestionType.LABEL_OR_RELATIONSHIP, null, false);
     }
 
-    public static Suggestion property(String completion) {
-        return new Suggestion(completion, SuggestionType.PROPERTY, null, false);
+    public static Suggestion property(String completion, String display) {
+        return new Suggestion(completion, display, SuggestionType.PROPERTY, null, false);
     }
 
     public static Suggestion command(Command.Metadata command) {
@@ -53,6 +53,10 @@ public class Suggestion extends Candidate {
 
     public static Suggestion parameter(String completion) {
         return new Suggestion(completion, SuggestionType.PARAMETER, null, false);
+    }
+
+    public static Suggestion parameter(String completion, String display) {
+        return new Suggestion(completion, display, SuggestionType.PARAMETER, null, false);
     }
 
     public static Suggestion procedure(String completion) {
@@ -73,5 +77,9 @@ public class Suggestion extends Candidate {
 
     public static Suggestion value(String completion) {
         return new Suggestion(completion, SuggestionType.VALUE, null, false);
+    }
+
+    public static Suggestion value(String completion, String display) {
+        return new Suggestion(completion, display, SuggestionType.VALUE, null, false);
     }
 }

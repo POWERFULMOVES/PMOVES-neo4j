@@ -19,9 +19,12 @@
  */
 package org.neo4j.internal.schema;
 
+import static org.neo4j.util.Preconditions.requireNonNull;
+
 import java.util.Optional;
 import org.neo4j.common.TokenNameLookup;
 import org.neo4j.hashing.HashFunction;
+import org.neo4j.internal.schema.constraints.RelationshipEndpointLabelConstraintDescriptor;
 import org.neo4j.util.Preconditions;
 
 public class SchemaNameUtil {
@@ -34,22 +37,15 @@ public class SchemaNameUtil {
     }
 
     public static String sanitiseName(String name) {
-        if (name == null) {
-            throw new IllegalArgumentException("Schema rule name cannot be null.");
-        }
+        requireNonNull(name, "Schema rule name cannot be null.");
         name = name.trim();
-        if (name.isEmpty() || name.isBlank()) {
+        if (name.isBlank()) {
             throw new IllegalArgumentException(
                     "Schema rule name cannot be the empty string or only contain whitespace.");
-        } else {
-            int length = name.length();
-            for (int i = 0; i < length; i++) {
-                char ch = name.charAt(i);
-                if (ch == '\0') {
-                    throw new IllegalArgumentException(
-                            "Schema rule names are not allowed to contain null-bytes: '" + name + "'.");
-                }
-            }
+        }
+        if (name.indexOf('\0') != -1) {
+            throw new IllegalArgumentException(
+                    "Schema rule names are not allowed to contain null-bytes: '" + name + "'.");
         }
         if (ReservedSchemaRuleNames.contains(name)) {
             throw new IllegalArgumentException("The index name '" + name + "' is reserved, and cannot be used. "
@@ -88,58 +84,80 @@ public class SchemaNameUtil {
         // NOTE to future maintainers: You probably want to avoid touching this function.
         // Last time this was changed, we had some 400+ tests to update.
         HashFunction hf = HashFunction.incrementalXXH64();
-        long key = hf.initialise(Boolean.hashCode(rule instanceof ConstraintDescriptor));
-        key = hf.update(key, rule.schema().entityType().ordinal());
-        key = hf.update(key, rule.schema().schemaPatternMatchingType().ordinal());
-        switch (rule.schema().entityType()) {
-            case NODE -> key = hf.updateWithArray(key, rule.schema().getEntityTokenIds(), id -> tokenNameLookup
-                    .labelGetName(id)
-                    .hashCode());
-            case RELATIONSHIP -> key = hf.updateWithArray(key, rule.schema().getEntityTokenIds(), id -> tokenNameLookup
-                    .relationshipTypeGetName(id)
-                    .hashCode());
-        }
-        key = hf.updateWithArray(key, rule.schema().getPropertyIds(), id -> tokenNameLookup
-                .propertyKeyGetName(id)
-                .hashCode());
 
-        if (rule instanceof IndexRef<?> indexRef) {
-            key = hf.update(key, indexRef.getIndexType().getTypeNumber());
-            key = hf.update(key, Boolean.hashCode(indexRef.isUnique()));
-            return String.format("index_%x", hf.toInt(hf.finalise(key)));
-        }
-        if (rule instanceof ConstraintDescriptor constraint) {
-            key = hf.update(key, constraint.type().ordinal());
-            if (constraint.isIndexBackedConstraint()) {
-                key = hf.update(
-                        key, constraint.asIndexBackedConstraint().indexType().getTypeNumber());
-            }
-            if (constraint.enforcesPropertyType()) {
-                key = hf.update(
+        // common strong seed for distributing values across 64-bit space
+        // hex(floor(pow(2, 64) / goldenRatio))
+        long key = hf.initialise(0x9E3779B97F4A7C15L);
+
+        SchemaDescriptor schema = rule.schema();
+        int[] entityTokenIds = schema.getEntityTokenIds();
+        int[] propertyKeyIds = schema.getPropertyIds();
+        key = hf.update(key, schema.entityType().ordinal());
+        key = hf.update(
+                key,
+                SchemaDescriptorImplementation.effectiveSchemaPatternMatchingTypeFeature(
+                        schema.schemaPatternMatchingType(), propertyKeyIds));
+        key = switch (schema.entityType()) {
+            case NODE ->
+                hf.updateWithArray(
                         key,
-                        constraint.asPropertyTypeConstraint().propertyType().hashCode());
-            }
-            if (constraint.isRelationshipEndpointLabelConstraint()) {
-                var relEndpointLabelConstraint = constraint.asRelationshipEndpointLabelConstraint();
-                key = hf.update(
+                        entityTokenIds,
+                        id -> tokenNameLookup.labelGetName(id).hashCode());
+            case RELATIONSHIP ->
+                hf.updateWithArray(
                         key,
-                        tokenNameLookup
-                                .labelGetName(relEndpointLabelConstraint.endpointLabelId())
-                                .hashCode());
-                key = hf.update(key, relEndpointLabelConstraint.endpointType().ordinal());
+                        entityTokenIds,
+                        id -> tokenNameLookup.relationshipTypeGetName(id).hashCode());
+        };
+        key = hf.updateWithArray(
+                key,
+                propertyKeyIds,
+                id -> tokenNameLookup.propertyKeyGetName(id).hashCode());
+
+        key = hf.update(key, Boolean.hashCode(rule instanceof ConstraintDescriptor));
+        return switch (rule) {
+            case IndexRef<?> index -> {
+                key = hf.update(key, Boolean.hashCode(index.isUnique()));
+                key = hf.update(key, index.getIndexType().getTypeNumber());
+                yield "index_%x".formatted(hf.toInt(hf.finalise(key)));
             }
-            if (constraint.isNodeLabelExistenceConstraint()) {
-                key = hf.update(
-                        key,
-                        tokenNameLookup
-                                .labelGetName(constraint
-                                        .asNodeLabelExistenceConstraint()
-                                        .requiredLabelId())
-                                .hashCode());
+
+            case ConstraintDescriptor constraint -> {
+                key = hf.update(key, constraint.type().ordinal());
+                if (constraint.isIndexBackedConstraint()) {
+                    key = hf.update(
+                            key,
+                            constraint.asIndexBackedConstraint().indexType().getTypeNumber());
+                } else if (constraint.enforcesPropertyType()) {
+                    key = hf.update(
+                            key,
+                            constraint.asPropertyTypeConstraint().propertyType().hashCode());
+                } else if (constraint.isRelationshipEndpointLabelConstraint()) {
+                    RelationshipEndpointLabelConstraintDescriptor relEndpointLabelConstraint =
+                            constraint.asRelationshipEndpointLabelConstraint();
+                    key = hf.update(
+                            key,
+                            tokenNameLookup
+                                    .labelGetName(relEndpointLabelConstraint.endpointLabelId())
+                                    .hashCode());
+                    key = hf.update(
+                            key, relEndpointLabelConstraint.endpointType().ordinal());
+                } else if (constraint.isNodeLabelExistenceConstraint()) {
+                    key = hf.update(
+                            key,
+                            tokenNameLookup
+                                    .labelGetName(constraint
+                                            .asNodeLabelExistenceConstraint()
+                                            .requiredLabelId())
+                                    .hashCode());
+                }
+
+                yield "constraint_%x".formatted(hf.toInt(hf.finalise(key)));
             }
-            return String.format("constraint_%x", hf.toInt(hf.finalise(key)));
-        }
-        throw new IllegalArgumentException(
-                "Don't know how to generate a name for this SchemaDescriptorSupplier implementation: " + rule + ".");
+
+            default ->
+                throw new IllegalArgumentException("Don't know how to generate a name for this %s implementation: %s."
+                        .formatted(SchemaDescriptorSupplier.class.getSimpleName(), rule));
+        };
     }
 }

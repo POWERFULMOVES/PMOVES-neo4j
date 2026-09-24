@@ -20,15 +20,22 @@
 package org.neo4j.cypher.internal.compiler.planner.logical.cardinality.assumeIndependence
 
 import org.neo4j.cypher.internal.compiler.planner.logical.Metrics.LabelInfo
+import org.neo4j.cypher.internal.compiler.planner.logical.Metrics.RelTypeInfo
+import org.neo4j.cypher.internal.compiler.planner.logical.cardinality.assumeIndependence.PatternRelationshipCardinalityModel.extractRelevantLabelInfo
+import org.neo4j.cypher.internal.compiler.planner.logical.cardinality.assumeIndependence.PatternRelationshipCardinalityModel.extractRelevantRelTypeInfo
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.RelTypeName
 import org.neo4j.cypher.internal.expressions.SemanticDirection
+import org.neo4j.cypher.internal.expressions.Variable
+import org.neo4j.cypher.internal.ir.NodeConnection
 import org.neo4j.cypher.internal.ir.PatternRelationship
 import org.neo4j.cypher.internal.ir.SimplePatternLength
 import org.neo4j.cypher.internal.ir.VarPatternLength
+import org.neo4j.cypher.internal.ir.helpers.CachedFunction
 import org.neo4j.cypher.internal.planner.spi.MinimumGraphStatistics
 import org.neo4j.cypher.internal.util.Cardinality
 import org.neo4j.cypher.internal.util.Cardinality.NumericCardinality
+import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.LabelId
 import org.neo4j.cypher.internal.util.Multiplier
 import org.neo4j.cypher.internal.util.Selectivity
@@ -38,6 +45,22 @@ import scala.annotation.tailrec
 trait PatternRelationshipCardinalityModel extends NodeCardinalityModel {
 
   def getRelationshipCardinality(
+    context: QueryGraphCardinalityContext,
+    labelInfo: LabelInfo,
+    relationship: PatternRelationship,
+    isUnique: Boolean
+  ): Cardinality = {
+    cachedDoGetRelationshipCardinality(
+      context.copy(relTypeInfo = extractRelevantRelTypeInfo(context.relTypeInfo, relationship)),
+      extractRelevantLabelInfo(labelInfo, relationship),
+      relationship,
+      isUnique
+    )
+  }
+
+  private val cachedDoGetRelationshipCardinality = CachedFunction(doGetRelationshipCardinality _)
+
+  private def doGetRelationshipCardinality(
     context: QueryGraphCardinalityContext,
     labelInfo: LabelInfo,
     relationship: PatternRelationship,
@@ -73,24 +96,17 @@ trait PatternRelationshipCardinalityModel extends NodeCardinalityModel {
               if (context.allNodesCardinality > Cardinality.EMPTY) {
                 // Prior to this call (in getBaseQueryGraphCardinality()), labels on the start and end nodes are already inferred
                 // Here, we want to find the labels that can be inferred on the middle nodes.
-                // Each middle node acts as the left boundary node of one of the unrolled relationships and
-                //                       as the right boundary node of another one of the unrolled relationships
-                // Therefore, the inferred labels on the middle nodes are those that can be implied on the left boundary node and those on the right boundary node (union)
-
-                // First, we remove the labels on both sides of the relationship (since label inference won't override specified labels).
-                // Second, we obtain the labels that the relationship can infer on the left node and the right node.
-                // Last, take the union of the labels that can be inferred on the left node and the labels that can be inferred on the right node.
-                // Those are the labels that can be inferred on the middle nodes of this varPattern.
-                val labelInfoTemp =
-                  labelInfo.updated(relationship.left, Set.empty).updated(relationship.right, Set.empty)
-                val (inferredLabelMapForMiddleNodes, updatedContext) = context.labelInferenceStrategy.inferLabels(
-                  context,
-                  labelInfoTemp,
-                  Seq(relationship)
+                val a = Variable("a")(InputPosition.NONE, isIsolated = false)
+                val r = PatternRelationship(
+                  Variable("r")(InputPosition.NONE, isIsolated = false),
+                  (a, a),
+                  relationship.dir,
+                  relationship.types,
+                  SimplePatternLength
                 )
-                val inferredLabelsForMiddleNodes =
-                  inferredLabelMapForMiddleNodes.getOrElse(relationship.left, Set.empty) union
-                    inferredLabelMapForMiddleNodes.getOrElse(relationship.right, Set.empty)
+                val (inferredLabels, updatedContext) =
+                  context.labelInferenceStrategy.inferLabels(context, Map.empty, List(r))
+                val inferredLabelsForMiddleNodes = inferredLabels.getOrElse(a, Set.empty)
 
                 // Goes from the left boundary node to a middle node
                 // Use labelInfo, but set the inferred labels of relationship.right (middle node) to inferredLabelsForMiddleNodes
@@ -109,21 +125,19 @@ trait PatternRelationshipCardinalityModel extends NodeCardinalityModel {
                 val intermediateRelationshipMultiplier =
                   getIntermediateRelationshipMultiplier(
                     context = updatedContext,
-                    labelInfo = labelInfo.updated(relationship.left, inferredLabelsForMiddleNodes).updated(
-                      relationship.right,
-                      inferredLabelsForMiddleNodes
-                    ),
-                    relationship
+                    labelInfo =
+                      labelInfo
+                        .updated(relationship.left, inferredLabelsForMiddleNodes)
+                        .updated(relationship.right, inferredLabelsForMiddleNodes),
+                    relationship = relationship
                   )
 
                 // Goes from a middle node to the right boundary node
                 // Use labelInfo, but set the inferred labels of relationship.left (middle node) to inferredLabelsForMiddleNodes
                 val lastRelationshipMultiplier = {
                   getLastRelationshipMultiplier(
-                    labelInfoAndContextForEndPoints = (
-                      labelInfo.updated(relationship.left, inferredLabelsForMiddleNodes),
-                      updatedContext
-                    ),
+                    updatedContext,
+                    labelInfo.updated(relationship.left, inferredLabelsForMiddleNodes),
                     relationship
                   )
                 }
@@ -150,6 +164,46 @@ trait PatternRelationshipCardinalityModel extends NodeCardinalityModel {
           }.sum(NumericCardinality)
     }
 
+  /**
+   * When we know that all relationships with type R end in label A, then we can
+   * replace the approximation for [:R]->(:A:B) with the exact value for [:R]->(:B).
+   *
+   * Thus, when estimating the cardinality of a relationship, we can remove the implied labels
+   * from relationship endpoint constraints (e.q., type R implies label A)
+   * and node label constraints (e.g., label B implies label A).
+   */
+  private def reduceLabelInfoByImplied(
+    context: QueryGraphCardinalityContext,
+    labelInfo: LabelInfo,
+    fromNode: LogicalVariable,
+    toNode: LogicalVariable,
+    relationshipTypes: Seq[RelTypeName],
+    relationshipDirection: SemanticDirection
+  ): LabelInfo = {
+    // First remove labels implied by other node-label constraints (cached inside GraphSchemaOptimizations).
+    val prunedByNodeLabelConstraints = context.graphSchemaOptimizations.pruneImpliedLabels(labelInfo)
+
+    // Then remove labels that are implied specifically by relationship-type endpoint constraints.
+    // Many relationships will have no such implications; short-circuit that common case to avoid
+    // computing and applying the more expensive transformation.
+    val implications = context.graphSchemaOptimizations.implicationsFromRelationship(
+      fromNode,
+      toNode,
+      relationshipTypes,
+      relationshipDirection
+    )
+
+    // If there are no implications from relationship types, return the pruned labels unchanged
+    if (implications.isEmpty) prunedByNodeLabelConstraints
+    else {
+      val variableToRelTypeMap = implications.groupMap(_._1)(_._2)
+      prunedByNodeLabelConstraints.map {
+        case (variable, knownLabels) =>
+          variable -> (knownLabels -- variableToRelTypeMap.getOrElse(variable, Set.empty))
+      }
+    }
+  }
+
   def getEmptyPathPatternCardinality(
     context: QueryGraphCardinalityContext,
     labelInfo: LabelInfo,
@@ -171,10 +225,16 @@ trait PatternRelationshipCardinalityModel extends NodeCardinalityModel {
     relationshipTypes: Seq[RelTypeName],
     relationshipDirection: SemanticDirection
   ): Cardinality = {
+    val (fromNode, toNode) = relationshipDirection match {
+      case SemanticDirection.INCOMING => (rightNode, leftNode)
+      case _                          => (leftNode, rightNode)
+    }
+    val reducedLabelInfo =
+      reduceLabelInfoByImplied(context, labelInfo, fromNode, toNode, relationshipTypes, relationshipDirection)
     val cardinality =
       for {
-        labelsOnLeft <- getResolvedNodeLabels(context, labelInfo, leftNode)
-        labelsOnRight <- getResolvedNodeLabels(context, labelInfo, rightNode)
+        labelsOnLeft <- getResolvedNodeLabels(context, reducedLabelInfo, leftNode)
+        labelsOnRight <- getResolvedNodeLabels(context, reducedLabelInfo, rightNode)
       } yield relationshipTypes match {
         case Seq() =>
           getDissectedRelationshipCardinality(
@@ -221,13 +281,14 @@ trait PatternRelationshipCardinalityModel extends NodeCardinalityModel {
   }
 
   private def getLastRelationshipMultiplier(
-    labelInfoAndContextForEndPoints: (LabelInfo, QueryGraphCardinalityContext),
+    context: QueryGraphCardinalityContext,
+    labelInfo: LabelInfo,
     relationship: PatternRelationship
   ): Multiplier = {
     val relCardinality =
       getSimpleRelationshipCardinality(
-        context = labelInfoAndContextForEndPoints._2,
-        labelInfo = labelInfoAndContextForEndPoints._1,
+        context = context,
+        labelInfo = labelInfo,
         leftNode = relationship.left,
         rightNode = relationship.right,
         relationshipTypes = relationship.types,
@@ -236,11 +297,11 @@ trait PatternRelationshipCardinalityModel extends NodeCardinalityModel {
 
     val nodeCardinality =
       getNodeCardinality(
-        labelInfoAndContextForEndPoints._2,
-        labelInfoAndContextForEndPoints._1,
+        context,
+        labelInfo,
         relationship.left
       )
-        .getOrElse(labelInfoAndContextForEndPoints._2.allNodesCardinality)
+        .getOrElse(context.allNodesCardinality)
 
     Multiplier.ofDivision(relCardinality, nodeCardinality)
       .getOrElse(Multiplier.ZERO)
@@ -310,4 +371,15 @@ trait PatternRelationshipCardinalityModel extends NodeCardinalityModel {
             context.graphStatistics.patternStepCardinality(labelOnLeft, Some(relationshipTypeId), labelOnRight)
         }
     }
+}
+
+object PatternRelationshipCardinalityModel {
+
+  def extractRelevantLabelInfo(labelInfo: LabelInfo, nodeConnection: NodeConnection): LabelInfo = {
+    labelInfo.view.filterKeys(nodeConnection.nodes.contains).toMap
+  }
+
+  def extractRelevantRelTypeInfo(relTypeInfo: RelTypeInfo, nodeConnection: NodeConnection): RelTypeInfo = {
+    relTypeInfo.view.filterKeys(nodeConnection.relationships.contains).toMap
+  }
 }

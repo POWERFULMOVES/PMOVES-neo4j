@@ -19,253 +19,151 @@
  */
 package org.neo4j.internal.batchimport.cache;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
-import static org.neo4j.internal.batchimport.cache.NumberArrayFactories.HEAP;
+import static org.mockito.Mockito.when;
+import static org.neo4j.internal.batchimport.cache.BufferFactories.fileBacked;
 import static org.neo4j.internal.batchimport.cache.NumberArrayFactories.OFF_HEAP;
-import static org.neo4j.internal.helpers.collection.Iterables.single;
+import static org.neo4j.internal.batchimport.cache.NumberArrayFactories.fromBufferFactory;
+import static org.neo4j.logging.LogAssertions.assertThat;
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.neo4j.internal.unsafe.NativeMemoryAllocationRefusedError;
+import org.neo4j.logging.AssertableLogProvider;
+import org.neo4j.logging.NullLog;
 import org.neo4j.memory.LocalMemoryTracker;
 import org.neo4j.memory.MemoryPools;
 import org.neo4j.memory.MemoryTracker;
+import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
+import org.neo4j.test.utils.TestDirectory;
 
+@TestDirectoryExtension
 class NumberArrayFactoryTest {
-    private static final long KILO = 1024;
+    private static final int KILO = 1024;
 
-    @Test
-    void trackHeapMemoryAllocations() {
-        var memoryTracker = new LocalMemoryTracker(MemoryPools.NO_TRACKING, 300, 0, null);
-        HEAP.newByteArray(10, new byte[] {0}, memoryTracker);
-        assertEquals(32, memoryTracker.estimatedHeapMemory());
-        assertEquals(0, memoryTracker.usedNativeMemory());
-
-        memoryTracker = new LocalMemoryTracker(MemoryPools.NO_TRACKING, 300, 0, null);
-        HEAP.newLongArray(10, 1, memoryTracker);
-        assertEquals(96, memoryTracker.estimatedHeapMemory());
-        assertEquals(0, memoryTracker.usedNativeMemory());
-
-        memoryTracker = new LocalMemoryTracker(MemoryPools.NO_TRACKING, 300, 0, null);
-        HEAP.newIntArray(10, 1, memoryTracker);
-        assertEquals(56, memoryTracker.estimatedHeapMemory());
-        assertEquals(0, memoryTracker.usedNativeMemory());
-    }
+    @Inject
+    private TestDirectory testDirectory;
 
     @Test
     void trackNativeMemoryAllocations() {
         var memoryTracker = new LocalMemoryTracker(MemoryPools.NO_TRACKING, 300, 0, null);
         try (ByteArray byteArray = OFF_HEAP.newByteArray(10, new byte[] {0}, memoryTracker)) {
-            assertEquals(0, memoryTracker.estimatedHeapMemory());
-            assertEquals(10, memoryTracker.usedNativeMemory());
+            byteArray.setByte(0, 0, (byte) 1);
+            assertThat(memoryTracker.estimatedHeapMemory()).isZero();
+            assertThat(memoryTracker.usedNativeMemory()).isEqualTo(10);
         }
-        assertEquals(0, memoryTracker.usedNativeMemory());
-        assertEquals(0, memoryTracker.estimatedHeapMemory());
+        assertThat(memoryTracker.usedNativeMemory()).isZero();
+        assertThat(memoryTracker.estimatedHeapMemory()).isZero();
 
-        try (LongArray longArray = OFF_HEAP.newLongArray(10, 1, memoryTracker)) {
-            assertEquals(0, memoryTracker.estimatedHeapMemory());
-            assertEquals(80, memoryTracker.usedNativeMemory());
+        try (LongArray longArray = OFF_HEAP.newLongArray(10, 0, memoryTracker)) {
+            longArray.set(0, 1);
+            assertThat(memoryTracker.estimatedHeapMemory()).isZero();
+            assertThat(memoryTracker.usedNativeMemory()).isEqualTo(80);
         }
-        assertEquals(0, memoryTracker.usedNativeMemory());
-        assertEquals(0, memoryTracker.estimatedHeapMemory());
+        assertThat(memoryTracker.usedNativeMemory()).isZero();
+        assertThat(memoryTracker.estimatedHeapMemory()).isZero();
 
-        try (IntArray intArray = OFF_HEAP.newIntArray(10, 1, memoryTracker)) {
-            assertEquals(0, memoryTracker.estimatedHeapMemory());
-            assertEquals(40, memoryTracker.usedNativeMemory());
+        try (IntArray intArray = OFF_HEAP.newIntArray(10, 0, memoryTracker)) {
+            intArray.set(0, 1);
+            assertThat(memoryTracker.estimatedHeapMemory()).isZero();
+            assertThat(memoryTracker.usedNativeMemory()).isEqualTo(40);
         }
-        assertEquals(0, memoryTracker.usedNativeMemory());
-        assertEquals(0, memoryTracker.estimatedHeapMemory());
+        assertThat(memoryTracker.usedNativeMemory()).isZero();
+        assertThat(memoryTracker.estimatedHeapMemory()).isZero();
     }
 
     @Test
     void shouldPickFirstAvailableCandidateLongArray() {
-        // GIVEN
-        NumberArrayFactory factory = new NumberArrayFactories.Auto(NumberArrayFactories.NO_MONITOR, HEAP);
-
         // WHEN
-        LongArray array = factory.newLongArray(KILO, -1, INSTANCE);
-        array.set(KILO - 10, 12345);
+        try (LongArray array = OFF_HEAP.newLongArray(KILO, -1, INSTANCE)) {
+            array.set(KILO - 10, 12345);
 
-        // THEN
-        assertTrue(array instanceof HeapLongArray);
-        assertEquals(12345, array.get(KILO - 10));
+            // THEN
+            assertThat(array.get(KILO - 10)).isEqualTo(12345);
+        }
     }
 
     @Test
     void shouldPickFirstAvailableCandidateLongArrayWhenSomeDontHaveEnoughMemory() {
         // GIVEN
-        NumberArrayFactory lowMemoryFactory = mock(NumberArrayFactory.class);
-        doThrow(OutOfMemoryError.class)
-                .when(lowMemoryFactory)
-                .newLongArray(anyLong(), anyLong(), anyLong(), any(MemoryTracker.class));
-        NumberArrayFactory factory =
-                new NumberArrayFactories.Auto(NumberArrayFactories.NO_MONITOR, lowMemoryFactory, HEAP);
+        BufferFactory lowMemoryFactory = mock(BufferFactory.class);
+        doThrow(OutOfMemoryError.class).when(lowMemoryFactory).allocate(anyInt(), any());
+        try (NumberArrayFactory factory = new NumberArrayFactories.NumberArrayFactoryImpl(
+                new NumberArrayFactories.Auto(NullLog.getInstance(), lowMemoryFactory, BufferFactories.OFF_HEAP))) {
 
-        // WHEN
-        LongArray array = factory.newLongArray(KILO, -1, INSTANCE);
-        array.set(KILO - 10, 12345);
+            // WHEN
+            try (LongArray array = factory.newLongArray(KILO, -1, INSTANCE)) {
+                array.set(KILO - 10, 12345);
 
-        // THEN
-        verify(lowMemoryFactory).newLongArray(KILO, -1, 0, INSTANCE);
-        assertTrue(array instanceof HeapLongArray);
-        assertEquals(12345, array.get(KILO - 10));
+                // THEN
+                assertThat(array.get(KILO - 10)).isEqualTo(12345);
+            }
+        }
     }
 
-    @Test
-    void shouldThrowOomOnNotEnoughMemory() {
+    @ParameterizedTest
+    @ValueSource(classes = {OutOfMemoryError.class, NativeMemoryAllocationRefusedError.class})
+    void shouldPickFirstAvailableCandidateIntArrayWhenSomeThrowOutOfMemoryError(Class<Exception> exception) {
         // GIVEN
-        FailureMonitor monitor = new FailureMonitor();
-        NumberArrayFactory lowMemoryFactory = mock(NumberArrayFactory.class);
-        doThrow(OutOfMemoryError.class)
-                .when(lowMemoryFactory)
-                .newLongArray(anyLong(), anyLong(), anyLong(), any(MemoryTracker.class));
-        NumberArrayFactory factory = new NumberArrayFactories.Auto(monitor, lowMemoryFactory);
+        BufferFactory lowMemoryFactory = mock(BufferFactory.class);
+
+        when(lowMemoryFactory.allocate(anyInt(), any())).thenThrow(exception);
 
         // WHEN
-        assertThrows(OutOfMemoryError.class, () -> factory.newLongArray(KILO, -1, INSTANCE));
+        try (NumberArrayFactory factory = NumberArrayFactories.fromBufferFactory(new NumberArrayFactories.Auto(
+                        NullLog.getInstance(), lowMemoryFactory, BufferFactories.OFF_HEAP));
+                IntArray array = factory.newIntArray(KILO, -1, INSTANCE)) {
+            array.set(KILO - 10, 12345);
+
+            // THEN
+            verify(lowMemoryFactory).allocate(eq(KILO * Integer.BYTES), any(MemoryTracker.class));
+            assertThat(array.get(KILO - 10)).isEqualTo(12345);
+        }
     }
 
     @Test
-    void shouldPickFirstAvailableCandidateIntArray() {
-        // GIVEN
-        FailureMonitor monitor = new FailureMonitor();
-        NumberArrayFactory factory = new NumberArrayFactories.Auto(monitor, HEAP);
+    void logWhenStartingToSwap() {
+        BufferFactory lowMemoryFactory = mock(BufferFactory.class);
+        when(lowMemoryFactory.allocate(anyInt(), any())).thenThrow(OutOfMemoryError.class);
 
-        // WHEN
-        IntArray array = factory.newIntArray(KILO, -1, INSTANCE);
-        array.set(KILO - 10, 12345);
+        BufferFactory swap = BufferFactories.fileBacked(testDirectory.getFileSystem(), testDirectory.homePath());
+        AssertableLogProvider logProvider = new AssertableLogProvider();
 
-        // THEN
-        assertTrue(array instanceof HeapIntArray);
-        assertEquals(12345, array.get(KILO - 10));
-        assertEquals(HEAP, monitor.successfulFactory);
-        assertFalse(monitor.attemptedAllocationFailures.iterator().hasNext());
+        try (NumberArrayFactory factory = NumberArrayFactories.fromBufferFactory(
+                new NumberArrayFactories.Auto(logProvider.getLog("test"), lowMemoryFactory, swap))) {
+
+            try (IntArray array = factory.newIntArray(KILO, -1, INSTANCE)) {
+                array.set(KILO - 10, 12345);
+            }
+        }
+
+        assertThat(logProvider)
+                .forLevel(AssertableLogProvider.Level.WARN)
+                .containsMessages("Running low on memory and will start swapping to hard drive");
     }
 
+    /**
+     * Since the backing file is shared for different implementations of arrays we need to make sure that
+     * all allocations are aligned to the largest alignment requirement.
+     */
     @Test
-    void shouldPickFirstAvailableCandidateIntArrayWhenSomeThrowOutOfMemoryError() {
-        // GIVEN
-        NumberArrayFactory lowMemoryFactory = mock(NumberArrayFactory.class);
-        doThrow(OutOfMemoryError.class)
-                .when(lowMemoryFactory)
-                .newIntArray(anyLong(), anyInt(), anyLong(), any(MemoryTracker.class));
-        NumberArrayFactory factory =
-                new NumberArrayFactories.Auto(NumberArrayFactories.NO_MONITOR, lowMemoryFactory, HEAP);
+    void alignedAccessRestrictions() {
+        try (NumberArrayFactory numberArrayFactory =
+                fromBufferFactory(fileBacked(testDirectory.getFileSystem(), testDirectory.homePath()))) {
+            ByteArray byteArray = numberArrayFactory.newByteArray(5, new byte[1], INSTANCE);
+            byteArray.set(4, new byte[] {1});
 
-        // WHEN
-        IntArray array = factory.newIntArray(KILO, -1, INSTANCE);
-        array.set(KILO - 10, 12345);
-
-        // THEN
-        verify(lowMemoryFactory).newIntArray(KILO, -1, 0, INSTANCE);
-        assertTrue(array instanceof HeapIntArray);
-        assertEquals(12345, array.get(KILO - 10));
-    }
-
-    @Test
-    void shouldPickFirstAvailableCandidateIntArrayWhenSomeThrowNativeMemoryAllocationRefusedError() {
-        // GIVEN
-        NumberArrayFactory lowMemoryFactory = mock(NumberArrayFactory.class);
-        doThrow(NativeMemoryAllocationRefusedError.class)
-                .when(lowMemoryFactory)
-                .newIntArray(anyLong(), anyInt(), anyLong(), any(MemoryTracker.class));
-        NumberArrayFactory factory =
-                new NumberArrayFactories.Auto(NumberArrayFactories.NO_MONITOR, lowMemoryFactory, HEAP);
-
-        // WHEN
-        IntArray array = factory.newIntArray(KILO, -1, INSTANCE);
-        array.set(KILO - 10, 12345);
-
-        // THEN
-        verify(lowMemoryFactory, times(1)).newIntArray(KILO, -1, 0, INSTANCE);
-        assertTrue(array instanceof HeapIntArray);
-        assertEquals(12345, array.get(KILO - 10));
-    }
-
-    @Test
-    void shouldCatchArithmeticExceptionsAndTryNext() {
-        // GIVEN
-        NumberArrayFactory throwingMemoryFactory = mock(NumberArrayFactory.class);
-        ArithmeticException failure = new ArithmeticException("This is an artificial failure");
-        doThrow(failure)
-                .when(throwingMemoryFactory)
-                .newByteArray(anyLong(), any(byte[].class), anyLong(), any(MemoryTracker.class));
-        FailureMonitor monitor = new FailureMonitor();
-        NumberArrayFactory factory = new NumberArrayFactories.Auto(monitor, throwingMemoryFactory, HEAP);
-        int itemSize = 4;
-
-        // WHEN
-        ByteArray array = factory.newByteArray(KILO, new byte[itemSize], 0, INSTANCE);
-        array.setInt(KILO - 10, 0, 12345);
-
-        // THEN
-        verify(throwingMemoryFactory).newByteArray(eq(KILO), any(byte[].class), eq(0L), any(MemoryTracker.class));
-        assertTrue(array instanceof HeapByteArray);
-        assertEquals(12345, array.getInt(KILO - 10, 0));
-        assertEquals(KILO * itemSize, monitor.memory);
-        assertEquals(HEAP, monitor.successfulFactory);
-        assertEquals(
-                throwingMemoryFactory,
-                single(monitor.attemptedAllocationFailures).getFactory());
-        assertThat(single(monitor.attemptedAllocationFailures).getFailure().getMessage())
-                .contains(failure.getMessage());
-    }
-
-    @Test
-    void heapArrayShouldAllowVeryLargeBases() {
-        NumberArrayFactory factory = new NumberArrayFactories.Auto(NumberArrayFactories.NO_MONITOR, HEAP);
-        verifyVeryLargeBaseSupport(factory);
-    }
-
-    @Test
-    void offHeapArrayShouldAllowVeryLargeBases() {
-        NumberArrayFactory factory = new NumberArrayFactories.Auto(NumberArrayFactories.NO_MONITOR, OFF_HEAP);
-        verifyVeryLargeBaseSupport(factory);
-    }
-
-    private static void verifyVeryLargeBaseSupport(NumberArrayFactory factory) {
-        long base = Integer.MAX_VALUE * 1337L;
-        byte[] into = new byte[1];
-        into[0] = 1;
-        factory.newByteArray(10, new byte[1], base, INSTANCE).get(base + 1, into);
-        assertThat(into[0]).isEqualTo((byte) 0);
-        assertThat(factory.newIntArray(10, 1, base, INSTANCE).get(base + 1)).isEqualTo(1);
-        assertThat(factory.newLongArray(10, 1, base, INSTANCE).get(base + 1)).isEqualTo(1L);
-    }
-
-    @Test
-    void heapArrayShouldThrowOnTooLargeArraySize() {
-        assertThatThrownBy(() -> HEAP.newByteArray(Integer.MAX_VALUE / 2, new byte[10], 0, INSTANCE))
-                .isInstanceOf(ArithmeticException.class)
-                .hasMessage("integer overflow");
-    }
-
-    private static class FailureMonitor implements NumberArrayFactory.Monitor {
-        private long memory;
-        private NumberArrayFactory successfulFactory;
-        private Iterable<NumberArrayFactory.AllocationFailure> attemptedAllocationFailures;
-
-        @Override
-        public void allocationSuccessful(
-                long memory,
-                NumberArrayFactory successfulFactory,
-                Iterable<NumberArrayFactory.AllocationFailure> attemptedAllocationFailures) {
-            this.memory = memory;
-            this.successfulFactory = successfulFactory;
-            this.attemptedAllocationFailures = attemptedAllocationFailures;
+            LongArray longArray = numberArrayFactory.newLongArray(2, 0, INSTANCE);
+            assertThatCode(() -> longArray.compareAndSet(1, 0, 1)).doesNotThrowAnyException();
         }
     }
 }

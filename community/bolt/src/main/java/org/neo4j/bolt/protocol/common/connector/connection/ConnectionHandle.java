@@ -23,14 +23,16 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import org.neo4j.bolt.fsm.StateMachineHandle;
 import org.neo4j.bolt.protocol.common.connector.connection.authentication.AuthenticationFlag;
-import org.neo4j.bolt.protocol.common.message.AccessMode;
-import org.neo4j.bolt.protocol.common.message.notifications.NotificationsConfig;
-import org.neo4j.bolt.protocol.common.message.request.connection.RoutingContext;
+import org.neo4j.bolt.protocol.common.connector.notification.NotificationManager;
 import org.neo4j.bolt.security.error.AuthenticationException;
 import org.neo4j.bolt.tx.Transaction;
-import org.neo4j.bolt.tx.TransactionType;
 import org.neo4j.bolt.tx.error.TransactionException;
+import org.neo4j.boltmessages.AccessMode;
+import org.neo4j.boltmessages.TransactionType;
+import org.neo4j.boltmessages.notifications.NotificationsConfig;
+import org.neo4j.boltmessages.request.connection.RoutingContext;
 import org.neo4j.internal.kernel.api.security.LoginContext;
 
 /**
@@ -107,4 +109,9 @@ public interface ConnectionHandle extends Connection {
     Optional<Transaction> transaction();
 
     void closeTransaction() throws TransactionException;
+
+    NotificationManager notificationManager();
+
+    @Override
+    StateMachineHandle fsm();
 }

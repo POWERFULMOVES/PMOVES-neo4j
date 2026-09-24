@@ -22,9 +22,8 @@ package org.neo4j.values.storable;
 import static java.lang.Character.isAlphabetic;
 import static java.lang.Character.isDigit;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.fail;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 import static org.neo4j.values.storable.Values.ZERO_INT;
 import static org.neo4j.values.storable.Values.longValue;
 
@@ -34,11 +33,13 @@ import java.util.HashSet;
 import java.util.Set;
 import java.util.SplittableRandom;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import org.apache.commons.lang3.ArrayUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.neo4j.function.Predicates;
 import org.neo4j.values.AnyValue;
 
 abstract class RandomValuesTest {
@@ -49,25 +50,18 @@ abstract class RandomValuesTest {
 
     private static final byte BOUND = 100;
     private static final LongValue UPPER = longValue(BOUND);
-    private static final Set<Class<? extends NumberValue>> NUMBER_TYPES = new HashSet<>(Arrays.asList(
-            LongValue.class, IntValue.class, ShortValue.class, ByteValue.class, FloatValue.class, DoubleValue.class));
+    private static final Set<Class<? extends AnyValue>> NUMBER_TYPES =
+            selectValueTypes((t) -> NumberValue.class.isAssignableFrom(t.valueClass));
+    private static final Set<Class<? extends AnyValue>> ARRAY_TYPES =
+            selectValueTypes(t -> t.valueRepresentation.canCreateArrayOfValueGroup());
+    private static final Set<Class<? extends AnyValue>> TYPES = selectValueTypes(Predicates.alwaysTrue());
 
-    private static final Set<Class<? extends AnyValue>> TYPES = new HashSet<>(Arrays.asList(
-            LongValue.class,
-            IntValue.class,
-            ShortValue.class,
-            ByteValue.class,
-            FloatValue.class,
-            DoubleValue.class,
-            TextValue.class,
-            BooleanValue.class,
-            PointValue.class,
-            DateTimeValue.class,
-            LocalDateTimeValue.class,
-            DateValue.class,
-            TimeValue.class,
-            LocalTimeValue.class,
-            DurationValue.class));
+    private static Set<Class<? extends AnyValue>> selectValueTypes(Predicate<ValueType> criteria) {
+        return Arrays.stream(ValueType.ALL_TYPES)
+                .filter(criteria)
+                .map(t -> t.valueClass)
+                .collect(Collectors.toSet());
+    }
 
     @BeforeEach
     void setUp() {
@@ -93,14 +87,14 @@ abstract class RandomValuesTest {
         for (int i = 0; i < ITERATIONS; i++) {
             LongValue value = randomValues.nextLongValue(1337, 1337 + BOUND);
             assertThat(value).isNotNull();
-            assertThat(value.compareTo(longValue(1337))).isGreaterThanOrEqualTo(0);
+            assertThat(value.compareTo(longValue(1337))).isNotNegative();
             assertThat(value.compareTo(longValue(1337 + BOUND)))
                     .as(value.toString())
-                    .isLessThanOrEqualTo(0);
+                    .isNotPositive();
             values.add(value);
         }
 
-        assertThat(values.size()).isGreaterThan(1);
+        assertThat(values).hasSizeGreaterThan(1);
     }
 
     @Test
@@ -154,7 +148,7 @@ abstract class RandomValuesTest {
     @Test
     void nextNumberValue() {
         assertTimeoutPreemptively(TIMEOUT, () -> {
-            Set<Class<? extends NumberValue>> seen = new HashSet<>(NUMBER_TYPES);
+            var seen = new HashSet<>(NUMBER_TYPES);
 
             while (!seen.isEmpty()) {
                 NumberValue numberValue = randomValues.nextNumberValue();
@@ -177,7 +171,9 @@ abstract class RandomValuesTest {
                     String asString = textValue.stringValue();
                     for (int j = 0; j < asString.length(); j++) {
                         int ch = asString.charAt(j);
-                        assertTrue(isAlphabetic(ch) || isDigit(ch), "Not a character nor letter: " + ch);
+                        assertThat(isAlphabetic(ch) || isDigit(ch))
+                                .as("Not a character nor letter: " + ch)
+                                .isTrue();
                         seenDigits.remove(ch);
                     }
                 }
@@ -191,8 +187,7 @@ abstract class RandomValuesTest {
             TextValue textValue = randomValues.nextAsciiTextValue(10, 20);
             String asString = textValue.stringValue();
             int length = asString.length();
-            assertThat(length).isGreaterThanOrEqualTo(10);
-            assertThat(length).isLessThanOrEqualTo(20);
+            assertThat(length).isGreaterThanOrEqualTo(10).isLessThanOrEqualTo(20);
         }
     }
 
@@ -202,18 +197,17 @@ abstract class RandomValuesTest {
             TextValue textValue = randomValues.nextTextValue(10, 20);
             String asString = textValue.stringValue();
             int length = asString.codePointCount(0, asString.length());
-            assertThat(length).isGreaterThanOrEqualTo(10);
-            assertThat(length).isLessThanOrEqualTo(20);
+            assertThat(length).isGreaterThanOrEqualTo(10).isLessThanOrEqualTo(20);
         }
     }
 
     @Test
     void nextArray() {
         assertTimeoutPreemptively(TIMEOUT, () -> {
-            Set<Class<? extends AnyValue>> seen = new HashSet<>(TYPES);
+            var seen = new HashSet<>(ARRAY_TYPES);
             while (!seen.isEmpty()) {
                 ArrayValue arrayValue = randomValues.nextArray();
-                assertThat(arrayValue.intSize()).isGreaterThanOrEqualTo(1);
+                assertThat(arrayValue.intSize()).isPositive();
                 AnyValue value = arrayValue.value(0);
                 assertKnownType(value.getClass(), TYPES);
                 markSeen(value.getClass(), seen);
@@ -224,13 +218,11 @@ abstract class RandomValuesTest {
     @Test
     void nextValue() {
         assertTimeoutPreemptively(TIMEOUT, () -> {
-            Set<Class<? extends AnyValue>> all = new HashSet<>(TYPES);
-            all.add(ArrayValue.class);
-            Set<Class<? extends AnyValue>> seen = new HashSet<>(all);
+            var seen = new HashSet<>(TYPES);
 
             while (!seen.isEmpty()) {
                 Value value = randomValues.nextValue();
-                assertKnownType(value.getClass(), all);
+                assertKnownType(value.getClass(), TYPES);
                 markSeen(value.getClass(), seen);
             }
         });
@@ -239,7 +231,7 @@ abstract class RandomValuesTest {
     @Test
     void nextValueOfTypes() {
         assertTimeoutPreemptively(TIMEOUT, () -> {
-            ValueType[] allTypes = ValueType.values();
+            ValueType[] allTypes = ValueType.ALL_TYPES;
             ValueType[] including = randomValues.selection(allTypes, 1, allTypes.length, false);
             Set<Class<? extends AnyValue>> seen = new HashSet<>();
             for (ValueType type : including) {
@@ -255,7 +247,7 @@ abstract class RandomValuesTest {
 
     @Test
     void excluding() {
-        ValueType[] allTypes = ValueType.values();
+        ValueType[] allTypes = ValueType.ALL_TYPES;
         ValueType[] excluding = randomValues.selection(allTypes, 1, allTypes.length, false);
         ValueType[] including = RandomValues.excluding(excluding);
         for (ValueType excludedType : excluding) {
@@ -305,21 +297,20 @@ abstract class RandomValuesTest {
             values.add(value);
         }
 
-        assertThat(values.size()).isGreaterThan(1);
+        assertThat(values).size().isGreaterThan(1);
     }
 
     private static void checkBounded(Supplier<NumberValue> supplier) {
         for (int i = 0; i < ITERATIONS; i++) {
             NumberValue value = supplier.get();
             assertThat(value).isNotNull();
-            assertThat(value.compareTo(ZERO_INT)).isGreaterThanOrEqualTo(0);
-            assertThat(value.compareTo(UPPER)).isLessThan(0);
+            assertThat(value.compareTo(ZERO_INT)).isNotNegative();
+            assertThat(value.compareTo(UPPER)).isNegative();
         }
     }
 }
 
 class RandomRandomValuesTest extends RandomValuesTest {
-
     @Override
     RandomValues randomValues() {
         return RandomValues.create(ThreadLocalRandom.current());
@@ -327,7 +318,6 @@ class RandomRandomValuesTest extends RandomValuesTest {
 }
 
 class SplittableRandomValuesTest extends RandomValuesTest {
-
     @Override
     RandomValues randomValues() {
         return RandomValues.create(new SplittableRandom());

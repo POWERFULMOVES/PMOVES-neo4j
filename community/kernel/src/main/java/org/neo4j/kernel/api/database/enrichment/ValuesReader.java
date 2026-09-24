@@ -20,6 +20,7 @@
 package org.neo4j.kernel.api.database.enrichment;
 
 import static java.time.ZoneOffset.UTC;
+import static org.neo4j.internal.helpers.TimeUtil.zoneOffsetOfTotalSeconds;
 import static org.neo4j.values.storable.Values.dateTimeArray;
 import static org.neo4j.values.storable.Values.localDateTimeArray;
 import static org.neo4j.values.storable.Values.localTimeArray;
@@ -32,12 +33,14 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetTime;
 import java.time.ZoneId;
-import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.List;
+import java.util.UUID;
 import org.eclipse.collections.api.map.primitive.ImmutableByteObjectMap;
 import org.eclipse.collections.impl.factory.primitive.ByteObjectMaps;
 import org.neo4j.values.AnyValue;
+import org.neo4j.values.storable.AbstractFloat16Vector;
+import org.neo4j.values.storable.BFloat16Vector;
 import org.neo4j.values.storable.BooleanArray;
 import org.neo4j.values.storable.BooleanValue;
 import org.neo4j.values.storable.ByteArray;
@@ -53,8 +56,16 @@ import org.neo4j.values.storable.DoubleArray;
 import org.neo4j.values.storable.DoubleValue;
 import org.neo4j.values.storable.DurationArray;
 import org.neo4j.values.storable.DurationValue;
+import org.neo4j.values.storable.Float16Format;
+import org.neo4j.values.storable.Float16Vector;
+import org.neo4j.values.storable.Float32Vector;
+import org.neo4j.values.storable.Float64Vector;
 import org.neo4j.values.storable.FloatArray;
 import org.neo4j.values.storable.FloatValue;
+import org.neo4j.values.storable.Int16Vector;
+import org.neo4j.values.storable.Int32Vector;
+import org.neo4j.values.storable.Int64Vector;
+import org.neo4j.values.storable.Int8Vector;
 import org.neo4j.values.storable.IntArray;
 import org.neo4j.values.storable.IntValue;
 import org.neo4j.values.storable.LocalDateTimeArray;
@@ -75,8 +86,12 @@ import org.neo4j.values.storable.TextValue;
 import org.neo4j.values.storable.TimeArray;
 import org.neo4j.values.storable.TimeValue;
 import org.neo4j.values.storable.TimeZones;
+import org.neo4j.values.storable.UUIDArray;
+import org.neo4j.values.storable.UUIDValue;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.Values;
+import org.neo4j.values.storable.VectorArray;
+import org.neo4j.values.storable.VectorValue;
 import org.neo4j.values.virtual.ListValue;
 import org.neo4j.values.virtual.MapValue;
 import org.neo4j.values.virtual.NodeValue;
@@ -129,7 +144,19 @@ public enum ValuesReader {
     NODE((byte) 35, VirtualNodeValue.class, ValuesReader::readNode),
     RELATIONSHIP((byte) 36, VirtualRelationshipValue.class, ValuesReader::readRelationship),
     LIST((byte) 37, ListValue.class, ValuesReader::readList),
-    MAP((byte) 38, MapValue.class, ValuesReader::readMap);
+    MAP((byte) 38, MapValue.class, ValuesReader::readMap),
+    // Vectors
+    VECTOR_INT8((byte) 39, Int8Vector.class, ValuesReader::readInt8Vector),
+    VECTOR_INT16((byte) 40, Int16Vector.class, ValuesReader::readInt16Vector),
+    VECTOR_INT32((byte) 41, Int32Vector.class, ValuesReader::readInt32Vector),
+    VECTOR_INT64((byte) 42, Int64Vector.class, ValuesReader::readInt64Vector),
+    VECTOR_FLOAT32((byte) 43, Float32Vector.class, ValuesReader::readFloat32Vector),
+    VECTOR_FLOAT64((byte) 44, Float64Vector.class, ValuesReader::readFloat64Vector),
+    UID((byte) 45, UUIDValue.class, ValuesReader::readUUID),
+    UID_ARRAY((byte) 46, UUIDArray.class, ValuesReader::readUUIDArray),
+    VECTOR_ARRAY((byte) 47, VectorArray.class, ValuesReader::readVectorArray),
+    VECTOR_FLOAT16((byte) 48, Float16Vector.class, ValuesReader::readFloat16Vector),
+    VECTOR_BFLOAT16((byte) 49, BFloat16Vector.class, ValuesReader::readBFloat16Vector);
 
     public static final ImmutableByteObjectMap<ValuesReader> BY_ID =
             ByteObjectMaps.immutable.from(List.of(ValuesReader.values()), ValuesReader::id, v -> v);
@@ -168,9 +195,14 @@ public enum ValuesReader {
     }
 
     public static String readJavaString(ByteBuffer buffer) {
+        final var bytes = readUTF8(buffer);
+        return new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    private static byte[] readUTF8(ByteBuffer buffer) {
         final var bytes = new byte[buffer.getInt()];
         buffer.get(bytes, 0, bytes.length);
-        return new String(bytes, StandardCharsets.UTF_8);
+        return bytes;
     }
 
     private static ByteValue readByte(ByteBuffer buffer) {
@@ -283,9 +315,9 @@ public enum ValuesReader {
 
     private static TextArray readStringArray(ByteBuffer buffer) {
         final var length = buffer.getInt();
-        final var values = new String[length];
+        final var values = new StringValue[length];
         for (var i = 0; i < length; i++) {
-            values[i] = readJavaString(buffer);
+            values[i] = Values.utf8Value(readUTF8(buffer));
         }
         return Values.stringArray(values);
     }
@@ -498,7 +530,7 @@ public enum ValuesReader {
     private static OffsetTime readRawTime(ByteBuffer buffer) {
         final var nanosOfDayUTC = buffer.getLong();
         final var offsetSeconds = buffer.getInt();
-        return OffsetTime.ofInstant(Instant.ofEpochSecond(0, nanosOfDayUTC), ZoneOffset.ofTotalSeconds(offsetSeconds));
+        return OffsetTime.ofInstant(Instant.ofEpochSecond(0, nanosOfDayUTC), zoneOffsetOfTotalSeconds(offsetSeconds));
     }
 
     private static ZoneId toZoneId(int z) {
@@ -509,7 +541,107 @@ public enum ValuesReader {
         }
         // otherwise it's a shifted offset seconds value
         // preserve sign-bit for negative offsets
-        return ZoneOffset.ofTotalSeconds(z >> 1);
+        return zoneOffsetOfTotalSeconds(z >> 1);
+    }
+
+    private static Int8Vector readInt8Vector(ByteBuffer buffer) {
+        var dimensions = buffer.getShort();
+        VectorValue.ensureValidDimensions(dimensions);
+        final byte[] coordinates = new byte[dimensions];
+        buffer.get(coordinates);
+        return Values.int8Vector(coordinates);
+    }
+
+    private static Int16Vector readInt16Vector(ByteBuffer buffer) {
+        var dimensions = buffer.getShort();
+        VectorValue.ensureValidDimensions(dimensions);
+        final short[] coordinates = new short[dimensions];
+        buffer.asShortBuffer().get(coordinates);
+        buffer.position(buffer.position() + dimensions * Short.BYTES);
+        return Values.int16Vector(coordinates);
+    }
+
+    private static Int32Vector readInt32Vector(ByteBuffer buffer) {
+        var dimensions = buffer.getShort();
+        VectorValue.ensureValidDimensions(dimensions);
+        final int[] coordinates = new int[dimensions];
+        buffer.asIntBuffer().get(coordinates);
+        buffer.position(buffer.position() + dimensions * Integer.BYTES);
+        return Values.int32Vector(coordinates);
+    }
+
+    private static Int64Vector readInt64Vector(ByteBuffer buffer) {
+        var dimensions = buffer.getShort();
+        VectorValue.ensureValidDimensions(dimensions);
+        final long[] coordinates = new long[dimensions];
+        buffer.asLongBuffer().get(coordinates);
+        buffer.position(buffer.position() + dimensions * Long.BYTES);
+        return Values.int64Vector(coordinates);
+    }
+
+    private static AbstractFloat16Vector readFloat16Vector(ByteBuffer buffer, Float16Format format) {
+        var dimensions = buffer.getShort();
+        VectorValue.ensureValidDimensions(dimensions);
+        final short[] coordinates = new short[dimensions];
+        buffer.asShortBuffer().get(coordinates);
+        buffer.position(buffer.position() + dimensions * Short.BYTES);
+        return Values.float16Vector(format, coordinates);
+    }
+
+    private static Float16Vector readFloat16Vector(ByteBuffer buffer) {
+        return (Float16Vector) readFloat16Vector(buffer, Float16Format.FLOAT16);
+    }
+
+    private static BFloat16Vector readBFloat16Vector(ByteBuffer buffer) {
+        return (BFloat16Vector) readFloat16Vector(buffer, Float16Format.BFLOAT16);
+    }
+
+    private static Float32Vector readFloat32Vector(ByteBuffer buffer) {
+        var dimensions = buffer.getShort();
+        VectorValue.ensureValidDimensions(dimensions);
+        final float[] coordinates = new float[dimensions];
+        buffer.asFloatBuffer().get(coordinates);
+        buffer.position(buffer.position() + dimensions * Float.BYTES);
+        return Values.float32Vector(coordinates);
+    }
+
+    private static Float64Vector readFloat64Vector(ByteBuffer buffer) {
+        var dimensions = buffer.getShort();
+        VectorValue.ensureValidDimensions(dimensions);
+        final double[] coordinates = new double[dimensions];
+        buffer.asDoubleBuffer().get(coordinates);
+        buffer.position(buffer.position() + dimensions * Double.BYTES);
+        return Values.float64Vector(coordinates);
+    }
+
+    private static UUIDValue readUUID(ByteBuffer buffer) {
+        return Values.uuidValue(buffer.getLong(), buffer.getLong());
+    }
+
+    private static UUIDArray readUUIDArray(ByteBuffer buffer) {
+        int length = buffer.getInt();
+        UUID[] uuids = new UUID[length];
+        for (int i = 0; i < length; i++) {
+            uuids[i] = new UUID(buffer.getLong(), buffer.getLong());
+        }
+        return Values.uuidArray(uuids);
+    }
+
+    public static VectorArray readVectorArray(ByteBuffer buffer) {
+        int length = buffer.getInt();
+        VectorValue[] vectors = new VectorValue[length];
+        for (int i = 0; i < length; i++) {
+            // VectorArray items are each written with their own byte type header, just like any other "high-level"
+            // value because a VectorArray may contain varying types of vector values in its items.
+            AnyValue candidate = from(buffer);
+            if (candidate instanceof VectorValue vectorValue) {
+                vectors[i] = vectorValue;
+            } else {
+                throw new IllegalStateException(
+                        "Item in VectorArray not a VectorValue, was a " + candidate.getTypeName());
+            }
+        }
+        return Values.vectorArray(vectors);
     }
 
     public byte id() {

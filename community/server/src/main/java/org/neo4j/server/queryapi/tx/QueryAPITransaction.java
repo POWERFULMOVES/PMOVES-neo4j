@@ -24,14 +24,14 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import org.neo4j.driver.AuthToken;
 import org.neo4j.driver.Bookmark;
 import org.neo4j.driver.Result;
 import org.neo4j.driver.Session;
-import org.neo4j.driver.summary.ResultSummary;
 
-public class QueryAPITransaction implements Transaction {
+public class QueryAPITransaction implements InternalTransaction {
 
     private final String transactionId;
     private final org.neo4j.driver.Transaction delegateTransaction;
@@ -39,7 +39,6 @@ public class QueryAPITransaction implements Transaction {
     private final AuthToken authToken;
     private final String databaseName;
     private final ReentrantLock lock = new ReentrantLock();
-    private Result currentResult;
     private Instant transactionExpiry;
     private final Duration timeoutExtensionDuration;
 
@@ -61,13 +60,8 @@ public class QueryAPITransaction implements Transaction {
     }
 
     @Override
-    public void runQuery(String statement, Map<String, Object> parameters) {
-        this.currentResult = delegateTransaction.run(statement, parameters);
-    }
-
-    @Override
-    public Result retrieveResults() {
-        return currentResult;
+    public Result run(String statement, Map<String, Object> parameters) {
+        return delegateTransaction.run(statement, parameters);
     }
 
     @Override
@@ -82,24 +76,30 @@ public class QueryAPITransaction implements Transaction {
     }
 
     @Override
-    public ResultSummary resultSummary() {
-        return currentResult.consume();
-    }
-
-    @Override
     public boolean isOpen() {
         return delegateTransaction.isOpen();
     }
 
     @Override
     public void close() {
-        delegateTransaction.close();
+        if (isOpen()) {
+            delegateTransaction.close();
+        }
         session.close();
     }
 
     @Override
     public boolean tryAcquire() {
         return lock.tryLock();
+    }
+
+    @Override
+    public boolean tryAcquire(long timeout, TimeUnit timeUnit) {
+        try {
+            return tryAcquire() || lock.tryLock(timeout, timeUnit);
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @Override

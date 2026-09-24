@@ -41,7 +41,8 @@ case class PlanHead(
   ): (BestPlans, LogicalPlanningContext) = {
     val aggregationPropertyAccesses = PropertyAccessHelper.findAggregationPropertyAccesses(headQuery)
     val localPropertyAccess = PropertyAccessHelper.findLocalPropertyAccesses(headQuery)
-    val contextualPropertyAccess = PropertyAccessHelper.findGlobalPropertyAccessesWithContext(headQuery)
+    val contextualPropertyAccess =
+      context.settings.remoteBatchPropertiesStrategy.findGlobalPropertyAccessesWithContext(headQuery)
     val updatedContext = context.withModifiedPlannerState(_
       .withAggregationProperties(aggregationPropertyAccesses)
       .withAccessedProperties(localPropertyAccess ++ aggregationPropertyAccesses)
@@ -49,7 +50,7 @@ case class PlanHead(
 
     val plans = countStorePlanner(headQuery, updatedContext) match {
       case Some(plan) =>
-        BestResults(plan, None)
+        BestResults(plan, None, None)
       case None =>
         val matchPlans = matchPlanner.plan(headQuery, updatedContext)
         // We take all plans solving the MATCH part. This could be two, if we have a required order.

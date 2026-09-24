@@ -31,6 +31,7 @@ import java.time.OffsetTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.temporal.TemporalAmount;
+import java.util.UUID;
 import java.util.function.Function;
 import org.junit.jupiter.api.Test;
 import org.neo4j.graphdb.spatial.Point;
@@ -125,12 +126,15 @@ class ArrayEncoderTest {
             DurationValue.duration(1991, 3, 5, 12).asObjectCopy(),
             DurationValue.duration(1992, 4, 6, 5).asObjectCopy()
         });
+        assertEncoding(
+                "U00000000-0000-0000-0000-000000000001|00000000-0000-0002-0000-000000000003|",
+                new UUID[] {new UUID(0, 1), new UUID(2, 3)});
     }
 
     @Test
     void shouldEncodeProperlyWithMultipleThreadsRacing() throws Throwable {
         // given
-        final String[] INPUT = {
+        String[] INPUT = {
             "These strings need to be longer than 57 bytes, because that is the line wrapping length of BASE64.",
             "This next line is also long. The number of strings in this array is the number of threads to use.",
             "Each thread will get a different string as input to encode, and ensure the result is always the same.",
@@ -149,7 +153,7 @@ class ArrayEncoderTest {
     private static void raceEncode(String[] INPUT, Function<Value, String> encodeFunction) throws Throwable {
         Race race = new Race();
         for (String input : INPUT) {
-            final Value inputValue = Values.of(new String[] {input});
+            Value inputValue = Values.of(new String[] {input});
             race.addContestant(() -> {
                 String first = encodeFunction.apply(inputValue);
                 for (int i = 0; i < 1000; i++) {

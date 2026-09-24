@@ -16,15 +16,17 @@
  */
 package org.neo4j.cypher.internal.frontend.phases
 
-import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.In
 import org.neo4j.cypher.internal.expressions.ListLiteral
 import org.neo4j.cypher.internal.expressions.Ors
+import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerConfig
 import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerFactory
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.scoping.UpToDateScopes
 import org.neo4j.cypher.internal.frontend.phases.rewriting.cnf.CNFNormalizer.PredicatesInCNF
 import org.neo4j.cypher.internal.frontend.phases.rewriting.cnf.rewriteEqualityToInPredicate
 import org.neo4j.cypher.internal.rewriting.conditions.SemanticInfoAvailable
+import org.neo4j.cypher.internal.rewriting.rewriters.computeDependenciesForExpressions.ExpressionsHaveComputedDependencies
 import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.StepSequencer
 import org.neo4j.cypher.internal.util.StepSequencer.DefaultPostCondition
@@ -80,10 +82,9 @@ case object collapseMultipleInPredicates extends StatementRewriter with StepSequ
   override def preConditions: Set[StepSequencer.Condition] =
     Set(rewriteEqualityToInPredicate.completed) ++ PredicatesInCNF
 
-  override def invalidatedConditions: Set[StepSequencer.Condition] = SemanticInfoAvailable // Introduces new AST nodes
+  override def invalidatedConditions: Set[StepSequencer.Condition] =
+    SemanticInfoAvailable ++ Set(UpToDateScopes, ExpressionsHaveComputedDependencies)
 
-  override def getTransformer(
-    pushdownPropertyReads: Boolean,
-    semanticFeatures: Seq[SemanticFeature]
-  ): Transformer[BaseContext, BaseState, BaseState] = this
+  override def getTransformer(planPipelineConfig: PlanPipelineTransformerConfig)
+    : Transformer[BaseContext, BaseState, BaseState] = this
 }

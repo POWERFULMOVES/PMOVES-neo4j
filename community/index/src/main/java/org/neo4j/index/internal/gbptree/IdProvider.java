@@ -21,17 +21,36 @@ package org.neo4j.index.internal.gbptree;
 
 import java.io.IOException;
 import org.neo4j.io.pagecache.PageCursor;
+import org.neo4j.io.pagecache.context.CursorContext;
 
 /**
  * Provide tree node (page) ids which can be used for storing tree node data.
  * Bytes on returned page ids must be empty (all zeros).
  */
 public interface IdProvider {
+    ExclusiveAccessMode NO_EXCLUSIVE_ACCESS = new ExclusiveAccessMode() {
+        @Override
+        public RewriteResult rewrite(
+                CursorCreator cursorCreator,
+                long belowId,
+                long stableGeneration,
+                long unstableGeneration,
+                CursorContext cursorContext) {
+            throw new IllegalStateException("No-op exclusive-access");
+        }
+
+        @Override
+        public void shrink(long numberOfPages) {
+            throw new IllegalStateException("No-op exclusive-access");
+        }
+
+        @Override
+        public void close() {}
+    };
 
     IdProvider NO_OP = new IdProvider() {
         @Override
-        public long acquireNewId(long stableGeneration, long unstableGeneration, CursorCreator cursorCreator)
-                throws IOException {
+        public long acquireNewId(long stableGeneration, CursorCreator cursorCreator, CursorContext cursorContext) {
             throw new IllegalStateException("No-op provider");
         }
 
@@ -50,6 +69,11 @@ public interface IdProvider {
         public long lastId() {
             throw new IllegalStateException("No-op provider");
         }
+
+        @Override
+        public ExclusiveAccessMode exclusiveAccess() {
+            return NO_EXCLUSIVE_ACCESS;
+        }
     };
 
     /**
@@ -57,16 +81,16 @@ public interface IdProvider {
      * are all guaranteed to be zero at the point of returning from this method.
      *
      * @param stableGeneration current stable generation.
-     * @param unstableGeneration current unstable generation.
      * @param cursorCreator function to create write page cursor, if this method is called within context of another write cursor, this should create linked cursor
      * @return page id guaranteed to current not be used and whose bytes are all zeros.
      * @throws IOException on {@link PageCursor} error.
      */
-    long acquireNewId(long stableGeneration, long unstableGeneration, CursorCreator cursorCreator) throws IOException;
+    long acquireNewId(long stableGeneration, CursorCreator cursorCreator, CursorContext cursorContext)
+            throws IOException;
 
     /**
      * Releases a page id which has previously been used, but isn't anymore, effectively allowing
-     * it to be reused and returned from {@link #acquireNewId(long, long, CursorCreator)}.
+     * it to be reused and returned from {@link #acquireNewId(long, CursorCreator, CursorContext)}.
      *
      * @param stableGeneration current stable generation.
      * @param unstableGeneration current unstable generation.
@@ -85,6 +109,12 @@ public interface IdProvider {
     void visitFreelist(IdProviderVisitor visitor, CursorCreator cursorCreator) throws IOException;
 
     long lastId();
+
+    /**
+     * Enter exclusive-access mode in order to get access to e.g. ability to rewrite the free-list.
+     * @return {@link ExclusiveAccessMode} which allows e.g. rewrite.
+     */
+    ExclusiveAccessMode exclusiveAccess();
 
     interface IdProviderVisitor {
         void beginFreelistPage(long pageId);
@@ -109,4 +139,39 @@ public interface IdProvider {
             public void freelistEntryFromReleaseCache(long pageId) {}
         }
     }
+
+    interface ExclusiveAccessMode extends AutoCloseable {
+        /**
+         * Rewrites the free-list onto new pages (potentially also found on the free-list). The new free-list
+         * pages will be any encountered available IDs that are below the given {@code belowId}.
+         * @param cursorCreator for creating {@link PageCursor} instances.
+         * @param belowId ID which all allocated new free-list pages need to be below.
+         * @param stableGeneration current stable generation.
+         * @param unstableGeneration current unstable generation.
+         * @param cursorContext context in which to do {@link PageCursor} operations.
+         * @return {@link RewriteResult} of past and present free-list pages.
+         * @throws IOException on I/O error.
+         */
+        RewriteResult rewrite(
+                CursorCreator cursorCreator,
+                long belowId,
+                long stableGeneration,
+                long unstableGeneration,
+                CursorContext cursorContext)
+                throws IOException;
+
+        /**
+         * Shrink the ID space by lowering the {@link #lastId()} by the given amount.
+         * @param numberOfPages amount to reduce the {@link #lastId()} by.
+         */
+        void shrink(long numberOfPages);
+
+        /**
+         * Exit exclusive-access mode.
+         */
+        @Override
+        void close();
+    }
+
+    record RewriteResult(long[] idsBefore, long[] idsAfter) {}
 }

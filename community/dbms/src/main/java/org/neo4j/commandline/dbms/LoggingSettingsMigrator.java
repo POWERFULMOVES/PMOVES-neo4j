@@ -111,8 +111,7 @@ class LoggingSettingsMigrator {
                 LogConfig.STRUCTURED_LOG_JSON_TEMPLATE_WITH_MESSAGE,
                 false);
 
-        sb.append(
-                """
+        sb.append("""
 
                         <!-- Only used by "neo4j console", will be ignored otherwise -->
                 """);
@@ -123,8 +122,7 @@ class LoggingSettingsMigrator {
                 DEFAULT_PLAIN_LAYOUT,
                 LogConfig.STRUCTURED_LOG_JSON_TEMPLATE_WITH_MESSAGE,
                 false);
-        sb.append(
-                """
+        sb.append("""
                         </Console>
                     </Appenders>
 
@@ -154,7 +152,7 @@ class LoggingSettingsMigrator {
                 getSettingValue(OldSettings.store_internal_log_max_archives),
                 "Neo4jDebugLogLayout",
                 getSettingValue(OldSettings.store_internal_log_format),
-                LogConfig.STRUCTURED_LOG_JSON_TEMPLATE_WITH_CATEGORY,
+                LogConfig.STRUCTURED_LOG_JSON_TEMPLATE_WITH_MESSAGE,
                 true);
 
         appendAppender(
@@ -187,11 +185,10 @@ class LoggingSettingsMigrator {
                 getSettingValue(OldSettings.store_security_log_max_archives),
                 DEFAULT_PLAIN_LAYOUT,
                 getSettingValue(OldSettings.security_log_format),
-                LogConfig.STRUCTURED_LOG_JSON_TEMPLATE,
+                LogConfig.STRUCTURED_LOG_JSON_TEMPLATE_WITH_MESSAGE,
                 false);
 
-        sb.append(
-                """
+        sb.append("""
                     </Appenders>
 
                     <Loggers>
@@ -200,8 +197,7 @@ class LoggingSettingsMigrator {
                         <!-- The debug log is used as the root logger to catch everything -->
                 """);
         sb.append(format("        <Root level=\"%s\">%n", getSettingValue(OldSettings.store_internal_log_level)));
-        sb.append(
-                """
+        sb.append("""
                             <AppenderRef ref="DebugLog"/> <!-- Keep this -->
                         </Root>
 
@@ -220,8 +216,7 @@ class LoggingSettingsMigrator {
         sb.append(format(
                 "        <Logger name=\"SecurityLogger\" level=\"%s\" additivity=\"false\">%n",
                 getSettingValue(OldSettings.security_log_level)));
-        sb.append(
-                """
+        sb.append("""
                             <AppenderRef ref="SecurityLog"/>
                         </Logger>
                     </Loggers>
@@ -278,8 +273,7 @@ class LoggingSettingsMigrator {
     }
 
     private void appendHeader(StringBuilder sb) {
-        sb.append(
-                """
+        sb.append("""
                 <?xml version="1.0" encoding="UTF-8"?>
                 <!--
                     This is a log4j 2 configuration file that provides maximum flexibility.
@@ -290,7 +284,7 @@ class LoggingSettingsMigrator {
                     Please consult https://logging.apache.org/log4j/2.x/manual/configuration.html for instructions and
                     available configuration options.
                 -->
-                <Configuration status="ERROR" monitorInterval="30" packages="org.neo4j.logging.log4j">
+                <Configuration status="ERROR" monitorInterval="30">
                     <Appenders>
                 """);
     }

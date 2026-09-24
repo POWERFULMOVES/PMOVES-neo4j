@@ -23,8 +23,10 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Consumer;
+import org.neo4j.cypher.internal.DefaultQueryLanguageScope;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.graphdb.NotInTransactionException;
+import org.neo4j.graphdb.schema.Schema;
 import org.neo4j.internal.kernel.api.CursorFactory;
 import org.neo4j.internal.kernel.api.ExecutionStatistics;
 import org.neo4j.internal.kernel.api.Locks;
@@ -53,8 +55,10 @@ import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.impl.api.ClockContext;
 import org.neo4j.kernel.impl.coreapi.InternalTransaction;
+import org.neo4j.memory.HeapEstimatorCacheConfig;
 import org.neo4j.memory.MemoryTracker;
-import org.neo4j.storageengine.api.StorageEngineCostCharacteristics;
+import org.neo4j.monitoring.ExceptionHandlerService;
+import org.neo4j.storageengine.api.StorageEngineCharacteristics;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 
 /**
@@ -105,13 +109,7 @@ public interface KernelTransaction extends AssertOpen, AutoCloseable {
      */
     long READ_ONLY_ID = 0;
 
-    KernelTransactionMonitor NO_MONITOR = new KernelTransactionMonitor() {
-        @Override
-        public void beforeApply() {}
-
-        @Override
-        public void afterCommit(ExecutionStatistics statistics) {}
-    };
+    Monitor NO_MONITOR = new Monitor() {};
 
     /**
      * Commit and any changes introduced as part of this transaction.
@@ -119,16 +117,16 @@ public interface KernelTransaction extends AssertOpen, AutoCloseable {
      *
      * When {@code commit()} is completed, all resources are released and no more changes are possible in this transaction.
      *
-     * @param kernelTransactionMonitor monitor for advanced interaction with commit process.
+     * @param monitor monitor for advanced interaction with commit process.
      * @return id of the committed transaction or {@link #ROLLBACK_ID} if transaction was rolled back or
      * {@link #READ_ONLY_ID} if transaction was read-only.
      */
-    long commit(KernelTransactionMonitor kernelTransactionMonitor) throws TransactionFailureException;
+    long commit(Monitor monitor) throws TransactionFailureException;
 
     /**
-     * Commit without a {@link KernelTransactionMonitor}.
+     * Commit without a {@link Monitor}.
      *
-     * @see #commit(KernelTransactionMonitor)
+     * @see #commit(Monitor)
      */
     default long commit() throws TransactionFailureException {
         return commit(NO_MONITOR);
@@ -204,9 +202,9 @@ public interface KernelTransaction extends AssertOpen, AutoCloseable {
     ExecutionStatistics executionStatistics();
 
     /**
-     * @return cost characteristics of the underlying storage engine.
+     * @return characteristics of the underlying storage engine.
      */
-    StorageEngineCostCharacteristics storageEngineCostCharacteristics();
+    StorageEngineCharacteristics storageEngineCharacteristics();
 
     /**
      * Closes this transaction, roll back any changes if {@link #commit()} was not called.
@@ -476,12 +474,20 @@ public interface KernelTransaction extends AssertOpen, AutoCloseable {
      * After that transaction thread should call {@link ExecutionContext#close()}}
      * @return separate thread execution context
      */
-    ExecutionContext createExecutionContext();
+    ExecutionContext createExecutionContext(HeapEstimatorCacheConfig heapEstimatorCacheConfig);
+
+    default ExecutionContext createExecutionContext() {
+        return createExecutionContext(HeapEstimatorCacheConfig.DISABLED);
+    }
 
     /**
      * Create an execution context memory tracker to be used by threads separate to where the transaction is executed.
      */
-    MemoryTracker createExecutionContextMemoryTracker();
+    MemoryTracker createExecutionContextMemoryTracker(HeapEstimatorCacheConfig heapEstimatorCacheConfig);
+
+    default MemoryTracker createExecutionContextMemoryTracker() {
+        return createExecutionContextMemoryTracker(HeapEstimatorCacheConfig.DISABLED);
+    }
 
     /**
      * @return current transaction query execution context
@@ -519,37 +525,35 @@ public interface KernelTransaction extends AssertOpen, AutoCloseable {
 
     InnerTransactionHandler getInnerTransactionHandler();
 
-    interface KernelTransactionMonitor {
+    interface Monitor {
         /**
          * Called during commit after all logical transaction state have been converted into storage commands,
          * but before the commands have been applied to the transaction log and store.
          */
-        void beforeApply();
+        default void beforeApply() {}
+
+        /**
+         * Called during commit after all commands have been applied.
+         * but before the transaction has been marked as closed (it has not yet started to close).
+         */
+        default void afterApply() {}
 
         /**
          * Called after the transaction has been committed, when its execution statistics are still available.
          */
-        void afterCommit(ExecutionStatistics statistics);
+        default void afterCommit(ExecutionStatistics statistics) {}
 
-        static KernelTransactionMonitor withBeforeApply(Runnable beforeApply) {
-            return new KernelTransactionMonitor() {
-
+        static Monitor withBeforeApply(Runnable beforeApply) {
+            return new Monitor() {
                 @Override
                 public void beforeApply() {
                     beforeApply.run();
                 }
-
-                @Override
-                public void afterCommit(ExecutionStatistics statistics) {}
             };
         }
 
-        static KernelTransactionMonitor withAfterCommit(Consumer<ExecutionStatistics> onFinalStatistics) {
-            return new KernelTransactionMonitor() {
-
-                @Override
-                public void beforeApply() {}
-
+        static Monitor withAfterCommit(Consumer<ExecutionStatistics> onFinalStatistics) {
+            return new Monitor() {
                 @Override
                 public void afterCommit(ExecutionStatistics statistics) {
                     onFinalStatistics.accept(statistics);
@@ -558,9 +562,9 @@ public interface KernelTransaction extends AssertOpen, AutoCloseable {
         }
     }
 
-    default boolean isSPDTransaction() {
-        return false;
-    }
+    DefaultQueryLanguageScope defaultQueryLanguageScope();
 
-    default void clearSPDQueryCaches() {}
+    ExceptionHandlerService exceptionHandlerService();
+
+    Schema schema();
 }

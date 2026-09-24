@@ -19,10 +19,12 @@
  */
 package org.neo4j.kernel.impl.newapi;
 
+import java.util.Set;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 import org.neo4j.collection.Dependencies;
 import org.neo4j.collection.ResourceRawIterator;
+import org.neo4j.common.DependencyResolver;
 import org.neo4j.internal.kernel.api.Procedures;
 import org.neo4j.internal.kernel.api.exceptions.ProcedureException;
 import org.neo4j.internal.kernel.api.procs.ProcedureCallContext;
@@ -32,19 +34,19 @@ import org.neo4j.internal.kernel.api.procs.QualifiedName;
 import org.neo4j.internal.kernel.api.procs.UserAggregationReducer;
 import org.neo4j.internal.kernel.api.procs.UserFunctionHandle;
 import org.neo4j.internal.kernel.api.procs.UserFunctionSignature;
-import org.neo4j.internal.kernel.api.security.AccessMode;
 import org.neo4j.internal.kernel.api.security.SecurityAuthorizationHandler;
+import org.neo4j.internal.kernel.api.security.StaticAccessMode;
 import org.neo4j.kernel.api.AssertOpen;
+import org.neo4j.kernel.api.ExecutionContext;
 import org.neo4j.kernel.api.QueryLanguage;
 import org.neo4j.kernel.api.procedure.ProcedureView;
 import org.neo4j.kernel.impl.api.ClockContext;
 import org.neo4j.kernel.impl.api.KernelTransactionImplementation;
 import org.neo4j.kernel.impl.api.OverridableSecurityContext;
 import org.neo4j.kernel.impl.api.parallel.ExecutionContextProcedureKernelTransaction;
-import org.neo4j.kernel.impl.api.parallel.ThreadExecutionContext;
 import org.neo4j.values.AnyValue;
 
-public abstract sealed class KernelProcedures implements Procedures {
+public abstract class KernelProcedures implements Procedures {
 
     private final AssertOpen assertOpen;
 
@@ -52,7 +54,7 @@ public abstract sealed class KernelProcedures implements Procedures {
         this.assertOpen = assertOpen;
     }
 
-    public static final class ForTransactionScope extends KernelProcedures {
+    public static class ForTransactionScope extends KernelProcedures {
 
         private final KernelTransactionImplementation ktx;
         private final Dependencies databaseDependencies;
@@ -79,13 +81,13 @@ public abstract sealed class KernelProcedures implements Procedures {
         }
     }
 
-    public static final class ForThreadExecutionContextScope extends KernelProcedures {
+    public static class ForThreadExecutionContextScope extends KernelProcedures {
 
         private final ProcedureCaller.ForThreadExecutionContextScope procedureCaller;
 
         public ForThreadExecutionContextScope(
-                ThreadExecutionContext executionContext,
-                Dependencies databaseDependencies,
+                ExecutionContext executionContext,
+                DependencyResolver databaseDependencies,
                 OverridableSecurityContext overridableSecurityContext,
                 ExecutionContextProcedureKernelTransaction kernelTransaction,
                 SecurityAuthorizationHandler securityAuthorizationHandler,
@@ -131,25 +133,25 @@ public abstract sealed class KernelProcedures implements Procedures {
     @Override
     public ResourceRawIterator<AnyValue[], ProcedureException> procedureCallRead(
             int id, AnyValue[] arguments, ProcedureCallContext context) throws ProcedureException {
-        return getProcedureCaller().callProcedure(id, arguments, AccessMode.Static.READ, context);
+        return getProcedureCaller().callProcedure(id, arguments, StaticAccessMode.READ, context);
     }
 
     @Override
     public ResourceRawIterator<AnyValue[], ProcedureException> procedureCallWrite(
             int id, AnyValue[] arguments, ProcedureCallContext context) throws ProcedureException {
-        return getProcedureCaller().callProcedure(id, arguments, AccessMode.Static.TOKEN_WRITE, context);
+        return getProcedureCaller().callProcedure(id, arguments, StaticAccessMode.TOKEN_WRITE, context);
     }
 
     @Override
     public ResourceRawIterator<AnyValue[], ProcedureException> procedureCallSchema(
             int id, AnyValue[] arguments, ProcedureCallContext context) throws ProcedureException {
-        return getProcedureCaller().callProcedure(id, arguments, AccessMode.Static.SCHEMA, context);
+        return getProcedureCaller().callProcedure(id, arguments, StaticAccessMode.SCHEMA, context);
     }
 
     @Override
     public ResourceRawIterator<AnyValue[], ProcedureException> procedureCallDbms(
             int id, AnyValue[] arguments, ProcedureCallContext context) throws ProcedureException {
-        return getProcedureCaller().callProcedure(id, arguments, AccessMode.Static.ACCESS, context);
+        return getProcedureCaller().callProcedure(id, arguments, StaticAccessMode.ACCESS, context);
     }
 
     @Override
@@ -208,6 +210,12 @@ public abstract sealed class KernelProcedures implements Procedures {
     public Stream<UserFunctionSignature> aggregationFunctionGetAll(QueryLanguage scope) {
         performCheckBeforeOperation();
         return getProcedureCaller().procedureView.getAllAggregatingFunctions(scope);
+    }
+
+    @Override
+    public Set<String> shadowedNamespaces(QueryLanguage scope) {
+        performCheckBeforeOperation();
+        return getProcedureCaller().procedureView.getAllShadowedNames(scope);
     }
 
     @Override

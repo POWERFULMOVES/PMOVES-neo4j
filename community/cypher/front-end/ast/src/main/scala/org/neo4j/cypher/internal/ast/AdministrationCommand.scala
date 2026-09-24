@@ -16,8 +16,12 @@
  */
 package org.neo4j.cypher.internal.ast
 
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.AdministrationCommand.NATIVE_AUTH
+import org.neo4j.cypher.internal.ast.AdministrationCommand.authRuleAllowListedFunctions
 import org.neo4j.cypher.internal.ast.AdministrationCommand.checkIsStringLiteralOrParameter
+import org.neo4j.cypher.internal.ast.AdministrationCommand.checkIsStringOrStringListOrParameter
+import org.neo4j.cypher.internal.ast.AdministrationCommand.propertyRuleAllowedTemporalFunctions
 import org.neo4j.cypher.internal.ast.prettifier.ExpressionStringifier
 import org.neo4j.cypher.internal.ast.prettifier.Prettifier
 import org.neo4j.cypher.internal.ast.semantics.SemanticAnalysisTooling
@@ -25,10 +29,12 @@ import org.neo4j.cypher.internal.ast.semantics.SemanticCheck
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheck.success
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheck.when
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheckResult
+import org.neo4j.cypher.internal.ast.semantics.SemanticCheckable
 import org.neo4j.cypher.internal.ast.semantics.SemanticError
 import org.neo4j.cypher.internal.ast.semantics.SemanticExpressionCheck
 import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
 import org.neo4j.cypher.internal.ast.semantics.SemanticState
+import org.neo4j.cypher.internal.ast.semantics._
 import org.neo4j.cypher.internal.ast.semantics.iterableOnceSemanticChecking
 import org.neo4j.cypher.internal.ast.semantics.optionSemanticChecking
 import org.neo4j.cypher.internal.expressions.BooleanExpression
@@ -36,7 +42,7 @@ import org.neo4j.cypher.internal.expressions.Equals
 import org.neo4j.cypher.internal.expressions.ExplicitParameter
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.Expression.SemanticContext
-import org.neo4j.cypher.internal.expressions.FunctionInvocation
+import org.neo4j.cypher.internal.expressions.FunctionInvocationLike
 import org.neo4j.cypher.internal.expressions.GreaterThan
 import org.neo4j.cypher.internal.expressions.GreaterThanOrEqual
 import org.neo4j.cypher.internal.expressions.In
@@ -57,18 +63,19 @@ import org.neo4j.cypher.internal.expressions.PatternComprehension
 import org.neo4j.cypher.internal.expressions.PatternExpression
 import org.neo4j.cypher.internal.expressions.Property
 import org.neo4j.cypher.internal.expressions.PropertyKeyName
+import org.neo4j.cypher.internal.expressions.StringDecimalInteger
 import org.neo4j.cypher.internal.expressions.StringLiteral
 import org.neo4j.cypher.internal.expressions.SubqueryExpression
 import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.util.ASTNode
 import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.symbols.CTBoolean
-import org.neo4j.cypher.internal.util.symbols.CTDateTime
-import org.neo4j.cypher.internal.util.symbols.CTInteger
 import org.neo4j.cypher.internal.util.symbols.CTList
 import org.neo4j.cypher.internal.util.symbols.CTMap
 import org.neo4j.cypher.internal.util.symbols.CTNode
+import org.neo4j.cypher.internal.util.symbols.CTRelationship
 import org.neo4j.cypher.internal.util.symbols.CTString
+import org.neo4j.cypher.internal.util.symbols.invariantTypeSpec
 import org.neo4j.gqlstatus.ErrorGqlStatusObject
 import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation
 import org.neo4j.gqlstatus.GqlHelper
@@ -80,6 +87,8 @@ import scala.jdk.CollectionConverters.SeqHasAsJava
 sealed trait AdministrationCommand extends StatementWithGraph with SemanticAnalysisTooling {
 
   def name: String
+
+  def commandDescription: String = name
 
   // We parse USE to give a nice error message, but it's not considered to be a part of the AST
   private var useGraphVar: Option[UseGraph] = None
@@ -96,23 +105,153 @@ sealed trait AdministrationCommand extends StatementWithGraph with SemanticAnaly
 
   override def semanticCheck: SemanticCheck =
     requireFeatureSupport(s"The `$name` clause", SemanticFeature.MultipleDatabases, position) chain
-      when(useGraphVar.isDefined)(error(
-        s"The `USE` clause is not required for Administration Commands. Retry your query omitting the `USE` clause and it will be routed automatically.",
-        position
-      ))
+      when(useGraphVar.isDefined)(SemanticError.useClauseWithAdministrationCommand(position))
 
   override def dup(children: Seq[AnyRef]): this.type =
     super.dup(children).withGraph(useGraph).asInstanceOf[this.type]
 }
 
-object AdministrationCommand {
+object AdministrationCommand extends SemanticAnalysisTooling {
   val NATIVE_AUTH = "native"
+
+  val propertyRuleAllowedTemporalFunctions: Seq[String] =
+    Seq("date", "datetime", "localdatetime", "localtime", "time", "duration", "point")
+
+  val authRuleAllowListedFunctions: Seq[String] = Seq(
+    // ABAC oidc user attributes function
+    "abac.oidc.user_attribute",
+    // ABAC native user tags function
+    "abac.native.user_tags",
+    // List functions
+    "range",
+    "reduce",
+    "reverse",
+    "tail",
+    "toBooleanList",
+    "toFloatList",
+    "toIntegerList",
+    "toStringList",
+    // Numeric functions
+    "abs",
+    "ceil",
+    "floor",
+    "isNaN",
+    "round",
+    "sign",
+    // Predicate functions,
+    "all",
+    "any",
+    "isEmpty",
+    "none",
+    "single",
+    // Scalar functions
+    "char_length",
+    "character_length",
+    "coalesce",
+    "head",
+    "last",
+    "nullIf",
+    "size",
+    "toBoolean",
+    "toBooleanOrNull",
+    "toFloat",
+    "toFloatOrNull",
+    "toInteger",
+    "toIntegerOrNull",
+    // String Functions
+    "btrim",
+    "left",
+    "lower",
+    "ltrim",
+    "replace",
+    "right",
+    "rtrim",
+    "split",
+    "substring",
+    "toLower",
+    "toString",
+    "toStringOrNull",
+    "toUpper",
+    "trim",
+    "upper",
+    // Temporal duration functions
+    "duration",
+    "duration.between",
+    "duration.inDays",
+    "duration.inMonths",
+    "duration.inSeconds",
+    // Temporal instant functions
+    "date",
+    "date.transaction",
+    "date.truncate",
+    "datetime",
+    "datetime.transaction",
+    "datetime.fromEpoch",
+    "datetime.fromEpochMillis",
+    "datetime.truncate",
+    "localdatetime",
+    "localdatetime.transaction",
+    "localdatetime.truncate",
+    "localtime",
+    "localtime.transaction",
+    "localtime.truncate",
+    "time",
+    "time.transaction",
+    "time.truncate"
+  ).map(_.toLowerCase)
 
   private[ast] def checkIsStringLiteralOrParameter(value: String, expression: Expression): SemanticCheck =
     expression match {
       case _: StringLiteral                            => success
       case p: Parameter if p.parameterType == CTString => success
-      case exp => SemanticCheck.error(SemanticError(s"$value must be a String, or a String parameter.", exp.position))
+      case exp => SemanticCheck.error(SemanticError.invalidEntityType(
+          ExpressionStringifier()(exp),
+          value,
+          Seq("STRING NOT NULL"),
+          s"$value must be a String, or a String parameter.",
+          exp.position
+        ))
+    }
+
+  /**
+   * Validate that {@code expr} is a non-empty StringLiteral, a ListLiteral of non-empty
+   * StringLiterals, or a Parameter. On failure produces a {@code 22N04} error tagged with the
+   * given {@code context} (e.g. "REMOVE AUTH", "SET TAGS").
+   *
+   * When {@code allowEmptyList} is true an empty ListLiteral is also accepted; the tag clauses use
+   * this to let {@code SET TAGS []} clear all tags (and {@code ADD}/{@code REMOVE TAGS []} be no-ops).
+   */
+  private[ast] def checkIsStringOrStringListOrParameter(
+    context: String,
+    expr: Expression,
+    allowEmptyList: Boolean = false
+  ): SemanticCheck =
+    expr match {
+      case s: StringLiteral if s.value.nonEmpty => success
+      case _: Parameter                         => success
+      case list: ListLiteral
+        if (allowEmptyList || list.expressions.nonEmpty) &&
+          list.expressions.forall(e =>
+            e.isInstanceOf[StringLiteral] && e.asInstanceOf[StringLiteral].value.nonEmpty
+          ) =>
+        success
+      case _ =>
+        val stringifier = ExpressionStringifier()
+        val listForm = if (allowEmptyList) "List of non-empty Strings" else "non-empty List of non-empty Strings"
+        val gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N04)
+          .atPosition(expr.position.offset, expr.position.line, expr.position.column)
+          .withParam(GqlParams.StringParam.input, stringifier(expr))
+          .withParam(GqlParams.StringParam.context, context)
+          .withParam(
+            GqlParams.ListParam.inputList,
+            List(
+              "non-empty String",
+              listForm,
+              "Parameter"
+            ).asJava
+          )
+          .build()
+        error(gql, s"Expected a non-empty String, $listForm, or Parameter.", expr.position)
     }
 }
 
@@ -129,6 +268,9 @@ sealed trait ReadAdministrationCommand extends AdministrationCommand {
   }
 
   def defaultColumnNames: List[String] = defaultColumnSet.map(_.name)
+
+  // Needed for scoping information
+  def defaultColumnVariables: List[LogicalVariable] = defaultColumnSet.map(_.variable)
 
   def yieldOrWhere: YieldOrWhere = None
   def yields: Option[Yield] = yieldOrWhere.flatMap(yw => yw.left.toOption.map { case (y, _) => y })
@@ -147,37 +289,37 @@ sealed trait ReadAdministrationCommand extends AdministrationCommand {
       invalid.map {
         case exp: ExistsExpression =>
           AdministrationCommandSemanticAnalysis.unsupportedRequestErrorOnSystemDatabase(
-            "EXISTS expression on SHOW commands",
+            "EXISTS expression",
             "The EXISTS expression is not valid on SHOW commands.",
             exp.position
           )
         case exp: CollectExpression =>
           AdministrationCommandSemanticAnalysis.unsupportedRequestErrorOnSystemDatabase(
-            "COLLECT expression on SHOW commands",
+            "COLLECT expression",
             "The COLLECT expression is not valid on SHOW commands.",
             exp.position
           )
         case exp: CountExpression =>
           AdministrationCommandSemanticAnalysis.unsupportedRequestErrorOnSystemDatabase(
-            "COUNT expression on SHOW commands",
+            "COUNT expression",
             "The COUNT expression is not valid on SHOW commands.",
             exp.position
           )
         case exp: PatternExpression =>
           AdministrationCommandSemanticAnalysis.unsupportedRequestErrorOnSystemDatabase(
-            "Pattern expressions on SHOW commands",
+            "Pattern expression",
             "Pattern expressions are not valid on SHOW commands.",
             exp.position
           )
         case exp: PatternComprehension =>
           AdministrationCommandSemanticAnalysis.unsupportedRequestErrorOnSystemDatabase(
-            "Pattern comprehensions on SHOW commands",
+            "Pattern comprehension",
             "Pattern comprehensions are not valid on SHOW commands.",
             exp.position
           )
         case exp =>
           AdministrationCommandSemanticAnalysis.unsupportedRequestErrorOnSystemDatabase(
-            "Subquery expressions on SHOW commands",
+            "Subquery expression",
             "Subquery expressions are not valid on SHOW commands.",
             exp.position
           )
@@ -217,51 +359,67 @@ sealed trait WriteAdministrationCommand extends AdministrationCommand {
   val isReadOnly: Boolean = false
   override def returnColumns: List[LogicalVariable] = List.empty
 
-  protected def topologyCheck(topology: Option[Topology], command: String): SemanticCheck = {
-
-    def numPrimaryGreaterThanZero(topology: Topology): SemanticCheck =
-      if (topology.primaries.flatMap(_.left.toOption).exists(_ < 1)) {
-        val gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22003)
-          .atPosition(position.line, position.column, position.offset)
-          .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N52)
-            .atPosition(position.line, position.column, position.offset)
-            .withParam(GqlParams.NumberParam.count, topology.primaries.flatMap(_.left.toOption).get)
-            .withParam(GqlParams.NumberParam.upper, 11)
-            .build())
-          .build()
-        error(
-          gql,
-          s"Failed to $command with `${Prettifier.extractTopology(topology).trim}`, PRIMARY must be greater than 0.",
+  protected def defaultLanguageVersionCheck(defaultVersion: Option[CypherVersion], command: String): SemanticCheck = {
+    defaultVersion.map(version =>
+      if (version.experimental) {
+        requireFeatureSupport(
+          s"`${version.description}` as default language for `$command`",
+          SemanticFeature.ExperimentalCypherVersions,
           position
         )
       } else {
         SemanticCheck.success
       }
+    ).getOrElse(SemanticCheck.success)
+  }
 
-    def numSecondaryPositive(topology: Topology): SemanticCheck =
+  protected def checkDefaultLanguageAndComposite(
+    aliasName: DatabaseName,
+    defaultLanguage: Option[CypherVersion]
+  ): SemanticCheck = {
+    defaultLanguage.map(_ => {
+      aliasName match {
+        case NamespacedName(_, Some(_)) =>
+          SemanticCheck.error(SemanticError.defaultLanguageForConstituentAliases(position))
+        case _ => SemanticCheck.success
+      }
+    }).getOrElse(SemanticCheck.success)
+  }
+}
+
+sealed trait TopologyCheck extends SemanticAnalysisTooling {
+
+  protected def topologyCheck(
+    topology: Option[Topology],
+    command: String,
+    action: String,
+    position: InputPosition
+  ): SemanticCheck = {
+
+    def numPrimaryGreaterThanZero(topology: Topology, position: InputPosition): SemanticCheck =
+      if (topology.primaries.flatMap(_.left.toOption).exists(_ < 1)) {
+        val count = topology.primaries.flatMap(_.left.toOption).get
+        val topologyString = Prettifier.extractTopology(topology).trim
+        error(SemanticError.numPrimariesOutOfRange(count, command, action, topologyString, position))
+      } else {
+        SemanticCheck.success
+      }
+
+    def numSecondaryPositive(topology: Topology, position: InputPosition): SemanticCheck =
       if (topology.secondaries.flatMap(_.left.toOption).exists(_ < 0)) {
-        val gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22003)
-          .atPosition(position.line, position.column, position.offset)
-          .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N53)
-            .atPosition(position.line, position.column, position.offset)
-            .withParam(GqlParams.NumberParam.count, topology.primaries.flatMap(_.left.toOption).get)
-            .withParam(GqlParams.NumberParam.upper, 20)
-            .build())
-          .build()
-        error(
-          gql,
-          s"Failed to $command with `${Prettifier.extractTopology(topology).trim}`, SECONDARY must be a positive value.",
-          position
-        )
+        val count = topology.secondaries.flatMap(_.left.toOption).get
+        val topologyString = Prettifier.extractTopology(topology).trim
+        error(SemanticError.numSecondariesOutOfRange(count, command, action, topologyString, position))
       } else {
         SemanticCheck.success
       }
 
     topology.map(topology => {
-      numPrimaryGreaterThanZero(topology) chain
-        numSecondaryPositive(topology)
+      numPrimaryGreaterThanZero(topology, position) chain
+        numSecondaryPositive(topology, position)
     }).getOrElse(SemanticCheck.success)
   }
+
 }
 
 // User commands
@@ -269,6 +427,7 @@ sealed trait WriteAdministrationCommand extends AdministrationCommand {
 final case class ShowUsers(
   override val yieldOrWhere: YieldOrWhere,
   withAuth: Boolean,
+  asCommands: Boolean,
   override val defaultColumnSet: List[ShowColumn]
 )(val position: InputPosition) extends ReadAdministrationCommand {
 
@@ -284,20 +443,32 @@ final case class ShowUsers(
 
 object ShowUsers {
 
-  def apply(yieldOrWhere: YieldOrWhere, withAuth: Boolean)(position: InputPosition): ShowUsers = {
-    val baseColumns = List(
-      ShowColumn("user")(position),
-      ShowColumn("roles", CTList(CTString))(position),
-      ShowColumn("passwordChangeRequired", CTBoolean)(position),
-      ShowColumn("suspended", CTBoolean)(position),
-      ShowColumn("home")(position)
+  def apply(yieldOrWhere: YieldOrWhere, withAuth: Boolean, asCommands: Boolean)(position: InputPosition): ShowUsers = {
+    val baseColumns: List[(ShowColumn, DefaultOrAllShowColumns.ShowByDefault)] = List(
+      (ShowColumn("user")(position), !asCommands),
+      (ShowColumn("roles", CTList(CTString))(position), !asCommands)
     )
-    val columns =
-      if (withAuth) baseColumns ++ List(ShowColumn("provider")(position), ShowColumn("auth", CTMap)(position))
-      else baseColumns
+    val withCommandOrExtra = if (asCommands)
+      List((ShowColumn("command")(position), true)) ++ baseColumns
+    else baseColumns ++ List(
+      (ShowColumn("passwordChangeRequired", CTBoolean)(position), true),
+      (ShowColumn("suspended", CTBoolean)(position), true),
+      (ShowColumn("home")(position), true)
+    )
+    val withAuthColumns =
+      if (withAuth)
+        withCommandOrExtra ++ List(
+          (ShowColumn("provider")(position), true),
+          (ShowColumn("auth", CTMap)(position), true)
+        )
+      else withCommandOrExtra
+    // The `tags` column is exposed regardless of the `SemanticFeature.UserTags` flag.
+    val allColumns = withAuthColumns :+ (ShowColumn("tags", CTList(CTString))(position), false)
+    val columns = DefaultOrAllShowColumns(allColumns, yieldOrWhere).columns
     ShowUsers(
       yieldOrWhere,
       withAuth,
+      asCommands,
       columns
     )(position)
   }
@@ -319,31 +490,33 @@ final case class ShowCurrentUser(
 
 object ShowCurrentUser {
 
-  def apply(yieldOrWhere: YieldOrWhere)(position: InputPosition): ShowCurrentUser =
-    ShowCurrentUser(
-      yieldOrWhere,
-      List(
-        ShowColumn("user")(position),
-        ShowColumn("roles", CTList(CTString))(position),
-        ShowColumn("passwordChangeRequired", CTBoolean)(position),
-        ShowColumn("suspended", CTBoolean)(position),
-        ShowColumn("home")(position)
-      )
-    )(position)
+  def apply(yieldOrWhere: YieldOrWhere)(position: InputPosition): ShowCurrentUser = {
+    val allColumns: List[(ShowColumn, DefaultOrAllShowColumns.ShowByDefault)] = List(
+      (ShowColumn("user")(position), true),
+      (ShowColumn("roles", CTList(CTString))(position), true),
+      (ShowColumn("passwordChangeRequired", CTBoolean)(position), true),
+      (ShowColumn("suspended", CTBoolean)(position), true),
+      (ShowColumn("home")(position), true),
+      // The `tags` column is exposed regardless of the `SemanticFeature.UserTags` flag.
+      (ShowColumn("tags", CTList(CTString))(position), false)
+    )
+    val columns = DefaultOrAllShowColumns(allColumns, yieldOrWhere).columns
+    ShowCurrentUser(yieldOrWhere, columns)(position)
+  }
 }
 
 sealed trait UserAuth extends SemanticAnalysisTooling {
   protected def newStyleAuth: List[Auth]
   protected def oldStyleAuth: Option[Auth]
 
-  protected val externalAuths: List[ExternalAuth] =
+  protected[ast] val externalAuths: List[ExternalAuth] =
     newStyleAuth.filter(_.provider != NATIVE_AUTH).map(a => ExternalAuth(a.provider, a.authAttributes)(a.position))
 
   private val allNativeAuths: List[NativeAuth] =
     (newStyleAuth.filter(_.provider == NATIVE_AUTH) ++ oldStyleAuth).map(a => NativeAuth(a.authAttributes)(a.position))
 
   // semantic check makes sure at most one exists
-  protected val nativeAuth: Option[NativeAuth] = allNativeAuths.headOption
+  protected[ast] val nativeAuth: Option[NativeAuth] = allNativeAuths.headOption
 
   protected val allAuths: Seq[AuthImpl] = externalAuths ++ allNativeAuths
 
@@ -358,14 +531,67 @@ sealed trait UserAuth extends SemanticAnalysisTooling {
 
   protected def checkOldAndNewStyleCombination: SemanticCheck = newStyleAuth.filter(_.provider == NATIVE_AUTH) match {
     case Seq(_, _*) if oldStyleAuth.nonEmpty =>
+      val gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N92)
+        .atPosition(
+          oldStyleAuth.head.position.offset,
+          oldStyleAuth.head.position.line,
+          oldStyleAuth.head.position.column
+        )
+        .build()
       error(
+        gql,
         "Cannot combine old and new auth syntax for the same auth provider.",
         oldStyleAuth.head.authAttributes.head.position
       )
     case _ => success
   }
 
-  val useOldStyleNativeAuth: Boolean = oldStyleAuth.nonEmpty
+  val usesOldStyleNativeAuth: Boolean = oldStyleAuth.nonEmpty
+}
+
+sealed trait UserTagsAction extends ASTNode
+
+final case class SetTags(tags: Expression)(val position: InputPosition) extends UserTagsAction
+final case class AddTags(tags: Expression)(val position: InputPosition) extends UserTagsAction
+final case class RemoveTags(tags: Expression)(val position: InputPosition) extends UserTagsAction
+final case class RemoveAllTags()(val position: InputPosition) extends UserTagsAction
+
+object UserTagsAction extends SemanticAnalysisTooling {
+
+  def checkFeature(tags: Seq[UserTagsAction]): SemanticCheck =
+    tags.headOption.map { t =>
+      val desc = t match {
+        case _: SetTags       => "The SET TAGS clause"
+        case _: AddTags       => "The ADD TAGS clause"
+        case _: RemoveTags    => "The REMOVE TAGS clause"
+        case _: RemoveAllTags => "The REMOVE ALL TAGS clause"
+      }
+      requireFeatureSupport(desc, SemanticFeature.UserTags, t.position)
+    }.getOrElse(success)
+
+  def checkConsistency(tags: Seq[UserTagsAction]): SemanticCheck =
+    if (
+      tags.exists(_.isInstanceOf[SetTags]) &&
+      tags.exists(t => t.isInstanceOf[AddTags] || t.isInstanceOf[RemoveTags] || t.isInstanceOf[RemoveAllTags])
+    ) {
+      val setPos = tags.collectFirst { case t: SetTags => t.position }.get
+      val gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N92)
+        .atPosition(setPos.offset, setPos.line, setPos.column)
+        .build()
+      error(gql, "SET TAGS cannot be combined with ADD TAGS or REMOVE TAGS.", setPos)
+    } else success
+
+  /**
+   * Validate the expressions carried by SET/ADD/REMOVE TAGS clauses: each must be a non-empty
+   * StringLiteral, a ListLiteral of non-empty StringLiterals, or a Parameter.
+   */
+  def checkValues(tags: Seq[UserTagsAction]): SemanticCheck =
+    tags.foldSemanticCheck {
+      case _: RemoveAllTags => success
+      case SetTags(expr)    => checkIsStringOrStringListOrParameter("SET TAGS", expr, allowEmptyList = true)
+      case AddTags(expr)    => checkIsStringOrStringListOrParameter("ADD TAGS", expr, allowEmptyList = true)
+      case RemoveTags(expr) => checkIsStringOrStringListOrParameter("REMOVE TAGS", expr, allowEmptyList = true)
+    }
 }
 
 final case class CreateUser(
@@ -373,7 +599,8 @@ final case class CreateUser(
   userOptions: UserOptions,
   ifExistsDo: IfExistsDo,
   protected val newStyleAuth: List[Auth],
-  protected val oldStyleAuth: Option[Auth]
+  protected val oldStyleAuth: Option[Auth],
+  tags: Option[SetTags] = None
 )(val position: InputPosition) extends WriteAdministrationCommand with UserAuth {
 
   override def name: String = ifExistsDo match {
@@ -382,14 +609,20 @@ final case class CreateUser(
   }
 
   private def checkAtLeastOneAuth: SemanticCheck = if (allAuths.isEmpty) {
-    error("No auth given for user.", position)
+    val gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N06)
+      .atPosition(position.offset, position.line, position.column)
+      .withParam(GqlParams.ListParam.inputList, List("Auth provider").asJava)
+      .build()
+    error(gql, "No auth given for user.", position)
   } else success
 
   override def semanticCheck: SemanticCheck = ifExistsDo match {
     case IfExistsInvalidSyntax =>
       SemanticCheck.error(SemanticError.bothOrReplaceAndIfNotExists("user", userAsString, position))
     case _ =>
-      checkAtLeastOneAuth chain
+      UserTagsAction.checkFeature(tags.toSeq) chain
+        UserTagsAction.checkValues(tags.toSeq) chain
+        checkAtLeastOneAuth chain
         checkDuplicateAuth chain
         checkOldAndNewStyleCombination chain
         allAuths.foldSemanticCheck(auth =>
@@ -408,8 +641,9 @@ final case class CreateUser(
 
 object CreateUser {
 
-  def unapply(c: CreateUser): Some[(Expression, UserOptions, IfExistsDo, List[ExternalAuth], Option[NativeAuth])] =
-    Some((c.userName, c.userOptions, c.ifExistsDo, c.externalAuths, c.nativeAuth))
+  def unapply(c: CreateUser)
+    : Some[(Expression, UserOptions, IfExistsDo, List[ExternalAuth], Option[NativeAuth], Option[SetTags])] =
+    Some((c.userName, c.userOptions, c.ifExistsDo, c.externalAuths, c.nativeAuth, c.tags))
 }
 
 final case class DropUser(userName: Expression, ifExists: Boolean)(val position: InputPosition)
@@ -444,33 +678,29 @@ final case class AlterUser(
   ifExists: Boolean,
   protected val newStyleAuth: List[Auth],
   protected val oldStyleAuth: Option[Auth],
-  removeAuth: RemoveAuth
+  removeAuth: RemoveAuth,
+  tags: Seq[UserTagsAction] = Seq.empty
 )(val position: InputPosition) extends WriteAdministrationCommand with UserAuth {
 
   override def name = "ALTER USER"
 
   private def checkAtLeastOneClause: SemanticCheck =
-    if (userOptions.isEmpty && allAuths.isEmpty && removeAuth.isEmpty) {
-      error("`ALTER USER` requires at least one clause.", position)
+    if (userOptions.isEmpty && allAuths.isEmpty && removeAuth.isEmpty && tags.isEmpty) {
+      val gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N94)
+        .atPosition(position.offset, position.line, position.column)
+        .build()
+      error(gql, "`ALTER USER` requires at least one clause.", position)
     } else {
       success
     }
 
   private def checkRemoveAuth: SemanticCheck =
-    removeAuth.auths.foldSemanticCheck {
-      case s: StringLiteral if s.value.nonEmpty => success
-      case _: Parameter                         => success
-      case list: ListLiteral
-        if list.expressions.forall(e =>
-          e.isInstanceOf[StringLiteral] && e.asInstanceOf[StringLiteral].value.nonEmpty
-        ) && list.expressions.nonEmpty =>
-        success
-      case expr =>
-        error("Expected a non-empty String, non-empty List of non-empty Strings, or Parameter.", expr.position)
-    }
+    removeAuth.auths.foldSemanticCheck(checkIsStringOrStringListOrParameter("REMOVE AUTH", _))
 
   override def semanticCheck: SemanticCheck =
-    checkAtLeastOneClause chain
+    UserTagsAction.checkFeature(tags) chain
+      checkAtLeastOneClause chain
+      UserTagsAction.checkConsistency(tags) chain
       checkDuplicateAuth chain
       checkOldAndNewStyleCombination chain
       allAuths.foldSemanticCheck(auth =>
@@ -480,6 +710,7 @@ final case class AlterUser(
       ) chain
       externalAuths.foldSemanticCheck(_.checkIdIsStringLiteralOrParameter) chain
       checkRemoveAuth chain
+      UserTagsAction.checkValues(tags) chain
       super.semanticCheck chain
       checkIsStringLiteralOrParameter("username", userName) chain
       SemanticState.recordCurrentScope(this)
@@ -488,8 +719,44 @@ final case class AlterUser(
 object AlterUser {
 
   def unapply(a: AlterUser)
-    : Some[(Expression, UserOptions, Boolean, List[ExternalAuth], Option[NativeAuth], RemoveAuth)] =
-    Some((a.userName, a.userOptions, a.ifExists, a.externalAuths, a.nativeAuth, a.removeAuth))
+    : Some[(
+      Expression,
+      UserOptions,
+      Boolean,
+      List[ExternalAuth],
+      Option[NativeAuth],
+      RemoveAuth,
+      Seq[UserTagsAction]
+    )] =
+    Some((a.userName, a.userOptions, a.ifExists, a.externalAuths, a.nativeAuth, a.removeAuth, a.tags))
+}
+
+final case class AlterUsers(
+  userNames: Seq[Expression],
+  ifExists: Boolean,
+  tags: Seq[UserTagsAction]
+)(val position: InputPosition) extends WriteAdministrationCommand {
+  override def name: String = "ALTER USERS"
+
+  private def checkTagsFeature: SemanticCheck =
+    requireFeatureSupport("The ALTER USERS command", SemanticFeature.UserTags, position)
+
+  private def checkAtLeastOneClause: SemanticCheck =
+    if (tags.isEmpty) {
+      val gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N94)
+        .atPosition(position.offset, position.line, position.column)
+        .build()
+      error(gql, "`ALTER USERS` requires at least one tag clause.", position)
+    } else success
+
+  override def semanticCheck: SemanticCheck =
+    checkTagsFeature chain
+      checkAtLeastOneClause chain
+      UserTagsAction.checkConsistency(tags) chain
+      UserTagsAction.checkValues(tags) chain
+      userNames.foldSemanticCheck(checkIsStringLiteralOrParameter("username", _)) chain
+      super.semanticCheck chain
+      SemanticState.recordCurrentScope(this)
 }
 
 final case class SetOwnPassword(newPassword: Expression, currentPassword: Expression)(val position: InputPosition)
@@ -532,9 +799,15 @@ sealed trait AuthImpl extends ASTNode with SemanticAnalysisTooling {
       )
   }.getOrElse(success)
 
-  def checkProviderName: SemanticCheck =
-    if (provider.isEmpty) error("Invalid input. Auth provider is not allowed to be an empty string.", position)
-    else success
+  def checkProviderName: SemanticCheck = {
+    if (provider.isEmpty) {
+      val gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NB6)
+        .atPosition(position.offset, position.line, position.column)
+        .withParam(GqlParams.StringParam.item, "Auth provider")
+        .build()
+      error(gql, "Invalid input. Auth provider is not allowed to be an empty string.", position)
+    } else success
+  }
 
   protected def requiredAttributes(func: AuthAttribute => Boolean, name: String): SemanticCheck =
     authAttributes.find(func) match {
@@ -654,7 +927,9 @@ final case class UserOptions(
 
 final case class ShowRoles(
   withUsers: Boolean,
+  withAuthRules: Boolean,
   showAll: Boolean,
+  asCommands: Boolean,
   override val yieldOrWhere: YieldOrWhere,
   override val defaultColumnSet: List[ShowColumn]
 )(val position: InputPosition) extends ReadAdministrationCommand {
@@ -671,19 +946,33 @@ final case class ShowRoles(
 
 object ShowRoles {
 
-  def apply(withUsers: Boolean, showAll: Boolean, yieldOrWhere: YieldOrWhere)(position: InputPosition): ShowRoles = {
-    val allColumns =
+  def apply(
+    withUsers: Boolean,
+    withAuthRules: Boolean,
+    showAll: Boolean,
+    asCommands: Boolean,
+    yieldOrWhere: YieldOrWhere
+  )(position: InputPosition): ShowRoles = {
+    val commandColumn = if (asCommands)
+      List((ShowColumn(Variable("command")(position, Variable.isIsolatedDefault), CTString, "command"), true))
+    else List.empty
+    val roleColumn =
+      List((ShowColumn(Variable("role")(position, Variable.isIsolatedDefault), CTString, "role"), !asCommands))
+    val extraColumn = {
       if (withUsers) List(
-        (ShowColumn(Variable("role")(position, Variable.isIsolatedDefault), CTString, "role"), true),
-        (ShowColumn(Variable("member")(position, Variable.isIsolatedDefault), CTString, "member"), true),
-        (ShowColumn(Variable("immutable")(position, Variable.isIsolatedDefault), CTBoolean, "immutable"), false)
+        (ShowColumn(Variable("member")(position, Variable.isIsolatedDefault), CTString, "member"), true)
       )
-      else List(
-        (ShowColumn(Variable("role")(position, Variable.isIsolatedDefault), CTString, "role"), true),
-        (ShowColumn(Variable("immutable")(position, Variable.isIsolatedDefault), CTBoolean, "immutable"), false)
+      else if (withAuthRules) List(
+        (ShowColumn(Variable("authRule")(position, Variable.isIsolatedDefault), CTString, "authRule"), true)
       )
+      else List.empty
+    }
+    val allColumns = commandColumn ++ roleColumn ++ extraColumn ++ List((
+      ShowColumn(Variable("immutable")(position, Variable.isIsolatedDefault), CTBoolean, "immutable"),
+      false
+    ))
     val columns = DefaultOrAllShowColumns(allColumns, yieldOrWhere).columns
-    ShowRoles(withUsers, showAll, yieldOrWhere, columns)(position)
+    ShowRoles(withUsers, withAuthRules, showAll, asCommands, yieldOrWhere, columns)(position)
   }
 }
 
@@ -748,7 +1037,30 @@ final case class GrantRolesToUsers(
   override def semanticCheck: SemanticCheck = {
     super.semanticCheck chain
       semanticCheckFold(roleNames)(roleName => checkIsStringLiteralOrParameter("rolename", roleName)) chain
-      semanticCheckFold(userNames)(roleName => checkIsStringLiteralOrParameter("username", roleName)) chain
+      semanticCheckFold(userNames)(username => checkIsStringLiteralOrParameter("username", username)) chain
+      SemanticState.recordCurrentScope(this)
+  }
+}
+
+final case class GrantRolesToAuthRules(
+  roleNames: Seq[Expression],
+  ruleNames: Seq[Expression]
+)(val position: InputPosition) extends WriteAdministrationCommand {
+
+  override def name = "GRANT ROLE TO AUTH RULE"
+
+  private val featureCheck =
+    requireFeatureSupport(
+      s"The `$name` clause",
+      SemanticFeature.AttributeBasedAccessControl,
+      position
+    )
+
+  override def semanticCheck: SemanticCheck = {
+    super.semanticCheck chain
+      featureCheck chain
+      semanticCheckFold(roleNames)(roleName => checkIsStringLiteralOrParameter("rolename", roleName)) chain
+      semanticCheckFold(ruleNames)(ruleName => checkIsStringLiteralOrParameter("rulename", ruleName)) chain
       SemanticState.recordCurrentScope(this)
   }
 }
@@ -763,8 +1075,328 @@ final case class RevokeRolesFromUsers(
   override def semanticCheck: SemanticCheck =
     super.semanticCheck chain
       semanticCheckFold(roleNames)(roleName => checkIsStringLiteralOrParameter("rolename", roleName)) chain
-      semanticCheckFold(userNames)(roleName => checkIsStringLiteralOrParameter("username", roleName)) chain
+      semanticCheckFold(userNames)(username => checkIsStringLiteralOrParameter("username", username)) chain
       SemanticState.recordCurrentScope(this)
+}
+
+final case class RevokeRolesFromAuthRules(
+  roleNames: Seq[Expression],
+  ruleNames: Seq[Expression]
+)(val position: InputPosition) extends WriteAdministrationCommand {
+
+  override def name = "REVOKE ROLE FROM AUTH RULE"
+
+  private val featureCheck =
+    requireFeatureSupport(
+      s"The `$name` clause",
+      SemanticFeature.AttributeBasedAccessControl,
+      position
+    )
+
+  override def semanticCheck: SemanticCheck =
+    super.semanticCheck chain
+      featureCheck chain
+      semanticCheckFold(roleNames)(roleName => checkIsStringLiteralOrParameter("rolename", roleName)) chain
+      semanticCheckFold(ruleNames)(ruleName => checkIsStringLiteralOrParameter("rulename", ruleName)) chain
+      SemanticState.recordCurrentScope(this)
+}
+
+// AuthRule commands
+
+sealed trait AuthRules extends SemanticAnalysisTooling {
+
+  protected def featureCheck(name: String, position: InputPosition): SemanticCheck =
+    requireFeatureSupport(
+      s"The `$name` clause",
+      SemanticFeature.AttributeBasedAccessControl,
+      position
+    )
+
+  protected def checkExpression(condition: Option[AuthRuleCondition]): SemanticCheck = {
+    condition.map(_.expression).toSeq
+      .flatMap(e => Seq(e) ++ e.subExpressions)
+      .foldSemanticCheck {
+        case subqueryExpression: SubqueryExpression => SemanticCheck.error(
+            SemanticError.authRuleConditionCannotSubqueryExpression(subqueryExpression.position)
+          )
+        case parameter: Parameter => SemanticCheck.error(
+            SemanticError.authRuleConditionCannotContainParameter(parameter)
+          )
+        case _ => SemanticCheck.success
+      } chain checkFunctions(condition)
+  }
+
+  protected def checkFunctions(condition: Option[AuthRuleCondition]): SemanticCheck = {
+    condition.map(_.expression).toSeq
+      .flatMap(e => Seq(e) ++ e.subExpressions)
+      .flatMap {
+        case f: FunctionInvocationLike => Some(f)
+        case _                         => None
+      }
+      .foldSemanticCheck(f => {
+        checkAllowlist(f) chain
+          checkTemporalFunctionsArguments(f) chain
+          checkAbacOidcUserAttributeFunction(f) chain
+          checkAbacUserTagsFunctions(f)
+      })
+  }
+
+  protected def checkAllowlist(functionInvocation: FunctionInvocationLike): SemanticCheck = {
+
+    val name = functionInvocation.functionName.fullName
+    // Reject an allow-listed name only when it resolved to a user-defined function (a UDF
+    // shadowing the name). Compiler built-ins, the genuine resolved abac functions, and abac
+    // names whose provider is not enabled (so they don't resolve to a signature) are all
+    // accepted here; a disabled-but-genuine abac function is then rejected at evaluation time.
+    if (authRuleAllowListedFunctions.contains(name.toLowerCase) && !functionInvocation.isUserDefined)
+      SemanticCheck.success
+    else
+      SemanticCheck.error(SemanticError.authRuleConditionHaveInvalidFunctionInCondition(
+        name,
+        functionInvocation.position
+      ))
+  }
+
+  protected def checkTemporalFunctionsArguments(functionInvocation: FunctionInvocationLike): SemanticCheck = {
+    val temporalFunctionsThatRequireArgs = Seq(
+      "date",
+      "datetime",
+      "localdatetime",
+      "localtime",
+      "time"
+    )
+
+    val name = functionInvocation.functionName.fullName
+    if (temporalFunctionsThatRequireArgs.contains(name.toLowerCase)) {
+      functionInvocation.callArguments match {
+        case Seq() =>
+          SemanticCheck.error(SemanticError.authRuleConditionHaveInvalidFunctionInCondition(
+            name,
+            functionInvocation.position
+          ))
+        case Seq(MapExpression(items), _*) if items.size == 1 && items.head._1.name.equalsIgnoreCase("timezone") =>
+          val (key, valueExpr) = items.head
+          val (callStr, suggestion) = valueExpr match {
+            case s: StringLiteral =>
+              (s"$name({${key.name}: '${s.value}'})", s"$name.transaction('${s.value}')")
+            case other =>
+              (s"$name({${key.name}: ${other.asCanonicalStringVal}})", s"$name.transaction()")
+          }
+          SemanticCheck.error(SemanticError.authRuleConditionTemporalFunctionRetrievesCurrentTime(
+            callStr,
+            suggestion,
+            functionInvocation.position
+          ))
+        case _ => SemanticCheck.success
+      }
+    } else {
+      SemanticCheck.success
+    }
+  }
+
+  protected def checkAbacOidcUserAttributeFunction(functionInvocation: FunctionInvocationLike): SemanticCheck = {
+    val name = functionInvocation.functionName.fullName
+    val args = functionInvocation.callArguments
+    if (name.toLowerCase == "abac.oidc.user_attribute") {
+      lazy val argHeadOption = args.headOption
+        .flatMap {
+          case _: Parameter             => None // cannot evaluate parameter so this will pass semantic check
+          case literal: Literal         => Some(literal)
+          case listLiteral: ListLiteral => Some(listLiteral)
+          case _                        => None // might want to evaluate the inner expression to fail more cases
+        }
+      if (args.size != 1) {
+        // This will probably never be more than 1 since the parser gives one ListLiteral argument
+        SemanticError.functionCallWrongNumberOfArguments(
+          1,
+          args.size,
+          name,
+          "abac.oidc.user_attribute(attributeKey :: STRING) :: ANY",
+          args.map(_.asCanonicalStringVal).mkString(", "),
+          functionInvocation.position
+        )
+      } else if (argHeadOption.exists(_.isInstanceOf[ListLiteral])) {
+        SemanticError.functionCallWrongNumberOfArguments(
+          1,
+          args.head.asInstanceOf[ListLiteral].expressions.size,
+          name,
+          "abac.oidc.user_attribute(attributeKey :: STRING) :: ANY",
+          args.map(_.asCanonicalStringVal).mkString(", "),
+          functionInvocation.position
+        )
+      } else if (argHeadOption.nonEmpty && !argHeadOption.exists(_.isInstanceOf[StringLiteral])) {
+        val argLiteral = argHeadOption.get.asInstanceOf[Literal]
+        SemanticExpressionCheck.simple(argLiteral) chain
+          expectType(CTString.covariant, argLiteral)
+      } else {
+        SemanticCheck.success
+      }
+    } else {
+      SemanticCheck.success
+    }
+  }
+
+  protected def checkAbacUserTagsFunctions(functionInvocation: FunctionInvocationLike): SemanticCheck = {
+    val name = functionInvocation.functionName.fullName
+    val args = functionInvocation.callArguments
+    if (Set("abac.native.user_tags", "abac.plugin.user_tags") contains name.toLowerCase) {
+      if (args.nonEmpty) {
+        SemanticError.functionCallWrongNumberOfArguments(
+          0,
+          args.size,
+          name,
+          s"$name() :: LIST<STRING>",
+          args.map(_.asCanonicalStringVal).mkString(", "),
+          functionInvocation.position
+        )
+      } else {
+        SemanticCheck.success
+      }
+    } else {
+      SemanticCheck.success
+    }
+  }
+}
+
+final case class ShowAuthRules(
+  override val yieldOrWhere: YieldOrWhere,
+  override val defaultColumnSet: List[ShowColumn],
+  asCommands: Boolean
+)(val position: InputPosition) extends ReadAdministrationCommand with AuthRules {
+
+  override def name: String = "SHOW AUTH RULES"
+
+  override def semanticCheck: SemanticCheck =
+    super.semanticCheck chain
+      featureCheck(name, position) chain
+      SemanticState.recordCurrentScope(this)
+
+  override def withYieldOrWhere(newYieldOrWhere: YieldOrWhere): ShowAuthRules =
+    this.copy(yieldOrWhere = newYieldOrWhere)(position)
+}
+
+object ShowAuthRules {
+
+  def apply(yieldOrWhere: YieldOrWhere, asCommands: Boolean)(position: InputPosition): ShowAuthRules = {
+    val columns =
+      if (asCommands)
+        List(
+          (ShowColumn("command")(position), true),
+          (ShowColumn("roles", CTList(CTString))(position), false)
+        )
+      else
+        List(
+          ShowColumn("name")(position),
+          ShowColumn("condition", CTString)(position),
+          ShowColumn("enabled", CTBoolean)(position),
+          ShowColumn("roles", CTList(CTString))(position)
+        ).map(column => (column, true))
+
+    ShowAuthRules(
+      yieldOrWhere,
+      DefaultOrAllShowColumns(columns, yieldOrWhere).columns,
+      asCommands
+    )(position)
+  }
+}
+
+final case class CreateAuthRule(
+  authRuleName: Expression,
+  ifExistsDo: IfExistsDo,
+  setClauses: List[AuthRuleSetClause]
+)(val position: InputPosition) extends WriteAdministrationCommand with AuthRules {
+
+  override def name: String = ifExistsDo match {
+    case IfExistsReplace | IfExistsInvalidSyntax => s"CREATE OR REPLACE AUTH RULE"
+    case _                                       => s"CREATE AUTH RULE"
+  }
+
+  override def semanticCheck: SemanticCheck =
+    ifExistsDo match {
+      case IfExistsInvalidSyntax =>
+        val name = Prettifier.escapeName(authRuleName)
+        SemanticCheck.error(SemanticError.bothOrReplaceAndIfNotExists("auth rule", name, position))
+      case _ =>
+        super.semanticCheck chain
+          featureCheck(name, position) chain
+          checkIsStringLiteralOrParameter("auth rule", authRuleName) chain
+          checkMustHaveCondition chain
+          checkExpression(condition) chain
+          SemanticState.recordCurrentScope(this)
+    }
+
+  def condition: Option[AuthRuleCondition] = setClauses.collectFirst { case condition: AuthRuleCondition => condition }
+
+  def enabled: Option[AuthRuleEnabled] = setClauses.collectFirst { case enabled: AuthRuleEnabled => enabled }
+
+  private def checkMustHaveCondition: SemanticCheck =
+    if (condition.isEmpty) SemanticCheck.error(SemanticError.authRuleMustHaveACondition(position))
+    else SemanticCheck.success
+}
+
+sealed trait AuthRuleSetClause extends ASTNode {
+  def position: InputPosition
+  def name: String
+}
+
+final case class AuthRuleCondition(
+  expression: Expression
+)(val position: InputPosition) extends AuthRuleSetClause {
+  override val name: String = "SET CONDITION"
+}
+
+final case class AuthRuleEnabled(
+  enabled: Boolean
+)(val position: InputPosition) extends AuthRuleSetClause {
+  override val name: String = "SET ENABLED"
+}
+
+final case class DropAuthRule(authRuleName: Expression, ifExists: Boolean)(val position: InputPosition)
+    extends WriteAdministrationCommand with AuthRules {
+
+  override def name = "DROP AUTH RULE"
+
+  override def semanticCheck: SemanticCheck =
+    super.semanticCheck chain
+      featureCheck(name, position) chain
+      checkIsStringLiteralOrParameter("auth rule", authRuleName) chain
+      SemanticState.recordCurrentScope(this)
+}
+
+final case class RenameAuthRule(
+  fromAuthRuleName: Expression,
+  toAuthRuleName: Expression,
+  ifExists: Boolean
+)(val position: InputPosition) extends WriteAdministrationCommand with AuthRules {
+
+  override def name: String = "RENAME AUTH RULE"
+
+  override def semanticCheck: SemanticCheck =
+    super.semanticCheck chain
+      featureCheck(name, position) chain
+      checkIsStringLiteralOrParameter("from auth rule name", fromAuthRuleName) chain
+      checkIsStringLiteralOrParameter("to auth rule name", fromAuthRuleName) chain
+      SemanticState.recordCurrentScope(this)
+}
+
+final case class AlterAuthRule(
+  authRuleName: Expression,
+  ifExists: Boolean,
+  setClauses: List[AuthRuleSetClause]
+)(val position: InputPosition) extends WriteAdministrationCommand with AuthRules {
+
+  override def name: String = "ALTER AUTH RULE"
+
+  override def semanticCheck: SemanticCheck =
+    super.semanticCheck chain
+      featureCheck(name, position) chain
+      checkIsStringLiteralOrParameter("auth rule", authRuleName) chain
+      checkExpression(condition) chain
+      SemanticState.recordCurrentScope(this)
+
+  def condition: Option[AuthRuleCondition] = setClauses.collectFirst { case condition: AuthRuleCondition => condition }
+
+  def enabled: Option[AuthRuleEnabled] = setClauses.collectFirst { case enabled: AuthRuleEnabled => enabled }
 }
 
 // Privilege commands
@@ -777,7 +1409,15 @@ final case class ShowPrivileges(
   override def name = "SHOW PRIVILEGE"
 
   override def semanticCheck: SemanticCheck =
-    super.semanticCheck chain
+    (scope match {
+      case s: ShowAuthRulesPrivileges => requireFeatureSupport(
+          "The `SHOW AUTH RULE PRIVILEGES` clause",
+          SemanticFeature.AttributeBasedAccessControl,
+          position
+        )
+      case _ => success
+    }) chain
+      super.semanticCheck chain
       SemanticState.recordCurrentScope(this)
 
   override def withYieldOrWhere(newYieldOrWhere: YieldOrWhere): ShowPrivileges =
@@ -797,6 +1437,7 @@ object ShowPrivileges {
       ShowColumn("immutable", CTBoolean)(position)
     ) ++ (scope match {
       case _: ShowUserPrivileges | _: ShowUsersPrivileges => List(ShowColumn("user")(position))
+      case _: ShowAuthRulesPrivileges                     => List(ShowColumn("authRule")(position))
       case _                                              => List.empty
     })
     ShowPrivileges(scope, yieldOrWhere, columns)(position)
@@ -846,7 +1487,15 @@ final case class ShowPrivilegeCommands(
   override def name = "SHOW PRIVILEGE COMMANDS"
 
   override def semanticCheck: SemanticCheck =
-    super.semanticCheck chain
+    (scope match {
+      case s: ShowAuthRulesPrivileges => requireFeatureSupport(
+          "The `SHOW AUTH RULE PRIVILEGES AS COMMANDS` clause",
+          SemanticFeature.AttributeBasedAccessControl,
+          position
+        )
+      case _ => success
+    }) chain
+      super.semanticCheck chain
       SemanticState.recordCurrentScope(this)
 
   override def withYieldOrWhere(newYieldOrWhere: YieldOrWhere): ShowPrivilegeCommands =
@@ -858,10 +1507,33 @@ object ShowPrivilegeCommands {
   def apply(
     scope: ShowPrivilegeScope,
     asRevoke: Boolean,
-    yieldOrWhere: YieldOrWhere
+    yieldOrWhere: YieldOrWhere,
+    fromCypher5: Boolean
   )(position: InputPosition): ShowPrivilegeCommands = {
-    val allColumns =
-      List((ShowColumn("command")(position), true), (ShowColumn("immutable", CTBoolean)(position), false))
+    val allColumnsWithVersion =
+      // (column, default, allowedInCypher5)
+      List(
+        (ShowColumn("command")(position), true, true),
+        (ShowColumn("access")(position), false, false),
+        (ShowColumn("action")(position), false, false),
+        (ShowColumn("roles", CTList(CTString))(position), false, false),
+        (ShowColumn("immutable", CTBoolean)(position), false, true)
+      ) ++ (
+        scope match {
+          case _: ShowUserPrivileges | _: ShowUsersPrivileges if !fromCypher5 =>
+            List((ShowColumn("users", CTList(CTString))(position), true, false))
+          // Auth rules are Cypher 25 only so no need to check Cypher version
+          case _: ShowAuthRulesPrivileges => List((ShowColumn("authRules", CTList(CTString))(position), true, false))
+          case _                          => List.empty
+        }
+      )
+
+    // Filter out the non-Cypher 5 columns if we come from Cypher 5
+    val allColumns = allColumnsWithVersion.flatMap {
+      case (column, default, false) if fromCypher5 => None
+      case (column, default, _)                    => Some(column, default)
+    }
+
     val columns = DefaultOrAllShowColumns(allColumns, yieldOrWhere).columns
     ShowPrivilegeCommands(scope, asRevoke, yieldOrWhere, columns)(position)
   }
@@ -870,14 +1542,21 @@ object ShowPrivilegeCommands {
 //noinspection ScalaUnusedSymbol
 sealed abstract class PrivilegeCommand(
   privilege: PrivilegeType,
-  qualifier: List[PrivilegeQualifier],
+  val qualifier: List[PrivilegeQualifier],
   position: InputPosition
 ) extends WriteAdministrationCommand {
 
   private val FAILED_PROPERTY_RULE = "Failed to administer property rule."
 
-  private def nanError(l: NaN) =
-    error(s"$FAILED_PROPERTY_RULE `NaN` is not supported for property-based access control.", l.position)
+  private def nanError(l: NaN) = {
+    val gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NA0)
+      .atPosition(l.position.offset, l.position.line, l.position.column)
+      .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NA3)
+        .atPosition(l.position.offset, l.position.line, l.position.column)
+        .build())
+      .build()
+    error(gql, s"$FAILED_PROPERTY_RULE `NaN` is not supported for property-based access control.", l.position)
+  }
 
   private def propertyAlwaysNullError(
     gqlBuilder: String => ErrorGqlStatusObject,
@@ -894,8 +1573,21 @@ sealed abstract class PrivilegeCommand(
 
   private def propertyPositionError(p: Property, operator: String) =
     error(
+      ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NA0)
+        .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NA1)
+          .withParam(GqlParams.StringParam.propKey, p.propertyKey.name)
+          .withParam(GqlParams.StringParam.operation, operator)
+          .build())
+        .build(),
       s"$FAILED_PROPERTY_RULE The property `${p.propertyKey.name}` must appear on the left hand side of the `$operator` operator.",
       p.position
+    )
+
+  private val featureCheck =
+    requireFeatureSupport(
+      s"The `$name` clause on relationship patterns",
+      SemanticFeature.RelationshipPropertyValueAccessRules,
+      position
     )
 
   private def checkActionTypeForPropertyRules(privilegeType: PrivilegeType): SemanticCheck = {
@@ -913,20 +1605,27 @@ sealed abstract class PrivilegeCommand(
     }
   }
 
-  private def privilegeQualifierCheckForPropertyRules(qualifiers: List[PrivilegeQualifier]): SemanticCheck = {
-    qualifiers.foldLeft(SemanticCheck.success)((acc, qualifier) => {
-      acc.chain(qualifier match {
-        case PatternQualifier(_, v, e) =>
-          v.foldSemanticCheck(declareVariable(_, CTNode)) chain
-            SemanticExpressionCheck.check(SemanticContext.Results, e) chain
-            checkActionTypeForPropertyRules(privilege) chain
-            checkExpression(e)
-        case _ => SemanticCheck.success
+  private def privilegeQualifierCheckForPropertyRules(qualifiers: List[PrivilegeQualifier]): SemanticCheck =
+    SemanticCheck.fromContext { context =>
+      qualifiers.foldLeft(SemanticCheck.success)((acc, qualifier) => {
+        acc.chain(qualifier match {
+          case PatternQualifier(_, v, e, Relationship) =>
+            featureCheck chain
+              v.foldSemanticCheck(declareVariable(_, CTRelationship)) chain
+              SemanticExpressionCheck.check(SemanticContext.Results, e) chain
+              checkActionTypeForPropertyRules(privilege) chain
+              whenState(!_.semanticCheckHasRunOnce) { checkExpression(e, context.cypherVersion) }
+          case PatternQualifier(_, v, e, Node) =>
+            v.foldSemanticCheck(declareVariable(_, CTNode)) chain
+              SemanticExpressionCheck.check(SemanticContext.Results, e) chain
+              checkActionTypeForPropertyRules(privilege) chain
+              whenState(!_.semanticCheckHasRunOnce) { checkExpression(e, context.cypherVersion) }
+          case _ => SemanticCheck.success
+        })
       })
-    })
-  }
+    }
 
-  private def checkExpression(expression: Expression) = {
+  private def checkExpression(expression: Expression, cypherVersion: CypherVersion) = {
 
     def stringifyExpression = {
       ExpressionStringifier.apply(_.asCanonicalStringVal).apply(expression)
@@ -938,12 +1637,15 @@ sealed abstract class PrivilegeCommand(
     def checkScalarExpression(value: Expression): SemanticCheck = {
       value match {
         case _: Literal | _: ExplicitParameter => SemanticCheck.success
-        case f: FunctionInvocation
-          if Seq("date", "datetime", "localdatetime", "localtime", "time", "duration", "point").contains(
-            f.functionName.name
-          ) =>
+        case f: FunctionInvocationLike
+          if f.isBuiltIn && propertyRuleAllowedTemporalFunctions.contains(f.functionName.fullName.toLowerCase) =>
           SemanticCheck.success
-        case _ => error(unsupportedExpression, expression.position)
+        case _ =>
+          AdministrationCommandSemanticAnalysis.invalidPropertyBasedAccessControlRuleInvolvingNontrivialPredicatesError(
+            value.asCanonicalStringVal,
+            unsupportedExpression,
+            expression.position
+          )
       }
     }
 
@@ -951,7 +1653,12 @@ sealed abstract class PrivilegeCommand(
       value match {
         case ll: ListLiteral          => checkTypesInList(ll)
         case param: ExplicitParameter => SemanticCheck.success
-        case _                        => error(unsupportedExpression, expression.position)
+        case _ =>
+          AdministrationCommandSemanticAnalysis.invalidPropertyBasedAccessControlRuleInvolvingNontrivialPredicatesError(
+            value.asCanonicalStringVal,
+            unsupportedExpression,
+            expression.position
+          )
       }
     }
 
@@ -961,28 +1668,57 @@ sealed abstract class PrivilegeCommand(
           checkScalarExpression(_) == SemanticCheck.success
         }
       ) SemanticCheck.success
-      else error(
-        s"$FAILED_PROPERTY_RULE The expression: `$stringifyExpression` is not supported. " +
-          s"All elements in a list must be literals of the same type for property-based access control.",
-        expression.position
-      )
+      else error(SemanticError.mixedListInPBAC(stringifyExpression, expression.position))
 
-    (expression match {
+    val unwrappedExpression = expression match {
       case Not(e: BooleanExpression) => e
       case e                         => e
-    }) match {
+    }
+
+    def valueInListPropertyFeatureCheck: SemanticCheck = {
+      def requireValueInListProperty(operator: String): SemanticCheck =
+        requireFeatureSupport(
+          s"The `$name` clause using a `<value> $operator <property>` predicate",
+          SemanticFeature.ValueInListProperty,
+          expression.position
+        )
+      if (cypherVersion.equals(CypherVersion.Cypher5)) {
+        SemanticCheck.success
+      } else {
+        unwrappedExpression match {
+          case In(lhs, _: Property) if !lhs.isInstanceOf[Property]                 => requireValueInListProperty("IN")
+          case Equals(lhs, _: Property) if !lhs.isInstanceOf[Property]             => requireValueInListProperty("=")
+          case NotEquals(lhs, _: Property) if !lhs.isInstanceOf[Property]          => requireValueInListProperty("<>")
+          case GreaterThan(lhs, _: Property) if !lhs.isInstanceOf[Property]        => requireValueInListProperty(">")
+          case GreaterThanOrEqual(lhs, _: Property) if !lhs.isInstanceOf[Property] => requireValueInListProperty(">=")
+          case LessThan(lhs, _: Property) if !lhs.isInstanceOf[Property]           => requireValueInListProperty("<")
+          case LessThanOrEqual(lhs, _: Property) if !lhs.isInstanceOf[Property]    => requireValueInListProperty("<=")
+          case _                                                                   => SemanticCheck.success
+        }
+      }
+    }
+
+    valueInListPropertyFeatureCheck chain (unwrappedExpression match {
+      // NaN cases
+      // LHS property (RHS = NaN)
       case Equals(_: Property, l: NaN)             => nanError(l)
       case NotEquals(_: Property, l: NaN)          => nanError(l)
       case GreaterThan(_: Property, l: NaN)        => nanError(l)
       case GreaterThanOrEqual(_: Property, l: NaN) => nanError(l)
       case LessThan(_: Property, l: NaN)           => nanError(l)
       case LessThanOrEqual(_: Property, l: NaN)    => nanError(l)
-      case Equals(l: NaN, _: Property)             => nanError(l)
-      case NotEquals(l: NaN, _: Property)          => nanError(l)
-      case GreaterThan(l: NaN, _: Property)        => nanError(l)
-      case GreaterThanOrEqual(l: NaN, _: Property) => nanError(l)
-      case LessThan(l: NaN, _: Property)           => nanError(l)
-      case LessThanOrEqual(l: NaN, _: Property)    => nanError(l)
+
+      // RHS property (LHS = NaN)
+      case Equals(l: NaN, _: Property)                                             => nanError(l)
+      case NotEquals(l: NaN, _: Property)                                          => nanError(l)
+      case GreaterThan(l: NaN, _: Property)                                        => nanError(l)
+      case GreaterThanOrEqual(l: NaN, _: Property)                                 => nanError(l)
+      case LessThan(l: NaN, _: Property)                                           => nanError(l)
+      case LessThanOrEqual(l: NaN, _: Property)                                    => nanError(l)
+      case In(l: NaN, _: Property) if cypherVersion.isAfter(CypherVersion.Cypher5) => nanError(l)
+
+      // NULL cases
+      // LHS property (RHS = NULL)
       case Equals(p: Property, l: Null) =>
         propertyAlwaysNullError(
           GqlHelper.getGql22NA0_22NA5,
@@ -1005,6 +1741,8 @@ sealed abstract class PrivilegeCommand(
         propertyAlwaysNullError(GqlHelper.getGql22NA0_22NA4, s"${p.propertyKey.name} < NULL", l.position)
       case LessThanOrEqual(p: Property, l: Null) =>
         propertyAlwaysNullError(GqlHelper.getGql22NA0_22NA4, s"${p.propertyKey.name} <= NULL", l.position)
+
+      // RHS property (LHS = NULL)
       case Equals(l: Null, p: Property) =>
         propertyAlwaysNullError(
           GqlHelper.getGql22NA0_22NA5,
@@ -1027,14 +1765,52 @@ sealed abstract class PrivilegeCommand(
         propertyAlwaysNullError(GqlHelper.getGql22NA0_22NA4, s"NULL < ${p.propertyKey.name}", l.position)
       case LessThanOrEqual(l: Null, p: Property) =>
         propertyAlwaysNullError(GqlHelper.getGql22NA0_22NA4, s"NULL <= ${p.propertyKey.name}", l.position)
-      case Equals(_, p: Property)             => propertyPositionError(p, "=")
-      case NotEquals(_, p: Property)          => propertyPositionError(p, "<>")
-      case GreaterThan(_, p: Property)        => propertyPositionError(p, ">")
-      case GreaterThanOrEqual(_, p: Property) => propertyPositionError(p, ">=")
-      case LessThan(_, p: Property)           => propertyPositionError(p, "<")
-      case LessThanOrEqual(_, p: Property)    => propertyPositionError(p, "<=")
+      case In(l: Null, p: Property) if cypherVersion.isAfter(CypherVersion.Cypher5) =>
+        propertyAlwaysNullError(GqlHelper.getGql22NA0_22NA4, s"NULL IN ${p.propertyKey.name}", l.position)
+
+      // Cypher 5: RHS property disallowed
+      case Equals(_, p: Property) if cypherVersion.equals(CypherVersion.Cypher5) =>
+        propertyPositionError(p, "=")
+      case NotEquals(_, p: Property) if cypherVersion.equals(CypherVersion.Cypher5) =>
+        propertyPositionError(p, "<>")
+      case GreaterThan(_, p: Property) if cypherVersion.equals(CypherVersion.Cypher5) =>
+        propertyPositionError(p, ">")
+      case GreaterThanOrEqual(_, p: Property) if cypherVersion.equals(CypherVersion.Cypher5) =>
+        propertyPositionError(p, ">=")
+      case LessThan(_, p: Property) if cypherVersion.equals(CypherVersion.Cypher5) =>
+        propertyPositionError(p, "<")
+      case LessThanOrEqual(_, p: Property) if cypherVersion.equals(CypherVersion.Cypher5) =>
+        propertyPositionError(p, "<=")
+
+      // Cypher 25+: RHS property allowed
+      case Equals(e: Expression, _: Property)             => checkScalarExpression(e)
+      case NotEquals(e: Expression, _: Property)          => checkScalarExpression(e)
+      case GreaterThan(e: Expression, _: Property)        => checkScalarExpression(e)
+      case GreaterThanOrEqual(e: Expression, _: Property) => checkScalarExpression(e)
+      case LessThan(e: Expression, _: Property)           => checkScalarExpression(e)
+      case LessThanOrEqual(e: Expression, _: Property)    => checkScalarExpression(e)
+      case In(e: Expression, _: Property) if cypherVersion.isAfter(CypherVersion.Cypher5) =>
+        checkScalarExpression(e)
+
+      // LHS property allowed
+      case Equals(_: Property, e: Expression)             => checkScalarExpression(e)
+      case NotEquals(_: Property, e: Expression)          => checkScalarExpression(e)
+      case GreaterThan(_: Property, e: Expression)        => checkScalarExpression(e)
+      case GreaterThanOrEqual(_: Property, e: Expression) => checkScalarExpression(e)
+      case LessThan(_: Property, e: Expression)           => checkScalarExpression(e)
+      case LessThanOrEqual(_: Property, e: Expression)    => checkScalarExpression(e)
+      case In(_: Property, e: Expression)                 => checkListExpression(e)
+
+      case IsNull(_: Property) | IsNotNull(_: Property) => SemanticCheck.success
+
+      // Map expressions
       case map @ MapExpression(items) if items.size > 1 =>
         error(
+          ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NA0)
+            .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22NA2)
+              .withParam(GqlParams.StringParam.expr, stringifyExpression)
+              .build())
+            .build(),
           s"$FAILED_PROPERTY_RULE The expression: `$stringifyExpression` is not supported. Property rules can only contain one property.",
           map.position
         )
@@ -1045,17 +1821,21 @@ sealed abstract class PrivilegeCommand(
           l.position,
           " Use `WHERE` syntax in combination with `IS NULL` instead."
         )
-      case Equals(_: Property, e: Expression)                      => checkScalarExpression(e)
-      case NotEquals(_: Property, e: Expression)                   => checkScalarExpression(e)
-      case In(_: Property, e: Expression)                          => checkListExpression(e)
-      case Not(In(_: Property, e: Expression))                     => checkListExpression(e)
-      case IsNull(_: Property) | IsNotNull(_: Property)            => SemanticCheck.success
       case MapExpression(Seq((_: PropertyKeyName, e: Expression))) => checkScalarExpression(e)
-      case GreaterThan(_: Property, e: Expression)                 => checkScalarExpression(e)
-      case GreaterThanOrEqual(_: Property, e: Expression)          => checkScalarExpression(e)
-      case LessThan(_: Property, e: Expression)                    => checkScalarExpression(e)
-      case LessThanOrEqual(_: Property, e: Expression)             => checkScalarExpression(e)
-      case _                                                       => error(unsupportedExpression, expression.position)
+
+      case _ =>
+        AdministrationCommandSemanticAnalysis.invalidPropertyBasedAccessControlRuleInvolvingNontrivialPredicatesError(
+          expression.asCanonicalStringVal,
+          unsupportedExpression,
+          expression.position
+        )
+    })
+  }
+
+  private def checkQualifierType(qualifiers: List[PrivilegeQualifier]): SemanticCheck = {
+    semanticCheckFold(qualifiers) {
+      case SecretQualifier(name) => checkIsStringLiteralOrParameter("secret name", name)
+      case _                     => SemanticCheck.success
     }
   }
 
@@ -1066,18 +1846,24 @@ sealed abstract class PrivilegeCommand(
       case _ => SemanticCheck.success
     }
 
+    val secretsManagerFeatureCheck = privilege match {
+      case DbmsPrivilege(_: SecretManagementAction) =>
+        requireFeatureSupport(s"The `$name` clause", SemanticFeature.SecretManager, position)
+      case _ => SemanticCheck.success
+    }
+
     (privilege match {
-      case DbmsPrivilege(u: UnassignableAction) =>
-        SemanticCheck.error(SemanticError.grantDenyRevokeUnsupported(u.name, position))
       case _: LoadPrivilege =>
         qualifier match {
           case LoadUrlQualifier(_) :: _ =>
-            error("LOAD privileges with a URL pattern are not currently supported", position)
+            val gql =
+              GqlHelper.get51N31("URL pattern", "LOAD privileges", position.offset, position.line, position.column)
+            error(gql, "LOAD privileges with a URL pattern are not currently supported", position)
           case _ => super.semanticCheck chain SemanticState.recordCurrentScope(this)
         }
-      case _ => showSettingFeatureCheck chain super.semanticCheck chain
-          SemanticState.recordCurrentScope(this)
-    }) chain privilegeQualifierCheckForPropertyRules(qualifier)
+      case _ => showSettingFeatureCheck chain secretsManagerFeatureCheck chain
+          super.semanticCheck chain SemanticState.recordCurrentScope(this)
+    }) chain privilegeQualifierCheckForPropertyRules(qualifier) chain checkQualifierType(qualifier)
   }
 }
 
@@ -1085,7 +1871,7 @@ final case class GrantPrivilege(
   privilege: PrivilegeType,
   immutable: Boolean,
   resource: Option[ActionResourceBase],
-  qualifier: List[PrivilegeQualifier],
+  override val qualifier: List[PrivilegeQualifier],
   roleNames: Seq[Expression]
 )(val position: InputPosition) extends PrivilegeCommand(privilege, qualifier, position) {
   override def name = s"GRANT${Prettifier.maybeImmutable(immutable)} ${privilege.name}"
@@ -1095,41 +1881,11 @@ final case class GrantPrivilege(
   )
 }
 
-object GrantPrivilege {
-
-  def dbmsAction(
-    action: DbmsAction,
-    immutable: Boolean,
-    roleNames: Seq[Expression],
-    qualifier: List[PrivilegeQualifier] = List(AllQualifier()(InputPosition.NONE))
-  ): InputPosition => GrantPrivilege =
-    GrantPrivilege(DbmsPrivilege(action)(InputPosition.NONE), immutable, None, qualifier, roleNames)
-
-  def databaseAction(
-    action: DatabaseAction,
-    immutable: Boolean,
-    scope: DatabaseScope,
-    roleNames: Seq[Expression],
-    qualifier: List[DatabasePrivilegeQualifier] = List(AllDatabasesQualifier()(InputPosition.NONE))
-  ): InputPosition => GrantPrivilege =
-    GrantPrivilege(DatabasePrivilege(action, scope)(InputPosition.NONE), immutable, None, qualifier, roleNames)
-
-  def graphAction[T <: GraphPrivilegeQualifier](
-    action: GraphAction,
-    immutable: Boolean,
-    resource: Option[ActionResourceBase],
-    scope: GraphScope,
-    qualifier: List[T],
-    roleNames: Seq[Expression]
-  ): InputPosition => GrantPrivilege =
-    GrantPrivilege(GraphPrivilege(action, scope)(InputPosition.NONE), immutable, resource, qualifier, roleNames)
-}
-
 final case class DenyPrivilege(
   privilege: PrivilegeType,
   immutable: Boolean,
   resource: Option[ActionResourceBase],
-  qualifier: List[PrivilegeQualifier],
+  override val qualifier: List[PrivilegeQualifier],
   roleNames: Seq[Expression]
 )(val position: InputPosition) extends PrivilegeCommand(privilege, qualifier, position) {
 
@@ -1139,46 +1895,18 @@ final case class DenyPrivilege(
     privilege match {
       case GraphPrivilege(MergeAdminAction, _) =>
         SemanticCheck.error(SemanticError.denyMergeUnsupported(position))
-      case _ => super.semanticCheck
+      case _ => super.semanticCheck chain semanticCheckFold(roleNames)(roleName =>
+          checkIsStringLiteralOrParameter("rolename", roleName)
+        )
     }
   }
-}
-
-object DenyPrivilege {
-
-  def dbmsAction(
-    action: DbmsAction,
-    immutable: Boolean,
-    roleNames: Seq[Expression],
-    qualifier: List[PrivilegeQualifier] = List(AllQualifier()(InputPosition.NONE))
-  ): InputPosition => DenyPrivilege =
-    DenyPrivilege(DbmsPrivilege(action)(InputPosition.NONE), immutable, None, qualifier, roleNames)
-
-  def databaseAction(
-    action: DatabaseAction,
-    immutable: Boolean,
-    scope: DatabaseScope,
-    roleNames: Seq[Expression],
-    qualifier: List[DatabasePrivilegeQualifier] = List(AllDatabasesQualifier()(InputPosition.NONE))
-  ): InputPosition => DenyPrivilege =
-    DenyPrivilege(DatabasePrivilege(action, scope)(InputPosition.NONE), immutable, None, qualifier, roleNames)
-
-  def graphAction[T <: GraphPrivilegeQualifier](
-    action: GraphAction,
-    immutable: Boolean,
-    resource: Option[ActionResourceBase],
-    scope: GraphScope,
-    qualifier: List[T],
-    roleNames: Seq[Expression]
-  ): InputPosition => DenyPrivilege =
-    DenyPrivilege(GraphPrivilege(action, scope)(InputPosition.NONE), immutable, resource, qualifier, roleNames)
 }
 
 final case class RevokePrivilege(
   privilege: PrivilegeType,
   immutableOnly: Boolean,
   resource: Option[ActionResourceBase],
-  qualifier: List[PrivilegeQualifier],
+  override val qualifier: List[PrivilegeQualifier],
   roleNames: Seq[Expression],
   revokeType: RevokeType
 )(val position: InputPosition) extends PrivilegeCommand(privilege, qualifier, position) {
@@ -1198,53 +1926,6 @@ final case class RevokePrivilege(
     }
   }
 
-}
-
-object RevokePrivilege {
-
-  def dbmsAction(
-    action: DbmsAction,
-    immutable: Boolean,
-    roleNames: Seq[Expression],
-    revokeType: RevokeType,
-    qualifier: List[PrivilegeQualifier] = List(AllQualifier()(InputPosition.NONE))
-  ): InputPosition => RevokePrivilege =
-    RevokePrivilege(DbmsPrivilege(action)(InputPosition.NONE), immutable, None, qualifier, roleNames, revokeType)
-
-  def databaseAction(
-    action: DatabaseAction,
-    immutable: Boolean,
-    scope: DatabaseScope,
-    roleNames: Seq[Expression],
-    revokeType: RevokeType,
-    qualifier: List[DatabasePrivilegeQualifier] = List(AllDatabasesQualifier()(InputPosition.NONE))
-  ): InputPosition => RevokePrivilege =
-    RevokePrivilege(
-      DatabasePrivilege(action, scope)(InputPosition.NONE),
-      immutable,
-      None,
-      qualifier,
-      roleNames,
-      revokeType
-    )
-
-  def graphAction[T <: GraphPrivilegeQualifier](
-    action: GraphAction,
-    immutable: Boolean,
-    resource: Option[ActionResourceBase],
-    scope: GraphScope,
-    qualifier: List[T],
-    roleNames: Seq[Expression],
-    revokeType: RevokeType
-  ): InputPosition => RevokePrivilege =
-    RevokePrivilege(
-      GraphPrivilege(action, scope)(InputPosition.NONE),
-      immutable,
-      resource,
-      qualifier,
-      roleNames,
-      revokeType
-    )
 }
 
 // Server commands
@@ -1385,135 +2066,100 @@ final case class ReallocateDatabases(dryRun: Boolean)(
 
 // Database commands
 
-final case class ShowDatabase(
-  scope: DatabaseScope,
-  override val yieldOrWhere: YieldOrWhere,
-  defaultColumns: DefaultOrAllShowColumns
-)(val position: InputPosition) extends ReadAdministrationCommand {
-  override val defaultColumnSet: List[ShowColumn] = defaultColumns.columns
-
-  override def name: String = scope match {
-    case _: SingleNamedDatabaseScope                   => "SHOW DATABASE"
-    case _: AllDatabasesScope | _: NamedDatabasesScope => "SHOW DATABASES"
-    case _: DefaultDatabaseScope                       => "SHOW DEFAULT DATABASE"
-    case _: HomeDatabaseScope                          => "SHOW HOME DATABASE"
-  }
-
-  override def semanticCheck: SemanticCheck =
-    super.semanticCheck chain
-      SemanticState.recordCurrentScope(this)
-
-  override def withYieldOrWhere(newYieldOrWhere: YieldOrWhere): ShowDatabase =
-    this.copy(yieldOrWhere = newYieldOrWhere)(position)
-}
-
-object ShowDatabase {
-
-  // Provided by the cypher stack - must be the same for all rows of a database
-  val ALIASES_COL = "aliases"
-  val REQUESTED_STATUS_COL = "requestedStatus"
-  val DEFAULT_COL = "default"
-  val HOME_COL = "home"
-  val REQUESTED_PRIMARIES_COUNT_COL = "requestedPrimariesCount"
-  val REQUESTED_SECONDARIES_COUNT_COL = "requestedSecondariesCount"
-  val CREATION_TIME_COL = "creationTime"
-  val LAST_START_TIME_COL = "lastStartTime"
-  val LAST_STOP_TIME_COL = "lastStopTime"
-  val CONSTITUENTS_COL = "constituents"
-
-  // Provided by TopologyInfoService - same for every row for a database
-  val NAME_COL = "name"
-  val TYPE_COL = "type"
-  val CURRENT_PRIMARIES_COUNT_COL = "currentPrimariesCount"
-  val CURRENT_SECONDARIES_COUNT_COL = "currentSecondariesCount"
-  val OPTIONS_COL = "options"
-
-  // Provided by TopologyInfoService - if present must be the same for every row for a database
-  val DATABASE_ID_COL = "databaseID"
-  val STORE_COL = "store"
-
-  // Provided by TopologyInfoService - can/will/must be different for every row for a database
-  val ACCESS_COL = "access"
-  val ROLE_COL = "role"
-  val WRITER_COL = "writer"
-  val CURRENT_STATUS_COL = "currentStatus"
-  val STATUS_MSG_COL = "statusMessage"
-  val LAST_COMMITTED_TX_COL = "lastCommittedTxn"
-  val REPLICATION_LAG_COL = "replicationLag"
-  val SERVER_ID_COL = "serverID"
-  val ADDRESS_COL = "address"
-
-  def apply(scope: DatabaseScope, yieldOrWhere: YieldOrWhere)(position: InputPosition): ShowDatabase = {
-    val showColumns = List(
-      // (column, brief)
-      (ShowColumn(NAME_COL)(position), true),
-      (ShowColumn(TYPE_COL)(position), true),
-      (ShowColumn(ALIASES_COL, CTList(CTString))(position), true),
-      (ShowColumn(ACCESS_COL)(position), true),
-      (ShowColumn(DATABASE_ID_COL)(position), false),
-      (ShowColumn(SERVER_ID_COL)(position), false),
-      (ShowColumn(ADDRESS_COL)(position), true),
-      (ShowColumn(ROLE_COL)(position), true),
-      (ShowColumn(WRITER_COL, CTBoolean)(position), true),
-      (ShowColumn(REQUESTED_STATUS_COL)(position), true),
-      (ShowColumn(CURRENT_STATUS_COL)(position), true),
-      (ShowColumn(STATUS_MSG_COL)(position), true)
-    ) ++ (scope match {
-      case _: DefaultDatabaseScope => List.empty
-      case _: HomeDatabaseScope    => List.empty
-      case _ =>
-        List((ShowColumn(DEFAULT_COL, CTBoolean)(position), true), (ShowColumn(HOME_COL, CTBoolean)(position), true))
-    }) ++ List(
-      (ShowColumn(CURRENT_PRIMARIES_COUNT_COL, CTInteger)(position), false),
-      (ShowColumn(CURRENT_SECONDARIES_COUNT_COL, CTInteger)(position), false),
-      (ShowColumn(REQUESTED_PRIMARIES_COUNT_COL, CTInteger)(position), false),
-      (ShowColumn(REQUESTED_SECONDARIES_COUNT_COL, CTInteger)(position), false),
-      (ShowColumn(CREATION_TIME_COL, CTDateTime)(position), false),
-      (ShowColumn(LAST_START_TIME_COL, CTDateTime)(position), false),
-      (ShowColumn(LAST_STOP_TIME_COL, CTDateTime)(position), false),
-      (ShowColumn(STORE_COL)(position), false),
-      (ShowColumn(LAST_COMMITTED_TX_COL, CTInteger)(position), false),
-      (ShowColumn(REPLICATION_LAG_COL, CTInteger)(position), false),
-      (ShowColumn(CONSTITUENTS_COL, CTList(CTString))(position), true),
-      (ShowColumn(OPTIONS_COL, CTMap)(position), false)
-    )
-
-    ShowDatabase(scope, yieldOrWhere, DefaultOrAllShowColumns(showColumns, yieldOrWhere))(position)
-  }
-}
-
 final case class CreateDatabase(
   dbName: DatabaseName,
   ifExistsDo: IfExistsDo,
   options: Options,
   waitUntilComplete: WaitUntilComplete,
-  topology: Option[Topology]
+  topology: Option[Topology],
+  defaultLanguage: Option[CypherVersion],
+  shards: Option[ShardDefinition]
 )(val position: InputPosition)
-    extends WaitableAdministrationCommand {
+    extends WaitableAdministrationCommand with TopologyCheck {
 
   override def name: String = ifExistsDo match {
     case IfExistsReplace | IfExistsInvalidSyntax => "CREATE OR REPLACE DATABASE"
     case _                                       => "CREATE DATABASE"
   }
 
-  override def semanticCheck: SemanticCheck = (ifExistsDo match {
-    case IfExistsInvalidSyntax =>
-      val name = Prettifier.escapeName(dbName)
-      SemanticCheck.error(SemanticError.bothOrReplaceAndIfNotExists("database", name, position))
-    case _ =>
-      super.semanticCheck chain
-        SemanticState.recordCurrentScope(this)
-  })
-    .chain(topologyCheck(topology, name))
+  override def semanticCheck: SemanticCheck =
+    (ifExistsDo match {
+      case IfExistsInvalidSyntax =>
+        val name = Prettifier.escapeDatabaseName(dbName)
+        SemanticCheck.error(SemanticError.bothOrReplaceAndIfNotExists("database", name, position))
+      case _ =>
+        super.semanticCheck chain
+          SemanticState.recordCurrentScope(this)
+    }) chain topologyCheck(topology, name, "create", position) chain
+      defaultLanguageVersionCheck(defaultLanguage, name) chain
+      shards.map(_.semanticCheck(name, "create", position, expectShard = true)).getOrElse(success)
+}
+
+final case class CreateReplicaDatabase(
+  dbName: DatabaseName,
+  ifExistsDo: IfExistsDo,
+  options: Options,
+  waitUntilComplete: WaitUntilComplete,
+  topology: Option[Topology],
+  defaultLanguage: Option[CypherVersion]
+)(val position: InputPosition)
+    extends WaitableAdministrationCommand with TopologyCheck {
+
+  override def name: String = ifExistsDo match {
+    case IfExistsReplace | IfExistsInvalidSyntax => "CREATE OR REPLACE REPLICA DATABASE"
+    case _                                       => "CREATE REPLICA DATABASE"
+  }
+
+  override def semanticCheck: SemanticCheck =
+    (ifExistsDo match {
+      case IfExistsInvalidSyntax =>
+        val name = Prettifier.escapeDatabaseName(dbName)
+        SemanticCheck.error(SemanticError.bothOrReplaceAndIfNotExists("database", name, position))
+      case _ =>
+        super.semanticCheck chain
+          SemanticState.recordCurrentScope(this)
+    }) chain topologyCheck(topology, name, "create", position) chain
+      defaultLanguageVersionCheck(defaultLanguage, name)
 }
 
 case class Topology(primaries: Option[Either[Int, Parameter]], secondaries: Option[Either[Int, Parameter]])
+
+case class ShardDefinition(
+  propertyShardCount: Int,
+  graphShardTopology: Option[Topology],
+  propertyShardReplicaCount: Option[Either[Int, Parameter]]
+) extends TopologyCheck {
+
+  def semanticCheck(command: String, action: String, position: InputPosition, expectShard: Boolean): SemanticCheck = {
+
+    def numShardsInRange(shardCount: Int): SemanticCheck = {
+      if ((shardCount < 1 && expectShard) || shardCount > 1000) {
+        error(SemanticError.numShardsOutOfRange(shardCount, command, s"COUNT $shardCount", position))
+      } else success
+    }
+
+    def numReplicasGreaterThanZero(replicas: Option[Either[Int, Parameter]]): SemanticCheck =
+      if (replicas.flatMap(_.left.toOption).exists(c => c < 1 || c > 20)) {
+        val count = replicas.flatMap(_.left.toOption).get
+        val topologyString = Prettifier.extractShardTopology(replicas).trim
+        error(SemanticError.numReplicasOutOfRange(count, command, topologyString, position))
+      } else {
+        SemanticCheck.success
+      }
+
+    topologyCheck(graphShardTopology, command, action, position) chain
+      numShardsInRange(propertyShardCount) chain
+      numReplicasGreaterThanZero(propertyShardReplicaCount)
+  }
+
+}
 
 final case class CreateCompositeDatabase(
   databaseName: DatabaseName,
   ifExistsDo: IfExistsDo,
   options: Options,
-  waitUntilComplete: WaitUntilComplete
+  waitUntilComplete: WaitUntilComplete,
+  defaultLanguage: Option[CypherVersion]
 )(
   val position: InputPosition
 ) extends WaitableAdministrationCommand {
@@ -1523,22 +2169,24 @@ final case class CreateCompositeDatabase(
     case _                                       => "CREATE COMPOSITE DATABASE"
   }
 
-  override def semanticCheck: SemanticCheck = ifExistsDo match {
-    case IfExistsInvalidSyntax =>
-      val name = Prettifier.escapeName(databaseName)
-      SemanticCheck.error(SemanticError.bothOrReplaceAndIfNotExists("composite database", name, position))
-    case _ =>
-      databaseName match {
-        case nsn @ NamespacedName(_, Some(_)) =>
-          AdministrationCommandSemanticAnalysis.inputContainsInvalidCharactersError(
-            nsn.toString,
-            "composite database name",
-            s"Failed to create the specified composite database '${nsn.toString}': COMPOSITE DATABASE names cannot contain \".\". " +
-              "COMPOSITE DATABASE names using '.' must be quoted with backticks e.g. `composite.database`.",
-            nsn.position
-          )
-        case _ => super.semanticCheck
-      }
+  override def semanticCheck: SemanticCheck = SemanticCheck.fromContext { context =>
+    ifExistsDo match {
+      case IfExistsInvalidSyntax =>
+        val name = Prettifier.escapeDatabaseName(databaseName)
+        SemanticCheck.error(SemanticError.bothOrReplaceAndIfNotExists("composite database", name, position))
+      case _ =>
+        databaseName match {
+          case nsn @ NamespacedName(_, Some(_)) if context.cypherVersion == CypherVersion.Cypher5 =>
+            AdministrationCommandSemanticAnalysis.inputContainsInvalidCharactersError(
+              nsn.toString,
+              "composite database name",
+              s"Failed to create the specified composite database '${nsn.toString}': COMPOSITE DATABASE names cannot contain \".\". " +
+                "COMPOSITE DATABASE names using '.' must be quoted with backticks e.g. `composite.database`.",
+              nsn.position
+            )
+          case _ => super.semanticCheck.chain(defaultLanguageVersionCheck(defaultLanguage, name))
+        }
+    }
   }
 }
 
@@ -1565,17 +2213,61 @@ final case class AlterDatabase(
   topology: Option[Topology],
   options: Options,
   optionsToRemove: Set[String],
-  waitUntilComplete: WaitUntilComplete
+  waitUntilComplete: WaitUntilComplete,
+  defaultLanguage: Option[CypherVersion],
+  shardDefinition: Option[ShardDefinition],
+  replicas: Option[Either[Int, Parameter]]
 )(
   val position: InputPosition
-) extends WaitableAdministrationCommand {
+) extends WaitableAdministrationCommand with TopologyCheck {
 
   override def name = "ALTER DATABASE"
+
+  override def commandDescription: String =
+    Seq(
+      Some(name),
+      access.map(_ => "SET ACCESS"),
+      topology.map(_ => "SET TOPOLOGY"),
+      replicas.map(_ => "SET TOPOLOGY"),
+      defaultLanguage.map(_ => "SET DEFAULT LANGUAGE"),
+      if (options != NoOptions) Some("SET OPTION") else None,
+      if (optionsToRemove.nonEmpty) Some("REMOVE OPTION") else None,
+      waitUntilComplete match {
+        case _: NoWait => None
+        case _         => Some("WAIT")
+      },
+      shardDefinition match {
+        case Some(ShardDefinition(_, Some(_), _)) => Some("SET GRAPH SHARD")
+        case Some(_)                              => Some("SET PROPERTY SHARD")
+        case _                                    => None
+      }
+    ).flatten.mkString(" ")
+
+  private def isValidReplicaCount(replicas: Option[Either[Int, Parameter]]): SemanticCheck =
+    if (replicas.flatMap(_.left.toOption).exists(replicaCount => replicaCount < 1 || replicaCount > 20)) {
+      val count = replicas.flatMap(_.left.toOption).get
+      val topologyString = Prettifier.extractShardTopology(replicas).trim
+      error(SemanticError.numReplicasOutOfRange(count, name, topologyString, position))
+    } else {
+      SemanticCheck.success
+    }
+
+  private def checkTopologyOrShards: SemanticCheck =
+    shardDefinition match {
+      case Some(ShardDefinition(_, Some(_), _)) if topology.nonEmpty || replicas.nonEmpty =>
+        SemanticCheck.error(SemanticError.invalidClauseCombination("SET TOPOLOGY", "SET GRAPH SHARD", position))
+      case Some(ShardDefinition(_, None, Some(_))) if topology.nonEmpty || replicas.nonEmpty =>
+        SemanticCheck.error(SemanticError.invalidClauseCombination("SET TOPOLOGY", "SET PROPERTY SHARD", position))
+      case _ => success
+    }
 
   override def semanticCheck: SemanticCheck =
     super.semanticCheck chain
       SemanticState.recordCurrentScope(this) chain
-      topologyCheck(topology, name)
+      topologyCheck(topology, name, "alter", position) chain
+      defaultLanguageVersionCheck(defaultLanguage, name) chain
+      shardDefinition.map(_.semanticCheck(name, "alter", position, expectShard = false)).getOrElse(success) chain
+      isValidReplicaCount(replicas) chain checkTopologyOrShards
 }
 
 final case class StartDatabase(dbName: DatabaseName, waitUntilComplete: WaitUntilComplete)(
@@ -1604,28 +2296,39 @@ sealed trait WaitableAdministrationCommand extends WriteAdministrationCommand {
   val waitUntilComplete: WaitUntilComplete
 
   override def returnColumns: List[LogicalVariable] = waitUntilComplete match {
-    case NoWait => List.empty
-    case _      => List("address", "state", "message", "success").map(Variable(_)(position, Variable.isIsolatedDefault))
+    case NoWait() => List.empty
+    case _ => List("address", "state", "message", "success").map(Variable(_)(position, Variable.isIsolatedDefault))
   }
+
+  override def semanticCheck: SemanticCheck = super.semanticCheck chain waitUntilComplete.semanticCheck
 }
 
-sealed trait WaitUntilComplete {
+sealed trait WaitUntilComplete extends ASTNode with SemanticCheckable {
   val DEFAULT_TIMEOUT = 300L
   val name: String
   def timeout: Long = DEFAULT_TIMEOUT
+
+  override def semanticCheck: SemanticCheck = success
 }
 
-case object NoWait extends WaitUntilComplete {
+case class NoWait()(val position: InputPosition) extends WaitUntilComplete {
   override val name: String = ""
 }
 
-case object IndefiniteWait extends WaitUntilComplete {
+case class IndefiniteWait()(val position: InputPosition) extends WaitUntilComplete {
   override val name: String = " WAIT"
 }
 
-case class TimeoutAfter(timoutSeconds: Long) extends WaitUntilComplete {
-  override val name: String = s" WAIT $timoutSeconds SECONDS"
-  override def timeout: Long = timoutSeconds
+case class TimeoutAfter(stringVal: String)(val position: InputPosition) extends Expression with StringDecimalInteger
+    with WaitUntilComplete {
+  override val name: String = s" WAIT $stringVal SECONDS"
+  override def timeout: Long = value
+
+  override def semanticCheck: SemanticCheck = {
+    super.semanticCheck chain SemanticExpressionCheck.simple(this)
+  }
+
+  override def isConstantForQuery: Boolean = true
 }
 
 sealed trait Access
@@ -1666,33 +2369,48 @@ final case class ShowAliases(
 
 object ShowAliases {
 
-  def apply(yieldOrWhere: YieldOrWhere)(position: InputPosition): ShowAliases = apply(None, yieldOrWhere)(position)
+  val OIDC_CREDENTIAL_FORWARDING = "OIDC CREDENTIAL FORWARDING"
+  val STORED_NATIVE_CREDENTIALS = "STORED NATIVE CREDENTIALS"
+
+  def apply(
+    yieldOrWhere: YieldOrWhere,
+    cypher5ColumnsOnly: Boolean,
+    oidcCredentialForwardingEnabled: Boolean
+  )(position: InputPosition): ShowAliases =
+    apply(None, yieldOrWhere, cypher5ColumnsOnly, oidcCredentialForwardingEnabled)(position)
 
   def apply(
     aliasName: Option[DatabaseName],
-    yieldOrWhere: YieldOrWhere
+    yieldOrWhere: YieldOrWhere,
+    cypher5ColumnsOnly: Boolean,
+    oidcCredentialForwardingEnabled: Boolean
   )(position: InputPosition): ShowAliases = {
-    val showColumns = List(
-      // (column, brief)
-      (ShowColumn("name")(position), true),
-      (ShowColumn("composite")(position), true),
-      (ShowColumn("database")(position), true),
-      (ShowColumn("location")(position), true),
-      (ShowColumn("url")(position), true),
-      (ShowColumn("user")(position), true),
-      (ShowColumn("driver", CTMap)(position), false),
-      (ShowColumn("properties", CTMap)(position), false)
+    val columns = List(
+      // (column, brief, includedInCypher5)
+      (ShowColumn("name")(position), true, true),
+      (ShowColumn("composite")(position), true, true),
+      (ShowColumn("database")(position), true, true),
+      (ShowColumn("location")(position), true, true),
+      (ShowColumn("url")(position), true, true),
+      (ShowColumn("credentials")(position), true, false),
+      (ShowColumn("user")(position), true, true),
+      (ShowColumn("driver", CTMap)(position), false, true),
+      (ShowColumn("defaultLanguage")(position), false, true),
+      (ShowColumn("properties", CTMap)(position), false, true)
     )
+
+    val showColumns =
+      columns.filter { case (column, _, includedInCypher5) =>
+        (!cypher5ColumnsOnly || includedInCypher5) &&
+        // the credential column is only available if oidcCredentialForwardingEnabled is true
+        (oidcCredentialForwardingEnabled || !(column.name == "credentials"))
+      }.map { case (showColumn, brief, _) => (showColumn, brief) }
 
     ShowAliases(aliasName, yieldOrWhere, DefaultOrAllShowColumns(showColumns, yieldOrWhere))(position)
   }
 }
 
 object AliasDriverSettingsCheck {
-  val existsErrorMessage = "The EXISTS expression is not valid in driver settings."
-  val countErrorMessage = "The COUNT expression is not valid in driver settings."
-  val collectErrorMessage = "The COLLECT expression is not valid in driver settings."
-  val genericErrorMessage = "This expression is not valid in driver settings."
 
   def findInvalidDriverSettings(driverSettings: Option[Either[Map[String, Expression], Parameter]])
     : Option[Expression] = {
@@ -1700,9 +2418,7 @@ object AliasDriverSettingsCheck {
       case Some(Left(settings)) =>
         settings.values.flatMap(s =>
           s.folder.treeFind[Expression] {
-            case _: ExistsExpression  => true
-            case _: CollectExpression => true
-            case _: CountExpression   => true
+            case _: SubqueryExpression => true
           }
         ).headOption
       case _ => None
@@ -1726,7 +2442,7 @@ final case class CreateLocalDatabaseAlias(
     case IfExistsInvalidSyntax =>
       SemanticCheck.error(SemanticError.bothOrReplaceAndIfNotExists(
         "alias",
-        Prettifier.escapeName(aliasName),
+        Prettifier.escapeDatabaseName(aliasName),
         position
       ))
     case _ => super.semanticCheck chain
@@ -1748,15 +2464,22 @@ final case class CreateLocalDatabaseAlias(
   }
 }
 
+sealed trait RemoteAliasCredentials extends ASTNode
+
+case class RemoteAliasStoredCredentials(username: Expression, password: Expression)(val position: InputPosition)
+    extends RemoteAliasCredentials
+
+case class OidcCredentialForwarding()(val position: InputPosition) extends RemoteAliasCredentials
+
 final case class CreateRemoteDatabaseAlias(
   aliasName: DatabaseName,
   targetName: DatabaseName,
   ifExistsDo: IfExistsDo,
   url: Either[String, Parameter],
-  username: Expression,
-  password: Expression,
+  remoteAliasCredentials: RemoteAliasCredentials,
   driverSettings: Option[Either[Map[String, Expression], Parameter]] = None,
-  properties: Option[Either[Map[String, Expression], Parameter]] = None
+  properties: Option[Either[Map[String, Expression], Parameter]] = None,
+  defaultLanguage: Option[CypherVersion] = None
 )(val position: InputPosition) extends WriteAdministrationCommand {
 
   override def name: String = ifExistsDo match {
@@ -1764,11 +2487,21 @@ final case class CreateRemoteDatabaseAlias(
     case _                                       => "CREATE ALIAS"
   }
 
+  def remoteAliasCredentialSemanticCheck(remoteAliasCredentials: RemoteAliasCredentials): SemanticCheck =
+    remoteAliasCredentials match {
+      case RemoteAliasStoredCredentials(username, _) => checkIsStringLiteralOrParameter("username", username)
+      case OidcCredentialForwarding() => requireFeatureSupport(
+          "`OIDC CREDENTIAL FORWARDING`",
+          SemanticFeature.OidcCredentialForwarding,
+          position
+        )
+    }
+
   override def semanticCheck: SemanticCheck = ifExistsDo match {
     case IfExistsInvalidSyntax =>
       SemanticCheck.error(SemanticError.bothOrReplaceAndIfNotExists(
         "alias",
-        Prettifier.escapeName(aliasName),
+        Prettifier.escapeDatabaseName(aliasName),
         position
       ))
     case _ => AliasDriverSettingsCheck.findInvalidDriverSettings(driverSettings) match {
@@ -1778,13 +2511,17 @@ final case class CreateRemoteDatabaseAlias(
           SemanticCheck.error(SemanticError.countInDriverSettings(expr.position))
         case Some(expr: CollectExpression) =>
           SemanticCheck.error(SemanticError.collectInDriverSettings(expr.position))
+        case Some(expr: PatternExpression) =>
+          SemanticCheck.error(SemanticError.patternExpressionInDriverSettings(expr.position))
+        case Some(expr: PatternComprehension) =>
+          SemanticCheck.error(SemanticError.patternComprehensionInDriverSettings(expr.position))
         case Some(expr) =>
           SemanticCheck.error(SemanticError.genericDriverSettingsFail(expr.position))
-        // Apparently this should not happen, but if you have a better message do tell
-        case _ => super.semanticCheck chain checkIsStringLiteralOrParameter(
-            "username",
-            username
-          ) chain SemanticState.recordCurrentScope(this)
+        case _ => super.semanticCheck chain
+            remoteAliasCredentialSemanticCheck(remoteAliasCredentials) chain
+            defaultLanguageVersionCheck(defaultLanguage, name) chain
+            checkDefaultLanguageAndComposite(aliasName, defaultLanguage) chain
+            SemanticState.recordCurrentScope(this)
       }
   }
 }
@@ -1809,7 +2546,8 @@ final case class AlterRemoteDatabaseAlias(
   username: Option[Expression] = None,
   password: Option[Expression] = None,
   driverSettings: Option[Either[Map[String, Expression], Parameter]] = None,
-  properties: Option[Either[Map[String, Expression], Parameter]] = None
+  properties: Option[Either[Map[String, Expression], Parameter]] = None,
+  defaultLanguage: Option[CypherVersion] = None
 )(val position: InputPosition) extends WriteAdministrationCommand {
 
   override def name = "ALTER ALIAS"
@@ -1824,24 +2562,31 @@ final case class AlterRemoteDatabaseAlias(
             SemanticCheck.error(SemanticError.countInDriverSettings(expr.position))
           case _: CollectExpression =>
             SemanticCheck.error(SemanticError.collectInDriverSettings(expr.position))
+          case _: PatternExpression =>
+            SemanticCheck.error(SemanticError.patternExpressionInDriverSettings(expr.position))
+          case _: PatternComprehension =>
+            SemanticCheck.error(SemanticError.patternComprehensionInDriverSettings(expr.position))
           case _ =>
             SemanticCheck.error(SemanticError.genericDriverSettingsFail(expr.position))
         }
       case _ =>
         val isLocalAlias = targetName.isDefined && url.isEmpty
-        val isRemoteAlias = url.isDefined || username.isDefined || password.isDefined || driverSettings.isDefined
+        val isRemoteAlias =
+          url.isDefined || username.isDefined || password.isDefined || driverSettings.isDefined || defaultLanguage.isDefined
         if (isLocalAlias && isRemoteAlias) {
           AdministrationCommandSemanticAnalysis.invalidInputError(
-            Prettifier.escapeName(aliasName),
+            Prettifier.escapeDatabaseName(aliasName),
             "database alias",
             List("url of a remote alias target"),
-            s"Failed to alter the specified database alias '${Prettifier.escapeName(aliasName)}': url needs to be defined to alter a remote alias target.",
+            s"Failed to alter the specified database alias '${Prettifier.escapeDatabaseName(aliasName)}': url needs to be defined to alter a remote alias target.",
             position
           )
         } else {
-          super.semanticCheck chain semanticCheckFold(username)(un =>
-            checkIsStringLiteralOrParameter("username", un)
-          ) chain SemanticState.recordCurrentScope(this)
+          super.semanticCheck chain
+            semanticCheckFold(username)(un => checkIsStringLiteralOrParameter("username", un)) chain
+            defaultLanguageVersionCheck(defaultLanguage, name) chain
+            checkDefaultLanguageAndComposite(aliasName, defaultLanguage) chain
+            SemanticState.recordCurrentScope(this)
         }
     }
 }

@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
 import static org.neo4j.internal.recordstorage.RecordCursorTypes.PROPERTY_KEY_TOKEN_CURSOR;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
 import static org.neo4j.kernel.impl.store.StoreType.PROPERTY_KEY_TOKEN_NAME;
@@ -46,6 +47,7 @@ import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.api.Kernel;
 import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.api.security.AnonymousContext;
@@ -58,7 +60,6 @@ import org.neo4j.kernel.impl.store.StoreFactory;
 import org.neo4j.kernel.impl.store.cursor.CachedStoreCursors;
 import org.neo4j.kernel.impl.store.record.DynamicRecord;
 import org.neo4j.kernel.impl.store.record.PropertyKeyTokenRecord;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.test.OtherThreadExecutor;
@@ -149,7 +150,7 @@ class ManyPropertyKeysIT {
                 NullLogProvider.getInstance(),
                 contextFactory,
                 false,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL);
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
         NeoStores neoStores = storeFactory.openAllNeoStores();
         PropertyKeyTokenStore store = neoStores.getPropertyKeyTokenStore();
         DynamicAllocatorProvider allocatorProvider = DynamicAllocatorProviders.nonTransactionalAllocator(neoStores);
@@ -170,7 +171,7 @@ class ManyPropertyKeysIT {
             }
         }
 
-        neoStores.flush(DatabaseFlushEvent.NULL, cursorContext);
+        neoStores.flush(DatabaseFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, cursorContext);
         neoStores.close();
 
         return database();

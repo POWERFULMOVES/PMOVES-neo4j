@@ -19,10 +19,13 @@
  */
 package org.neo4j.cypher.internal
 
+import org.neo4j.cypher.internal.InterpretedRuntime.InterpretedExecutionPlan
+import org.neo4j.cypher.internal.InterpretedRuntime.calculateTransactionMode
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 import org.neo4j.cypher.internal.logical.plans.TransactionApply
 import org.neo4j.cypher.internal.logical.plans.TransactionConcurrency
 import org.neo4j.cypher.internal.logical.plans.TransactionForeach
+import org.neo4j.cypher.internal.notification.InternalNotification
 import org.neo4j.cypher.internal.options.CypherRuntimeOption
 import org.neo4j.cypher.internal.plandescription.Argument
 import org.neo4j.cypher.internal.runtime.ExecutionMode
@@ -45,28 +48,30 @@ import org.neo4j.cypher.internal.runtime.interpreted.UpdateCountingQueryContext
 import org.neo4j.cypher.internal.runtime.interpreted.commands.convert.CommunityExpressionConverter
 import org.neo4j.cypher.internal.runtime.interpreted.commands.convert.ExpressionConverters
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.NestedPipeExpressions
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.PipeMapper
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.PipeTreeBuilder
 import org.neo4j.cypher.internal.runtime.interpreted.profiler.InterpretedProfileInformation
 import org.neo4j.cypher.internal.runtime.interpreted.profiler.Profiler
 import org.neo4j.cypher.internal.runtime.slottedParameters
+import org.neo4j.cypher.internal.util.CancellationChecker
 import org.neo4j.cypher.internal.util.Foldable.SkipChildren
 import org.neo4j.cypher.internal.util.Foldable.TraverseChildren
-import org.neo4j.cypher.internal.util.InternalNotification
 import org.neo4j.cypher.result.RuntimeResult
+import org.neo4j.kernel.api.query.RuntimeName
 import org.neo4j.kernel.impl.query.QuerySubscriber
 import org.neo4j.kernel.impl.query.TransactionalContext.DatabaseMode
 import org.neo4j.values.virtual.MapValue
 
 import scala.collection.immutable.ArraySeq
 
-object InterpretedRuntime extends CypherRuntime[RuntimeContext] {
+trait InterpretedRuntime[-CONTEXT <: RuntimeContext] extends CypherRuntime[CONTEXT] {
   override def name: String = "interpreted"
 
   override def correspondingRuntimeOption: Option[CypherRuntimeOption] = Some(CypherRuntimeOption.legacy)
 
   override def compileToExecutable(
     query: LogicalQuery,
-    context: RuntimeContext,
+    context: CONTEXT,
     databaseMode: DatabaseMode
   ): ExecutionPlan = {
     val Result(logicalPlan, nExpressionSlots, availableExpressionVars) =
@@ -75,17 +80,20 @@ object InterpretedRuntime extends CypherRuntime[RuntimeContext] {
 
     val selectivityTrackerRegistrator = new SelectivityTrackerRegistrator()
 
+    val queryIndexRegistrator = QueryIndexRegistrator(context.schemaRead)
     val converters = new ExpressionConverters(
       None,
       CommunityExpressionConverter(
         context.tokenContext,
         context.anonymousVariableNameGenerator,
         selectivityTrackerRegistrator,
-        context.config
+        context.config,
+        context.cypherVersion,
+        queryIndexRegistrator
       )
     )
-    val queryIndexRegistrator = new QueryIndexRegistrator(context.schemaRead)
-    val pipeMapper = InterpretedPipeMapper(
+    val cancellationChecker: CancellationChecker = () => context.assertOpen.assertOpen()
+    val pipeMapper = getFallbackPipeMapper(InterpretedPipeMapper(
       context.cypherVersion,
       query.readOnly,
       converters,
@@ -93,17 +101,18 @@ object InterpretedRuntime extends CypherRuntime[RuntimeContext] {
       queryIndexRegistrator,
       context.anonymousVariableNameGenerator,
       context.isCommunity,
-      parameterMapping
-    )(query.semanticTable)
+      parameterMapping,
+      query.stableLeafPlans
+    )(query.semanticTable))
     val pipeTreeBuilder = PipeTreeBuilder(pipeMapper)
     val logicalPlanWithConvertedNestedPlans =
       NestedPipeExpressions.build(
         pipeTreeBuilder,
         withSlottedParameters,
         availableExpressionVars,
-        () => context.assertOpen.assertOpen()
+        cancellationChecker
       )
-    val pipe = pipeTreeBuilder.build(logicalPlanWithConvertedNestedPlans, () => context.assertOpen.assertOpen())
+    val pipe = pipeTreeBuilder.build(logicalPlanWithConvertedNestedPlans, cancellationChecker, isNestedPlan = false)
     val columns = query.resultColumns
 
     val transactionsMode = calculateTransactionMode(query)
@@ -118,18 +127,27 @@ object InterpretedRuntime extends CypherRuntime[RuntimeContext] {
       context.config.lenientCreateRelationship,
       context.config.memoryTrackingController,
       query.hasLoadCSV,
-      transactionsMode
+      transactionsMode,
+      context.config.warnOnAggregationSkipNull,
+      context.indexComparatorFactory
     )
 
     new InterpretedExecutionPlan(
       resultBuilderFactory,
-      InterpretedRuntimeName,
+      RuntimeName.INTERPRETED,
       query.readOnly,
       transactionsMode.startsTransactions,
       IndexedSeq.empty,
-      Set.empty
+      Set.empty,
+      generatedByteCodeSize = 0L
     )
   }
+
+  // Method to be able to wrap the fallback from enterprise
+  protected def getFallbackPipeMapper(initialFallback: PipeMapper): PipeMapper = initialFallback
+}
+
+object InterpretedRuntime {
 
   def calculateTransactionMode(logicalQuery: LogicalQuery): QueryTransactionMode = {
     doCalculateTransactionMode(logicalQuery.logicalPlan)
@@ -137,9 +155,9 @@ object InterpretedRuntime extends CypherRuntime[RuntimeContext] {
 
   private def doCalculateTransactionMode(plan: LogicalPlan): QueryTransactionMode = {
     plan.folder.treeFold[QueryTransactionMode](StartsNoTransactions) {
-      case TransactionApply(_, _, _, TransactionConcurrency.Concurrent(_), _, _) =>
+      case TransactionApply(_, _, _, TransactionConcurrency.Concurrent(_), _, _, _, _) =>
         _ => SkipChildren(StartsConcurrentTransactions)
-      case TransactionForeach(_, _, _, TransactionConcurrency.Concurrent(_), _, _) =>
+      case TransactionForeach(_, _, _, TransactionConcurrency.Concurrent(_), _, _, _, _) =>
         _ => SkipChildren(StartsConcurrentTransactions)
       case _: TransactionApply | _: TransactionForeach =>
         _ => TraverseChildren(StartsSerialTransactions)
@@ -160,7 +178,8 @@ object InterpretedRuntime extends CypherRuntime[RuntimeContext] {
     readOnly: Boolean,
     startsTransactions: Boolean,
     override val metadata: Seq[Argument],
-    warnings: Set[InternalNotification]
+    warnings: Set[InternalNotification],
+    override val generatedByteCodeSize: Long
   ) extends ExecutionPlan {
 
     override def run(
@@ -188,3 +207,5 @@ object InterpretedRuntime extends CypherRuntime[RuntimeContext] {
     override def notifications: Set[InternalNotification] = warnings
   }
 }
+
+object CommunityInterpretedRuntime extends InterpretedRuntime[RuntimeContext]

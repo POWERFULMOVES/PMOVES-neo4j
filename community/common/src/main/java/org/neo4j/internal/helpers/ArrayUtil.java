@@ -23,6 +23,7 @@ import static java.util.Arrays.copyOf;
 
 import java.lang.reflect.Array;
 import java.util.Arrays;
+import java.util.Objects;
 
 /**
  * Methods "missing" from {@link Arrays} are provided here.
@@ -92,23 +93,11 @@ public final class ArrayUtil {
     public static <T> boolean contains(T[] array, int arrayLength, T contains) {
         for (int i = 0; i < arrayLength; i++) {
             T item = array[i];
-            if (nullSafeEquals(item, contains)) {
+            if (Objects.equals(item, contains)) {
                 return true;
             }
         }
         return false;
-    }
-
-    /**
-     * Compare two items for equality; if both are {@code null} they are regarded as equal.
-     *
-     * @param first First item to compare
-     * @param other Other item to compare
-     * @param <T> The type of the items
-     * @return {@code true} if {@code first} and {@code other} are both {@code null} or are both equal.
-     */
-    public static <T> boolean nullSafeEquals(T first, T other) {
-        return first == null ? first == other : first.equals(other);
     }
 
     /**
@@ -163,7 +152,7 @@ public final class ArrayUtil {
     }
 
     /**
-     * Create a array from a existing array and additional items following it.
+     * Create an array from an existing array and additional items following it.
      *
      * @param initial the initial array
      * @param additional the additional items that would be added into the initial array
@@ -197,6 +186,27 @@ public final class ArrayUtil {
         T[] result = Arrays.copyOf(initial, length);
         int offset = initial.length;
         for (T[] array : additional) {
+            System.arraycopy(array, 0, result, offset, array.length);
+            offset += array.length;
+        }
+        return result;
+    }
+
+    /**
+     * Create a single int array from many int arrays.
+     *
+     * @param initial an initial int array
+     * @param additional additional int arrays to be concatenated with the initial int array
+     * @return the concatenated int array
+     */
+    public static int[] concatArrays(int[] initial, int[]... additional) {
+        int length = initial.length;
+        for (int[] array : additional) {
+            length += array.length;
+        }
+        int[] result = Arrays.copyOf(initial, length);
+        int offset = initial.length;
+        for (int[] array : additional) {
             System.arraycopy(array, 0, result, offset, array.length);
             offset += array.length;
         }
@@ -262,6 +272,54 @@ public final class ArrayUtil {
                     + " elements: " + Arrays.toString(array));
         }
         return array[0];
+    }
+
+    public static byte[] filled(int size, byte value) {
+        var arr = new byte[size];
+        if (value != 0) {
+            Arrays.fill(arr, value);
+        }
+        return arr;
+    }
+
+    public static short[] filled(int size, short value) {
+        var arr = new short[size];
+        if (value != 0) {
+            Arrays.fill(arr, value);
+        }
+        return arr;
+    }
+
+    public static int[] filled(int size, int value) {
+        var arr = new int[size];
+        if (value != 0) {
+            Arrays.fill(arr, value);
+        }
+        return arr;
+    }
+
+    public static long[] filled(int size, long value) {
+        var arr = new long[size];
+        if (value != 0) {
+            Arrays.fill(arr, value);
+        }
+        return arr;
+    }
+
+    public static float[] filled(int size, float value) {
+        var arr = new float[size];
+        if (value != 0) {
+            Arrays.fill(arr, value);
+        }
+        return arr;
+    }
+
+    public static double[] filled(int size, double value) {
+        var arr = new double[size];
+        if (value != 0) {
+            Arrays.fill(arr, value);
+        }
+        return arr;
     }
 
     private ArrayUtil() { // No instances allowed

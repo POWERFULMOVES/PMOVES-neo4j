@@ -32,6 +32,7 @@ import org.neo4j.configuration.Config;
 import org.neo4j.internal.batchimport.BatchImporterFactory;
 import org.neo4j.internal.helpers.progress.ProgressListener;
 import org.neo4j.internal.recordstorage.RecordStorageEngineFactory;
+import org.neo4j.io.ByteUnit;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.layout.Neo4jLayout;
@@ -43,7 +44,6 @@ import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.impl.store.MetaDataStore;
 import org.neo4j.kernel.impl.store.format.standard.Standard;
-import org.neo4j.kernel.impl.transaction.log.EmptyLogTailMetadata;
 import org.neo4j.logging.internal.NullLogService;
 import org.neo4j.scheduler.JobScheduler;
 import org.neo4j.storageengine.api.StorageEngineFactory;
@@ -53,6 +53,7 @@ import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.Neo4jLayoutExtension;
 import org.neo4j.test.extension.pagecache.PageCacheExtension;
 import org.neo4j.test.scheduler.ThreadPoolJobScheduler;
+import org.neo4j.wal.EmptyLogTailMetadata;
 
 @PageCacheExtension
 @Neo4jLayoutExtension
@@ -81,7 +82,7 @@ class RecordStoreMigratorTest {
     }
 
     @AfterEach
-    void tearDown() throws Exception {
+    void tearDown() {
         jobScheduler.close();
     }
 
@@ -141,10 +142,11 @@ class RecordStoreMigratorTest {
                 contextFactory,
                 batchImporterFactory,
                 INSTANCE,
-                false);
+                false,
+                ByteUnit.mebiBytes(80));
     }
 
-    private static class MyProcessListener implements ProgressListener {
+    private static class MyProcessListener extends ProgressListener.Adapter {
         public boolean added;
 
         MyProcessListener() {
@@ -154,20 +156,6 @@ class RecordStoreMigratorTest {
         @Override
         public void add(long progress) {
             added = true;
-        }
-
-        @Override
-        public void mark(char mark) {}
-
-        @Override
-        public void close() {}
-
-        @Override
-        public void failed(Throwable e) {}
-
-        @Override
-        public ProgressListener threadLocalReporter(int threshold) {
-            return null;
         }
     }
 }

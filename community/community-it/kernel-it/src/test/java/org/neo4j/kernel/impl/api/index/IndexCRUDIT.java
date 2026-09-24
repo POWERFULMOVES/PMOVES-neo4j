@@ -53,7 +53,6 @@ import org.neo4j.graphdb.Transaction;
 import org.neo4j.internal.kernel.api.TokenRead;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexPrototype;
-import org.neo4j.internal.schema.SchemaDescriptors;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
@@ -69,14 +68,18 @@ import org.neo4j.kernel.impl.coreapi.InternalTransaction;
 import org.neo4j.kernel.impl.coreapi.TransactionImpl;
 import org.neo4j.kernel.impl.index.schema.CollectingIndexUpdater;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
+import org.neo4j.storageengine.api.LazyValueIndexEntryUpdate;
 import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
 import org.neo4j.storageengine.migration.StoreMigrationParticipant;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.EphemeralFileSystemExtension;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.values.ElementIdMapper;
 import org.neo4j.values.storable.Values;
 
+@SkipOnSpd(reason = "Assumptions about index updates applied to 'local' index")
 @ExtendWith(EphemeralFileSystemExtension.class)
 class IndexCRUDIT {
     private FileSystemAbstraction fs;
@@ -106,11 +109,19 @@ class IndexCRUDIT {
         try (Transaction tx = db.beginTx()) {
             KernelTransaction ktx = ((InternalTransaction) tx).kernelTransaction();
             TokenRead tokenRead = ktx.tokenRead();
-            int propertyKey1 = tokenRead.propertyKey(indexProperty);
             int label = tokenRead.nodeLabel(myLabel.name());
-            var descriptor = SchemaDescriptors.forLabel(label, propertyKey1);
+            IndexDescriptor indexDescriptor =
+                    ktx.schemaRead().indexesGetForLabel(label).next();
             assertThat(writer.updatesCommitted)
-                    .isEqualTo(asSet(IndexEntryUpdate.add(node.getId(), () -> descriptor, Values.of(value1))));
+                    .satisfiesAnyOf(
+                            w -> assertThat(w)
+                                    .isEqualTo(asSet(EagerValueIndexEntryUpdate.add(
+                                            node.getId(), indexDescriptor, Values.of(value1)))),
+                            w -> assertThat(w)
+                                    .isEqualTo(asSet(LazyValueIndexEntryUpdate.add(
+                                            node.getId(),
+                                            indexDescriptor,
+                                            LazyValueIndexEntryUpdate.ValueSupplier.constant(Values.of(value1))))));
             tx.commit();
         }
         // We get two updates because we both add a label and a property to be indexed
@@ -129,14 +140,15 @@ class IndexCRUDIT {
         String otherProperty = "otherProperty";
         int value = 12;
         int otherValue = 17;
-        Node node = createNode(map(indexProperty, value, otherProperty, otherValue));
+        long nodeId =
+                createNode(map(indexProperty, value, otherProperty, otherValue)).getId();
 
         // THEN
-        assertThat(writer.updatesCommitted.size()).isEqualTo(0);
+        assertThat(writer.updatesCommitted).hasSize(0);
 
         // AND WHEN
         try (Transaction tx = db.beginTx()) {
-            node = tx.getNodeById(node.getId());
+            Node node = tx.getNodeById(nodeId);
             node.addLabel(myLabel);
             tx.commit();
         }
@@ -145,11 +157,19 @@ class IndexCRUDIT {
         try (Transaction tx = db.beginTx()) {
             KernelTransaction ktx = ((InternalTransaction) tx).kernelTransaction();
             TokenRead tokenRead = ktx.tokenRead();
-            int propertyKey1 = tokenRead.propertyKey(indexProperty);
             int label = tokenRead.nodeLabel(myLabel.name());
-            var descriptor = SchemaDescriptors.forLabel(label, propertyKey1);
+            IndexDescriptor indexDescriptor =
+                    ktx.schemaRead().indexesGetForLabel(label).next();
             assertThat(writer.updatesCommitted)
-                    .isEqualTo(asSet(IndexEntryUpdate.add(node.getId(), () -> descriptor, Values.of(value))));
+                    .satisfiesAnyOf(
+                            w -> assertThat(w)
+                                    .isEqualTo(asSet(
+                                            EagerValueIndexEntryUpdate.add(nodeId, indexDescriptor, Values.of(value)))),
+                            w -> assertThat(w)
+                                    .isEqualTo(asSet(LazyValueIndexEntryUpdate.add(
+                                            nodeId,
+                                            indexDescriptor,
+                                            LazyValueIndexEntryUpdate.ValueSupplier.constant(Values.of(value))))));
             tx.commit();
         }
     }
@@ -217,14 +237,14 @@ class IndexCRUDIT {
     }
 
     private static class GatheringIndexWriter extends IndexAccessor.Adapter implements IndexPopulator {
-        private final Set<IndexEntryUpdate<?>> updatesCommitted = new HashSet<>();
+        private final Set<IndexEntryUpdate> updatesCommitted = new HashSet<>();
         private final Map<Object, Set<Long>> indexSamples = new HashMap<>();
 
         @Override
         public void create() {}
 
         @Override
-        public void add(Collection<? extends IndexEntryUpdate<?>> updates, CursorContext cursorContext) {
+        public void add(Collection<? extends IndexEntryUpdate> updates, CursorContext cursorContext) {
             updatesCommitted.addAll(updates);
         }
 
@@ -235,7 +255,11 @@ class IndexCRUDIT {
 
         @Override
         public IndexUpdater newUpdater(final IndexUpdateMode mode, CursorContext cursorContext, boolean parallel) {
-            return new CollectingIndexUpdater(updatesCommitted::addAll);
+            return new CollectingIndexUpdater(
+                    NULL_CONTEXT,
+                    updates -> updatesCommitted.addAll(updates.stream()
+                            .map(CollectingIndexUpdater.VersionedUpdate::update)
+                            .toList()));
         }
 
         @Override
@@ -245,8 +269,8 @@ class IndexCRUDIT {
         public void markAsFailed(String failure) {}
 
         @Override
-        public void includeSample(IndexEntryUpdate<?> update) {
-            addValueToSample(update.getEntityId(), ((ValueIndexEntryUpdate<?>) update).values()[0]);
+        public void includeSample(IndexEntryUpdate update) {
+            addValueToSample(update.getEntityId(), ((ValueIndexEntryUpdate) update).values()[0]);
         }
 
         @Override

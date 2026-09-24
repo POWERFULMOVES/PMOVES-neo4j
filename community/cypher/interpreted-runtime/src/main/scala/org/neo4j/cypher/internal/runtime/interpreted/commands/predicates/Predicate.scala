@@ -20,6 +20,7 @@
 package org.neo4j.cypher.internal.runtime.interpreted.commands.predicates
 
 import org.neo4j.cypher.internal.expressions.NormalForm
+import org.neo4j.cypher.internal.notification.DeprecatedBooleanCoercion
 import org.neo4j.cypher.internal.runtime.CastSupport
 import org.neo4j.cypher.internal.runtime.IsList
 import org.neo4j.cypher.internal.runtime.IsNoValue
@@ -36,8 +37,6 @@ import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Litera
 import org.neo4j.cypher.internal.runtime.interpreted.commands.values.KeyToken
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.LazyLabel
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.QueryState
-import org.neo4j.cypher.internal.util.DeprecatedBooleanCoercion
-import org.neo4j.cypher.internal.util.NonEmptyList
 import org.neo4j.cypher.internal.util.symbols.CypherType
 import org.neo4j.cypher.operations.CypherFunctions
 import org.neo4j.cypher.operations.CypherTypeValueMapper
@@ -56,10 +55,6 @@ import org.neo4j.values.virtual.VirtualNodeValue
 import org.neo4j.values.virtual.VirtualRelationshipValue
 
 import java.util.regex.Pattern
-
-import scala.util.Failure
-import scala.util.Success
-import scala.util.Try
 
 sealed trait IsMatchResult {
   def negate: IsMatchResult
@@ -81,7 +76,7 @@ object IsMatchResult {
         value.prettyPrint(),
         CypherTypeValueMapper.valueType(value)
       )
-    case other =>
+    case other @ null =>
       throw CypherTypeException.notBool(
         String.valueOf(other),
         String.valueOf(other),
@@ -130,20 +125,16 @@ abstract class Predicate extends Expression {
     }
 
   def isTrue(ctx: ReadableRow, state: QueryState): Boolean = isMatch(ctx, state) eq IsTrue
-  def andWith(other: Predicate): Predicate = Ands(this, other)
+  infix def andWith(other: Predicate): Predicate = Ands(Array(this, other))
   def isMatch(ctx: ReadableRow, state: QueryState): IsMatchResult
 
   def andWith(preds: Predicate*): Predicate =
     if (preds.isEmpty) this else preds.fold(this)(_ andWith _)
 }
 
-object Predicate {
-  def fromSeq(in: Seq[Predicate]): Predicate = in.reduceOption(_ andWith _).getOrElse(True())
-}
-
 abstract class CompositeBooleanPredicate extends Predicate {
 
-  def predicates: NonEmptyList[Predicate]
+  def predicates: Array[Predicate]
 
   def shouldExitWhen: IsMatchResult
 
@@ -155,25 +146,18 @@ abstract class CompositeBooleanPredicate extends Predicate {
    * superceded by exit predicates (false for AND and true for OR).
    */
   override def isMatch(ctx: ReadableRow, state: QueryState): IsMatchResult = {
-    predicates.foldLeft[Try[IsMatchResult]](Success(shouldExitWhen.negate)) { (previousValue, predicate) =>
-      previousValue match {
-        // if a previous evaluation was true (false) the OR (AND) result is determined
-        case Success(result) if result == shouldExitWhen => previousValue
-        case _ =>
-          Try(predicate.isMatch(ctx, state)) match {
-            // Handle null only for non error cases
-            case Success(IsUnknown) if previousValue.isSuccess => Success(IsUnknown)
-            // If we get the exit case (false for AND and true for OR) ignore any error cases
-            case Success(result) if result == shouldExitWhen => Success(shouldExitWhen)
-            // errors or non-exit cases propagate as normal
-            case Failure(e) if previousValue.isSuccess => Failure(e)
-            case _                                     => previousValue
-          }
+    var i = 0
+    var seenNull = false
+    while (i < predicates.length) {
+      val result = predicates(i).isMatch(ctx, state)
+      if (result eq shouldExitWhen) {
+        return shouldExitWhen
+      } else if (result eq IsUnknown) {
+        seenNull = true
       }
-    } match {
-      case Failure(e)      => throw e
-      case Success(option) => option
+      i += 1
     }
+    if (seenNull) IsUnknown else shouldExitWhen.negate
   }
 
   override def arguments: Seq[Expression] = predicates.toIndexedSeq
@@ -209,7 +193,7 @@ case class IsNull(expression: Expression) extends Predicate {
     case _           => IsFalse
   }
 
-  override def toString: String = expression + " IS NULL"
+  override def toString: String = expression.toString + " IS NULL"
   override def rewrite(f: Expression => Expression): Expression = f(IsNull(expression.rewrite(f)))
   override def arguments: Seq[Expression] = Seq(expression)
   override def children: Seq[AstNode[_]] = Seq(expression)
@@ -221,7 +205,7 @@ case class IsTyped(expression: Expression, typeName: CypherType) extends Predica
     IsMatchResult(CypherFunctions.isTyped(expression(ctx, state), typeName))
   }
 
-  override def toString: String = expression + " IS :: " + typeName
+  override def toString: String = expression.toString + " IS :: " + typeName
   override def rewrite(f: Expression => Expression): Expression = f(IsTyped(expression.rewrite(f), typeName))
   override def arguments: Seq[Expression] = Seq(expression)
   override def children: Seq[AstNode[_]] = Seq(expression)
@@ -229,7 +213,7 @@ case class IsTyped(expression: Expression, typeName: CypherType) extends Predica
 
 case class IsNormalized(expression: Expression, normalForm: NormalForm) extends Expression {
 
-  override def toString: String = expression + " IS NORMALIZED"
+  override def toString: String = expression.toString + " IS NORMALIZED"
 
   override def rewrite(f: Expression => Expression): Expression = f(IsNormalized(expression.rewrite(f), normalForm))
 
@@ -310,7 +294,10 @@ object CachedNodePropertyExists {
   def apply(expression: Expression): CachedNodePropertyExists = expression match {
     case cp: AbstractCachedNodeProperty    => CachedNodePropertyExistsWithValue(cp)
     case cp: AbstractCachedNodeHasProperty => CachedNodePropertyExistsWithoutValue(cp)
-    case _ => throw new CypherTypeException("Expected " + expression + " to be a cached node property.")
+    case _ => throw CypherTypeException.internalError(
+        this.getClass.getSimpleName,
+        "Expected " + expression + " to be a cached node property."
+      )
   }
 }
 
@@ -412,7 +399,10 @@ object CachedRelationshipPropertyExists {
   def apply(expression: Expression): CachedRelationshipPropertyExists = expression match {
     case cp: AbstractCachedRelationshipProperty    => CachedRelationshipPropertyExistsWithValue(cp)
     case cp: AbstractCachedRelationshipHasProperty => CachedRelationshipPropertyExistsWithoutValue(cp)
-    case _ => throw new CypherTypeException("Expected " + expression + " to be a cached relationship property.")
+    case _ => throw CypherTypeException.internalError(
+        this.getClass.getSimpleName,
+        "Expected " + expression + " to be a cached relationship property."
+      )
   }
 }
 
@@ -493,7 +483,7 @@ case class Contains(lhs: Expression, rhs: Expression) extends Predicate with Str
 }
 
 case class LiteralRegularExpression(lhsExpr: Expression, regexExpr: Literal)(implicit
-converter: TextValue => TextValue = identity) extends Predicate {
+  converter: TextValue => TextValue = identity) extends Predicate {
   lazy val pattern: Pattern = converter(regexExpr.value.asInstanceOf[TextValue]).stringValue().r.pattern
 
   override def isMatch(ctx: ReadableRow, state: QueryState): IsMatchResult =
@@ -514,7 +504,7 @@ converter: TextValue => TextValue = identity) extends Predicate {
 }
 
 case class RegularExpression(lhsExpr: Expression, regexExpr: Expression)(implicit converter: TextValue => TextValue =
-  identity) extends Predicate {
+    identity) extends Predicate {
 
   override def isMatch(ctx: ReadableRow, state: QueryState): IsMatchResult = {
     val lValue = lhsExpr(ctx, state)
@@ -612,7 +602,7 @@ case class HasALabelOrType(entity: Expression) extends Predicate {
       throw CypherTypeException.expectedNodeRelWas(
         String.valueOf(value),
         value.getClass.getName,
-        value.prettyPrint(),
+        value.prettify(),
         CypherTypeValueMapper.valueType(value)
       )
 
@@ -620,7 +610,7 @@ case class HasALabelOrType(entity: Expression) extends Predicate {
       throw CypherTypeException.expectedNodeRelWas(
         String.valueOf(other),
         other.getClass.getName,
-        String.valueOf(other),
+        other.prettify(),
         CypherTypeValueMapper.valueType(other)
       )
   }
@@ -659,7 +649,7 @@ case class HasLabelOrType(entity: Expression, labelOrType: String) extends Predi
       throw CypherTypeException.expectedNodeRelWas(
         String.valueOf(value),
         value.getClass.getName,
-        value.prettyPrint(),
+        value.prettify(),
         CypherTypeValueMapper.valueType(value)
       )
 
@@ -667,7 +657,7 @@ case class HasLabelOrType(entity: Expression, labelOrType: String) extends Predi
       throw CypherTypeException.expectedNodeRelWas(
         String.valueOf(other),
         other.getClass.getName,
-        String.valueOf(other),
+        other.prettify(),
         CypherTypeValueMapper.valueType(other)
       )
   }
@@ -734,6 +724,32 @@ case class HasDynamicLabels(entity: Expression, labels: Seq[Expression]) extends
   def children: collection.Seq[AstNode[_]] = entity +: labels
 }
 
+case class HasDynamicLabelsOrTypes(entity: Expression, labelsOrTypes: Seq[Expression]) extends Predicate {
+
+  def isMatch(ctx: ReadableRow, state: QueryState): IsMatchResult = {
+    entity(ctx, state) match {
+      case IsNoValue() => IsUnknown
+
+      case value =>
+        IsMatchResult(CypherFunctions.hasDynamicLabelsOrTypes(
+          value,
+          labelsOrTypes.iterator.map(_(ctx, state)).toArray,
+          state.cursors.nodeCursor,
+          state.cursors.relationshipScanCursor,
+          state.query,
+          state
+        ))
+    }
+  }
+
+  def rewrite(f: Expression => Expression): Expression =
+    f(HasDynamicLabelsOrTypes(entity.rewrite(f), labelsOrTypes.map(_.rewrite(f))))
+
+  def arguments: collection.Seq[Expression] = entity +: labelsOrTypes
+
+  def children: collection.Seq[AstNode[_]] = entity +: labelsOrTypes
+}
+
 case class HasAnyLabel(entity: Expression, labels: Seq[KeyToken]) extends Predicate {
 
   override def isMatch(ctx: ReadableRow, state: QueryState): IsMatchResult = entity(ctx, state) match {
@@ -778,6 +794,31 @@ case class HasAnyDynamicLabel(entity: Expression, labels: Seq[Expression]) exten
   override def arguments: collection.Seq[Expression] = entity +: labels
 
   override def children: collection.Seq[AstNode[_]] = entity +: labels
+}
+
+case class HasAnyDynamicLabelsOrTypes(entity: Expression, labelsOrTypes: Seq[Expression]) extends Predicate {
+
+  override def isMatch(ctx: ReadableRow, state: QueryState): IsMatchResult = {
+    entity(ctx, state) match {
+      case IsNoValue() => IsUnknown
+
+      case value =>
+        IsMatchResult(CypherFunctions.hasAnyDynamicLabelsOrTypes(
+          value,
+          labelsOrTypes.iterator.map(_(ctx, state)).toArray,
+          state.cursors.nodeCursor,
+          state.cursors.relationshipScanCursor,
+          state.query
+        ))
+    }
+  }
+
+  override def rewrite(f: Expression => Expression): Expression =
+    f(HasAnyDynamicLabelsOrTypes(entity.rewrite(f), labelsOrTypes.map(_.rewrite(f))))
+
+  override def arguments: collection.Seq[Expression] = entity +: labelsOrTypes
+
+  override def children: collection.Seq[AstNode[_]] = entity +: labelsOrTypes
 }
 
 case class HasType(entity: Expression, typ: KeyToken) extends Predicate {

@@ -28,35 +28,43 @@ import org.neo4j.cypher.internal.ast.semantics.SemanticCheckable
 import org.neo4j.cypher.internal.ast.semantics.SemanticError
 import org.neo4j.cypher.internal.ast.semantics.SemanticExpressionCheck
 import org.neo4j.cypher.internal.ast.semantics.SemanticState
+import org.neo4j.cypher.internal.ast.semantics._
 import org.neo4j.cypher.internal.expressions.Expression
-import org.neo4j.cypher.internal.expressions.LogicalProperty
+import org.neo4j.cypher.internal.expressions.IsAggregate
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.MapProjection
 import org.neo4j.cypher.internal.util.ASTNode
+import org.neo4j.cypher.internal.util.Foldable.SkipChildren
+import org.neo4j.cypher.internal.util.Foldable.TraverseChildren
 import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.cypher.internal.util.helpers.LazyVal
 
 /**
  *
- * @param includeExisting       Users must specify return items for the projection, either all variables (*), no variables (-), or explicit expressions.
- *                              Neo4j does not support the no variables case on the surface, but it may appear as the result of expanding the star (*) when no variables are in scope.
- *                              This field is true if the dash (-) was used by a user.
+ * @param projectionType The projection type describes whether existing variables are included and if whether they can be overridden.
  *
  * @param defaultOrderOnColumns For some clauses the default order of alphabetical columns is inconvenient, primarily show command clauses.
  *                              If this field is set, the given order will be used instead of the alphabetical order.
  */
 final case class ReturnItems(
-  includeExisting: Boolean,
+  projectionType: ProjectionType,
   items: Seq[ReturnItem],
   defaultOrderOnColumns: Option[List[String]] = None
 )(val position: InputPosition) extends ASTNode with SemanticCheckable with SemanticAnalysisTooling {
 
-  def withExisting(includeExisting: Boolean): ReturnItems =
-    copy(includeExisting = includeExisting)(position)
-
   def withDefaultOrderOnColumns(defaultOrderOnColumns: List[String]): ReturnItems =
     copy(defaultOrderOnColumns = Some(defaultOrderOnColumns))(position)
 
-  def semanticCheck: SemanticCheck = items.semanticCheck chain ensureProjectedToUniqueIds
+  def semanticCheck: SemanticCheck = {
+    SemanticCheck.when(projectionType == StrictlyAdditiveProjection) {
+      SemanticCheck.fromFunction((state: SemanticState) => {
+        items.collectFirst {
+          case AliasedReturnItem(_, variable) if state.currentScope.symbolNames contains variable.name =>
+            SemanticCheckResult.error(state, SemanticError.variableAlreadyDeclared(variable.name, variable.position))
+        }.getOrElse(SemanticCheckResult.success(state))
+      })
+    } chain items.semanticCheck
+  }
 
   def aliases: Set[LogicalVariable] = items.flatMap(_.alias).toSet
 
@@ -72,25 +80,25 @@ final case class ReturnItems(
           val maybePreviousSymbol = previousScope.symbol(variable.name)
           declareVariable(variable, types(item.expression), maybePreviousSymbol, overriding = true)
         case Some(variable) =>
-          declareVariable(variable, types(item.expression), overriding = true)
+          declareVariable(variable, types(item.expression), None, overriding = true)
         case None => (state: SemanticState) => SemanticCheckResult(state, Seq.empty)
       }
     )
-
-  private def ensureProjectedToUniqueIds: SemanticCheck = {
-    items.groupBy(_.name).foldSemanticCheck {
-      case (_, groupedItems) if groupedItems.size > 1 =>
-        SemanticError("Multiple result columns with the same name are not supported", groupedItems.head.position)
-      case _ =>
-        SemanticCheck.success
-    }
-  }
 
   def returnVariables: ReturnVariables = ReturnVariables(includeExisting, items.flatMap(_.alias))
 
   def containsAggregate: Boolean = items.exists(_.expression.containsAggregate)
 
-  def isSimple: Boolean = items.exists(_.expression.isSimple)
+  def directlyContainsAggregate: Boolean = items.exists(_.directlyContainsAggregate)
+
+  def isSimple: Boolean = items.forall(_.expression.isSimple)
+
+  /*
+   * Users must specify return items for the projection, either all variables (*), no variables (-), or explicit expressions.
+   * Neo4j does not support the no variables case on the surface, but it may appear as the result of expanding the star (*) when no variables are in scope.
+   * This field is true if the dash (-) was used by a user.
+   */
+  val includeExisting: Boolean = projectionType == AdditiveProjection || projectionType == StrictlyAdditiveProjection
 }
 
 sealed trait ReturnItem extends ASTNode with SemanticCheckable {
@@ -103,7 +111,33 @@ sealed trait ReturnItem extends ASTNode with SemanticCheckable {
     SemanticExpressionCheck.check(Expression.SemanticContext.Results, expression)
 
   def stringify(expressionStringifier: ExpressionStringifier): String
+
+  def withName(name: LogicalVariable)(position: InputPosition): ReturnItem
+
+  def directlyContainsAggregate: Boolean = {
+    expression.folder.treeFold(false) {
+      case IsAggregate(_)            => _ => SkipChildren(true)
+      case _: FullSubqueryExpression => acc => SkipChildren(acc)
+      case _                         => acc => TraverseChildren(acc)
+    }
+  }
+
+  def wasAutoAliased: Boolean
 }
+
+sealed trait ProjectionType
+
+// Do not include existing variables (unless explicitly listed in the return items)
+// WITH x, YIELD x, RETURN x, SKIP ..., LIMIT ..., ORDER BY ..., FILTER ...
+case object FreeProjection extends ProjectionType
+
+// Include existing variables, allow override
+// WITH *, YIELD *, RETURN *
+case object AdditiveProjection extends ProjectionType
+
+// Including existing variables, fail on override
+// LET ...
+case object StrictlyAdditiveProjection extends ProjectionType
 
 case class UnaliasedReturnItem(expression: Expression, inputText: String)(val position: InputPosition)
     extends ReturnItem {
@@ -114,20 +148,31 @@ case class UnaliasedReturnItem(expression: Expression, inputText: String)(val po
     case _                  => None
   }
   val name: String = alias.map(_.name) getOrElse { inputText.trim }
+  private val groupingNameLazy: LazyVal[String] = LazyVal(ExpressionStringifier()(expression))
+  def groupingName: String = groupingNameLazy.value
 
   override def asCanonicalStringVal: String = expression.asCanonicalStringVal
 
   def stringify(expressionStringifier: ExpressionStringifier): String = expressionStringifier(expression)
+
+  override def withName(name: LogicalVariable)(position: InputPosition): ReturnItem =
+    AliasedReturnItem(expression, name)(position, AliasedReturnItem.wasAutoAliasedDefault)
+
+  override def wasAutoAliased: Boolean = false
 }
 
 object AliasedReturnItem {
 
   def apply(v: LogicalVariable): AliasedReturnItem =
-    AliasedReturnItem(v.copyId, v.copyId)(v.position)
+    AliasedReturnItem(v.copyId, v.copyId)(v.position, AliasedReturnItem.wasAutoAliasedDefault)
+
+  val wasAutoAliasedDefault: Boolean = false
 }
 
-case class AliasedReturnItem(expression: Expression, variable: LogicalVariable)(val position: InputPosition)
-    extends ReturnItem {
+case class AliasedReturnItem(expression: Expression, variable: LogicalVariable)(
+  val position: InputPosition,
+  val wasAutoAliased: Boolean = false
+) extends ReturnItem {
   val alias: Option[LogicalVariable] = Some(variable)
   val name: String = variable.name
 
@@ -135,13 +180,15 @@ case class AliasedReturnItem(expression: Expression, variable: LogicalVariable)(
     this.copy(
       children.head.asInstanceOf[Expression],
       children(1).asInstanceOf[LogicalVariable]
-    )(position).asInstanceOf[this.type]
+    )(position, wasAutoAliased).asInstanceOf[this.type]
 
   override def asCanonicalStringVal: String = s"${expression.asCanonicalStringVal} AS ${variable.asCanonicalStringVal}"
 
   def stringify(expressionStringifier: ExpressionStringifier): String =
     s"${expressionStringifier(expression)} AS ${expressionStringifier(variable)}"
 
+  override def withName(name: LogicalVariable)(position: InputPosition): ReturnItem =
+    AliasedReturnItem(expression, name)(position, AliasedReturnItem.wasAutoAliasedDefault)
 }
 
 object ReturnItems {
@@ -153,32 +200,14 @@ object ReturnItems {
   case class ReturnVariables(
     includeExisting: Boolean,
     explicitVariables: Seq[LogicalVariable]
-  )
+  ) {
+
+    def merge(other: ReturnVariables): ReturnVariables = {
+      ReturnVariables(includeExisting || other.includeExisting, (explicitVariables ++ other.explicitVariables).distinct)
+    }
+  }
 
   object ReturnVariables {
     def empty: ReturnVariables = ReturnVariables(includeExisting = false, Seq.empty)
-  }
-
-  def checkAmbiguousGrouping(returnItems: ReturnItems): Option[SemanticError] = {
-    val returnItemExprs = returnItems.items.map(_.expression).toSet
-    // FullSubqueryExpressions can contain aggregates, but they also contain a whole query so that isn't relevant for this check.
-    val aggregationExpressions = returnItemExprs.collect {
-      case expr if expr.containsAggregate && !expr.isInstanceOf[FullSubqueryExpression] => expr
-    }
-    val newGroupingVariables = returnItemExprs.collect { case expr: LogicalVariable => expr }
-    val newPropertiesUsedForGrouping = returnItemExprs.collect { case v @ LogicalProperty(LogicalVariable(_), _) => v }
-
-    val ambiguousAggregationExpressions = aggregationExpressions
-      .flatMap(aggItem =>
-        AmbiguousAggregation.ambiguousExpressions(aggItem, newGroupingVariables, newPropertiesUsedForGrouping)
-      )
-
-    if (ambiguousAggregationExpressions.nonEmpty) {
-      val variables = ambiguousAggregationExpressions.map(_.asCanonicalStringVal).toSeq
-      val pos = ambiguousAggregationExpressions.head.position
-      Some(SemanticError.invalidQuantifier(variables, pos))
-    } else {
-      None
-    }
   }
 }

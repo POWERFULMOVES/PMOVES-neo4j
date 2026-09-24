@@ -20,12 +20,12 @@ import org.neo4j.cypher.internal.util.InputPosition
 
 case class FloatType(isNullable: Boolean)(val position: InputPosition) extends CypherType {
   val parentType: CypherType = CTNumber
-  override val toString = "Float"
+  override val toClassString = "Float"
   override val toCypherTypeString = "FLOAT"
 
   override def sortOrder: Int = CypherTypeOrder.FLOAT.id
 
-  override def hasValueRepresentation: Boolean = true
+  override def couldBeStoredInProperty: Boolean = true
 
   override def withIsNullable(isNullable: Boolean): CypherType = this.copy(isNullable = isNullable)(position)
 

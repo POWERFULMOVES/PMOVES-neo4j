@@ -17,19 +17,22 @@
 package org.neo4j.cypher.internal.util.test_helpers
 
 import org.neo4j.cypher.internal.util.test_helpers.CompareAsPrettyStrings.Wrapper
+import org.scalatest.Assertion
 
 trait CompareAsPrettyStrings {
   self: CypherFunSuite =>
 
-  implicit class AnyHasCompareAsPrettyStrings(lhs: Any) {
+  extension (lhs: Any) {
 
-    def asPrettyString: String = {
+    def asPrettyTestString: String = {
       pprint.PPrinter.BlackWhite(lhs).render
     }
 
-    def compareAsPrettyStrings(rhs: Any): Unit = {
+    infix def compareAsPrettyStrings(rhs: Any): Assertion = {
       // wrap to prevent Scalatest from minimizing the String diff
-      Wrapper(lhs.asPrettyString) shouldEqual Wrapper(rhs.asPrettyString)
+      val lhsPrettyString = pprint.PPrinter.BlackWhite(lhs).render
+      val rhsPrettyString = pprint.PPrinter.BlackWhite(rhs).render
+      Wrapper(lhsPrettyString) shouldEqual Wrapper(rhsPrettyString)
 
       fail("compareAsPrettyStrings is only for debugging and should not be committed")
     }

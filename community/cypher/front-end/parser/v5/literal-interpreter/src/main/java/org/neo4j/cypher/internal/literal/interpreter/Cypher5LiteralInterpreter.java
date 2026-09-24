@@ -41,9 +41,11 @@ import org.antlr.v4.runtime.tree.ErrorNode;
 import org.antlr.v4.runtime.tree.ParseTreeListener;
 import org.antlr.v4.runtime.tree.TerminalNode;
 import org.neo4j.cypher.internal.parser.AstRuleCtx;
+import org.neo4j.cypher.internal.parser.RecognitionExceptionWithGql;
 import org.neo4j.cypher.internal.parser.v5.Cypher5Lexer;
 import org.neo4j.cypher.internal.parser.v5.Cypher5Parser;
 import org.neo4j.exceptions.SyntaxException;
+import org.neo4j.gqlstatus.GqlHelper;
 import org.neo4j.internal.helpers.Exceptions;
 import org.neo4j.values.storable.DateTimeValue;
 import org.neo4j.values.storable.DateValue;
@@ -89,7 +91,8 @@ public class Cypher5LiteralInterpreter {
             var offset = Optional.ofNullable(parser.getCurrentToken())
                     .map(Token::getStartIndex)
                     .orElse(0);
-            throw new SyntaxException("Invalid cypher expression", cypherExpression, offset);
+            throw SyntaxException.invalidInput(
+                    cypherExpression, List.of("valid Cypher expression"), "Invalid cypher expression", offset);
         }
 
         return result.ast;
@@ -132,16 +135,16 @@ class LiteralInterpreterBuilder implements ParseTreeListener {
             case Cypher5Parser.RULE_listLiteral -> exitListLiteral((Cypher5Parser.ListLiteralContext) ctx);
             case Cypher5Parser.RULE_map -> exitMap((Cypher5Parser.MapContext) ctx);
             case Cypher5Parser.RULE_propertyKeyName -> exitPropertyKeyName((Cypher5Parser.PropertyKeyNameContext) ctx);
-            case Cypher5Parser.RULE_symbolicNameString -> exitSymbolicNameString(
-                    (Cypher5Parser.SymbolicNameStringContext) ctx);
-            case Cypher5Parser.RULE_escapedSymbolicNameString -> exitEscapedSymbolicNameString(
-                    (Cypher5Parser.EscapedSymbolicNameStringContext) ctx);
-            case Cypher5Parser.RULE_unescapedSymbolicNameString -> exitUnescapedSymbolicNameString(
-                    (Cypher5Parser.UnescapedSymbolicNameStringContext) ctx);
-            case Cypher5Parser.RULE_functionInvocation -> exitFunctionInvocation(
-                    (Cypher5Parser.FunctionInvocationContext) ctx);
-            case Cypher5Parser.RULE_functionArgument -> exitFunctionArgument(
-                    (Cypher5Parser.FunctionArgumentContext) ctx);
+            case Cypher5Parser.RULE_symbolicNameString ->
+                exitSymbolicNameString((Cypher5Parser.SymbolicNameStringContext) ctx);
+            case Cypher5Parser.RULE_escapedSymbolicNameString ->
+                exitEscapedSymbolicNameString((Cypher5Parser.EscapedSymbolicNameStringContext) ctx);
+            case Cypher5Parser.RULE_unescapedSymbolicNameString ->
+                exitUnescapedSymbolicNameString((Cypher5Parser.UnescapedSymbolicNameStringContext) ctx);
+            case Cypher5Parser.RULE_functionInvocation ->
+                exitFunctionInvocation((Cypher5Parser.FunctionInvocationContext) ctx);
+            case Cypher5Parser.RULE_functionArgument ->
+                exitFunctionArgument((Cypher5Parser.FunctionArgumentContext) ctx);
             case Cypher5Parser.RULE_functionName -> exitFunctionName((Cypher5Parser.FunctionNameContext) ctx);
             case Cypher5Parser.RULE_expression -> exitDefault((AstRuleCtx) ctx);
             case Cypher5Parser.RULE_expression1 -> exitExpression1((Cypher5Parser.Expression1Context) ctx);
@@ -156,8 +159,8 @@ class LiteralInterpreterBuilder implements ParseTreeListener {
             case Cypher5Parser.RULE_expression10 -> exitDefault((AstRuleCtx) ctx);
             case Cypher5Parser.RULE_expression11 -> exitDefault((AstRuleCtx) ctx);
             case Cypher5Parser.RULE_namespace -> exitNameSpace((Cypher5Parser.NamespaceContext) ctx);
-            case Cypher5Parser.RULE_unescapedLabelSymbolicNameString_ -> exitUnescapedLabelSymbolicNameString_(
-                    (Cypher5Parser.UnescapedLabelSymbolicNameString_Context) ctx);
+            case Cypher5Parser.RULE_unescapedLabelSymbolicNameString_ ->
+                exitUnescapedLabelSymbolicNameString_((Cypher5Parser.UnescapedLabelSymbolicNameString_Context) ctx);
 
             default -> exitDefault((AstRuleCtx) ctx);
         }
@@ -319,7 +322,7 @@ class LiteralInterpreterBuilder implements ParseTreeListener {
     }
 
     private void exitLiteral(Cypher5Parser.LiteralContext ctx) {
-        if (ctx instanceof Cypher5Parser.NummericLiteralContext nctx) {
+        if (ctx instanceof Cypher5Parser.NumericLiteralContext nctx) {
             ctx.ast = nctx.numberLiteral().ast;
         } else if (ctx instanceof Cypher5Parser.StringsLiteralContext sctx) {
             ctx.ast = sctx.stringLiteral().ast;
@@ -356,11 +359,17 @@ class LiteralInterpreterBuilder implements ParseTreeListener {
             var text = ctx.getText();
             ctx.ast = Long.parseLong(text);
         } else if (ctx.UNSIGNED_OCTAL_INTEGER() != null) {
-            var octalString = ctx.getText().replaceFirst("o", "");
-            ctx.ast = Long.parseLong(octalString, 8);
+            var text = ctx.getText();
+            if (!text.matches("-?0o?[0-7]+")) {
+                throw new NumberFormatException("Invalid octal integer literal: " + text);
+            }
+            ctx.ast = Long.parseLong(text.replaceFirst("o", ""), 8);
         } else if (ctx.UNSIGNED_HEX_INTEGER() != null) {
-            var hexString = ctx.getText().replaceFirst("x", "");
-            ctx.ast = Long.parseLong(hexString, 16);
+            var text = ctx.getText();
+            if (!text.matches("-?0x[0-9a-fA-F]+")) {
+                throw new NumberFormatException("Invalid hex integer literal: " + text);
+            }
+            ctx.ast = Long.parseLong(text.replaceFirst("x", ""), 16);
         }
     }
 
@@ -406,9 +415,7 @@ class LiteralInterpreterBuilder implements ParseTreeListener {
             var length = input.length();
             StringBuilder builder = null;
             while (pos != -1) {
-                if (pos == length - 1)
-                    throw new SyntaxException(
-                            "Failed to parse string literal. The query must contain an even number of non-escaped quotes.");
+                if (pos == length - 1) throw SyntaxException.stringLiteralWithInvalidQuotes();
                 char replacement =
                         switch (input.charAt(pos + 1)) {
                             case 't' -> '\t';
@@ -457,6 +464,12 @@ class LiteralErrorListener extends BaseErrorListener {
             String msg,
             RecognitionException e) {
         var offset = offendingSymbol instanceof Token offendingToken ? offendingToken.getStartIndex() : 0;
-        error = Exceptions.chain(error, new SyntaxException(msg, query, offset, e));
+        if (e instanceof RecognitionExceptionWithGql) {
+            var gql = GqlHelper.getGql42001_withCause(
+                    ((RecognitionExceptionWithGql) e).getGqlCauseBuilder(), offset, line, charPositionInLine);
+            error = Exceptions.chain(error, new SyntaxException(gql, msg, query, offset));
+        } else {
+            error = Exceptions.chain(error, new SyntaxException(GqlHelper.getDefaultObject(), msg, query, offset));
+        }
     }
 }

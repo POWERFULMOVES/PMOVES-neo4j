@@ -41,7 +41,6 @@ import java.util.function.BiFunction;
 import org.assertj.core.api.AutoCloseableSoftAssertions;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.batchimport.api.BatchImporter;
 import org.neo4j.batchimport.api.IndexImporterFactory;
 import org.neo4j.batchimport.api.InputIterable;
@@ -72,32 +71,41 @@ import org.neo4j.internal.batchimport.input.BadCollector;
 import org.neo4j.internal.batchimport.staging.ExecutionMonitor;
 import org.neo4j.internal.helpers.TimeUtil;
 import org.neo4j.internal.helpers.collection.Iterables;
+import org.neo4j.internal.recordstorage.RecordStorageEngineFactory;
 import org.neo4j.io.ByteUnit;
 import org.neo4j.io.fs.DefaultFileSystemAbstraction;
 import org.neo4j.io.layout.recordstorage.RecordDatabaseLayout;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.api.index.MultipleIndexPopulator;
 import org.neo4j.kernel.impl.index.schema.IndexImporterFactoryImpl;
-import org.neo4j.kernel.impl.transaction.log.EmptyLogTailMetadata;
-import org.neo4j.kernel.impl.transaction.log.files.TransactionLogInitializer;
+import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.logging.internal.NullLogService;
 import org.neo4j.scheduler.JobScheduler;
+import org.neo4j.storageengine.api.StorageEngineFactory;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.test.extension.RequireAlignedFormat;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.scheduler.ThreadPoolJobScheduler;
 import org.neo4j.test.utils.TestDirectory;
 import org.neo4j.values.storable.RandomValues;
+import org.neo4j.values.storable.RandomValuesUtils;
+import org.neo4j.wal.EmptyLogTailMetadata;
+import org.neo4j.wal.files.TransactionLogInitializer;
 
 /**
  * Idea is to test a {@link MultipleIndexPopulator} with a bunch of indexes, some of which can fail randomly.
  * Also updates are randomly streaming in during population. In the end all the indexes should have been populated
  * with correct data.
+ *
+ * Note that this is a record engine only tests, because it relies on the data being imported with record format specific {@link ParallelBatchImporter}
  */
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 @TestDirectoryExtension
+@RequireAlignedFormat
 class MultipleIndexPopulationStressIT {
     private static final String[] TOKENS = new String[] {"One", "Two", "Three", "Four"};
     private ExecutorService executor;
@@ -190,12 +198,18 @@ class MultipleIndexPopulationStressIT {
     }
 
     private void populateDbAndIndexes(long nodeCount, long relCount) throws InterruptedException {
-        DatabaseManagementService managementService =
-                new TestDatabaseManagementServiceBuilder(directory.homePath()).build();
-        final GraphDatabaseService db = managementService.database(DEFAULT_DATABASE_NAME);
-        try {
-            try (var tx = db.beginTx();
-                    var softly = new AutoCloseableSoftAssertions()) {
+        try (DatabaseManagementService managementService =
+                new TestDatabaseManagementServiceBuilder(directory.homePath()).build()) {
+            GraphDatabaseService db = managementService.database(DEFAULT_DATABASE_NAME);
+            // The database was created by the importer in record format.
+            assert ((GraphDatabaseAPI) db)
+                    .getDependencyResolver()
+                    .resolveOptionalDependency(StorageEngineFactory.class)
+                    .map(StorageEngineFactory::name)
+                    .orElseThrow()
+                    .equals(RecordStorageEngineFactory.NAME);
+            try (Transaction tx = db.beginTx();
+                    AutoCloseableSoftAssertions softly = new AutoCloseableSoftAssertions()) {
                 softly.assertThat(Iterables.count(tx.getAllNodes()))
                         .as("Number of nodes")
                         .isEqualTo(nodeCount);
@@ -204,12 +218,15 @@ class MultipleIndexPopulationStressIT {
                         .isEqualTo(relCount);
             }
             createIndexes(db);
-            final AtomicBoolean end = new AtomicBoolean();
+            AtomicBoolean end = new AtomicBoolean();
             executor = Executors.newCachedThreadPool();
             for (int i = 0; i < 10; i++) {
                 executor.submit(() -> {
-                    ChangeRandomEntities changeRandomEntities =
-                            new ChangeRandomEntities(db, RandomValues.create(), nodeCount, relCount);
+                    ChangeRandomEntities changeRandomEntities = new ChangeRandomEntities(
+                            db,
+                            RandomValues.create(RandomValuesUtils.selectStorageEngineDependentConfiguration(db)),
+                            nodeCount,
+                            relCount);
                     while (!end.get()) {
                         changeRandomEntities.node();
                         changeRandomEntities.relationship();
@@ -224,21 +241,19 @@ class MultipleIndexPopulationStressIT {
             executor.shutdown();
             executor.awaitTermination(10, SECONDS);
             executor = null;
-        } finally {
-            managementService.shutdown();
         }
     }
 
     private void dropIndexes() {
-        DatabaseManagementService managementService = new TestDatabaseManagementServiceBuilder(directory.homePath())
+        try (DatabaseManagementService managementService = new TestDatabaseManagementServiceBuilder(
+                        directory.homePath())
                 .setConfig(GraphDatabaseSettings.pagecache_memory, ByteUnit.mebiBytes(8))
-                .build();
-        GraphDatabaseService db = managementService.database(DEFAULT_DATABASE_NAME);
-        try (Transaction tx = db.beginTx()) {
-            tx.schema().getIndexes().forEach(IndexDefinition::drop);
-            tx.commit();
-        } finally {
-            managementService.shutdown();
+                .build()) {
+            GraphDatabaseService db = managementService.database(DEFAULT_DATABASE_NAME);
+            try (Transaction tx = db.beginTx()) {
+                tx.schema().getIndexes().forEach(IndexDefinition::drop);
+                tx.commit();
+            }
         }
 
         expectingNLI = false;
@@ -355,7 +370,10 @@ class MultipleIndexPopulationStressIT {
 
     private void createRandomData(long nodeCount, long relCount) throws Exception {
         Config config = Config.defaults(neo4j_home, directory.homePath());
-        try (RandomDataInput input = new RandomDataInput(nodeCount, relCount);
+        try (RandomDataInput input = new RandomDataInput(
+                        nodeCount,
+                        relCount,
+                        RandomValuesUtils.selectStorageEngineDependentConfiguration(RecordStorageEngineFactory.NAME));
                 JobScheduler jobScheduler = new ThreadPoolJobScheduler()) {
             RecordDatabaseLayout layout = RecordDatabaseLayout.of(config);
             IndexImporterFactory indexImporterFactory = new IndexImporterFactoryImpl();
@@ -375,44 +393,47 @@ class MultipleIndexPopulationStressIT {
                     TransactionLogInitializer.getLogFilesInitializer(),
                     indexImporterFactory,
                     INSTANCE,
-                    NULL_CONTEXT_FACTORY);
+                    NULL_CONTEXT_FACTORY,
+                    DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
             importer.doImport(input);
         }
     }
 
     private class RandomEntityGenerator extends GeneratingInputIterator<RandomValues> {
-        RandomEntityGenerator(long count, Generator<RandomValues> randomsGenerator) {
-            super(count, 1_000, new RandomsStates(random.seed()), randomsGenerator, 0);
+        RandomEntityGenerator(long count, RandomValues.Configuration config, Generator<RandomValues> randomsGenerator) {
+            super(count, 1_000, new RandomsStates(random.seed(), config), randomsGenerator, 0);
         }
     }
 
     private class RandomDataInput implements Input, AutoCloseable {
         private final long nodeCount;
         private final long relCount;
-        private final BadCollector badCollector;
+        private final Collector badCollector;
+        private final RandomValues.Configuration config;
 
-        RandomDataInput(long nodeCount, long relCount) {
+        RandomDataInput(long nodeCount, long relCount, RandomValues.Configuration config) {
             this.nodeCount = nodeCount > 0 ? nodeCount : 0;
             this.relCount = nodeCount > 0 && relCount > 0 ? relCount : 0;
             this.badCollector = createBadCollector();
+            this.config = config;
         }
 
         @Override
         public InputIterable nodes(Collector badCollector) {
-            return () -> new RandomEntityGenerator(nodeCount, (state, visitor, id) -> {
+            return () -> new RandomEntityGenerator(nodeCount, config, (state, visitor, id) -> {
                 visitor.id(id);
                 visitor.labels(random.selection(TOKENS, 1, TOKENS.length, false));
-                properties(visitor);
+                properties(state, visitor);
             });
         }
 
         @Override
         public InputIterable relationships(Collector badCollector) {
-            return () -> new RandomEntityGenerator(relCount, (state, visitor, id) -> {
-                visitor.startId(random.nextLong(nodeCount));
-                visitor.type(random.among(TOKENS));
-                visitor.endId(random.nextLong(nodeCount));
-                properties(visitor);
+            return () -> new RandomEntityGenerator(relCount, config, (state, visitor, id) -> {
+                visitor.startId(state.nextLong(nodeCount));
+                visitor.type(state.among(TOKENS));
+                visitor.endId(state.nextLong(nodeCount));
+                properties(state, visitor);
             });
         }
 
@@ -426,16 +447,16 @@ class MultipleIndexPopulationStressIT {
             return ReadableGroups.EMPTY;
         }
 
-        private void properties(InputEntityVisitor visitor) {
-            String[] keys = random.randomValues().selection(TOKENS, 1, TOKENS.length, false);
+        private static void properties(RandomValues state, InputEntityVisitor visitor) {
+            String[] keys = state.selection(TOKENS, 1, TOKENS.length, false);
             for (String key : keys) {
-                visitor.property(key, random.nextValueAsObject());
+                visitor.property(key, state.nextValue(), false);
             }
         }
 
-        private BadCollector createBadCollector() {
+        private Collector createBadCollector() {
             try {
-                return new BadCollector(
+                return BadCollector.create(
                         fileSystemAbstraction.openAsOutputStream(
                                 directory.homePath().resolve("bad"), false),
                         0,
@@ -446,7 +467,7 @@ class MultipleIndexPopulationStressIT {
         }
 
         @Override
-        public Estimates validateAndEstimate(PropertySizeCalculator valueSizeCalculator) {
+        public Estimates validateAndEstimate(PropertySizeCalculator valueSizeCalculator, int numberOfThreads) {
             long labelCount = nodeCount * TOKENS.length / 2;
             long nodePropCount = nodeCount * TOKENS.length / 2;
             long nodePropSize = nodePropCount * Long.BYTES;
@@ -457,7 +478,13 @@ class MultipleIndexPopulationStressIT {
         }
 
         @Override
-        public void close() {
+        public boolean containsVectorData() {
+            // unknown as it is generated; however, will note if it is possible
+            return config.includeVectorTypes();
+        }
+
+        @Override
+        public void close() throws IOException {
             badCollector.close();
         }
     }

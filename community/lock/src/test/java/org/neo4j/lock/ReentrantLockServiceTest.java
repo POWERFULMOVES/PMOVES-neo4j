@@ -23,60 +23,35 @@ import static java.lang.Thread.currentThread;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.locks.LockSupport.getBlocker;
 import static java.util.concurrent.locks.LockSupport.parkNanos;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.neo4j.lock.LockType.EXCLUSIVE;
+import static org.neo4j.lock.LockType.SHARED;
 
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
-import org.neo4j.lock.ReentrantLockService.OwnerQueueElement;
+import org.neo4j.test.OtherThreadExecutor;
+import org.neo4j.test.Race;
 
 class ReentrantLockServiceTest {
     private final ReentrantLockService locks = new ReentrantLockService();
 
     @Test
-    void shouldFormLinkedListOfWaitingLockOwners() {
-        // given
-        OwnerQueueElement<Integer> queue = new OwnerQueueElement<>(0);
-        OwnerQueueElement<Integer> element1 = new OwnerQueueElement<>(1);
-        OwnerQueueElement<Integer> element2 = new OwnerQueueElement<>(2);
-        OwnerQueueElement<Integer> element3 = new OwnerQueueElement<>(3);
-        OwnerQueueElement<Integer> element4 = new OwnerQueueElement<>(4);
-
-        // when
-        queue.enqueue(element1);
-        // then
-        assertEquals(1, queue.dequeue().intValue());
-
-        // when
-        queue.enqueue(element2);
-        queue.enqueue(element3);
-        queue.enqueue(element4);
-        // then
-        assertEquals(2, queue.dequeue().intValue());
-        assertEquals(3, queue.dequeue().intValue());
-        assertEquals(4, queue.dequeue().intValue());
-        assertEquals(4, queue.dequeue().intValue(), "should get the current element when dequeuing the current head");
-        assertNull(queue.dequeue(), "should get null when dequeuing from a dead list");
-        assertNull(queue.dequeue(), "should get null continuously when dequeuing from a dead list");
-    }
-
-    @Test
     void shouldAllowReEntrance() {
-        var lock = locks.acquireNodeLock(11, EXCLUSIVE);
-        var lock2 = locks.acquireNodeLock(11, EXCLUSIVE);
-        var lock3 = locks.acquireNodeLock(11, EXCLUSIVE);
+        try (var lock = locks.acquireNodeLock(11, EXCLUSIVE);
+                var lock2 = locks.acquireNodeLock(11, EXCLUSIVE);
+                var lock3 = locks.acquireNodeLock(11, EXCLUSIVE)) {
+            assertLock(lock, 11, 3, 0);
+        }
     }
 
     @Test
     @Timeout(60)
     void shouldBlockOnLockedLock() {
         // given
-        var executor = Executors.newSingleThreadExecutor();
-
-        try {
+        try (var executor = Executors.newSingleThreadExecutor()) {
             var threadHolder = new AtomicReference<Thread>();
             try (var lock = locks.acquireNodeLock(17, EXCLUSIVE)) {
                 executor.execute(() -> {
@@ -94,8 +69,6 @@ class ReentrantLockServiceTest {
                     parkNanos(MILLISECONDS.toNanos(10));
                 }
             }
-        } finally {
-            executor.shutdown();
         }
     }
 
@@ -105,7 +78,7 @@ class ReentrantLockServiceTest {
         locks.acquireNodeLock(42, EXCLUSIVE).release();
 
         // then
-        assertEquals(0, locks.lockCount());
+        assertThat(locks.lockCount()).isEqualTo(0);
     }
 
     @Test
@@ -115,24 +88,124 @@ class ReentrantLockServiceTest {
         Lock second;
 
         // when
-        var currentThread = currentThread();
         try (Lock lock = first = locks.acquireNodeLock(666, EXCLUSIVE)) {
             // then
-            assertEquals("LockedNode[id=666; HELD_BY=1*" + currentThread + "]", lock.toString());
+            assertLock(lock, 666, 1, 0);
 
             // when
             try (Lock inner = second = locks.acquireNodeLock(666, EXCLUSIVE)) {
-                assertEquals("LockedNode[id=666; HELD_BY=2*" + currentThread + "]", lock.toString());
-                assertEquals(lock.toString(), inner.toString());
+                assertLock(lock, 666, 2, 0);
+                assertThat(inner).hasToString(lock.toString());
             }
 
             // then
-            assertEquals("LockedNode[id=666; HELD_BY=1*" + currentThread + "]", lock.toString());
-            assertEquals("LockedNode[id=666; RELEASED]", second.toString());
+            assertLock(lock, 666, 1, 0);
+            assertLock(second, 666, 0, 0);
         }
 
         // then
-        assertEquals("LockedNode[id=666; RELEASED]", first.toString());
-        assertEquals("LockedNode[id=666; RELEASED]", second.toString());
+        assertLock(first, 666, 0, 0);
+        assertLock(second, 666, 0, 0);
+    }
+
+    @Test
+    void shouldAcquireSharedLocks() throws Exception {
+        // given
+        long nodeId = 10;
+        try (Lock lock = locks.acquireNodeLock(nodeId, SHARED)) {
+            assertLock(lock, nodeId, 0, 1);
+            // when
+            try (OtherThreadExecutor t2 = new OtherThreadExecutor("T2")) {
+                t2.execute(() -> {
+                    try (Lock t2Lock = locks.acquireNodeLock(nodeId, SHARED)) {
+                        // then
+                        assertLock(t2Lock, nodeId, 0, 2);
+                        assertLock(lock, nodeId, 0, 2);
+                    }
+                    return null;
+                });
+                assertLock(lock, nodeId, 0, 1);
+            }
+        }
+    }
+
+    @Test
+    void shouldPruneDeadLockInstances() {
+        // given
+        var race = new Race();
+        int numThreads = 4;
+
+        // when
+        race.addContestants(numThreads, () -> {
+            var rng = ThreadLocalRandom.current();
+            for (int i = 0; i < 100_000; i++) {
+                try (var lock = locks.acquireNodeLock(rng.nextLong(1_000), EXCLUSIVE)) {
+                    // then
+                    assertThat(locks.lockCount()).isLessThanOrEqualTo(numThreads * 2);
+                }
+            }
+        });
+        race.goUnchecked();
+    }
+
+    @Test
+    void shouldWorkWithClientAbstraction() throws Exception {
+        // given
+        try (var t2 = new OtherThreadExecutor("T2");
+                var client1 = locks.newClient()) {
+            client1.acquireNodeLock(123, EXCLUSIVE);
+            var lockFuture = t2.executeDontWait(() -> {
+                try (var client2 = locks.newClient()) {
+                    client2.acquireNodeLock(123, EXCLUSIVE);
+                }
+                return null;
+            });
+            t2.waitUntilWaiting();
+            client1.close();
+            lockFuture.get();
+        }
+    }
+
+    @Test
+    void shouldWorkWithClientAbstractionAndCustomLocks() throws Exception {
+        // given
+        try (var t2 = new OtherThreadExecutor("T2");
+                var client1 = locks.newClient()) {
+            for (int i = 0; i < 10; i++) {
+                client1.acquireCustomLock(9, 10, SHARED);
+            }
+            var lockFuture = t2.executeDontWait(() -> {
+                try (var client2 = locks.newClient()) {
+                    client2.acquireCustomLock(9, 10, EXCLUSIVE);
+                }
+                return null;
+            });
+            t2.waitUntilWaiting();
+            client1.close();
+            lockFuture.get();
+        }
+    }
+
+    @Test
+    void shouldAllowHighAcquisitionCountForLockClients() {
+        // given
+        try (var client = locks.newClient()) {
+            // when/then (not throwing an error from ReentrantReadWriteLock)
+            for (int i = 0; i < 100_000; i++) {
+                client.acquireCustomLock(23, 45, SHARED);
+            }
+        }
+    }
+
+    private void assertLock(Lock lock, long id, int writeLockCount, int readLockCount) {
+        String lockToString = lock.toString();
+        assertThat(lockToString).contains("[id=" + id + "]");
+        if (writeLockCount == 0 && readLockCount == 0) {
+            assertThat(lockToString).contains("RELEASED");
+        } else {
+            assertThat(lockToString)
+                    .contains("Write locks = " + writeLockCount)
+                    .contains("Read locks = " + readLockCount);
+        }
     }
 }

@@ -36,12 +36,12 @@ import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
 import static org.neo4j.configuration.GraphDatabaseSettings.pagecache_flush_buffer_size_in_pages;
 import static org.neo4j.internal.helpers.Numbers.ceilingPowerOfTwo;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.memory.ByteBuffers.allocateDirect;
 import static org.neo4j.io.memory.ByteBuffers.releaseBuffer;
 import static org.neo4j.io.pagecache.PageCache.PAGE_SIZE;
@@ -102,13 +102,17 @@ import org.neo4j.io.memory.ByteBuffers;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.impl.FileIsNotMappedException;
-import org.neo4j.io.pagecache.impl.SingleFilePageSwapperFactory;
 import org.neo4j.io.pagecache.impl.muninn.CacheLiveLockException;
 import org.neo4j.io.pagecache.impl.muninn.EvictionBouncer;
 import org.neo4j.io.pagecache.impl.muninn.MuninnPageCursor;
-import org.neo4j.io.pagecache.impl.muninn.SwapperSet;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
+import org.neo4j.io.pagecache.impl.muninn.swapper.PageSwapper;
+import org.neo4j.io.pagecache.impl.muninn.swapper.PageSwapperFactory;
+import org.neo4j.io.pagecache.impl.muninn.swapper.SingleFilePageSwapperFactory;
+import org.neo4j.io.pagecache.impl.muninn.swapper.SwapperIdProvider;
 import org.neo4j.io.pagecache.randomharness.Record;
 import org.neo4j.io.pagecache.randomharness.StandardRecordFormat;
+import org.neo4j.io.pagecache.segment.FileSegmentTracker;
 import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
 import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
@@ -131,7 +135,10 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
     protected PagedFile map(PageCache pageCache, Path file, int filePageSize, ImmutableSet<OpenOption> options)
             throws IOException {
         return pageCache.map(
-                file, filePageSize, DEFAULT_DATABASE_NAME, getOpenOptions().newWithAll(options));
+                new StoreFile(file),
+                filePageSize,
+                DEFAULT_DATABASE_NAME,
+                getOpenOptions().newWithAll(options));
     }
 
     protected PagedFile map(PageCache pageCache, Path file, int filePageSize) throws IOException {
@@ -235,7 +242,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                 }
             }
 
-            pagedFile.flushAndForce(FileFlushEvent.NULL);
+            pagedFile.flushAndForce(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR);
 
             verifyRecordsInFile(file("a"), recordCount);
             pagedFile.close();
@@ -246,8 +253,8 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
     void pagedFileFlushAndForceMustThrowOnNullIOPSLimiter() {
         configureStandardPageCache();
         assertThrows(NullPointerException.class, () -> {
-            try (PagedFile pf =
-                    pageCache.map(file("a"), filePageSize, DEFAULT_DATABASE_NAME, immutable.empty(), null)) {
+            try (PagedFile pf = pageCache.map(
+                    new StoreFile(file("a")), filePageSize, DEFAULT_DATABASE_NAME, immutable.empty(), null)) {
                 // empty
             }
         });
@@ -263,10 +270,10 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
         AtomicInteger callbackCounter = new AtomicInteger();
         AtomicInteger ioCounter = new AtomicInteger();
         PageCacheIOController ioController = new PageCacheIOController(ioCounter, pagesPerFlush, callbackCounter);
-        PagedFile pfA =
-                cache.map(existingFile("a"), filePageSize, DEFAULT_DATABASE_NAME, immutable.empty(), ioController);
-        PagedFile pfB =
-                cache.map(existingFile("b"), filePageSize, DEFAULT_DATABASE_NAME, immutable.empty(), ioController);
+        PagedFile pfA = cache.map(
+                new StoreFile(existingFile("a")), filePageSize, DEFAULT_DATABASE_NAME, immutable.empty(), ioController);
+        PagedFile pfB = cache.map(
+                new StoreFile(existingFile("b")), filePageSize, DEFAULT_DATABASE_NAME, immutable.empty(), ioController);
 
         dirtyManyPages(pfA, pagesToDirty);
         dirtyManyPages(pfB, pagesToDirty);
@@ -291,12 +298,13 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
         AtomicInteger ioCounter = new AtomicInteger();
         PageCacheIOController ioController = new PageCacheIOController(ioCounter, pagesPerFlush, callbackCounter);
 
-        PagedFile pf = cache.map(file("a"), filePageSize, DEFAULT_DATABASE_NAME, immutable.empty(), ioController);
+        PagedFile pf = cache.map(
+                new StoreFile(file("a")), filePageSize, DEFAULT_DATABASE_NAME, immutable.empty(), ioController);
 
         // Dirty a bunch of data
         dirtyManyPages(pf, pagesToDirty);
 
-        pf.flushAndForce(FileFlushEvent.NULL);
+        pf.flushAndForce(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR);
         pf.close();
 
         assertThat(callbackCounter.get()).isGreaterThan(0);
@@ -340,7 +348,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                     // running concurrently right now.
                     // Therefor, a flush right now would have a high chance of racing
                     // with eviction.
-                    pagedFile.flushAndForce(FileFlushEvent.NULL);
+                    pagedFile.flushAndForce(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR);
 
                     // Race or not, a flush should still put all changes in storage,
                     // so we should be able to verify the contents of the file.
@@ -369,14 +377,14 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
             BinaryLatch limiterBlockLatch = new BinaryLatch();
             var ioController = new EmptyIOController() {
                 @Override
-                public void maybeLimitIO(int recentlyCompletedIOs, FileFlushEvent flushEvent) {
+                public void maybeLimitIO(int recentlyCompletedIOs, int affectedPages, FileFlushEvent flushEvent) {
                     limiterStartLatch.release();
                     limiterBlockLatch.await();
-                    super.maybeLimitIO(recentlyCompletedIOs, flushEvent);
+                    super.maybeLimitIO(recentlyCompletedIOs, affectedPages, flushEvent);
                 }
             };
-            try (PagedFile pfA =
-                    pageCache.map(a, filePageSize, DEFAULT_DATABASE_NAME, immutable.empty(), ioController)) {
+            try (PagedFile pfA = pageCache.map(
+                    new StoreFile(a), filePageSize, DEFAULT_DATABASE_NAME, immutable.empty(), ioController)) {
                 // Dirty a bunch of pages.
                 try (PageCursor cursor = pfA.io(0, PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
                     for (int i = 0; i < maxPages; i++) {
@@ -385,7 +393,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                 }
 
                 Future<?> flusher = executor.submit(() -> {
-                    pfA.flushAndForce(FileFlushEvent.NULL);
+                    pfA.flushAndForce(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR);
                     return null;
                 });
 
@@ -395,7 +403,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                 map(pageCache, b, filePageSize).close();
                 // We should be able to get and list existing mappings.
                 pageCache.listExistingMappings();
-                pageCache.getExistingMapping(a).ifPresent(PagedFile::close);
+                pageCache.getExistingMapping(new StoreFile(a)).ifPresent(PagedFile::close);
 
                 limiterBlockLatch.release();
                 flusher.get();
@@ -415,10 +423,12 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
         var ioController = new LatchedIOController(closeFilesLatch, limiterBlockLatch);
         List<Future<?>> flushers = new ArrayList<>();
 
-        try (PagedFile pfA = pageCache.map(a, filePageSize, DEFAULT_DATABASE_NAME, immutable.empty(), ioController);
-                PagedFile pfB = pageCache.map(b, filePageSize, DEFAULT_DATABASE_NAME, immutable.empty(), ioController);
-                PagedFile pfC =
-                        pageCache.map(c, filePageSize, DEFAULT_DATABASE_NAME, immutable.empty(), ioController)) {
+        try (PagedFile pfA = pageCache.map(
+                        new StoreFile(a), filePageSize, DEFAULT_DATABASE_NAME, immutable.empty(), ioController);
+                PagedFile pfB = pageCache.map(
+                        new StoreFile(b), filePageSize, DEFAULT_DATABASE_NAME, immutable.empty(), ioController);
+                PagedFile pfC = pageCache.map(
+                        new StoreFile(c), filePageSize, DEFAULT_DATABASE_NAME, immutable.empty(), ioController)) {
             // Dirty a bunch of pages.
             try (PageCursor cursor = pfA.io(0, PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
                 assertTrue(cursor.next());
@@ -431,15 +441,15 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
             }
 
             flushers.add(executor.submit(() -> {
-                pfA.flushAndForce(FileFlushEvent.NULL);
+                pfA.flushAndForce(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR);
                 return null;
             }));
             flushers.add(executor.submit(() -> {
-                pfB.flushAndForce(FileFlushEvent.NULL);
+                pfB.flushAndForce(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR);
                 return null;
             }));
             flushers.add(executor.submit(() -> {
-                pfC.flushAndForce(FileFlushEvent.NULL);
+                pfC.flushAndForce(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR);
                 return null;
             }));
 
@@ -515,7 +525,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                 cursor.putInt(1);
             }
 
-            pagedFile.flushAndForce(FileFlushEvent.NULL);
+            pagedFile.flushAndForce(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR);
 
             assertThat(writeCounter.get()).isGreaterThanOrEqualTo(2); // We might race with background flushing.
             assertThat(forceCounter.get()).isEqualTo(1);
@@ -539,7 +549,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                 cursor.putInt(1);
             }
 
-            pagedFile.flushAndForce(FileFlushEvent.NULL);
+            pagedFile.flushAndForce(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR);
 
             assertThat(writeCounter.get()).isGreaterThanOrEqualTo(1); // We might race with background flushing.
             assertThat(forceCounter.get()).isEqualTo(1);
@@ -916,7 +926,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
     void flushAndForceAfterCloseAndEvictionMustNotGetStuckOnEvictedPages() {
         assertTimeoutPreemptively(ofMillis(SHORT_TIMEOUT_MILLIS), () -> {
             configureStandardPageCache();
-            PagedFile pagedFile = pageCache.map(file("a"), pageCachePageSize, DEFAULT_DATABASE_NAME);
+            PagedFile pagedFile = pageCache.map(new StoreFile(file("a")), pageCachePageSize, DEFAULT_DATABASE_NAME);
             try (PageCursor cursor = pagedFile.io(0, PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
                 for (int i = 0; i < 20; i++) {
                     cursor.next();
@@ -924,14 +934,15 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                 }
             }
             pagedFile.close();
-            try (PagedFile b = pageCache.map(existingFile("b"), pageCachePageSize, DEFAULT_DATABASE_NAME);
+            try (PagedFile b =
+                            pageCache.map(new StoreFile(existingFile("b")), pageCachePageSize, DEFAULT_DATABASE_NAME);
                     PageCursor cursor = b.io(0, PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
                 for (int i = 0; i < 200; i++) {
                     cursor.next();
                 }
             }
 
-            pagedFile.flushAndForce(FileFlushEvent.NULL);
+            pagedFile.flushAndForce(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR);
         });
     }
 
@@ -1393,7 +1404,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
         configureStandardPageCache();
         final Path file = file("a");
         try (PagedFile pf = map(file, filePageSize)) {
-            final Optional<PagedFile> optional = pageCache.getExistingMapping(file);
+            final Optional<PagedFile> optional = pageCache.getExistingMapping(new StoreFile(file));
             assertTrue(optional.isPresent());
             final PagedFile actual = optional.get();
             assertThat(actual).isSameAs(pf);
@@ -1404,7 +1415,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
     @Test
     void tryMappedPagedFileShouldReportNonMappedFileNotPresent() throws Exception {
         configureStandardPageCache();
-        final Optional<PagedFile> dontExist = pageCache.getExistingMapping(Path.of("dont_exist"));
+        final Optional<PagedFile> dontExist = pageCache.getExistingMapping(new StoreFile(Path.of("dont_exist")));
         assertFalse(dontExist.isPresent());
     }
 
@@ -1419,7 +1430,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                 PagedFile pf2 = map(f2, filePageSize)) {
             map(f3, filePageSize).close();
             List<PagedFile> existingMappings = pageCache.listExistingMappings();
-            assertThat(existingMappings.size()).isEqualTo(2);
+            assertThat(existingMappings).hasSize(2);
             assertThat(existingMappings).contains(pf1, pf2);
         }
     }
@@ -2495,7 +2506,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                                     assertTrue(writer.next(i));
                                 }
                             }
-                            otherPagedFile.flushAndForce(FileFlushEvent.NULL);
+                            otherPagedFile.flushAndForce(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR);
                         }
                     });
                 }
@@ -2768,6 +2779,60 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                     0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x55, 0x10, 0x20, 0x30, 0x40, 0x10, 0x20
                 });
             }
+        }
+    }
+
+    @Test
+    void readsThroughOverflow() throws IOException {
+        verifyAccessThroughOverflow(PageCursor::getLong);
+    }
+
+    @Test
+    void writesThroughOverflow() throws IOException {
+        verifyAccessThroughOverflow(cursor -> cursor.putLong(42L));
+    }
+
+    @Test
+    void readsByteThroughOverflow() throws IOException {
+        verifyAccessThroughOverflow(PageCursor::getByte);
+    }
+
+    @Test
+    void writesByteThroughOverflow() throws IOException {
+        verifyAccessThroughOverflow(cursor -> cursor.putByte((byte) 42));
+    }
+
+    @Test
+    void readsShortThroughOverflow() throws IOException {
+        verifyAccessThroughOverflow(PageCursor::getShort);
+    }
+
+    @Test
+    void writesShortThroughOverflow() throws IOException {
+        verifyAccessThroughOverflow(cursor -> cursor.putShort((short) 42));
+    }
+
+    @Test
+    void readsIntThroughOverflow() throws IOException {
+        verifyAccessThroughOverflow(PageCursor::getInt);
+    }
+
+    @Test
+    void writesIntThroughOverflow() throws IOException {
+        verifyAccessThroughOverflow(cursor -> cursor.putInt(42));
+    }
+
+    private void verifyAccessThroughOverflow(PageCursorAction action) throws IOException {
+        configureStandardPageCache();
+        try (PagedFile pf = map(file("a"), filePageSize);
+                PageCursor cursor = pf.io(0, PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
+            assertTrue(cursor.next());
+            assertDoesNotThrow(() -> {
+                cursor.setOffset(Integer.MAX_VALUE - Long.BYTES);
+                for (int i = 0; i < 20; i++) {
+                    action.apply(cursor);
+                }
+            });
         }
     }
 
@@ -3049,6 +3114,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
     @Test
     void readingAndRetryingOnPageWithOptimisticReadLockingAfterUnmappingMustThrow() {
         assertTimeoutPreemptively(ofMillis(SHORT_TIMEOUT_MILLIS), () -> {
+            doNotCloseAllocatorOnShutdown();
             configureStandardPageCache();
 
             generateFileWithRecords(
@@ -3311,6 +3377,126 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
         });
     }
 
+    @Test
+    void getByteWithOffsetBeyondPageEndMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.getByte(filePageSize));
+    }
+
+    @Test
+    void putByteWithOffsetBeyondPageEndMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.putByte(filePageSize, (byte) 42));
+    }
+
+    @Test
+    void getShortWithOffsetBeyondPageEndMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.getShort(filePageSize));
+    }
+
+    @Test
+    void putShortWithOffsetBeyondPageEndMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.putShort(filePageSize, (short) 42));
+    }
+
+    @Test
+    void getIntWithOffsetBeyondPageEndMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.getInt(filePageSize));
+    }
+
+    @Test
+    void putIntWithOffsetBeyondPageEndMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.putInt(filePageSize, 42));
+    }
+
+    @Test
+    void getLongWithOffsetBeyondPageEndMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.getLong(filePageSize));
+    }
+
+    @Test
+    void putLongWithOffsetBeyondPageEndMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.putLong(filePageSize, 42L));
+    }
+
+    @Test
+    void getByteWithNegativeOffsetMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.getByte(-1));
+    }
+
+    @Test
+    void putByteWithNegativeOffsetMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.putByte(-1, (byte) 42));
+    }
+
+    @Test
+    void getShortWithNegativeOffsetMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.getShort(-1));
+    }
+
+    @Test
+    void putShortWithNegativeOffsetMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.putShort(-1, (short) 42));
+    }
+
+    @Test
+    void getIntWithNegativeOffsetMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.getInt(-1));
+    }
+
+    @Test
+    void putIntWithNegativeOffsetMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.putInt(-1, 42));
+    }
+
+    @Test
+    void getLongWithNegativeOffsetMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.getLong(-1));
+    }
+
+    @Test
+    void putLongWithNegativeOffsetMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.putLong(-1, 42L));
+    }
+
+    @Test
+    void getByteWithOverflowOffsetMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.getByte(Integer.MAX_VALUE));
+    }
+
+    @Test
+    void putByteWithOverflowOffsetMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.putByte(Integer.MAX_VALUE, (byte) 42));
+    }
+
+    @Test
+    void getShortWithOverflowOffsetMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.getShort(Integer.MAX_VALUE - 1));
+    }
+
+    @Test
+    void putShortWithOverflowOffsetMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.putShort(Integer.MAX_VALUE - 1, (short) 42));
+    }
+
+    @Test
+    void getIntWithOverflowOffsetMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.getInt(Integer.MAX_VALUE - 3));
+    }
+
+    @Test
+    void putIntWithOverflowOffsetMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.putInt(Integer.MAX_VALUE - 3, 42));
+    }
+
+    @Test
+    void getLongWithOverflowOffsetMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.getLong(Integer.MAX_VALUE - 7));
+    }
+
+    @Test
+    void putLongWithOverflowOffsetMustRaiseOutOfBoundsFlag() throws IOException {
+        verifyOffsetPageBoundsCheck(cursor -> cursor.putLong(Integer.MAX_VALUE - 7, 42L));
+    }
+
     private void verifyPageBounds(PageCursorAction action) throws IOException {
         configureStandardPageCache();
 
@@ -3327,6 +3513,17 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                     }
                 }
             });
+        }
+    }
+
+    private void verifyOffsetPageBoundsCheck(PageCursorAction action) throws IOException {
+        configureStandardPageCache();
+        generateFileWithRecords(file("a"), 1, recordSize, recordsPerFilePage, reservedBytes, filePageSize);
+        try (PagedFile pagedFile = map(file("a"), filePageSize);
+                PageCursor cursor = pagedFile.io(0, PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
+            cursor.next();
+            action.apply(cursor);
+            assertTrue(cursor.checkAndClearBoundsFlag());
         }
     }
 
@@ -3487,29 +3684,6 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
     }
 
     @Test
-    void settingOutOfBoundsCursorOffsetMustRaiseBoundsFlag() {
-        assertTimeoutPreemptively(ofMillis(SHORT_TIMEOUT_MILLIS), () -> {
-            configureStandardPageCache();
-
-            generateFileWithRecords(file("a"), 1, recordSize, recordsPerFilePage, reservedBytes, filePageSize);
-            try (PagedFile pagedFile = map(file("a"), filePageSize);
-                    PageCursor cursor = pagedFile.io(0, PF_SHARED_READ_LOCK, NULL_CONTEXT)) {
-                cursor.setOffset(-1);
-                assertTrue(cursor.checkAndClearBoundsFlag());
-                assertFalse(cursor.checkAndClearBoundsFlag());
-
-                cursor.setOffset(filePageSize + 1);
-                assertTrue(cursor.checkAndClearBoundsFlag());
-                assertFalse(cursor.checkAndClearBoundsFlag());
-
-                cursor.setOffset(pageCachePageSize + 1);
-                assertTrue(cursor.checkAndClearBoundsFlag());
-                assertFalse(cursor.checkAndClearBoundsFlag());
-            }
-        });
-    }
-
-    @Test
     void pageFaultForWriteMustThrowIfOutOfStorageSpace() {
         assertTimeoutPreemptively(ofMillis(SHORT_TIMEOUT_MILLIS), () -> {
             final AtomicInteger writeCounter = new AtomicInteger();
@@ -3646,6 +3820,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
 
             fs.write(file("a")).close();
 
+            doNotEnableBackgroundEviction();
             getPageCache(fs, maxPages, PageCacheTracer.NULL);
             PagedFile pagedFile = map(file("a"), filePageSize);
 
@@ -3713,7 +3888,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
         hasSpace.set(true);
 
         // Flushing the paged file implies the eviction exception gets cleared, and mustn't itself throw:
-        pagedFile.flushAndForce(FileFlushEvent.NULL);
+        pagedFile.flushAndForce(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR);
 
         try (PageCursor cursor = pagedFile.io(0, PF_SHARED_READ_LOCK, NULL_CONTEXT)) {
             assertTrue(cursor.next()); // this should not throw
@@ -4138,12 +4313,9 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
     }
 
     private void verifyMappingWithOpenOptionThrows(OpenOption option) throws IOException {
-        try {
-            map(file("a"), filePageSize, immutable.of(option)).close();
-            fail("Expected map() to throw when given the OpenOption " + option);
-        } catch (IllegalArgumentException | UnsupportedOperationException e) {
-            // good
-        }
+        assertThatThrownBy(
+                        () -> map(file("a"), filePageSize, immutable.of(option)).close())
+                .isInstanceOfAny(IllegalArgumentException.class, UnsupportedOperationException.class);
     }
 
     @Test
@@ -4173,7 +4345,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                 try (PageCursor cursor = pf.io(20, PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
                     assertTrue(cursor.next());
                 }
-                pf.flushAndForce(FileFlushEvent.NULL);
+                pf.flushAndForce(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR);
                 assertEquals(21L * filePageSize, fs.getFileSize(file));
 
                 pf.truncate(10, FileTruncateEvent.NULL);
@@ -4193,7 +4365,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                 try (PageCursor cursor = pf.io(25, PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
                     assertTrue(cursor.next());
                 }
-                pf.flushAndForce(FileFlushEvent.NULL);
+                pf.flushAndForce(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR);
 
                 try (RegionCollectionEvent collectionEvent = storageTracer.beginRegionCollection()) {
                     try (var truncateEvent = collectionEvent.attemptTruncate()) {
@@ -4231,7 +4403,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                 try (PageCursor cursor = pf.io(2, PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
                     assertTrue(cursor.next());
                 }
-                pf.flushAndForce(FileFlushEvent.NULL);
+                pf.flushAndForce(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR);
                 assertEquals(2, pf.getLastPageId());
 
                 pf.truncate(1, FileTruncateEvent.NULL);
@@ -4263,7 +4435,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                 try (PageCursor cursor = pf.io(2, PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
                     assertTrue(cursor.next());
                 }
-                pf.flushAndForce(FileFlushEvent.NULL);
+                pf.flushAndForce(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR);
                 assertEquals(2, pf.getLastPageId());
 
                 pf.truncate(0, FileTruncateEvent.NULL);
@@ -4330,7 +4502,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                         pf.truncate(pagesToKeep, truncateEvent);
                     }
                     try (FileFlushEvent fileFlushEvent = cacheTracer.beginFileFlush()) {
-                        pf.flushAndForce(fileFlushEvent);
+                        pf.flushAndForce(fileFlushEvent, EMPTY_ASYNC_BLOCK_ACCESSOR);
                     }
 
                     long expectedTruncatedBytes = beforeTruncation + (totalFilePages - pagesToKeep) * filePageSize;
@@ -4371,7 +4543,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                         cursor.putLong(i);
                     }
                 }
-                pf.flushAndForce(FileFlushEvent.NULL);
+                pf.flushAndForce(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR);
                 assertEquals(21L * filePageSize, fs.getFileSize(file));
 
                 pf.truncate(7, FileTruncateEvent.NULL);
@@ -4383,7 +4555,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                         cursor.putLong(i);
                     }
                 }
-                pf.flushAndForce(FileFlushEvent.NULL);
+                pf.flushAndForce(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR);
                 assertEquals(25L * filePageSize, fs.getFileSize(file));
             }
         });
@@ -4401,7 +4573,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                         cursor.putLong(i);
                     }
                 }
-                pf.flushAndForce(FileFlushEvent.NULL);
+                pf.flushAndForce(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR);
 
                 pf.truncate(5, FileTruncateEvent.NULL);
                 for (int i = 0; i < 4; i++) {
@@ -4426,7 +4598,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                         cursor.putLong(i);
                     }
                 }
-                pf.flushAndForce(FileFlushEvent.NULL);
+                pf.flushAndForce(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR);
 
                 pf.truncate(7, FileTruncateEvent.NULL);
 
@@ -4489,10 +4661,11 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
     void fileMappedWithDeleteOnCloseShouldNotFlushDirtyPagesOnClose() throws Exception {
         PageCacheTracer cacheTracer = PageCacheTracer.NULL;
         AtomicInteger flushCounter = new AtomicInteger();
-        PageSwapperFactory swapperFactory = flushCountingPageSwapperFactory(fs, flushCounter, cacheTracer);
         Path file = file("a");
-        try (PageCache cache = createPageCache(swapperFactory, maxPages, cacheTracer);
-                PagedFile pf = cache.map(file, filePageSize, DEFAULT_DATABASE_NAME, immutable.of(DELETE_ON_CLOSE));
+        PageSwapperFactory swapperFactory = flushCountingPageSwapperFactory(fs, flushCounter, cacheTracer);
+        try (PageCache cache = createPageCache(fs, maxPages, cacheTracer, swapperFactory);
+                PagedFile pf = cache.map(
+                        new StoreFile(file), filePageSize, DEFAULT_DATABASE_NAME, immutable.of(DELETE_ON_CLOSE));
                 PageCursor cursor = pf.io(0, PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
             writeRecords(cursor);
             assertTrue(cursor.next());
@@ -4506,8 +4679,8 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
         AtomicInteger flushCounter = new AtomicInteger();
         PageSwapperFactory swapperFactory = flushCountingPageSwapperFactory(fs, flushCounter, cacheTracer);
         Path file = file("a");
-        try (PageCache cache = createPageCache(swapperFactory, maxPages, cacheTracer);
-                PagedFile pf = cache.map(file, filePageSize, DEFAULT_DATABASE_NAME);
+        try (PageCache cache = createPageCache(fs, maxPages, cacheTracer, swapperFactory);
+                PagedFile pf = cache.map(new StoreFile(file), filePageSize, DEFAULT_DATABASE_NAME);
                 PageCursor cursor = pf.io(0, PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
             writeRecords(cursor);
             assertTrue(cursor.next());
@@ -4525,9 +4698,11 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                     PageEvictionCallback onEviction,
                     boolean createIfNotExist,
                     boolean useDirectIO,
+                    long pagesPerSegment,
                     IOController ioController,
                     EvictionBouncer evictionBouncer,
-                    SwapperSet swappers)
+                    SwapperIdProvider swapperIdProvider,
+                    FileSegmentTracker segmentTracker)
                     throws IOException {
                 PageSwapper swapper = super.createPageSwapper(
                         path,
@@ -4535,9 +4710,11 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                         onEviction,
                         createIfNotExist,
                         useDirectIO,
+                        pagesPerSegment,
                         ioController,
                         evictionBouncer,
-                        swappers);
+                        swapperIdProvider,
+                        segmentTracker);
                 return new DelegatingPageSwapper(swapper) {
                     @Override
                     public long write(long filePageId, long bufferAddress) throws IOException {
@@ -4546,15 +4723,10 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
                     }
 
                     @Override
-                    public long write(
-                            long startFilePageId,
-                            long[] bufferAddresses,
-                            int[] bufferLengths,
-                            int length,
-                            int totalAffectedPages)
+                    public long write(long startFilePageId, long[] bufferAddresses, int[] bufferLengths, int length)
                             throws IOException {
-                        flushCounter.getAndAdd(totalAffectedPages);
-                        return super.write(startFilePageId, bufferAddresses, bufferLengths, length, totalAffectedPages);
+                        flushCounter.getAndAdd(length);
+                        return super.write(startFilePageId, bufferAddresses, bufferLengths, length);
                     }
                 };
             }
@@ -5451,6 +5623,19 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
     }
 
     @Test
+    void checkAndClearBoundsFlagMustClearFlag() throws IOException {
+        configureStandardPageCache();
+        generateFileWithRecords(file("a"), 1, recordSize, recordsPerFilePage, reservedBytes, filePageSize);
+        try (PagedFile pf = map(file("a"), filePageSize);
+                PageCursor cursor = pf.io(0, PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
+            assertTrue(cursor.next());
+            cursor.getByte(-1);
+            assertTrue(cursor.checkAndClearBoundsFlag());
+            assertFalse(cursor.checkAndClearBoundsFlag());
+        }
+    }
+
+    @Test
     void checkAndClearBoundsFlagMustCheckAndClearLinkedCursor() {
         assertTimeoutPreemptively(ofMillis(SHORT_TIMEOUT_MILLIS), () -> {
             configureStandardPageCache();
@@ -5514,20 +5699,18 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
             try (PageCursor cursor = pf.io(0, PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
                 assertTrue(cursor.next());
                 cursor.setCursorException(msg);
-                cursor.checkAndClearCursorException();
-                fail("checkAndClearError on write cursor should have thrown");
-            } catch (CursorException e) {
-                assertThat(e.getMessage()).isEqualTo(msg);
+                assertThatThrownBy(cursor::checkAndClearCursorException)
+                        .isInstanceOf(CursorException.class)
+                        .hasMessage(msg);
             }
 
             msg = "Boo" + ThreadLocalRandom.current().nextInt();
             try (PageCursor cursor = pf.io(0, PF_SHARED_READ_LOCK, NULL_CONTEXT)) {
                 assertTrue(cursor.next());
                 cursor.setCursorException(msg);
-                cursor.checkAndClearCursorException();
-                fail("checkAndClearError on read cursor should have thrown");
-            } catch (CursorException e) {
-                assertThat(e.getMessage()).isEqualTo(msg);
+                assertThatThrownBy(cursor::checkAndClearCursorException)
+                        .isInstanceOf(CursorException.class)
+                        .hasMessage(msg);
             }
         }
     }
@@ -5539,22 +5722,14 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
             try (PageCursor cursor = pf.io(0, PF_SHARED_WRITE_LOCK, NULL_CONTEXT)) {
                 assertTrue(cursor.next());
                 cursor.setCursorException("boo");
-                try {
-                    cursor.checkAndClearCursorException();
-                    fail("checkAndClearError on write cursor should have thrown");
-                } catch (CursorException ignore) {
-                }
+                assertThatThrownBy(cursor::checkAndClearCursorException).isInstanceOf(CursorException.class);
                 cursor.checkAndClearCursorException();
             }
 
             try (PageCursor cursor = pf.io(0, PF_SHARED_READ_LOCK, NULL_CONTEXT)) {
                 assertTrue(cursor.next());
                 cursor.setCursorException("boo");
-                try {
-                    cursor.checkAndClearCursorException();
-                    fail("checkAndClearError on read cursor should have thrown");
-                } catch (CursorException ignore) {
-                }
+                assertThatThrownBy(cursor::checkAndClearCursorException).isInstanceOf(CursorException.class);
                 cursor.checkAndClearCursorException();
             }
         }
@@ -6239,7 +6414,7 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
         }
 
         @Override
-        public void maybeLimitIO(int recentlyCompletedIOs, FileFlushEvent flushEvent) {
+        public void maybeLimitIO(int recentlyCompletedIOs, int affectedPages, FileFlushEvent flushEvent) {
             ioCounter.addAndGet(recentlyCompletedIOs * pagesPerFlush);
             callbackCounter.getAndIncrement();
         }
@@ -6255,10 +6430,10 @@ public abstract class PageCacheTest<T extends PageCache> extends PageCacheTestSu
         }
 
         @Override
-        public void maybeLimitIO(int recentlyCompletedIOs, FileFlushEvent flushEvent) {
+        public void maybeLimitIO(int recentlyCompletedIOs, int affectedPages, FileFlushEvent flushEvent) {
             closeLatch.countDown();
             limiterBlockLatch.await();
-            super.maybeLimitIO(recentlyCompletedIOs, flushEvent);
+            super.maybeLimitIO(recentlyCompletedIOs, affectedPages, flushEvent);
         }
     }
 }

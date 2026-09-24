@@ -37,10 +37,10 @@ import org.neo4j.kernel.api.exceptions.index.IndexEntryConflictException;
 import org.neo4j.kernel.impl.api.index.PhaseTracker;
 import org.neo4j.kernel.impl.api.index.SwallowingIndexUpdater;
 import org.neo4j.scheduler.JobHandle;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
 import org.neo4j.storageengine.api.TokenIndexEntryUpdate;
 import org.neo4j.storageengine.api.UpdateMode;
-import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
 import org.neo4j.values.storable.Value;
 
 /**
@@ -48,6 +48,7 @@ import org.neo4j.values.storable.Value;
  */
 public interface IndexPopulator extends MinimalIndexAccessor {
     IndexPopulator EMPTY = new Adapter();
+    Configuration DEFAULT_CONFIGURATION = new Configuration(1);
 
     /**
      * Remove all data in the index and paves the way for populating an index.
@@ -63,14 +64,14 @@ public interface IndexPopulator extends MinimalIndexAccessor {
      * Implementations verify constraints at this time.
      *
      * @param updates batch of index updates (entity property updates or entity token updates) that needs to be inserted.
-     * Depending on the type of index the updates will be  {@link ValueIndexEntryUpdate property value index updates}
+     * Depending on the type of index the updates will be  {@link EagerValueIndexEntryUpdate property value index updates}
      * or {@link TokenIndexEntryUpdate token index updates}.
      * @param cursorContext underlying page cache events tracer
      * @throws IndexEntryConflictException if this is a uniqueness index and any of the updates are detected
      * to violate that constraint.
      * @throws UncheckedIOException on I/O error.
      */
-    void add(Collection<? extends IndexEntryUpdate<?>> updates, CursorContext cursorContext)
+    void add(Collection<? extends IndexEntryUpdate> updates, CursorContext cursorContext)
             throws IndexEntryConflictException;
 
     /**
@@ -133,7 +134,7 @@ public interface IndexPopulator extends MinimalIndexAccessor {
      *
      * @param update update to include in sample
      */
-    void includeSample(IndexEntryUpdate<?> update);
+    void includeSample(IndexEntryUpdate update);
 
     /**
      * @return {@link IndexSample} from samples collected by {@link #includeSample(IndexEntryUpdate)} calls.
@@ -162,6 +163,20 @@ public interface IndexPopulator extends MinimalIndexAccessor {
             IndexEntryConflictHandler conflictHandler,
             CursorContext cursorContext)
             throws IndexEntryConflictException { // no-op by default
+    }
+
+    /**
+     * Signals that this population is being stopped, so that whatever
+     * {@link #scanCompleted(PhaseTracker, PopulationWorkScheduler, IndexEntryConflictHandler, CursorContext)} is
+     * currently doing should be abandoned as soon as it can.
+     * <p/>
+     * Post-scan work can be long-running and a database shutdown waits for the population job to finish,
+     * so without this it waits for that work.
+     * <p/>
+     * Called from a different thread than the one running {@code scanCompleted}, and must not block waiting for it to
+     * notice; whoever closes the populator afterwards is responsible for waiting.
+     */
+    default void cancelPostScanWork() { // no-op by default
     }
 
     /**
@@ -200,7 +215,7 @@ public interface IndexPopulator extends MinimalIndexAccessor {
         }
 
         @Override
-        public void add(Collection<? extends IndexEntryUpdate<?>> updates, CursorContext cursorContext) {}
+        public void add(Collection<? extends IndexEntryUpdate> updates, CursorContext cursorContext) {}
 
         @Override
         public IndexUpdater newPopulatingUpdater(CursorContext cursorContext) {
@@ -221,7 +236,7 @@ public interface IndexPopulator extends MinimalIndexAccessor {
         public void markAsFailed(String failure) {}
 
         @Override
-        public void includeSample(IndexEntryUpdate<?> update) {}
+        public void includeSample(IndexEntryUpdate update) {}
 
         @Override
         public IndexSample sample(CursorContext cursorContext) {
@@ -252,7 +267,7 @@ public interface IndexPopulator extends MinimalIndexAccessor {
         }
 
         @Override
-        public void add(Collection<? extends IndexEntryUpdate<?>> updates, CursorContext cursorContext)
+        public void add(Collection<? extends IndexEntryUpdate> updates, CursorContext cursorContext)
                 throws IndexEntryConflictException {
             delegate.add(updates, cursorContext);
         }
@@ -273,7 +288,7 @@ public interface IndexPopulator extends MinimalIndexAccessor {
         }
 
         @Override
-        public void includeSample(IndexEntryUpdate<?> update) {
+        public void includeSample(IndexEntryUpdate update) {
             delegate.includeSample(update);
         }
 
@@ -298,8 +313,15 @@ public interface IndexPopulator extends MinimalIndexAccessor {
         }
 
         @Override
+        public void cancelPostScanWork() {
+            delegate.cancelPostScanWork();
+        }
+
+        @Override
         public Map<String, Value> indexConfig() {
             return delegate.indexConfig();
         }
     }
+
+    record Configuration(int threadSharingFactor) {}
 }

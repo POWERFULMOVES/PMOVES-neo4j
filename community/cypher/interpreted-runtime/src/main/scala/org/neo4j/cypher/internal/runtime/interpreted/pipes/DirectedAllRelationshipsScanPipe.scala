@@ -23,27 +23,34 @@ import org.neo4j.cypher.internal.runtime.ClosingIterator
 import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.runtime.PrimitiveLongHelper
 import org.neo4j.cypher.internal.runtime.QueryContext
-import org.neo4j.cypher.internal.runtime.interpreted.TransactionBoundQueryContext.BaseRelationshipCursorIterator
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.DirectedAllRelationshipsScanPipe.allRelationshipsIterator
+import org.neo4j.cypher.internal.runtime.iterators.BaseRelationshipCursorIterator
 import org.neo4j.cypher.internal.util.attribution.Id
+import org.neo4j.values.virtual.VirtualValues
 
 case class DirectedAllRelationshipsScanPipe(
-  ident: String,
-  fromNode: String,
-  toNode: String
+  ident: Option[String],
+  fromNode: Option[String],
+  toNode: Option[String],
+  includeChangesFromThisTransaction: Boolean
 )(val id: Id = Id.INVALID_ID) extends Pipe {
+
+  private val relationshipWriter = Relationships.compileRelationshipWriter(ident, fromNode, toNode)
 
   protected def internalCreateResults(state: QueryState): ClosingIterator[CypherRow] = {
     val ctx = state.newRowWithArgument(rowFactory)
     val query: QueryContext = state.query
-    val relIterator = allRelationshipsIterator(query)
+    val relIterator = allRelationshipsIterator(query, includeChangesFromThisTransaction)
     PrimitiveLongHelper.map(
       relIterator,
-      relationshipId => {
-        val relationship = state.query.relationshipById(relationshipId)
-        val startNode = query.nodeById(relIterator.startNodeId())
-        val endNode = query.nodeById(relIterator.endNodeId())
-        rowFactory.copyWith(ctx, ident, relationship, fromNode, startNode, toNode, endNode)
+      r => {
+        relationshipWriter.writeRow(
+          rowFactory,
+          ctx,
+          VirtualValues.relationship(r),
+          VirtualValues.node(relIterator.startNodeId()),
+          VirtualValues.node(relIterator.endNodeId())
+        )
       }
     )
   }
@@ -51,11 +58,14 @@ case class DirectedAllRelationshipsScanPipe(
 
 object DirectedAllRelationshipsScanPipe {
 
-  def allRelationshipsIterator(query: QueryContext): BaseRelationshipCursorIterator = {
+  def allRelationshipsIterator(
+    query: QueryContext,
+    includeChangesFromThisTransaction: Boolean
+  ): BaseRelationshipCursorIterator = {
     val read = query.transactionalContext.dataRead
     val cursor = query.scanCursor()
     query.resources.trace(cursor)
-    read.allRelationshipsScan(cursor)
+    read.allRelationshipsScan(cursor, includeChangesFromThisTransaction)
     new BaseRelationshipCursorIterator {
       override protected def fetchNext(): Long = if (cursor.next()) cursor.reference() else -1L
       override def close(): Unit = cursor.close()

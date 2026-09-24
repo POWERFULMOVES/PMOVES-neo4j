@@ -1,0 +1,995 @@
+/*
+ * Copyright (c) "Neo4j"
+ * Neo4j Sweden AB [https://neo4j.com]
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.neo4j.cypher.internal.frontend.phases.parserTransformers
+
+import org.neo4j.cypher.internal.CypherVersion
+import org.neo4j.cypher.internal.ast.AddedInRewriteGeneral
+import org.neo4j.cypher.internal.ast.AddedWithOrigin
+import org.neo4j.cypher.internal.ast.AliasedReturnItem
+import org.neo4j.cypher.internal.ast.Clause
+import org.neo4j.cypher.internal.ast.ConditionalQueryWhen
+import org.neo4j.cypher.internal.ast.ExplicitGroupingElements
+import org.neo4j.cypher.internal.ast.Finish
+import org.neo4j.cypher.internal.ast.FlavouredWithType
+import org.neo4j.cypher.internal.ast.FreeProjection
+import org.neo4j.cypher.internal.ast.FullSubqueryExpression
+import org.neo4j.cypher.internal.ast.GroupBy
+import org.neo4j.cypher.internal.ast.NextStatement
+import org.neo4j.cypher.internal.ast.PartQuery
+import org.neo4j.cypher.internal.ast.ProjectionClause
+import org.neo4j.cypher.internal.ast.Query
+import org.neo4j.cypher.internal.ast.Return
+import org.neo4j.cypher.internal.ast.ReturnItem
+import org.neo4j.cypher.internal.ast.ReturnItems
+import org.neo4j.cypher.internal.ast.ScopeClauseSubqueryCall
+import org.neo4j.cypher.internal.ast.SingleQuery
+import org.neo4j.cypher.internal.ast.SortItem
+import org.neo4j.cypher.internal.ast.SubqueryCall
+import org.neo4j.cypher.internal.ast.TopLevelBraces
+import org.neo4j.cypher.internal.ast.Union
+import org.neo4j.cypher.internal.ast.UnionAll
+import org.neo4j.cypher.internal.ast.UnionDistinct
+import org.neo4j.cypher.internal.ast.Unwind
+import org.neo4j.cypher.internal.ast.UpdateClause
+import org.neo4j.cypher.internal.ast.UseGraph
+import org.neo4j.cypher.internal.ast.Where
+import org.neo4j.cypher.internal.ast.With
+import org.neo4j.cypher.internal.ast.Yield
+import org.neo4j.cypher.internal.ast.semantics.SemanticTable
+import org.neo4j.cypher.internal.ast.semantics.scoping.Result
+import org.neo4j.cypher.internal.ast.semantics.scoping.ScopeState
+import org.neo4j.cypher.internal.ast.semantics.scoping.TableResult
+import org.neo4j.cypher.internal.expressions.CaseExpression
+import org.neo4j.cypher.internal.expressions.ContainerIndex
+import org.neo4j.cypher.internal.expressions.CountStar
+import org.neo4j.cypher.internal.expressions.Equals
+import org.neo4j.cypher.internal.expressions.Expression
+import org.neo4j.cypher.internal.expressions.FunctionInvocation
+import org.neo4j.cypher.internal.expressions.ListLiteral
+import org.neo4j.cypher.internal.expressions.LogicalVariable
+import org.neo4j.cypher.internal.expressions.Null
+import org.neo4j.cypher.internal.expressions.SignedDecimalIntegerLiteral
+import org.neo4j.cypher.internal.expressions.Subtract
+import org.neo4j.cypher.internal.expressions.Variable
+import org.neo4j.cypher.internal.expressions.containsAggregate
+import org.neo4j.cypher.internal.expressions.functions.Count
+import org.neo4j.cypher.internal.expressions.functions.Range
+import org.neo4j.cypher.internal.frontend.phases.BaseContains
+import org.neo4j.cypher.internal.frontend.phases.BaseContext
+import org.neo4j.cypher.internal.frontend.phases.BaseState
+import org.neo4j.cypher.internal.frontend.phases.StatementRewriter
+import org.neo4j.cypher.internal.frontend.phases.Transformer
+import org.neo4j.cypher.internal.frontend.phases.factories.ParsePipelineTransformerFactory
+import org.neo4j.cypher.internal.frontend.phases.factories.ParsingConfig
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.IsolateSubqueriesInMutatingPatterns.SubqueriesInMutatingPatternsIsolated
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.scoping.UpToDateScopes
+import org.neo4j.cypher.internal.rewriting.conditions.ContainsNoExpandableClauses
+import org.neo4j.cypher.internal.rewriting.conditions.ContainsNoStarProjections
+import org.neo4j.cypher.internal.rewriting.conditions.ProjectionClausesHaveSemanticInfo
+import org.neo4j.cypher.internal.rewriting.rewriters.computeDependenciesForExpressions.ExpressionsHaveComputedDependencies
+import org.neo4j.cypher.internal.util.ASTNode
+import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
+import org.neo4j.cypher.internal.util.Foldable.SkipChildren
+import org.neo4j.cypher.internal.util.Foldable.TraverseChildren
+import org.neo4j.cypher.internal.util.FunctionName
+import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.cypher.internal.util.Rewriter
+import org.neo4j.cypher.internal.util.StepSequencer
+import org.neo4j.cypher.internal.util.StepSequencer.Condition
+import org.neo4j.cypher.internal.util.bottomUp
+import org.neo4j.cypher.internal.util.topDown
+
+import scala.annotation.tailrec
+
+/**
+ * ExpandClauses rewrites ASTs that does not have a representation that is supported by planner and runtime.
+ * The AST, NEXT, WHEN and Top Level Braces are rewritten into known ASTs such as UNIONs and SingleQueries.
+ * Stars are expanded ahead of this phase, by [[ExpandStarProjections]].
+ *
+ * The expansions follow a structures like this:
+ *
+ * Preface - collect and alias incoming
+ * Nested [
+ *   Ingress - at first row by row consumer start - Clauses: Use Unwind De-anonymizer
+ *   Query - expanded
+ * ]
+ * Postface - deanonymize - Anonymizing
+ *
+ * A Next statement is expanded using primarily WITH and CALL subqueries. Observe that statements
+ * that require wrapping in CALL have their return variables anonymized and moved to outside
+ * the call to not cause scope issues. Anonymizing the returns also allows for returning unaliased
+ * expressions in the last statement. To emulate the by-table semantics of NEXT the incoming rows are
+ * collected and unwound where relevant.
+ *
+ * A When query is rewritten into a chain of UNION queries with a controlling WHERE ensuring that only one
+ * branch of the UNION is excuted according to the predicate.
+ *
+ * QUERY
+ *    WHEN $param < 1 THEN RETURN 1 AS res
+ *    WHEN $param > 1 THEN RETURN 2 AS res
+ *    ELSE RETURN 3 AS res
+ *
+ * REWRITE
+ *    WITH *, CASE WHEN $param < 1 THEN 0 WHEN $param > 1 THEN 1 ELSE 2 END AS `  UNNAMED0`
+ *    CALL (*) {
+ *       // WHEN #1
+ *       WITH * WHERE `  UNNAMED0` = 0
+ *       // THEN #1
+ *       RETURN 1 AS res
+ *       UNION ALL
+ *       // WHEN #2
+ *       WITH * WHERE `  UNNAMED0` = 1
+ *       // THEN #2
+ *       RETURN 2 AS res
+ *       UNION ALL
+ *       WITH * WHERE `  UNNAMED0` = 2
+ *       // ELSE
+ *       RETURN 3 AS res
+ *    }
+ *    RETURN res
+ *
+ * Top Level Braces is in many cases removed and in some context replaced by nesting the inner query in a
+ * call subquery. Any USE clause attached to the top level braces is propagated to the first SingleQuery.
+ *
+ */
+case object ExpandClauses extends StatementRewriter with StepSequencer.Step with ParsePipelineTransformerFactory {
+
+  private def needsExpansion(statement: ASTNode): Boolean =
+    statement.folder.treeExists {
+      case _: TopLevelBraces                               => true
+      case _: ConditionalQueryWhen                         => true
+      case _: NextStatement                                => true
+      case With(_, _, _, _, _, _, _, _: FlavouredWithType) => true
+    }
+
+  override def process(from: BaseState, context: BaseContext): BaseState = {
+    if (!needsExpansion(from.statement()))
+      return from
+    val rewritten = from.statement().endoRewrite(instance(from, context))
+    from.withStatement(rewritten)
+  }
+
+  override def instance(from: BaseState, context: BaseContext): Rewriter =
+    getRewriter(from.scopeState(), from.anonymousVariableNameGenerator, context.cypherVersion)
+
+  override def preConditions: Set[Condition] =
+    Set(
+      UpToDateScopes,
+      BaseContains[SemanticTable](),
+      ProjectionClausesHaveSemanticInfo,
+      // anonymizeSortKey reads computed scope dependencies, which throw when they have not been computed.
+      ExpressionsHaveComputedDependencies,
+      // The expansions here rewrite the very clauses a star is expanded from.
+      ContainsNoStarProjections,
+      SemanticTypeCheckCompleted,
+      DeprecatedSemanticsReplaced,
+      SubqueriesInMutatingPatternsIsolated
+    )
+
+  override def postConditions: Set[Condition] = Set(ContainsNoExpandableClauses)
+
+  override def invalidatedConditions: Set[Condition] =
+    Set(ProjectionClausesHaveSemanticInfo, UpToDateScopes)
+
+  def getRewriter(
+    scopeState: ScopeState,
+    anonVarNameGen: AnonymousVariableNameGenerator,
+    version: CypherVersion
+  ): Rewriter = buildExpandClausesRewriter(scopeState, anonVarNameGen, version)
+
+  private def buildExpandClausesRewriter(
+    scopeState: ScopeState,
+    anonVarNameGen: AnonymousVariableNameGenerator,
+    version: CypherVersion
+  ): Rewriter = {
+
+    val ensureUniqueIds: Rewriter = bottomUp(Rewriter.lift { case v: LogicalVariable => v.copyId })
+
+    enum ContextKind {
+      case SingleQueryCtx
+      case UnionDistinctCtx
+      case UnionAllCtx
+      case WhenCtx
+      case FirstInNextCtx
+      case BodyInNextCtx
+      case LastInNextCtx
+    }
+    import ContextKind.*
+
+    case class SemanticContext(
+      kind: ContextKind,
+      mappedReturns: Map[LogicalVariable, LogicalVariable] = Map.empty
+    ) {
+      def withReturns(r: Map[LogicalVariable, LogicalVariable]): SemanticContext = copy(mappedReturns = r)
+      def isInNext: Boolean = kind == FirstInNextCtx || kind == BodyInNextCtx || kind == LastInNextCtx
+    }
+
+    case object Layout {
+      def empty: Layout = Layout(None, Seq.empty, Map.empty, None, SemanticContext(SingleQueryCtx))
+    }
+
+    /**
+     * An expansion modify the Layout of the AST and propagates information to children and sibling clauses.
+     *
+     * Pushes use clauses to the deepest nested child.
+     * @param use
+     * Transformation of incoming rows to the first by-row operation in the children.
+     * @param ingress
+     * Tracks the incoming variables mapped to anonymized variables.
+     * @param incomingMapping
+     * Tracks the count variable from NEXT and the switch variable from WHEN.
+     * @param utilityVariable
+     * Tracks outer context of query and expected result anonymization.
+     * @param semanticContext
+     */
+    case class Layout(
+      use: Option[UseGraph],
+      ingress: Seq[Clause],
+      incomingMapping: Map[LogicalVariable, AnonymizedVariable],
+      utilityVariable: Option[LogicalVariable],
+      semanticContext: SemanticContext
+    ) {
+      def pushUse(maybeUse: Option[UseGraph]): Layout = copy(use = if (maybeUse.isDefined) maybeUse else use)
+      def consumeLayout: Layout = copy(use = None, ingress = Seq.empty, utilityVariable = None)
+
+      def getIngress: Seq[Clause] = ingress.endoRewrite(ensureUniqueIds)
+
+      def resultMapping: Map[LogicalVariable, LogicalVariable] = semanticContext.mappedReturns
+
+      def withIncomingMappingAndContext(
+        incomingMapping: Map[LogicalVariable, AnonymizedVariable],
+        semanticContext: SemanticContext
+      ): Layout = copy(incomingMapping = incomingMapping, semanticContext = semanticContext)
+
+      def anonymizeResultMapping: Map[LogicalVariable, AnonymizedVariable] =
+        resultMapping.map { case (k, v) => k -> AnonymizedVariable(k, v, k) }
+
+      def getLastInNextContext(layout: Layout): Layout =
+        if (layout.semanticContext.isInNext)
+          withIncomingMappingAndContext(anonymizeResultMapping, SemanticContext(BodyInNextCtx, layout.resultMapping))
+        else withIncomingMappingAndContext(anonymizeResultMapping, SemanticContext(LastInNextCtx, layout.resultMapping))
+
+      def inUnionDistinct: Layout =
+        copy(semanticContext = semanticContext.copy(kind = UnionDistinctCtx))
+
+      def inUnionAll: Layout =
+        copy(semanticContext = semanticContext.copy(kind = UnionAllCtx))
+
+      def inSingleQuery: Layout =
+        copy(semanticContext = semanticContext.copy(kind = SingleQueryCtx))
+
+      private def drivingTableReset(pos: InputPosition): Clause =
+        With(
+          ReturnItems(
+            FreeProjection,
+            Seq(AliasedReturnItem(
+              Count(Null()(pos.zeroLength))(pos),
+              Variable(anonVarNameGen.nextName)(pos, isIsolated = false)
+            )(pos, AliasedReturnItem.wasAutoAliasedDefault))
+          )(pos),
+          AddedInRewriteGeneral()
+        )(pos)
+
+      // Adapts a SingleQuery to the Layout
+      def adapt(singleQuery: SingleQuery): SingleQuery = {
+        val clauseRewriter = rewriter(consumeLayout)
+        val rewrittenClauses = singleQuery.clauses.map(_.endoRewrite(clauseRewriter))
+
+        val adaptedClauses = if (singleQuery.partitionedClauses.initialGraphSelection.isDefined) {
+          Seq(rewrittenClauses.head) ++ getIngress ++ rewrittenClauses.tail
+        } else {
+          use.toSeq ++ getIngress ++ rewrittenClauses
+        }
+
+        val lastClause = (semanticContext.kind, adaptedClauses.last) match {
+          case (LastInNextCtx, c)                                => Seq(c)
+          case (FirstInNextCtx | BodyInNextCtx, f: Finish)       => Seq(drivingTableReset(f.position))
+          case (FirstInNextCtx | BodyInNextCtx, u: UpdateClause) => Seq(u, drivingTableReset(u.position))
+          case (FirstInNextCtx | BodyInNextCtx, r: Return)       => Seq(r.convertToWith())
+          case (_, c)                                            => Seq(c)
+        }
+
+        singleQuery.copy(adaptedClauses.dropRight(1) ++ lastClause)(singleQuery.position)
+
+      }
+
+      def anonymize(returnItem: ReturnItem): ReturnItem =
+        if (semanticContext.mappedReturns.contains(returnItem.alias.get)) {
+          returnItem.withName(semanticContext.mappedReturns(returnItem.alias.get).copyId)(returnItem.position)
+        } else returnItem
+
+      def anonymizeSortKey(sortItem: SortItem): SortItem =
+        sortItem.mapExpression(substituteReturns(_, semanticContext.mappedReturns))
+
+      /**
+       * A grouping key always resolves to the projection alias, so the renamed aliases apply to keys just like they
+       * do to sort keys.
+       */
+      def anonymizeGroupingKeys(groupBy: GroupBy): GroupBy = groupBy.groupingElements match {
+        case elements @ ExplicitGroupingElements(keys) =>
+          groupBy.copy(groupingElements =
+            elements.copy(elements = keys.map(substituteReturns(_, semanticContext.mappedReturns)))(elements.position)
+          )(groupBy.position)
+        case _ => groupBy
+      }
+
+      private def substituteReturns(
+        expression: Expression,
+        mapping: Map[LogicalVariable, LogicalVariable]
+      ): Expression =
+        mapping.foldLeft(expression)((accExpr, pair) =>
+          accExpr.replaceAllOccurrencesBy(pair._1.copyId, pair._2.copyId)
+        )
+    }
+
+    case class AnonymizedVariable(original: LogicalVariable, incoming: LogicalVariable, outgoing: LogicalVariable) {
+      def anonymizedIncoming: Boolean = original != incoming
+    }
+
+    def orderByInnerColumns(
+      columns: Seq[LogicalVariable],
+      inner: Query,
+      innerNameOf: LogicalVariable => LogicalVariable
+    ): Seq[LogicalVariable] = {
+      val innerOrder = inner.returnColumns.map(_.name).zipWithIndex.toMap
+      columns.sortBy(c => innerOrder.getOrElse(innerNameOf(c).name, Int.MaxValue))
+    }
+
+    object NextExpansion {
+
+      /**
+       * Emulate By-table semantics when needed.
+       *
+       * UNWIND range(0, cnt - 1) AS i
+       * WITH list_a[i] AS a, ..., list_c[i] AS c
+       */
+      def getNextIngress(
+        incomingVariables: Map[LogicalVariable, AnonymizedVariable],
+        countVariable: Option[LogicalVariable],
+        pos: InputPosition
+      ): Seq[Clause] = {
+        if (countVariable.isDefined) {
+          val index = Variable(anonVarNameGen.nextName)(pos, isIsolated = false)
+
+          val unwind = Unwind(
+            FunctionInvocation(
+              FunctionName(Range.name)(pos),
+              distinct = false,
+              IndexedSeq(
+                SignedDecimalIntegerLiteral("0")(pos.zeroLength),
+                Subtract(countVariable.get, SignedDecimalIntegerLiteral("1")(pos.zeroLength))(pos)
+              )
+            )(pos),
+            index
+          )(pos)
+
+          val accessedItems =
+            incomingVariables.toSeq.map { case (original, anonymized) =>
+              AliasedReturnItem(
+                ContainerIndex(
+                  ContainerIndex(
+                    anonymized.outgoing.copyId,
+                    index.copyId
+                  )(pos),
+                  SignedDecimalIntegerLiteral("0")(pos.zeroLength)
+                )(pos),
+                original
+              )(pos, AliasedReturnItem.wasAutoAliasedDefault)
+            }
+
+          val remappingWith: Option[With] =
+            Option.when(accessedItems.nonEmpty)(
+              With(ReturnItems(FreeProjection, accessedItems)(pos), AddedInRewriteGeneral())(pos)
+            )
+          Seq(unwind) ++ remappingWith
+        } else Seq.empty
+      }
+
+      def getNextPreface(
+        collectedVariables: Map[LogicalVariable, AnonymizedVariable],
+        countVariable: Option[LogicalVariable],
+        willExpand: Boolean,
+        pos: InputPosition
+      ): Seq[Clause] = {
+        if (countVariable.isDefined) {
+          val countStar =
+            AliasedReturnItem(CountStar()(pos), countVariable.get.copyId)(pos, AliasedReturnItem.wasAutoAliasedDefault)
+          val collectItems = collectedVariables.map {
+            case (_, v) =>
+              AliasedReturnItem(
+                FunctionInvocation(
+                  FunctionName("collect")(pos),
+                  ListLiteral(Seq(v.incoming.copyId))(pos)
+                )(pos),
+                v.outgoing.copyId
+              )(pos, AliasedReturnItem.wasAutoAliasedDefault)
+          }.toSeq
+
+          val returnItems = ReturnItems(FreeProjection, Seq(countStar) ++ collectItems)(pos)
+          Seq(With(returnItems, withType = AddedInRewriteGeneral())(pos))
+        } else if (collectedVariables.exists(_._2.anonymizedIncoming) && !willExpand) {
+          val deanonymized = collectedVariables.map(av =>
+            AliasedReturnItem(
+              av._2.incoming.copyId,
+              av._2.original.copyId
+            )(pos, AliasedReturnItem.wasAutoAliasedDefault)
+          )
+          Seq(With(ReturnItems(FreeProjection, deanonymized.toSeq)(pos))(pos))
+        } else Seq.empty
+      }
+
+      // Checks if the directly contained query will require nesting a call subquery.
+      def needsWrapping(ast: Query): Boolean = ast match {
+        case sq: SingleQuery         => sq.partitionedClauses.initialGraphSelection.isDefined
+        case _: ConditionalQueryWhen => false
+        case tlb: TopLevelBraces => tlb.query match {
+            case _: Union => true
+            case _        => false
+          }
+        case _ => true
+      }
+
+      // Check is the directly contained query will be expanded. If the query will not be expanded later any preface
+      // need to be inserted.
+      def willBeExpanded(ast: Query): Boolean = ast match {
+        case _: SingleQuery          => false
+        case _: ConditionalQueryWhen => true
+        case tlb: TopLevelBraces => tlb.query match {
+            case _: UnionDistinct => true
+            case _                => false
+          }
+        case _ => true
+      }
+
+      enum QuerySemantics {
+        case ByRow
+        case ByTable
+        case RequiresCollecting
+      }
+      import QuerySemantics.*
+
+      // Logic deciding whether a query queries ByTable semantics.
+      def checkQuerySemantics(query: Query, init: QuerySemantics = ByRow): QuerySemantics =
+        query.folder.treeFold[QuerySemantics](init) {
+          case _: SubqueryCall => acc => SkipChildren(acc)
+          case _: ConditionalQueryWhen => {
+            case RequiresCollecting => SkipChildren(RequiresCollecting)
+            case _                  => SkipChildren(ByRow)
+          }
+          case _: UnionDistinct => _ => SkipChildren(RequiresCollecting)
+          case _: UnionAll => {
+            case RequiresCollecting => SkipChildren(RequiresCollecting)
+            case _                  => TraverseChildren(ByTable)
+          }
+          case ns: NextStatement => {
+            case RequiresCollecting => SkipChildren(RequiresCollecting)
+            case _                  => SkipChildren(checkQuerySemantics(ns.queries.head, ByRow))
+          }
+          case _: UseGraph => {
+            case RequiresCollecting => SkipChildren(RequiresCollecting)
+            case _                  => TraverseChildren(ByTable)
+          }
+          case p: ProjectionClause => {
+            case ByTable if p.distinct =>
+              SkipChildren(RequiresCollecting)
+            case ByTable if p.limit.isDefined || p.skip.isDefined =>
+              SkipChildren(RequiresCollecting)
+            case acc => TraverseChildren(acc)
+          }
+          case _: UpdateClause => {
+            case ByTable =>
+              SkipChildren(RequiresCollecting)
+            case acc => TraverseChildren(acc)
+          }
+          case _: FullSubqueryExpression => acc => SkipChildren(acc)
+          case exp: Expression => {
+            case ByTable if containsAggregate(exp) =>
+              SkipChildren(RequiresCollecting)
+            case acc => TraverseChildren(acc)
+          }
+        }
+
+      /**
+       * Identifies if a query uses By-table semantics when in a NEXT statement
+       * If an aggregation, pagination or an update occurs in a ByTable context, then the rewriter
+       * must collect and unwind the incoming rows to emulate by-table semantics.
+       */
+      def requiresCollecting(query: Query): Boolean = {
+        val hasByTableTrigger = query.folder.treeExists {
+          case _: UseGraph      => true
+          case _: UnionAll      => true
+          case _: UnionDistinct => true
+        }
+        hasByTableTrigger && (checkQuerySemantics(query) match {
+          case RequiresCollecting => true
+          case _                  => false
+        })
+      }
+
+      def expand(ast: Query, incomingLayout: Layout): (Layout, Seq[Clause]) = {
+
+        val incomingConstants: Seq[LogicalVariable] = scopeState.getIncomingConstants(ast)
+        val incomingVariables: Seq[LogicalVariable] = scopeState.getIncomingVariables(ast)
+        val incomingSymbols: Set[LogicalVariable] = (incomingConstants ++ incomingVariables).toSet
+
+        val referenced: Set[LogicalVariable] = scopeState.getReferenced(ast)
+        val variableRefs: Set[LogicalVariable] = referenced.filterNot(incomingConstants.contains(_))
+
+        val result: Result = scopeState.getResult(ast)
+        val resultColumns: Seq[LogicalVariable] = result.getColumns
+
+        val needsCollecting = incomingVariables.nonEmpty && requiresCollecting(ast)
+
+        val willBeWrapped = needsWrapping(ast)
+
+        val collectedColumns =
+          if (incomingLayout.utilityVariable.isDefined) incomingLayout.incomingMapping
+          else
+            variableRefs.toSeq.sortBy(_.name).map(vr =>
+              vr -> AnonymizedVariable(
+                vr,
+                incomingLayout.incomingMapping.get(vr).fold(vr)(_.incoming),
+                if (needsCollecting) Variable(anonVarNameGen.nextName, ast.position) else vr
+              )
+            ).toMap
+
+        val countVariable =
+          if (incomingLayout.utilityVariable.isDefined) incomingLayout.utilityVariable
+          else Option.when(needsCollecting)(Variable(anonVarNameGen.nextName, ast.position))
+
+        val imports =
+          referenced.filterNot(collectedColumns.keys.toSet) ++ collectedColumns.values.map(_.outgoing) ++ countVariable
+
+        val preface: Seq[Clause] =
+          if (incomingLayout.ingress.nonEmpty) Seq.empty
+          else getNextPreface(collectedColumns, countVariable, willBeExpanded(ast), ast.position)
+
+        val ingress: Seq[Clause] =
+          if (incomingLayout.ingress.nonEmpty) incomingLayout.getIngress
+          else getNextIngress(collectedColumns, countVariable, ast.position)
+
+        // If returned columns exists in incoming symbols we need to anonymize the result columns
+        val returnsMapped: Map[LogicalVariable, LogicalVariable] = {
+          incomingLayout.semanticContext match {
+            case ctx if ctx.mappedReturns.nonEmpty => ctx.mappedReturns
+            case _ =>
+              resultColumns.map(vr =>
+                (
+                  vr,
+                  if (resultColumns.exists(incomingSymbols) && willBeWrapped)
+                    Variable(anonVarNameGen.nextName, ast.position)
+                  else vr.copyId
+                )
+              ).toMap
+          }
+        }
+
+        val updatedCtx = if (returnsMapped.nonEmpty && incomingLayout.semanticContext.isInNext) {
+          incomingLayout.semanticContext.withReturns(returnsMapped)
+        } else incomingLayout.semanticContext
+
+        val incomingMapping: Map[LogicalVariable, AnonymizedVariable] =
+          if (preface.isEmpty || needsCollecting) collectedColumns else Map.empty
+
+        val updatedLayout: Layout =
+          incomingLayout.copy(
+            ingress = ingress,
+            semanticContext = updatedCtx,
+            incomingMapping = incomingMapping,
+            utilityVariable = countVariable
+          )
+
+        val rewrittenQuery: Query = flattenQuery(ast, updatedLayout)
+
+        val postface: Seq[Clause] =
+          if (incomingLayout.semanticContext.kind == LastInNextCtx) {
+            (rewrittenQuery, result, willBeWrapped) match {
+              case (SingleQuery(_ :+ Finish()), _, false)                          => Seq.empty[Clause]
+              case (SingleQuery(_ :+ x), _, false) if x.isInstanceOf[UpdateClause] => Seq.empty[Clause]
+              case (SingleQuery(_ :+ Return(_, _, _, _, _, _, _, _, _)), _, false) => Seq.empty[Clause]
+              case (_, TableResult(_), _) =>
+                val mappedReturns = incomingLayout.semanticContext.mappedReturns
+                val items =
+                  if (mappedReturns.nonEmpty)
+                    orderByInnerColumns(resultColumns, rewrittenQuery, k => mappedReturns.getOrElse(k, k))
+                      .map(k => AliasedReturnItem(mappedReturns.getOrElse(k, k)))
+                  else
+                    orderByInnerColumns(resultColumns, rewrittenQuery, returnsMapped)
+                      .map(k => AliasedReturnItem(returnsMapped(k).copyId, k.copyId)(k.position))
+                Seq(Return(ReturnItems(FreeProjection, items)(ast.position))(ast.position))
+              case _ => Seq(Finish()(ast.position))
+            }
+          } else Seq.empty
+
+        val getExpandedAST: Seq[Clause] = rewrittenQuery match {
+          case sq: SingleQuery if !willBeWrapped => preface ++ sq.clauses ++ postface
+          case q: Query =>
+            preface ++ Seq(ScopeClauseSubqueryCall(q, imports.toSeq)(q.position)) ++ postface
+        }
+
+        val resultingLayout =
+          incomingLayout.copy(
+            ingress = Seq.empty,
+            utilityVariable = None,
+            semanticContext = incomingLayout.semanticContext.withReturns(returnsMapped),
+            incomingMapping = Map.empty
+          )
+
+        (resultingLayout, getExpandedAST.endoRewrite(ensureUniqueIds))
+      }
+    }
+
+    object BranchExpansion {
+
+      def expand(ast: PartQuery, incomingLayout: Layout, index: Int, listName: String): SingleQuery = {
+        val position = ast.position
+        val incomingVariables: Seq[LogicalVariable] = scopeState.getIncomingVariables(ast)
+        val references: Set[LogicalVariable] = scopeState.getReferenced(ast)
+        val isReturning: Boolean = scopeState.getResult(ast).isTableResult
+        val returns: Seq[LogicalVariable] = scopeState.getResultCols(ast)
+
+        /**
+         * THEN ... QUERY ... --> WITH * WHERE condition = i ... QUERY ...
+         */
+        val ingress: Seq[Clause] =
+          Seq(With(
+            ReturnItems(
+              FreeProjection,
+              incomingVariables.map(AliasedReturnItem(_)) :+ AliasedReturnItem(Variable(listName, position))
+            )(position),
+            Where(Equals(
+              Variable(listName, position),
+              SignedDecimalIntegerLiteral(index.toString)(position.zeroLength)
+            )(position))(position),
+            AddedInRewriteGeneral()
+          )(position))
+
+        val nestedQuery =
+          ScopeClauseSubqueryCall(
+            ensureNoTopLevelBracesSingleQuery(ast, incomingLayout.consumeLayout),
+            references.toSeq.sortBy(_.name).map(_.copyId)
+          )(ast.position)
+
+        val deanonymizeReturns = returns.map(r => incomingLayout.resultMapping.getOrElse(r, r).copyId)
+
+        val returningClause = if (isReturning)
+          Return(ReturnItems(FreeProjection, deanonymizeReturns.map(AliasedReturnItem(_)))(ast.position))(ast.position)
+        else Finish()(ast.position)
+
+        SingleQuery(ingress ++ Seq(nestedQuery, returningClause))(ast.position)
+      }
+    }
+
+    object WhenExpansion {
+
+      def expand(ast: ConditionalQueryWhen, incomingLayout: Layout): SingleQuery = {
+
+        val incomingConstants: Seq[LogicalVariable] = scopeState.getIncomingConstants(ast)
+        val incomingVariables: Seq[LogicalVariable] = scopeState.getIncomingVariables(ast)
+        val incomingSymbols: Set[LogicalVariable] = (incomingConstants ++ incomingVariables).toSet
+
+        val referenced: Set[LogicalVariable] = scopeState.getReferenced(ast)
+
+        val result: Result = scopeState.getResult(ast)
+        val resultColumns: Seq[LogicalVariable] = result.getColumns
+
+        val ConditionalQueryWhen(branches, default) = ast
+        val pos = ast.position
+
+        val listName = anonVarNameGen.nextName
+
+        val imports =
+          referenced.toSeq.sortBy(_.name) ++ Seq(Variable(listName, ast.position))
+
+        // If returned columns exists in incoming symbols we need to anonymize the result columns
+        val returnsMapped: Map[LogicalVariable, LogicalVariable] =
+          if (
+            incomingLayout.resultMapping.nonEmpty &&
+            incomingLayout.resultMapping.forall { case (k, v) => k != v }
+          ) incomingLayout.resultMapping
+          else
+            resultColumns.map(vr =>
+              (vr, if (resultColumns.exists(incomingSymbols)) Variable(anonVarNameGen.nextName, ast.position) else vr)
+            ).toMap
+
+        val updatedLayout =
+          incomingLayout.copy(
+            semanticContext = SemanticContext(WhenCtx, returnsMapped),
+            ingress = Seq.empty,
+            utilityVariable = Some(Variable(listName, ast.position))
+          )
+
+        val defaultQuery = default.map(d => BranchExpansion.expand(d.query, updatedLayout, branches.size, listName))
+
+        val branchQueries = branches.zipWithIndex.map { case (branch, idx) =>
+          BranchExpansion.expand(branch.query, updatedLayout, idx, listName)
+        } ++ defaultQuery
+
+        val unionOfBranches =
+          branchQueries.tail.foldLeft[Query](branchQueries.head) { case (acc, query) => UnionAll(acc, query)(pos) }
+
+        val referencedSorted: Seq[LogicalVariable] = referenced.toSeq.sortBy(_.name)
+        val incomingItems =
+          if (
+            incomingLayout.ingress.nonEmpty ||
+            incomingLayout.incomingMapping.isEmpty ||
+            incomingLayout.incomingMapping.forall(!_._2.anonymizedIncoming)
+          )
+            (None, referencedSorted.map(lv => AliasedReturnItem(lv)))
+          else
+            (
+              Some(
+                With(
+                  ReturnItems(
+                    FreeProjection,
+                    referencedSorted.map(lv =>
+                      AliasedReturnItem(
+                        incomingLayout.incomingMapping.get(lv).fold(lv)(_.incoming).copyId,
+                        lv.copyId
+                      )(lv.position)
+                    )
+                  )(ast.position),
+                  AddedInRewriteGeneral(AddedWithOrigin.Synthesized(Some("WHEN")))
+                )(ast.position)
+              ),
+              referencedSorted.map(lv => AliasedReturnItem(lv))
+            )
+
+        /**
+         *  WITH ..., CASE
+         *          WHEN $param < 1 THEN 0
+         *          WHEN $param > 1 THEN 1
+         *          ELSE 2
+         *  END AS condition
+         */
+        val preface: Seq[Clause] = incomingItems._1.toSeq ++ Seq(With(
+          ReturnItems(
+            FreeProjection,
+            incomingItems._2 :+ AliasedReturnItem(
+              CaseExpression(
+                expression = None,
+                alternatives = branches.zipWithIndex.map { case (branch, index) =>
+                  (branch.predicate.get, SignedDecimalIntegerLiteral(index.toString)(pos.zeroLength))
+                }.toList,
+                default = Some(SignedDecimalIntegerLiteral(branches.size.toString)(pos.zeroLength))
+              )(pos),
+              Variable(listName, pos)
+            )(pos)
+          )(pos),
+          withType = AddedInRewriteGeneral()
+        )(pos))
+
+        val subquery = ScopeClauseSubqueryCall(unionOfBranches, imports)(pos)
+
+        def inNextPostface: Option[Clause] =
+          Option.when(resultColumns.exists(incomingSymbols.contains)) {
+            val items = resultColumns.map { k =>
+              val v = returnsMapped.getOrElse(k, k)
+              AliasedReturnItem(v.copyId, incomingLayout.resultMapping.getOrElse(k, k).copyId)(v.position)
+            }
+            With(ReturnItems(FreeProjection, items)(ast.position), withType = AddedInRewriteGeneral())(ast.position)
+          }
+
+        def defaultPostface: Clause = {
+          val items = scopeState.getResultCols(ast).map { v =>
+            (updatedLayout.resultMapping.getOrElse(v, v), incomingLayout.resultMapping.getOrElse(v, v))
+          }.map { case (v1, v2) =>
+            AliasedReturnItem(v1.copyId, v2.copyId)(v1.position, AliasedReturnItem.wasAutoAliasedDefault)
+          }
+
+          Return(ReturnItems(FreeProjection, items)(pos))(pos)
+        }
+
+        val postface: Option[Clause] = (incomingLayout.semanticContext.kind, ast.isReturning) match {
+          case (FirstInNextCtx | BodyInNextCtx, _) => inNextPostface
+          case (_, false)                          => Some(Finish()(pos))
+          case (_, true)                           => Some(defaultPostface)
+        }
+
+        // Emit a graph selection inherited from an enclosing `USE g { ... }` as the leading clause, so the whole
+        // expanded WHEN (the switch WITH, the branch subquery, the postface) is scoped to g.
+        SingleQuery(incomingLayout.use.toSeq ++ incomingLayout.getIngress ++ preface ++ Seq(subquery) ++ postface)(
+          ast.position
+        )
+          .endoRewrite(ensureUniqueIds)
+      }
+    }
+
+    object TopLevelBracesExpansion {
+
+      @tailrec
+      def expand(ast: TopLevelBraces, incomingLayout: Layout): SingleQuery = {
+
+        val layoutWithUse = incomingLayout.pushUse(ast.use)
+
+        def wrap(inner: Union, rewritten: Boolean): SingleQuery = {
+          val innerRewritten =
+            if (rewritten) inner
+            else inner.endoRewrite(rewriter(layoutWithUse.copy(
+              ingress = Seq.empty,
+              utilityVariable = None,
+              incomingMapping = Map.empty
+            )))
+
+          val postface: Clause =
+            if (innerRewritten.isReturning) {
+              val items =
+                if (layoutWithUse.resultMapping.nonEmpty) {
+                  val innerOrder = innerRewritten.returnColumns.map(_.name).zipWithIndex.toMap
+                  layoutWithUse.resultMapping.values.toSeq
+                    .sortBy(v => (innerOrder.getOrElse(v.name, Int.MaxValue), v.name))
+                    .map(v =>
+                      AliasedReturnItem(v.copyId, v.copyId)(v.position, AliasedReturnItem.wasAutoAliasedDefault)
+                    )
+                } else innerRewritten.returnVariables.explicitVariables.map(AliasedReturnItem(_))
+              val returnItems = ReturnItems(FreeProjection, items.toSeq)(ast.position)
+              Return(returnItems)(ast.position)
+            } else Finish()(ast.position)
+
+          val imports: Seq[LogicalVariable] = scopeState.getReferenced(ast).toSeq.sortBy(_.name)
+
+          val expandedQuery =
+            layoutWithUse.getIngress ++ Seq(ScopeClauseSubqueryCall(
+              innerRewritten,
+              imports.map(_.copyId)
+            )(ast.position)) :+ postface
+          SingleQuery(expandedQuery)(ast.position)
+        }
+
+        ast.query match {
+          case inner: Union        => wrap(inner, rewritten = false)
+          case tlb: TopLevelBraces => TopLevelBracesExpansion.expand(tlb, layoutWithUse)
+          case query: Query => query.endoRewrite(rewriter(layoutWithUse)) match {
+              case union: Union    => wrap(union, rewritten = true)
+              case sq: SingleQuery => sq
+              case _ => throw new IllegalStateException("All other queries should have been rewritten away")
+            }
+        }
+      }
+    }
+
+    /**
+     * Checks if the current query needs to be collected and then unwrapped in the following query.
+     * This is needed when the following query is aggregating or updating and
+     * if the current query returns more than one row.
+     *
+     * This check could be further refined to limit needing to materialize the full working table
+     * by expanding this check. Avenues of optimization is exploring SKIP/LIMIT and aggregations.
+     */
+    def rewriteNextQueries(queries: Seq[Query], incomingLayout: Layout): Seq[Clause] = {
+
+      (queries.map(Some(_)) :+ None).sliding(2).foldLeft((incomingLayout, Seq.empty[Clause])) {
+        case ((lay, clauses), Seq(Some(q1), Some(_))) if queries.head == q1 =>
+          // The first query in a NextStatement takes the incoming mapping of the enclosing context
+          val res =
+            NextExpansion.expand(
+              q1,
+              lay.withIncomingMappingAndContext(incomingLayout.incomingMapping, SemanticContext(FirstInNextCtx))
+            )
+          (res._1, clauses ++ res._2)
+        case ((lay, clauses), Seq(Some(q1), Some(_))) =>
+          // The queries in the body of the NextStatement takes the result mapping of the previous query as incoming
+          val res =
+            NextExpansion.expand(
+              q1,
+              lay.withIncomingMappingAndContext(lay.anonymizeResultMapping, SemanticContext(BodyInNextCtx))
+            )
+          (res._1, clauses ++ res._2)
+        case ((lay, clauses), Seq(Some(q1), None)) =>
+          // The last query in the NextStatement takes the previous query as incoming and the outer context
+          // as result mapping. If the outer context is a NextStatement it is treated as a BodyInNext and not LastInNext
+          val res = NextExpansion.expand(q1, lay.getLastInNextContext(incomingLayout))
+          (res._1, clauses ++ res._2)
+        case (acc, _) => acc
+      }._2
+    }
+
+    /**
+     * Expanding a nested NEXT/WHEN/top-level-braces query before the rename keeps its scope lookups on nodes the
+     * survey recorded; narrowed to just those three cases, unlike the full `rewriter`, so it doesn't reprocess a
+     * plain clause the enclosing top-down walk will reach anyway.
+     */
+    def expandNestedQueries[T <: ASTNode](subclause: T): T =
+      subclause.endoRewrite(topDown(Rewriter.lift(expandableQueryCases(Layout.empty))))
+
+    def expandReturnItems(clause: ProjectionClause, returnItems: ReturnItems, layout: Layout): ProjectionClause = {
+      val isReturn = clause.isInstanceOf[Return]
+      val anonymizedItems = if (isReturn) returnItems.items.map(layout.anonymize) else returnItems.items
+      val renames = isReturn && layout.resultMapping.nonEmpty
+      val orderBy = if (renames) clause.orderBy.map(expandNestedQueries) else clause.orderBy
+      val groupBy = if (renames) clause.groupBy.map(expandNestedQueries) else clause.groupBy
+      val anonymizedSortKeys =
+        if (isReturn)
+          orderBy.map(ob => ob.copy(sortItems = ob.sortItems.map(layout.anonymizeSortKey))(ob.position))
+        else orderBy
+      val anonymizedGroupBy =
+        if (isReturn) groupBy.map(layout.anonymizeGroupingKeys)
+        else groupBy
+
+      clause.copyProjection(
+        returnItems =
+          returnItems.copy(FreeProjection, anonymizedItems, defaultOrderOnColumns = None)(returnItems.position),
+        groupBy = anonymizedGroupBy,
+        orderBy = anonymizedSortKeys
+      ).withRewrittenType
+    }
+
+    def removeTopLevelBraces(tlb: TopLevelBraces, layout: Layout): Query =
+      tlb.query.endoRewrite(rewriter(layout.pushUse(tlb.use)))
+
+    def flattenQuery(query: Query, layout: Layout): Query = (query, layout.semanticContext.isInNext) match {
+      case (tlb: TopLevelBraces, true) => tlb.query.endoRewrite(rewriter(layout.pushUse(tlb.use)))
+      case (tlb: TopLevelBraces, _)    => TopLevelBracesExpansion.expand(tlb, layout.pushUse(tlb.use))
+      case (q: Query, _)               => q.endoRewrite(rewriter(layout))
+    }
+
+    def ensureNoTopLevelBracesSingleQuery(query: PartQuery, layout: Layout): SingleQuery = query match {
+      case tlb: TopLevelBraces => TopLevelBracesExpansion.expand(tlb, layout.pushUse(tlb.use))
+      case sq: SingleQuery     => sq.endoRewrite(rewriter(layout))
+    }
+
+    def expandableQueryCases(layout: Layout): PartialFunction[AnyRef, AnyRef] = {
+      case tlb: TopLevelBraces =>
+        removeTopLevelBraces(tlb, layout)
+      case wh: ConditionalQueryWhen =>
+        WhenExpansion.expand(wh, layout)
+      case ns @ NextStatement(queries) =>
+        val ingress = layout.use.toSeq.endoRewrite(ensureUniqueIds)
+        SingleQuery(ingress ++ rewriteNextQueries(queries, layout.copy(use = None)))(ns.position)
+    }
+
+    def rewriter(layout: Layout): Rewriter = Rewriter.lift(expandableQueryCases(layout).orElse {
+      case clause @ With(_, returnItems, _, _, _, _, _, _) =>
+        expandReturnItems(clause, returnItems, layout)
+      case clause @ Return(_, returnItems, _, _, _, _, _, _, _) =>
+        expandReturnItems(clause, returnItems, layout)
+      case clause @ Yield(returnItems, _, _, _, _, _) =>
+        expandReturnItems(clause, returnItems, layout)
+      case u @ UnionDistinct(lhs, rhs) =>
+        val updatedLayout = layout.inUnionDistinct
+        u.copy(
+          flattenQuery(lhs, updatedLayout),
+          ensureNoTopLevelBracesSingleQuery(rhs, updatedLayout)
+        )(u.position)
+      case u @ UnionAll(lhs, rhs) =>
+        val updatedLayout = layout.inUnionAll
+        u.copy(
+          flattenQuery(lhs, updatedLayout),
+          ensureNoTopLevelBracesSingleQuery(rhs, updatedLayout)
+        )(u.position)
+      case sq: SingleQuery if sq.partitionedClauses.initialGraphSelection.isDefined =>
+        layout.inSingleQuery.adapt(sq)
+      case sq: SingleQuery =>
+        layout.adapt(sq)
+    })
+
+    // Cypher 5 requires a WITH clause between clauses in some cases so the query is not possible to fully cleanup.
+    def cleanupCypher5: Rewriter = Rewriter.noop
+
+    def build(): Rewriter = version match {
+      case CypherVersion.Cypher5 =>
+        topDown(rewriter(Layout.empty) andThen cleanupCypher5)
+      case CypherVersion.Cypher25 =>
+        topDown(rewriter(Layout.empty)) andThen DropEmptyProjections.rewriter(anonVarNameGen)
+    }
+
+    build()
+  }
+
+  override def getTransformer(config: ParsingConfig): Transformer[BaseContext, BaseState, BaseState] = ExpandClauses
+
+}

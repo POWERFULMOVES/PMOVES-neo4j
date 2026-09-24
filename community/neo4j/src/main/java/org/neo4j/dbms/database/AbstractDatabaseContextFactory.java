@@ -20,20 +20,25 @@
 package org.neo4j.dbms.database;
 
 import static org.neo4j.configuration.GraphDatabaseInternalSettings.snapshot_query;
+import static org.neo4j.configuration.GraphDatabaseInternalSettings.system_database_format;
 import static org.neo4j.configuration.GraphDatabaseSettings.db_format;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
 import static org.neo4j.token.api.TokenHolder.TYPE_LABEL;
 import static org.neo4j.token.api.TokenHolder.TYPE_PROPERTY_KEY;
 import static org.neo4j.token.api.TokenHolder.TYPE_RELATIONSHIP_TYPE;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.Supplier;
 import org.neo4j.configuration.DatabaseConfig;
+import org.neo4j.graphdb.config.Setting;
 import org.neo4j.graphdb.factory.module.GlobalModule;
-import org.neo4j.graphdb.factory.module.id.IdContextFactory;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.context.VersionContextSupplier;
 import org.neo4j.kernel.api.Kernel;
+import org.neo4j.kernel.database.CursorContextFactorySupplier;
+import org.neo4j.kernel.database.IdContextFactory;
 import org.neo4j.kernel.database.NamedDatabaseId;
 import org.neo4j.kernel.impl.context.TransactionVersionContextSupplier;
 import org.neo4j.kernel.impl.core.DefaultLabelIdCreator;
@@ -72,26 +77,35 @@ public abstract class AbstractDatabaseContextFactory<CONTEXT, OPTIONS>
         return new DefaultLabelIdCreator(kernelSupplier);
     }
 
-    protected final CursorContextFactory createContextFactory(
+    protected DatabaseConfig createDatabaseConfig(
+            NamedDatabaseId namedDatabaseId, Map<Setting<?>, Object> databaseSpecificSettings) {
+        var globalConfig = globalModule.getGlobalConfig();
+        var settings = new HashMap<>(databaseSpecificSettings);
+        if (namedDatabaseId.isSystemDatabase()) {
+            settings.put(db_format, globalConfig.get(system_database_format));
+        }
+        return new DatabaseConfig(settings, globalConfig);
+    }
+
+    protected final CursorContextFactorySupplier createContextFactorySupplier(
             DatabaseConfig databaseConfig, NamedDatabaseId databaseId) {
-        var pageCacheTracer = globalModule.getTracers().getPageCacheTracer();
-        var factory = externalVersionContextSupplierFactory(globalModule)
-                .orElse(internalVersionContextSupplierFactory(databaseConfig));
-        return new CursorContextFactory(pageCacheTracer, factory.create(databaseId));
+        return (multiVersion) -> {
+            var pageCacheTracer = globalModule.getTracers().getPageCacheTracer();
+            var factory = externalVersionContextSupplierFactory(globalModule)
+                    .orElse(internalVersionContextSupplierFactory(databaseConfig, multiVersion));
+            return new CursorContextFactory(pageCacheTracer, factory.create(databaseId));
+        };
     }
 
     private static Optional<VersionContextSupplier.Factory> externalVersionContextSupplierFactory(
             GlobalModule globalModule) {
         var externalDependencies = globalModule.getExternalDependencyResolver();
-        var klass = VersionContextSupplier.Factory.class;
-        if (externalDependencies.containsDependency(klass)) {
-            return Optional.of(externalDependencies.resolveDependency(klass));
-        }
-        return Optional.empty();
+        return externalDependencies.resolveOptionalDependency(VersionContextSupplier.Factory.class);
     }
 
-    private static VersionContextSupplier.Factory internalVersionContextSupplierFactory(DatabaseConfig databaseConfig) {
-        return databaseId -> "multiversion".equals(databaseConfig.get(db_format)) || databaseConfig.get(snapshot_query)
+    private static VersionContextSupplier.Factory internalVersionContextSupplierFactory(
+            DatabaseConfig databaseConfig, boolean multiVersion) {
+        return databaseId -> multiVersion || databaseConfig.get(snapshot_query)
                 ? new TransactionVersionContextSupplier()
                 : EMPTY_CONTEXT_SUPPLIER;
     }

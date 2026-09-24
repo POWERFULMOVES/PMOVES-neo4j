@@ -24,7 +24,6 @@ import static java.util.Collections.singletonList;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
@@ -46,11 +45,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.neo4j.internal.id.IdGenerator;
 import org.neo4j.internal.id.IdType;
-import org.neo4j.internal.id.SchemaIdType;
 import org.neo4j.internal.recordstorage.Command.LabelTokenCommand;
 import org.neo4j.internal.recordstorage.Command.PropertyKeyTokenCommand;
 import org.neo4j.internal.recordstorage.Command.RelationshipTypeTokenCommand;
-import org.neo4j.internal.recordstorage.CommandHandlerContract.ApplyFunction;
 import org.neo4j.internal.schema.ConstraintDescriptor;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexPrototype;
@@ -81,9 +78,10 @@ import org.neo4j.kernel.impl.store.record.RelationshipGroupRecord;
 import org.neo4j.kernel.impl.store.record.RelationshipRecord;
 import org.neo4j.kernel.impl.store.record.RelationshipTypeTokenRecord;
 import org.neo4j.kernel.impl.store.record.SchemaRecord;
+import org.neo4j.lock.LockGroup;
 import org.neo4j.lock.LockService;
-import org.neo4j.storageengine.api.IndexEntryUpdate;
 import org.neo4j.storageengine.api.IndexUpdateListener;
+import org.neo4j.storageengine.api.StorageCommand;
 import org.neo4j.storageengine.api.StorageEngineTransaction;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.storageengine.util.IdGeneratorUpdatesWorkSync;
@@ -109,11 +107,11 @@ class LockGuardedNeoStoreTransactionApplierTest {
     private final RelationshipGroupStore relationshipGroupStore =
             mockedStore(RelationshipGroupStore.class, RecordIdType.RELATIONSHIP_GROUP);
     private final RelationshipTypeTokenStore relationshipTypeTokenStore =
-            mockedStore(RelationshipTypeTokenStore.class, SchemaIdType.RELATIONSHIP_TYPE_TOKEN);
-    private final LabelTokenStore labelTokenStore = mockedStore(LabelTokenStore.class, SchemaIdType.LABEL_TOKEN);
+            mockedStore(RelationshipTypeTokenStore.class, RecordIdType.RELATIONSHIP_TYPE_TOKEN);
+    private final LabelTokenStore labelTokenStore = mockedStore(LabelTokenStore.class, RecordIdType.LABEL_TOKEN);
     private final PropertyKeyTokenStore propertyKeyTokenStore =
-            mockedStore(PropertyKeyTokenStore.class, SchemaIdType.PROPERTY_KEY_TOKEN);
-    private final SchemaStore schemaStore = mockedStore(SchemaStore.class, SchemaIdType.SCHEMA);
+            mockedStore(PropertyKeyTokenStore.class, RecordIdType.PROPERTY_KEY_TOKEN);
+    private final SchemaStore schemaStore = mockedStore(SchemaStore.class, RecordIdType.SCHEMA);
     private final DynamicArrayStore dynamicLabelStore = mockedStore(DynamicArrayStore.class, RecordIdType.ARRAY_BLOCK);
     private final DynamicStringStore dynamicStringStore =
             mockedStore(DynamicStringStore.class, RecordIdType.STRING_BLOCK);
@@ -162,7 +160,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyNodeCommandToTheStore() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(false);
+        var applier = newApplier(false);
         NodeRecord before = new NodeRecord(11);
         before.setLabelField(42, asList(one, two));
         NodeRecord after = new NodeRecord(12);
@@ -171,7 +169,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
         Command.NodeCommand command = new Command.NodeCommand(LATEST_LOG_SERIALIZATION, before, after);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -183,7 +181,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyNodeCommandToTheStoreAndInvalidateTheCache() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(false);
+        var applier = newApplier(false);
         NodeRecord before = new NodeRecord(11);
         before.setLabelField(42, asList(one, two));
         NodeRecord after = new NodeRecord(12);
@@ -192,7 +190,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
         Command.NodeCommand command = new Command.NodeCommand(LATEST_LOG_SERIALIZATION, before, after);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -204,7 +202,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyNodeCommandToTheStoreInRecoveryMode() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(true);
+        var applier = newApplier(true);
         NodeRecord before = new NodeRecord(11);
         before.setLabelField(42, asList(one, two));
         NodeRecord after = new NodeRecord(12);
@@ -213,7 +211,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
         Command.NodeCommand command = new Command.NodeCommand(LATEST_LOG_SERIALIZATION, before, after);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -227,7 +225,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldInvalidateTheCacheWhenTheNodeBecomesDense() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(false);
+        var applier = newApplier(false);
         NodeRecord before = new NodeRecord(11);
         before.setLabelField(42, singletonList(one));
         before.setInUse(true);
@@ -239,7 +237,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
         Command.NodeCommand command = new Command.NodeCommand(LATEST_LOG_SERIALIZATION, before, after);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -253,7 +251,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyRelationshipCommandToTheStore() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(false);
+        var applier = newApplier(false);
         RelationshipRecord before = new RelationshipRecord(12);
         RelationshipRecord record = new RelationshipRecord(12);
         record.setLinks(3, 4, 5);
@@ -261,7 +259,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
 
         Command command = new Command.RelationshipCommand(LATEST_LOG_SERIALIZATION, before, record);
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -272,7 +270,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyRelationshipCommandToTheStoreAndInvalidateTheCache() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(false);
+        var applier = newApplier(false);
         RelationshipRecord before = new RelationshipRecord(12);
         RelationshipRecord record = new RelationshipRecord(12);
         record.setLinks(3, 4, 5);
@@ -281,7 +279,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
         Command command = new Command.RelationshipCommand(LATEST_LOG_SERIALIZATION, before, record);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -292,7 +290,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyRelationshipCommandToTheStoreInRecovery() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(true);
+        var applier = newApplier(true);
         RelationshipRecord before = new RelationshipRecord(12);
         RelationshipRecord record = new RelationshipRecord(12);
         record.setLinks(3, 4, 5);
@@ -300,7 +298,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
         Command command = new Command.RelationshipCommand(LATEST_LOG_SERIALIZATION, before, record);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -314,14 +312,14 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyNodePropertyCommandToTheStore() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(false);
+        var applier = newApplier(false);
         PropertyRecord before = new PropertyRecord(11);
         PropertyRecord after = new PropertyRecord(12);
         after.setNodeId(42);
         Command command = new Command.PropertyCommand(LATEST_LOG_SERIALIZATION, before, after);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -333,14 +331,14 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyNodePropertyCommandToTheStoreInRecovery() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(true);
+        var applier = newApplier(true);
         PropertyRecord before = new PropertyRecord(11);
         PropertyRecord after = new PropertyRecord(12);
         after.setNodeId(42);
         Command command = new Command.PropertyCommand(LATEST_LOG_SERIALIZATION, before, after);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -353,14 +351,14 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyRelPropertyCommandToTheStore() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(false);
+        var applier = newApplier(false);
         PropertyRecord before = new PropertyRecord(11);
         PropertyRecord after = new PropertyRecord(12);
         after.setRelId(42);
         Command command = new Command.PropertyCommand(LATEST_LOG_SERIALIZATION, before, after);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -371,14 +369,14 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyRelPropertyCommandToTheStoreInRecovery() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(true);
+        var applier = newApplier(true);
         PropertyRecord before = new PropertyRecord(11);
         PropertyRecord after = new PropertyRecord(12);
         after.setRelId(42);
         Command command = new Command.PropertyCommand(LATEST_LOG_SERIALIZATION, before, after);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -392,7 +390,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyRelationshipGroupCommandToTheStore() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(false);
+        var applier = newApplier(false);
         // when
         RelationshipGroupRecord before = new RelationshipGroupRecord(42)
                 .initialize(
@@ -405,7 +403,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
                         NULL_REFERENCE.longValue());
         RelationshipGroupRecord after = new RelationshipGroupRecord(42).initialize(true, 1, 2, 3, 4, 5, 6);
         Command command = new Command.RelationshipGroupCommand(LATEST_LOG_SERIALIZATION, before, after);
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -416,7 +414,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyRelationshipGroupCommandToTheStoreInRecovery() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(true);
+        var applier = newApplier(true);
         // when
         RelationshipGroupRecord before = new RelationshipGroupRecord(42)
                 .initialize(
@@ -430,7 +428,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
         RelationshipGroupRecord after = new RelationshipGroupRecord(42).initialize(true, 1, 2, 3, 4, 5, 6);
         Command command = new Command.RelationshipGroupCommand(LATEST_LOG_SERIALIZATION, before, after);
 
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -444,7 +442,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyRelationshipTypeTokenCommandToTheStore() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(false);
+        var applier = newApplier(false);
         RelationshipTypeTokenRecord before = new RelationshipTypeTokenRecord(42);
         RelationshipTypeTokenRecord after = new RelationshipTypeTokenRecord(42);
         after.setInUse(true);
@@ -455,7 +453,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
         Command command = new RelationshipTypeTokenCommand(LATEST_LOG_SERIALIZATION, before, after);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -467,7 +465,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyRelationshipTypeTokenCommandToTheStoreInRecovery() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(true);
+        var applier = newApplier(true);
 
         RelationshipTypeTokenRecord before = new RelationshipTypeTokenRecord(42);
         RelationshipTypeTokenRecord after = new RelationshipTypeTokenRecord(42);
@@ -484,7 +482,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
                 .thenReturn(token);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -499,7 +497,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyLabelTokenCommandToTheStore() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(false);
+        var applier = newApplier(false);
         LabelTokenRecord before = new LabelTokenRecord(42);
         LabelTokenRecord after = new LabelTokenRecord(42);
         after.setInUse(true);
@@ -510,7 +508,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
         Command command = new LabelTokenCommand(LATEST_LOG_SERIALIZATION, before, after);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -522,7 +520,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyLabelTokenCommandToTheStoreInRecovery() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(true);
+        var applier = newApplier(true);
         LabelTokenRecord before = new LabelTokenRecord(42);
         LabelTokenRecord after = new LabelTokenRecord(42);
         after.setInUse(true);
@@ -535,7 +533,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
         Command.LabelTokenCommand command = new Command.LabelTokenCommand(LATEST_LOG_SERIALIZATION, before, after);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -550,7 +548,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyPropertyKeyTokenCommandToTheStore() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(false);
+        var applier = newApplier(false);
         PropertyKeyTokenRecord before = new PropertyKeyTokenRecord(42);
         PropertyKeyTokenRecord after = new PropertyKeyTokenRecord(42);
         after.setInUse(true);
@@ -561,7 +559,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
         Command command = new PropertyKeyTokenCommand(LATEST_LOG_SERIALIZATION, before, after);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -573,7 +571,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyPropertyKeyTokenCommandToTheStoreInRecovery() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(true);
+        var applier = newApplier(true);
 
         PropertyKeyTokenRecord before = new PropertyKeyTokenRecord(42);
         PropertyKeyTokenRecord after = new PropertyKeyTokenRecord(42);
@@ -590,7 +588,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
                 .thenReturn(token);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -603,7 +601,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyCreateIndexRuleSchemaRuleCommandToTheStore() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplierFacade(newApplier(false), newIndexApplier());
+        var applier = newApplier(false, newIndexApplier());
         IndexDescriptor rule = indexRule(0, 1, 2, "K", "X.Y");
         SchemaRecord before = new SchemaRecord(rule.getId());
         SchemaRecord after = new SchemaRecord(before).initialize(true, Record.NO_NEXT_PROPERTY.longValue());
@@ -612,20 +610,20 @@ class LockGuardedNeoStoreTransactionApplierTest {
                 new Command.SchemaRuleCommand(LATEST_LOG_SERIALIZATION, before, after, rule);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
 
         verify(schemaStore).updateRecord(eq(after), any(), any(), any(), any());
-        verify(indexingService).createIndexes(AUTH_DISABLED, rule);
+        verify(indexingService).createIndexes(AUTH_DISABLED, NULL_CONTEXT, rule);
         verify(cacheAccess).addSchemaRule(rule);
     }
 
     @Test
     void shouldApplyCreateIndexRuleSchemaRuleCommandToTheStoreInRecovery() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplierFacade(newIndexApplier(), newApplier(true));
+        var applier = newApplier(true, newIndexApplier());
         SchemaRecord before = new SchemaRecord(21);
         SchemaRecord after = new SchemaRecord(before).initialize(true, Record.NO_NEXT_PROPERTY.longValue());
         after.setCreated();
@@ -634,14 +632,14 @@ class LockGuardedNeoStoreTransactionApplierTest {
                 new Command.SchemaRuleCommand(LATEST_LOG_SERIALIZATION, before, after, rule);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
 
         verify(schemaStore.getIdGenerator()).setHighestPossibleIdInUse(after.getId());
         verify(schemaStore).updateRecord(eq(after), any(), any(), any(), any());
-        verify(indexingService).createIndexes(AUTH_DISABLED, rule);
+        verify(indexingService).createIndexes(AUTH_DISABLED, NULL_CONTEXT, rule);
         verify(cacheAccess).addSchemaRule(rule);
     }
 
@@ -659,7 +657,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
                 INSTANCE,
                 IdUpdateListener.IGNORE,
                 StoreCursors.NULL);
-        TransactionApplierFactory applier = newApplierFacade(newIndexApplier(), newApplier(false));
+        var applier = newApplier(false, newIndexApplier());
         SchemaRecord before = new SchemaRecord(21);
         SchemaRecord after = new SchemaRecord(before).initialize(true, Record.NO_NEXT_PROPERTY.longValue());
         after.setConstraint(true);
@@ -668,7 +666,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
                 new Command.SchemaRuleCommand(LATEST_LOG_SERIALIZATION, before, after, rule);
 
         // when
-        boolean result = apply(applier, command::handle, batchContext, transactionToApply);
+        boolean result = apply(applier, command, batchContext, transactionToApply);
 
         // then
         assertFalse(result);
@@ -692,7 +690,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
                 INSTANCE,
                 IdUpdateListener.IGNORE,
                 StoreCursors.NULL);
-        TransactionApplierFactory applier = newApplierFacade(newIndexApplier(), newApplier(true));
+        var applier = newApplier(true, newIndexApplier());
         SchemaRecord before = new SchemaRecord(21);
         SchemaRecord after = new SchemaRecord(before).initialize(true, Record.NO_NEXT_PROPERTY.longValue());
         IndexDescriptor rule = constraintIndexRule(0, 1, 2, "K", "X.Y", 42L);
@@ -700,7 +698,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
                 new Command.SchemaRuleCommand(LATEST_LOG_SERIALIZATION, before, after, rule);
 
         // when
-        boolean result = apply(applier, command::handle, batchContext, transactionToApply);
+        boolean result = apply(applier, command, batchContext, transactionToApply);
 
         // then
         assertFalse(result);
@@ -712,67 +710,12 @@ class LockGuardedNeoStoreTransactionApplierTest {
     }
 
     @Test
-    void shouldCloseReaderAndNasNoUpdatesOnContextClose() throws Exception {
-        RecordStorageEngine storageEngine = mock(RecordStorageEngine.class);
-        RecordStorageReader storageReader = mock(RecordStorageReader.class);
-        when(storageEngine.newReader()).thenReturn(storageReader);
-        var batchContext = new BatchContextImpl(
-                indexingService,
-                indexUpdatesSync,
-                nodeStore,
-                propertyStore,
-                storageEngine,
-                mock(SchemaCache.class),
-                NULL_CONTEXT,
-                INSTANCE,
-                IdUpdateListener.IGNORE,
-                StoreCursors.NULL);
-
-        IndexUpdates indexEntryUpdates = batchContext.indexUpdates();
-        ((OnlineIndexUpdates) indexEntryUpdates).getUpdates().add(IndexEntryUpdate.add(1, IndexDescriptor.NO_INDEX));
-
-        assertTrue(batchContext.hasUpdates());
-
-        batchContext.close();
-
-        assertFalse(batchContext.hasUpdates());
-        verify(storageReader).close();
-    }
-
-    @Test
-    void shouldNasNoUpdatesAfterPendingUpdatesApplied() throws Exception {
-        RecordStorageEngine storageEngine = mock(RecordStorageEngine.class);
-        RecordStorageReader storageReader = mock(RecordStorageReader.class);
-        when(storageEngine.newReader()).thenReturn(storageReader);
-        var batchContext = new BatchContextImpl(
-                indexingService,
-                indexUpdatesSync,
-                nodeStore,
-                propertyStore,
-                storageEngine,
-                mock(SchemaCache.class),
-                NULL_CONTEXT,
-                INSTANCE,
-                IdUpdateListener.IGNORE,
-                StoreCursors.NULL);
-
-        IndexUpdates indexEntryUpdates = batchContext.indexUpdates();
-        ((OnlineIndexUpdates) indexEntryUpdates).getUpdates().add(IndexEntryUpdate.add(1, IndexDescriptor.NO_INDEX));
-
-        assertTrue(batchContext.hasUpdates());
-
-        batchContext.applyPendingIndexUpdates();
-
-        assertFalse(batchContext.hasUpdates());
-    }
-
-    @Test
     void shouldApplyUpdateIndexRuleSchemaRuleCommandToTheStoreThrowingIndexProblem() {
         // given
         var batchContext = mock(BatchContext.class);
         var indexActivator = mock(IndexActivator.class);
         when(batchContext.getIndexActivator()).thenReturn(indexActivator);
-        TransactionApplierFactory applier = newIndexApplier();
+        var applier = newApplierFacade(newIndexApplier());
         var runtimeException = new RuntimeException("");
         doThrow(runtimeException).when(indexActivator).activateIndex(any());
 
@@ -782,19 +725,16 @@ class LockGuardedNeoStoreTransactionApplierTest {
         Command.SchemaRuleCommand command =
                 new Command.SchemaRuleCommand(LATEST_LOG_SERIALIZATION, before, after, rule);
 
-        var e = assertThrows(Exception.class, () -> apply(applier, command::handle, batchContext, transactionToApply));
+        var e = assertThrows(Exception.class, () -> apply(applier, command, batchContext, transactionToApply));
         assertSame(runtimeException, e);
     }
 
     @Test
     void shouldApplyDeleteIndexRuleSchemaRuleCommandToTheStore() throws Exception {
         // given
-        TransactionApplierFactory base = newApplier(false);
-        TransactionApplierFactory indexApplier = newIndexApplier();
+        var applier = newApplier(false, newIndexApplier());
         IdGeneratorUpdatesWorkSync idGeneratorUpdatesWorkSync = new IdGeneratorUpdatesWorkSync();
         Stream.of(RecordIdType.values()).forEach(idType -> idGeneratorUpdatesWorkSync.add(mock(IdGenerator.class)));
-        TransactionApplierFactoryChain applier =
-                new TransactionApplierFactoryChain(IdGeneratorUpdatesWorkSync::newBatch, base, indexApplier);
         SchemaRecord before = new SchemaRecord(21).initialize(true, Record.NO_NEXT_PROPERTY.longValue());
         SchemaRecord after = new SchemaRecord(before).initialize(false, Record.NO_NEXT_PROPERTY.longValue());
         IndexDescriptor rule = indexRule(0, 1, 2, "K", "X.Y");
@@ -802,20 +742,20 @@ class LockGuardedNeoStoreTransactionApplierTest {
                 new Command.SchemaRuleCommand(LATEST_LOG_SERIALIZATION, before, after, rule);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
 
         verify(schemaStore).updateRecord(eq(after), any(), any(), any(), any());
         verify(indexingService).dropIndex(rule);
-        verify(cacheAccess).removeSchemaRuleFromCache(command.getKey());
+        verify(cacheAccess).removeSchemaRuleFromCache(command.getSchemaRule());
     }
 
     @Test
     void shouldApplyDeleteIndexRuleSchemaRuleCommandToTheStoreInRecovery() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplierFacade(newIndexApplier(), newApplier(true));
+        var applier = newApplier(true, newIndexApplier());
         SchemaRecord before = new SchemaRecord(21).initialize(true, Record.NO_NEXT_PROPERTY.longValue());
         SchemaRecord after = new SchemaRecord(before).initialize(false, Record.NO_NEXT_PROPERTY.longValue());
         IndexDescriptor rule = indexRule(0, 1, 2, "K", "X.Y");
@@ -823,7 +763,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
                 new Command.SchemaRuleCommand(LATEST_LOG_SERIALIZATION, before, after, rule);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -831,13 +771,13 @@ class LockGuardedNeoStoreTransactionApplierTest {
         verify(schemaStore.getIdGenerator()).setHighestPossibleIdInUse(after.getId());
         verify(schemaStore).updateRecord(eq(after), any(), any(), any(), any());
         verify(indexingService).dropIndex(rule);
-        verify(cacheAccess).removeSchemaRuleFromCache(command.getKey());
+        verify(cacheAccess).removeSchemaRuleFromCache(command.getSchemaRule());
     }
 
     @Test
     void shouldApplyCreateUniquenessConstraintRuleSchemaRuleCommandToTheStore() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(false);
+        var applier = newApplier(false);
         SchemaRecord before = new SchemaRecord(21);
         SchemaRecord after = new SchemaRecord(before).initialize(true, Record.NO_NEXT_PROPERTY.longValue());
         after.setCreated();
@@ -847,7 +787,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
                 new Command.SchemaRuleCommand(LATEST_LOG_SERIALIZATION, before, after, rule);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -859,7 +799,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyCreateUniquenessConstraintRuleSchemaRuleCommandToTheStoreInRecovery() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(true);
+        var applier = newApplier(true);
         SchemaRecord before = new SchemaRecord(21);
         SchemaRecord after = new SchemaRecord(before).initialize(true, Record.NO_NEXT_PROPERTY.longValue());
         after.setCreated();
@@ -869,7 +809,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
                 new Command.SchemaRuleCommand(LATEST_LOG_SERIALIZATION, before, after, rule);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -882,7 +822,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyUpdateUniquenessConstraintRuleSchemaRuleCommandToTheStore() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(false);
+        var applier = newApplier(false);
         SchemaRecord before = new SchemaRecord(21);
         SchemaRecord after = new SchemaRecord(before).initialize(true, Record.NO_NEXT_PROPERTY.longValue());
         after.setConstraint(true);
@@ -891,7 +831,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
                 new Command.SchemaRuleCommand(LATEST_LOG_SERIALIZATION, before, after, rule);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -903,7 +843,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyUpdateUniquenessConstraintRuleSchemaRuleCommandToTheStoreInRecovery() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(true);
+        var applier = newApplier(true);
         SchemaRecord before = new SchemaRecord(21);
         SchemaRecord after = new SchemaRecord(before).initialize(true, Record.NO_NEXT_PROPERTY.longValue());
         after.setConstraint(true);
@@ -912,7 +852,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
                 new Command.SchemaRuleCommand(LATEST_LOG_SERIALIZATION, before, after, rule);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
@@ -925,7 +865,7 @@ class LockGuardedNeoStoreTransactionApplierTest {
     @Test
     void shouldApplyDeleteUniquenessConstraintRuleSchemaRuleCommandToTheStore() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(false);
+        var applier = newApplier(false);
         SchemaRecord before = new SchemaRecord(21).initialize(true, Record.NO_NEXT_PROPERTY.longValue());
         SchemaRecord after = new SchemaRecord(before).initialize(false, Record.NO_NEXT_PROPERTY.longValue());
         ConstraintDescriptor rule = uniquenessConstraintRule(0L, 1, 2, 3L);
@@ -933,19 +873,19 @@ class LockGuardedNeoStoreTransactionApplierTest {
                 new Command.SchemaRuleCommand(LATEST_LOG_SERIALIZATION, before, after, rule);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
 
         verify(schemaStore).updateRecord(eq(after), any(), any(), any(), any());
-        verify(cacheAccess).removeSchemaRuleFromCache(command.getKey());
+        verify(cacheAccess).removeSchemaRuleFromCache(command.getSchemaRule());
     }
 
     @Test
     void shouldApplyDeleteUniquenessConstraintRuleSchemaRuleCommandToTheStoreInRecovery() throws Exception {
         // given
-        TransactionApplierFactory applier = newApplier(true);
+        var applier = newApplier(true);
         SchemaRecord before = new SchemaRecord(21).initialize(true, Record.NO_NEXT_PROPERTY.longValue());
         SchemaRecord after = new SchemaRecord(before).initialize(false, Record.NO_NEXT_PROPERTY.longValue());
         ConstraintDescriptor rule = uniquenessConstraintRule(0L, 1, 2, 3L);
@@ -953,27 +893,41 @@ class LockGuardedNeoStoreTransactionApplierTest {
                 new Command.SchemaRuleCommand(LATEST_LOG_SERIALIZATION, before, after, rule);
 
         // when
-        boolean result = apply(applier, command::handle, transactionToApply);
+        boolean result = apply(applier, command, transactionToApply);
 
         // then
         assertFalse(result);
 
         verify(schemaStore.getIdGenerator()).setHighestPossibleIdInUse(after.getId());
         verify(schemaStore).updateRecord(eq(after), any(), any(), any(), any());
-        verify(cacheAccess).removeSchemaRuleFromCache(command.getKey());
+        verify(cacheAccess).removeSchemaRuleFromCache(command.getSchemaRule());
     }
 
-    private TransactionApplierFactory newApplier(boolean recovery) {
-        TransactionApplierFactory applier = new LockGuardedNeoStoreTransactionApplierFactory(
-                recovery ? RECOVERY : INTERNAL, neoStores, cacheAccess, lockService);
+    private TransactionAppliersDispatcherFactory newApplier(boolean recovery) {
         if (recovery) {
-            applier = newApplierFacade(new HighIdTransactionApplierFactory(neoStores), applier);
+            return newApplierFacade(
+                    new HighIdTransactionApplierFactory(neoStores),
+                    new LockGuardedNeoStoreTransactionApplierFactory(RECOVERY, neoStores, cacheAccess, lockService));
         }
-        return applier;
+        return newApplierFacade(
+                new LockGuardedNeoStoreTransactionApplierFactory(INTERNAL, neoStores, cacheAccess, lockService));
     }
 
-    private static TransactionApplierFactory newApplierFacade(TransactionApplierFactory... appliers) {
-        return new TransactionApplierFactoryChain(IdGeneratorUpdatesWorkSync::newBatch, appliers);
+    private TransactionAppliersDispatcherFactory newApplier(boolean recovery, TransactionApplierFactory extraApplier) {
+        if (recovery) {
+            return newApplierFacade(
+                    new HighIdTransactionApplierFactory(neoStores),
+                    new LockGuardedNeoStoreTransactionApplierFactory(RECOVERY, neoStores, cacheAccess, lockService),
+                    extraApplier);
+        }
+        return newApplierFacade(
+                new LockGuardedNeoStoreTransactionApplierFactory(INTERNAL, neoStores, cacheAccess, lockService),
+                extraApplier);
+    }
+
+    private static TransactionAppliersDispatcherFactory newApplierFacade(TransactionApplierFactory... appliers) {
+        return new TransactionAppliersDispatcherFactory(
+                (workSync, cursorContext) -> workSync.newBatch(cursorContext, false), appliers);
     }
 
     private TransactionApplierFactory newIndexApplier() {
@@ -981,23 +935,27 @@ class LockGuardedNeoStoreTransactionApplierTest {
     }
 
     private boolean apply(
-            TransactionApplierFactory applier, ApplyFunction function, StorageEngineTransaction transactionToApply)
+            TransactionAppliersDispatcherFactory applier,
+            StorageCommand command,
+            StorageEngineTransaction transactionToApply)
             throws Exception {
-        try {
-            return CommandHandlerContract.apply(applier, function, transactionToApply);
-        } finally {
-            indexActivator.close();
-        }
+        BatchContext batchContext = mock(BatchContext.class);
+        when(batchContext.getLockGroup()).thenReturn(new LockGroup());
+        when(batchContext.getIdUpdateListener()).thenReturn(IdUpdateListener.DIRECT);
+        when(batchContext.getIndexActivator()).thenReturn(new IndexActivator(mock(IndexUpdateListener.class)));
+        return apply(applier, command, batchContext, transactionToApply);
     }
 
     private boolean apply(
-            TransactionApplierFactory applier,
-            ApplyFunction function,
+            TransactionAppliersDispatcherFactory applier,
+            StorageCommand command,
             BatchContext context,
             StorageEngineTransaction transactionToApply)
             throws Exception {
         try (context) {
-            return CommandHandlerContract.apply(applier, function, context, transactionToApply);
+            try (var txApplier = applier.startTx(transactionToApply, context)) {
+                return txApplier.visit(command);
+            }
         } finally {
             indexActivator.close();
         }

@@ -28,10 +28,138 @@ import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.graphdb.Label
 
+object WritingSubqueryApplyTestBase
+
 abstract class WritingSubqueryApplyTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT]
 ) extends RuntimeTestSuite[CONTEXT](edition, runtime) {
+
+  test("RHS should be lazy when LHS is empty") {
+    assertRhsLazy(lhsRows = 0, rhsRows = 2, limit = 1, withSort = false)
+  }
+
+  test("RHS should be lazy when 1024 LHS rows, 2x cardinality increase, and limit 1") {
+    assertRhsLazy(lhsRows = 1024, rhsRows = 2, limit = 1, withSort = false)
+  }
+
+  test("RHS should be lazy when 1024 LHS rows, 16x cardinality increase, and limit 1") {
+    assertRhsLazy(lhsRows = 1024, rhsRows = 16, limit = 1, withSort = false)
+  }
+
+  test("RHS should be lazy when 1024 LHS rows, 2x cardinality increase, and limit 3") {
+    assertRhsLazy(lhsRows = 1024, rhsRows = 2, limit = 3, withSort = false)
+  }
+
+  test("RHS should be lazy when 1024 LHS rows, 16x cardinality increase, and limit 3") {
+    assertRhsLazy(lhsRows = 1024, rhsRows = 16, limit = 3, withSort = false)
+  }
+
+  test("RHS should be lazy when 1024 LHS rows, 2x cardinality increase, limit 3, and sort on top") {
+    assertRhsLazy(lhsRows = 1024, rhsRows = 2, limit = 3, withSort = true)
+  }
+
+  test("RHS should be lazy when 1024 LHS rows, 16x cardinality increase, limit 3, and sort on top") {
+    assertRhsLazy(lhsRows = 1024, rhsRows = 16, limit = 3, withSort = true)
+  }
+
+  private def assertRhsLazy(lhsRows: Long, rhsRows: Long, limit: Long, withSort: Boolean): Unit = {
+    // given
+    val aNode = givenGraph {
+      nodeGraph(1, "A").head
+    }
+
+    var maybeSortId: Option[Int] = None
+    val builder = if (withSort) {
+      maybeSortId = Some(1)
+      new LogicalQueryBuilder(this)
+        .produceResults("a")
+        .sort("a ASC")
+    } else {
+      new LogicalQueryBuilder(this)
+        .produceResults("a")
+    }
+
+    // when
+    val logicalQuery = builder
+      .limit(limit)
+      .apply()
+      // NOTE: create is only here to force single-row execution on RHS
+      .|.create(createNode("c", "C"))
+      .|.unwind(s"range(1,$rhsRows) AS b")
+      .|.nonFuseable()
+      .|.argument("a")
+      .unwind(s"range(1,$lhsRows) AS ignore")
+      .nodeByLabelScan("a", "A")
+      .build(readOnly = false)
+
+    val runtimeResult = profile(logicalQuery, runtime)
+
+    val totalRows = lhsRows * rhsRows
+    val expectedResultRows = math.min(limit, totalRows)
+    val expected = (0 until expectedResultRows.toInt).map(_ => aNode).toArray
+
+    // then
+    runtimeResult should beColumns("a").withRows(singleColumn(expected))
+
+    val produceResultsId = 0
+    val limitId = 1 + maybeSortId.getOrElse(0)
+    val createId = 3 + maybeSortId.getOrElse(0)
+    val unwindId = 4 + maybeSortId.getOrElse(0)
+    val nonFuseableId = 5 + maybeSortId.getOrElse(0)
+    val argumentId = 6 + maybeSortId.getOrElse(0)
+
+    val queryProfile = runtimeResult.runtimeResult.queryProfile()
+    queryProfile.operatorProfile(produceResultsId).rows() shouldBe expectedResultRows
+    maybeSortId.foreach(sortId =>
+      queryProfile.operatorProfile(sortId).rows() shouldBe expectedResultRows
+    )
+    queryProfile.operatorProfile(limitId).rows() shouldBe expectedResultRows
+    val beExpectedRowsTopRhs = be >= expectedResultRows and be <= (rhsRows + limit)
+    withClue(
+      s"LHS:$lhsRows, RHS:$rhsRows, LIMIT:$limit, expectedResultRows:$expectedResultRows, Top RHS: $beExpectedRowsTopRhs\n"
+    ) {
+      queryProfile.operatorProfile(createId).rows() should beExpectedRowsTopRhs
+      queryProfile.operatorProfile(unwindId).rows() should beExpectedRowsTopRhs
+    }
+    val beExpectedRowsBottomRhs = if (expectedResultRows % rhsRows == 0)
+      be >= expectedResultRows / rhsRows and be <= expectedResultRows
+    else
+      be >= expectedResultRows / rhsRows + 1 and be <= expectedResultRows
+    withClue(
+      s"LHS:$lhsRows, RHS:$rhsRows, LIMIT:$limit, expectedResultRows:$expectedResultRows, Bottom RHS: $beExpectedRowsBottomRhs\n"
+    ) {
+      queryProfile.operatorProfile(nonFuseableId).rows() should beExpectedRowsBottomRhs
+      queryProfile.operatorProfile(argumentId).rows() should beExpectedRowsBottomRhs
+    }
+  }
+
+  test("should handle limit on RHS") {
+    // given
+    val sizeHint = 2
+
+    val nodes = givenGraph {
+      nodeGraph(sizeHint)
+    }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("c")
+      .aggregation(Seq.empty, Seq("count(x) AS c"))
+      .apply()
+      .|.create(createNode("n"))
+      .|.limit(1)
+      .|.argument("x")
+      .allNodeScan("x")
+      .build(readOnly = false)
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    val expected = nodes.length
+
+    // then
+    runtimeResult should beColumns("c").withSingleRow(expected).withStatistics(nodesCreated = expected)
+  }
 
   test("should handle RHS with R/W dependencies - with AllNodesScan on RHS") {
     // given

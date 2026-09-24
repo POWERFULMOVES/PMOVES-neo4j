@@ -75,17 +75,31 @@ final case class ElementsAllQualifier()(val position: InputPosition) extends Gra
     Seq(LabelAllQualifier()(position), RelationshipAllQualifier()(position))
 }
 
+sealed trait Element {
+  def name: String
+}
+
+case object Node extends Element {
+  override def name: String = "node"
+}
+
+case object Relationship extends Element {
+  override def name: String = "relationship"
+}
+
 final case class PatternQualifier(
-  labelQualifiers: Seq[PrivilegeQualifier],
+  elementTypeQualifiers: Seq[PrivilegeQualifier],
   variable: Option[Variable],
-  expression: Expression
+  expression: Expression,
+  element: Element
 ) extends GraphPrivilegeQualifier {
 
   override def dup(children: Seq[AnyRef]): PatternQualifier.this.type = {
     PatternQualifier(
       children.head.asInstanceOf[Seq[PrivilegeQualifier]],
       children(1).asInstanceOf[Option[Variable]],
-      children(2).asInstanceOf[Expression]
+      children(2).asInstanceOf[Expression],
+      children(3).asInstanceOf[Element]
     ).asInstanceOf[this.type]
   }
 }
@@ -202,6 +216,24 @@ final case class LoadUrlQualifier(url: Either[String, Parameter])(val position: 
   override def dup(children: Seq[AnyRef]): LoadUrlQualifier.this.type = {
     LoadUrlQualifier(
       children.head.asInstanceOf[Either[String, Parameter]]
+    )(position).asInstanceOf[this.type]
+  }
+}
+
+// Secrets qualifiers
+
+sealed trait SecretPrivilegeQualifier extends PrivilegeQualifier
+
+final case class SecretAllQualifier()(val position: InputPosition) extends SecretPrivilegeQualifier {
+  override def dup(children: Seq[AnyRef]): SecretAllQualifier.this.type = this
+}
+
+final case class SecretQualifier(secret: Expression)(val position: InputPosition)
+    extends SecretPrivilegeQualifier {
+
+  override def dup(children: Seq[AnyRef]): SecretQualifier.this.type = {
+    SecretQualifier(
+      children.head.asInstanceOf[Expression]
     )(position).asInstanceOf[this.type]
   }
 }

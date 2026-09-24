@@ -49,6 +49,7 @@ import static org.neo4j.internal.schema.IndexPrototype.forSchema;
 import static org.neo4j.internal.schema.IndexPrototype.uniqueForSchema;
 import static org.neo4j.internal.schema.SchemaDescriptors.forLabel;
 import static org.neo4j.internal.schema.SchemaDescriptors.forRelType;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.memory.ByteBufferFactory.heapBufferFactory;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
@@ -65,7 +66,6 @@ import static org.neo4j.kernel.impl.store.record.Record.NO_PREVIOUS_PROPERTY;
 import static org.neo4j.kernel.impl.store.record.Record.NULL_REFERENCE;
 import static org.neo4j.kernel.impl.store.record.RecordLoad.FORCE;
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
-import static org.neo4j.storageengine.api.EntityTokenUpdate.tokenChanges;
 import static org.neo4j.test.mockito.mock.Property.property;
 import static org.neo4j.test.mockito.mock.Property.set;
 import static org.neo4j.util.BitBuffer.bits;
@@ -125,7 +125,6 @@ import org.neo4j.internal.schema.ConstraintDescriptor;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexProviderDescriptor;
 import org.neo4j.internal.schema.IndexType;
-import org.neo4j.internal.schema.LabelSchemaDescriptor;
 import org.neo4j.internal.schema.SchemaDescriptor;
 import org.neo4j.internal.schema.SchemaDescriptors;
 import org.neo4j.internal.schema.SchemaRule;
@@ -175,14 +174,14 @@ import org.neo4j.kernel.impl.store.record.RelationshipGroupRecord;
 import org.neo4j.kernel.impl.store.record.RelationshipRecord;
 import org.neo4j.kernel.impl.store.record.RelationshipTypeTokenRecord;
 import org.neo4j.kernel.impl.store.record.SchemaRecord;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
 import org.neo4j.logging.log4j.Log4jLogProvider;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.memory.ThreadSafePeakMemoryTracker;
-import org.neo4j.storageengine.api.EntityTokenUpdate;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.storageengine.api.EntityUpdates;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
+import org.neo4j.storageengine.api.LogMetadataProvider;
+import org.neo4j.storageengine.api.TokenIndexEntryUpdate;
 import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.storageengine.util.IdUpdateListener;
@@ -196,6 +195,8 @@ import org.neo4j.util.BitBuffer;
 import org.neo4j.values.ElementIdMapper;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.Values;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
 
 @EphemeralTestDirectoryExtension
 public class FullCheckIntegrationTest {
@@ -364,9 +365,12 @@ public class FullCheckIntegrationTest {
         long nodeId1 = idGenerator.node();
         int labelId = idGenerator.label() - 1;
 
-        Iterable<EntityTokenUpdate> nodeLabelUpdates =
-                asIterable(tokenChanges(nodeId1, EMPTY_INT_ARRAY, new int[] {labelId}));
-        writeToNodeLabelStructure(fixture, nodeLabelUpdates);
+        IndexDescriptor tokenIndex = findTokenIndex(fixture, EntityType.NODE);
+        writeToNodeLabelStructure(
+                fixture,
+                asIterable(
+                        TokenIndexEntryUpdate.tokenChange(nodeId1, tokenIndex, EMPTY_INT_ARRAY, new int[] {labelId})),
+                tokenIndex);
 
         // when
         ConsistencySummaryStatistics stats = check();
@@ -386,7 +390,7 @@ public class FullCheckIntegrationTest {
         IndexDescriptor rtiDescriptor = findTokenIndex(fixture, EntityType.RELATIONSHIP);
         IndexAccessor accessor = fixture.indexAccessorLookup().apply(rtiDescriptor);
         try (IndexUpdater indexUpdater = accessor.newUpdater(IndexUpdateMode.ONLINE, NULL_CONTEXT, false)) {
-            indexUpdater.process(IndexEntryUpdate.change(
+            indexUpdater.process(TokenIndexEntryUpdate.tokenChange(
                     relationshipId, rtiDescriptor, EMPTY_INT_ARRAY, new int[] {relationshipTypeId}));
         }
 
@@ -435,17 +439,13 @@ public class FullCheckIntegrationTest {
         throw new RuntimeException(entityType + " index missing");
     }
 
-    void writeToNodeLabelStructure(GraphStoreFixture fixture, Iterable<EntityTokenUpdate> entityTokenUpdates)
+    void writeToNodeLabelStructure(
+            GraphStoreFixture fixture, Iterable<TokenIndexEntryUpdate> entityTokenUpdates, IndexDescriptor tokenIndex)
             throws IOException, IndexEntryConflictException {
-        IndexDescriptor tokenIndex = findTokenIndex(fixture, EntityType.NODE);
         IndexAccessor accessor = fixture.indexAccessorLookup().apply(tokenIndex);
         try (IndexUpdater indexUpdater = accessor.newUpdater(IndexUpdateMode.ONLINE, NULL_CONTEXT, false)) {
-            for (EntityTokenUpdate entityTokenUpdate : entityTokenUpdates) {
-                indexUpdater.process(IndexEntryUpdate.change(
-                        entityTokenUpdate.getEntityId(),
-                        tokenIndex,
-                        entityTokenUpdate.getTokensBefore(),
-                        entityTokenUpdate.getTokensAfter()));
+            for (var entityTokenUpdate : entityTokenUpdates) {
+                indexUpdater.process(entityTokenUpdate);
             }
         }
     }
@@ -551,11 +551,12 @@ public class FullCheckIntegrationTest {
             }
         });
 
-        int[] before = asArray(labels);
-        labels.remove(1);
-        int[] after = asArray(labels);
-
-        writeToNodeLabelStructure(fixture, singletonList(tokenChanges(42, before, after)));
+        IndexDescriptor tokenIndex = findTokenIndex(fixture, EntityType.NODE);
+        writeToNodeLabelStructure(
+                fixture,
+                singletonList(
+                        TokenIndexEntryUpdate.tokenChange(42, tokenIndex, new int[] {labels.get(1)}, EMPTY_INT_ARRAY)),
+                tokenIndex);
 
         // when
         ConsistencySummaryStatistics stats = check();
@@ -586,8 +587,11 @@ public class FullCheckIntegrationTest {
             }
         });
 
-        EntityTokenUpdate update = tokenChanges(42, new int[] {label1, label2}, new int[] {label1});
-        writeToNodeLabelStructure(fixture, singletonList(update));
+        IndexDescriptor tokenIndex = findTokenIndex(fixture, EntityType.NODE);
+        writeToNodeLabelStructure(
+                fixture,
+                singletonList(TokenIndexEntryUpdate.tokenChange(42, tokenIndex, new int[label2], EMPTY_INT_ARRAY)),
+                tokenIndex);
 
         // when
         ConsistencySummaryStatistics stats = check();
@@ -608,10 +612,10 @@ public class FullCheckIntegrationTest {
                 try (IndexUpdater updater = accessor.newUpdater(IndexUpdateMode.ONLINE, NULL_CONTEXT, false)) {
                     for (long nodeId : indexedNodes) {
                         EntityUpdates updates = fixture.nodeAsUpdates(nodeId);
-                        for (IndexEntryUpdate<?> update :
+                        for (IndexEntryUpdate update :
                                 updates.valueUpdatesForIndexKeys(singletonList(indexDescriptor))) {
-                            updater.process(IndexEntryUpdate.remove(
-                                    nodeId, indexDescriptor, ((ValueIndexEntryUpdate<?>) update).values()));
+                            updater.process(EagerValueIndexEntryUpdate.remove(
+                                    nodeId, indexDescriptor, ((ValueIndexEntryUpdate) update).values()));
                         }
                     }
                 }
@@ -639,10 +643,10 @@ public class FullCheckIntegrationTest {
                 try (IndexUpdater updater = accessor.newUpdater(IndexUpdateMode.ONLINE, NULL_CONTEXT, false)) {
                     for (long relId : indexedRelationships) {
                         EntityUpdates updates = fixture.relationshipAsUpdates(relId);
-                        for (IndexEntryUpdate<?> update :
+                        for (IndexEntryUpdate update :
                                 updates.valueUpdatesForIndexKeys(singletonList(indexDescriptor))) {
-                            updater.process(IndexEntryUpdate.remove(
-                                    relId, indexDescriptor, ((ValueIndexEntryUpdate<?>) update).values()));
+                            updater.process(EagerValueIndexEntryUpdate.remove(
+                                    relId, indexDescriptor, ((ValueIndexEntryUpdate) update).values()));
                         }
                     }
                 }
@@ -671,7 +675,7 @@ public class FullCheckIntegrationTest {
             if (indexDescriptor.schema().entityType() == EntityType.NODE && !indexDescriptor.isUnique()) {
                 IndexAccessor accessor = fixture.indexAccessorLookup().apply(indexDescriptor);
                 try (IndexUpdater updater = accessor.newUpdater(IndexUpdateMode.ONLINE, NULL_CONTEXT, false)) {
-                    updater.process(IndexEntryUpdate.add(newNode, indexDescriptor, values(indexDescriptor)));
+                    updater.process(EagerValueIndexEntryUpdate.add(newNode, indexDescriptor, values(indexDescriptor)));
                 }
             }
         }
@@ -698,7 +702,7 @@ public class FullCheckIntegrationTest {
             if (indexDescriptor.schema().entityType() == EntityType.RELATIONSHIP && !indexDescriptor.isUnique()) {
                 IndexAccessor accessor = fixture.indexAccessorLookup().apply(indexDescriptor);
                 try (IndexUpdater updater = accessor.newUpdater(IndexUpdateMode.ONLINE, NULL_CONTEXT, false)) {
-                    updater.process(IndexEntryUpdate.add(newRel, indexDescriptor, values(indexDescriptor)));
+                    updater.process(EagerValueIndexEntryUpdate.add(newRel, indexDescriptor, values(indexDescriptor)));
                 }
             }
         }
@@ -728,7 +732,7 @@ public class FullCheckIntegrationTest {
             if (indexDescriptor.schema().entityType() == EntityType.NODE && !indexDescriptor.isUnique()) {
                 IndexAccessor accessor = fixture.indexAccessorLookup().apply(indexDescriptor);
                 try (IndexUpdater updater = accessor.newUpdater(IndexUpdateMode.ONLINE, NULL_CONTEXT, false)) {
-                    updater.process(IndexEntryUpdate.change(
+                    updater.process(EagerValueIndexEntryUpdate.change(
                             id.get(), indexDescriptor, values(indexDescriptor), otherValues(indexDescriptor)));
                 }
             }
@@ -762,7 +766,7 @@ public class FullCheckIntegrationTest {
             if (indexDescriptor.schema().entityType() == EntityType.RELATIONSHIP) {
                 IndexAccessor accessor = fixture.indexAccessorLookup().apply(indexDescriptor);
                 try (IndexUpdater updater = accessor.newUpdater(IndexUpdateMode.ONLINE, NULL_CONTEXT, false)) {
-                    updater.process(IndexEntryUpdate.change(
+                    updater.process(EagerValueIndexEntryUpdate.change(
                             id.get(), indexDescriptor, values(indexDescriptor), otherValues(indexDescriptor)));
                 }
             }
@@ -797,15 +801,15 @@ public class FullCheckIntegrationTest {
         // (IndexChecker only reports the duplicate if it refers to a node id lower than highId)
         long nodeId = createOneNode();
         for (IndexDescriptor indexDescriptor : getValueIndexDescriptors()) {
-            if (indexDescriptor.schema().isSchemaDescriptorType(LabelSchemaDescriptor.class)) {
+            if (indexDescriptor.schema().isLabelSchemaDescriptor()) {
                 // Don't close this accessor. It will be done when shutting down db.
                 IndexAccessor accessor = fixture.indexAccessorLookup().apply(indexDescriptor);
 
                 try (IndexUpdater updater = accessor.newUpdater(IndexUpdateMode.ONLINE, NULL_CONTEXT, false)) {
                     // There is already another node (created in generateInitialData()) that has this value
-                    updater.process(IndexEntryUpdate.add(nodeId, indexDescriptor, values(indexDescriptor)));
+                    updater.process(EagerValueIndexEntryUpdate.add(nodeId, indexDescriptor, values(indexDescriptor)));
                 }
-                accessor.force(FileFlushEvent.NULL, NULL_CONTEXT);
+                accessor.force(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
             }
         }
 
@@ -904,7 +908,9 @@ public class FullCheckIntegrationTest {
                         1,
                         NO_NEXT_RELATIONSHIP.intValue(),
                         true,
-                        true);
+                        true,
+                        false,
+                        false);
                 relationship.setNextProp(propId);
 
                 PropertyRecord property = new PropertyRecord(propId, relationship);
@@ -2053,12 +2059,18 @@ public class FullCheckIntegrationTest {
                 AllIndexProviderDescriptors.TEXT_V2_DESCRIPTOR,
                 entityTokenId,
                 propertyKeyId);
+        createIndexRule(
+                entityType,
+                IndexType.TEXT,
+                AllIndexProviderDescriptors.TEXT_V3_DESCRIPTOR,
+                entityTokenId,
+                propertyKeyId);
 
         // When
         ConsistencySummaryStatistics stats = check();
 
         // Then
-        on(stats).verify(RecordType.SCHEMA, 1).andThatsAllFolks();
+        on(stats).verify(RecordType.SCHEMA, 2).andThatsAllFolks();
     }
 
     @ParameterizedTest
@@ -3152,7 +3164,14 @@ public class FullCheckIntegrationTest {
                 PropertyRecord record = new PropertyRecord(id).initialize(true, prev, next);
                 PropertyBlock block = new PropertyBlock();
                 PropertyStore.encodeValue(
-                        block, propertyKeyId, Values.intValue(10), null, null, NULL_CONTEXT, INSTANCE);
+                        block,
+                        propertyKeyId,
+                        Values.intValue(10),
+                        null,
+                        null,
+                        NULL_CONTEXT,
+                        INSTANCE,
+                        "db-format-2000");
                 record.addPropertyBlock(block);
                 return record;
             }
@@ -3203,7 +3222,8 @@ public class FullCheckIntegrationTest {
                 memoryLimiter,
                 memoryTracker,
                 new CursorContextFactory(cacheTracer, EMPTY_CONTEXT_SUPPLIER),
-                cacheTracer)) {
+                cacheTracer,
+                dependencyResolver.resolveDependency(LogMetadataProvider.class).getLastCommittedTransactionId())) {
             checker.check();
         }
         assertThat(memoryTracker.usedNativeMemory()).isZero();
@@ -3520,7 +3540,7 @@ public class FullCheckIntegrationTest {
     }
 
     protected Iterable<IndexDescriptor> getValueIndexDescriptors() {
-        return Iterables.filter(descriptor -> !descriptor.isTokenIndex(), fixture.getIndexDescriptors());
+        return Iterables.filter(fixture.getIndexDescriptors(), descriptor -> !descriptor.isTokenIndex());
     }
 
     private static class Reference<T> {
@@ -3578,7 +3598,8 @@ public class FullCheckIntegrationTest {
         DynamicRecordAllocator arrayAllocator = null;
         protoProperties.forEachKeyValue((keyId, value) -> {
             PropertyBlock block = new PropertyBlock();
-            PropertyStore.encodeValue(block, keyId, value, stringAllocator, arrayAllocator, NULL_CONTEXT, INSTANCE);
+            PropertyStore.encodeValue(
+                    block, keyId, value, stringAllocator, arrayAllocator, NULL_CONTEXT, INSTANCE, "db-format-2000");
             blocks.add(block);
         });
 
@@ -3604,7 +3625,7 @@ public class FullCheckIntegrationTest {
 
     @SuppressWarnings("unchecked")
     private static <T extends AbstractBaseRecord> T cloneRecord(T record) {
-        return (T) ReflectionUtil.callCopyConstructor(record);
+        return ReflectionUtil.callCopyConstructor(record);
     }
 
     private PropertyRecord newInitialisedPropertyRecord(IdGenerator next, SchemaRule rule) {

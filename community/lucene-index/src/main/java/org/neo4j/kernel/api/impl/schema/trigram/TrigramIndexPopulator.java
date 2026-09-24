@@ -19,15 +19,16 @@
  */
 package org.neo4j.kernel.api.impl.schema.trigram;
 
-import org.apache.lucene.document.Document;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.kernel.api.impl.index.DatabaseIndex;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDocument;
 import org.neo4j.kernel.api.impl.schema.populator.LuceneIndexPopulator;
 import org.neo4j.kernel.api.index.IndexUpdater;
 import org.neo4j.kernel.api.index.IndexValueValidator;
 import org.neo4j.kernel.api.index.ValueIndexReader;
 import org.neo4j.kernel.impl.index.schema.IndexUpdateIgnoreStrategy;
 import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
+import org.neo4j.values.storable.Value;
 
 class TrigramIndexPopulator extends LuceneIndexPopulator<DatabaseIndex<ValueIndexReader>> {
     private final IndexValueValidator validator;
@@ -41,11 +42,16 @@ class TrigramIndexPopulator extends LuceneIndexPopulator<DatabaseIndex<ValueInde
     }
 
     @Override
-    protected Document updateAsDocument(ValueIndexEntryUpdate<?> update) {
-        var entityId = update.getEntityId();
-        var value = update.values()[0];
+    protected LuceneDocument updateAsDocument(ValueIndexEntryUpdate update) {
+        long entityId = update.getEntityId();
+        Value value = update.values()[0];
         validator.validate(entityId, value);
-        return TrigramDocumentStructure.createLuceneDocument(entityId, value);
+        return documentsFactory.createTrigramDocument(entityId, value);
+    }
+
+    @Override
+    protected boolean usesSeparateDocuments() {
+        return true;
     }
 
     @Override

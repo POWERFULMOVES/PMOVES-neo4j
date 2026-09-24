@@ -16,9 +16,9 @@
  */
 package org.neo4j.export.providers;
 
-import org.neo4j.export.UploadCommand;
+import org.neo4j.export.Source;
 
 public interface SignedUpload {
 
-    void copy(boolean verbose, UploadCommand.Source src);
+    void copy(boolean verbose, Source src);
 }

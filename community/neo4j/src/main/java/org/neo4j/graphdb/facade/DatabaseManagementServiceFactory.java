@@ -38,20 +38,18 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 import org.neo4j.bolt.BoltServer;
 import org.neo4j.bolt.dbapi.BoltGraphDatabaseManagementServiceSPI;
+import org.neo4j.bolt.protocol.common.connector.admissioncontrol.ConnectionAdmissionControlTrackerFactory;
 import org.neo4j.bolt.transport.Netty4LoggerFactory;
 import org.neo4j.bolt.tx.TransactionManager;
 import org.neo4j.bolt.tx.TransactionManagerImpl;
 import org.neo4j.collection.Dependencies;
 import org.neo4j.common.DependencyResolver;
-import org.neo4j.common.Edition;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.configuration.connectors.BoltConnectorInternalSettings;
 import org.neo4j.configuration.connectors.HttpConnector;
 import org.neo4j.configuration.connectors.HttpsConnector;
 import org.neo4j.dbms.DatabaseStateService;
-import org.neo4j.dbms.admissioncontrol.AdmissionControlService;
-import org.neo4j.dbms.admissioncontrol.NoopAdmissionControlService;
 import org.neo4j.dbms.api.DatabaseManagementService;
 import org.neo4j.dbms.database.DatabaseContext;
 import org.neo4j.dbms.database.DatabaseContextProvider;
@@ -74,19 +72,18 @@ import org.neo4j.graphdb.spatial.Geometry;
 import org.neo4j.graphdb.spatial.Point;
 import org.neo4j.internal.collector.DataCollector;
 import org.neo4j.internal.kernel.api.procs.ProcedureCallContext;
+import org.neo4j.internal.kernel.api.security.AbstractSecurityLog;
 import org.neo4j.internal.kernel.api.security.SecurityContext;
 import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.KernelVersionProvider;
 import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.api.database.DatabaseSizeServiceImpl;
-import org.neo4j.kernel.api.impl.fulltext.FulltextAdapter;
 import org.neo4j.kernel.api.procedure.Context;
 import org.neo4j.kernel.api.procedure.GlobalProcedures;
 import org.neo4j.kernel.api.security.provider.SecurityProvider;
 import org.neo4j.kernel.impl.factory.DbmsInfo;
 import org.neo4j.kernel.impl.factory.GraphDatabaseFacade;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
-import org.neo4j.kernel.internal.Version;
 import org.neo4j.kernel.lifecycle.LifeSupport;
 import org.neo4j.kernel.lifecycle.Lifecycle;
 import org.neo4j.logging.InternalLog;
@@ -95,7 +92,6 @@ import org.neo4j.logging.Log;
 import org.neo4j.logging.internal.LogService;
 import org.neo4j.procedure.StatusDetailsAccessor;
 import org.neo4j.procedure.builtin.BuiltInDbmsProcedures;
-import org.neo4j.procedure.builtin.SpecialBuiltInProcedures;
 import org.neo4j.procedure.impl.GlobalProceduresRegistry;
 import org.neo4j.procedure.impl.ProcedureConfig;
 import org.neo4j.procedure.impl.ProcedureGraphDatabaseAPI;
@@ -158,24 +154,27 @@ public class DatabaseManagementServiceFactory {
         globalDependencies.satisfyDependency(edition.getSystemGraphComponents());
 
         var databaseContextProvider = edition.createDatabaseContextProvider(globalModule);
-        var systemDatabaseProvider = new ContextBasedSystemDatabaseProvider(databaseContextProvider);
+        var systemDatabaseProvider = new ContextBasedSystemDatabaseProvider(
+                databaseContextProvider, globalModule.getDatabaseEventListeners());
+        globalDependencies.satisfyDependency(systemDatabaseProvider);
         edition.createGlobalReadOnlyChecker(
                 systemDatabaseProvider, databaseContextProvider.databaseIdRepository(), globalModule);
         var managementService = createManagementService(globalModule, globalLife, internalLog, databaseContextProvider);
-        globalDependencies.satisfyDependencies(managementService);
+        globalDependencies.satisfyDependency(managementService);
         globalDependencies.satisfyDependency(new DatabaseSizeServiceImpl(databaseContextProvider));
         var topologyInfoService = edition.createTopologyInfoService(databaseContextProvider);
-        globalDependencies.satisfyDependencies(topologyInfoService);
+        globalDependencies.satisfyDependency(topologyInfoService);
 
         // Routing procedures depend on DatabaseResolver
         edition.createDefaultDatabaseResolver(systemDatabaseProvider);
         globalDependencies.satisfyDependency(edition.getDefaultDatabaseResolver());
 
+        // the clientRoutingDomainChecker is also used by the webserver (resolved via global dependencies)
+        // therefore shall not be moved into the edition module
         var clientRoutingDomainChecker = tryResolveOrCreate(
                 ClientRoutingDomainChecker.class,
                 globalModule.getGlobalDependencies(),
                 () -> edition.createClientRoutingDomainChecker(globalModule));
-
         var routingService = edition.createRoutingService(databaseContextProvider, clientRoutingDomainChecker);
         globalDependencies.satisfyDependency(routingService);
 
@@ -184,9 +183,10 @@ public class DatabaseManagementServiceFactory {
 
         edition.bootstrapQueryRouterServices(managementService);
 
+        globalLife.add(globalModule.getGlobalExtensions());
         edition.registerDatabaseInitializers(globalModule, systemDatabaseProvider);
 
-        edition.createSecurityModule(globalModule);
+        edition.createSecurityModule(globalModule, systemDatabaseProvider);
         SecurityProvider securityProvider = edition.getSecurityProvider();
         globalDependencies.satisfyDependencies(securityProvider.authManager());
 
@@ -194,7 +194,6 @@ public class DatabaseManagementServiceFactory {
                 globalModule, databaseContextProvider, globalDependencies, dbmsRuntimeSystemGraphComponent);
         globalDependencies.satisfyDependency(dbmsRuntimeVersionProvider);
 
-        globalLife.add(globalModule.getGlobalExtensions());
         BoltGraphDatabaseManagementServiceSPI boltGraphDatabaseManagementServiceSPI =
                 edition.createBoltDatabaseManagementServiceProvider();
 
@@ -202,9 +201,12 @@ public class DatabaseManagementServiceFactory {
                 new TransactionManagerImpl(boltGraphDatabaseManagementServiceSPI, globalModule.getGlobalClock());
         globalDependencies.satisfyDependency(transactionManager);
 
-        var acs =
-                tryResolveOrCreate(AdmissionControlService.class, globalDependencies, NoopAdmissionControlService::new);
-        var boltServer = createBoltServer(globalModule, edition, transactionManager, routingService, config, acs);
+        var connectionTenantResolverFactory = tryResolveOrCreate(
+                ConnectionAdmissionControlTrackerFactory.class,
+                globalDependencies,
+                ConnectionAdmissionControlTrackerFactory::noop);
+        var boltServer = createBoltServer(
+                globalModule, edition, transactionManager, routingService, config, connectionTenantResolverFactory);
 
         globalLife.add(boltServer);
         globalDependencies.satisfyDependency(boltServer);
@@ -244,7 +246,8 @@ public class DatabaseManagementServiceFactory {
                 globalModule.getDatabaseEventListeners(),
                 globalModule.getTransactionEventListeners(),
                 internalLog,
-                globalModule.getGlobalConfig());
+                globalModule.getGlobalConfig(),
+                globalModule.getExceptionHandlerService());
     }
 
     private Lifecycle createWebServer(
@@ -278,7 +281,7 @@ public class DatabaseManagementServiceFactory {
         try {
             globalLife.start();
 
-            DatabaseStateService databaseStateService =
+            DatabaseStateService<?> databaseStateService =
                     globalModule.getGlobalDependencies().resolveDependency(DatabaseStateService.class);
 
             verifySystemDatabaseStart(databaseContextProvider, databaseStateService);
@@ -304,16 +307,20 @@ public class DatabaseManagementServiceFactory {
     }
 
     private static void verifySystemDatabaseStart(
-            DatabaseContextProvider<?> databaseContextProvider, DatabaseStateService dbStateService) {
+            DatabaseContextProvider<?> databaseContextProvider, DatabaseStateService<?> dbStateService) {
         Optional<? extends DatabaseContext> databaseContext =
                 databaseContextProvider.getDatabaseContext(NAMED_SYSTEM_DATABASE_ID);
         if (databaseContext.isEmpty()) {
-            throw new UnableToStartDatabaseException(SYSTEM_DATABASE_NAME + " not found.");
+            throw UnableToStartDatabaseException.internalError(
+                    DatabaseManagementService.class.getSimpleName(), SYSTEM_DATABASE_NAME + " not found.");
         }
 
         Optional<Throwable> failure = dbStateService.causeOfFailure(NAMED_SYSTEM_DATABASE_ID);
         if (failure.isPresent()) {
-            throw new UnableToStartDatabaseException(SYSTEM_DATABASE_NAME + " failed to start.", failure.get());
+            throw UnableToStartDatabaseException.internalError(
+                    DatabaseManagementService.class.getSimpleName(),
+                    SYSTEM_DATABASE_NAME + " failed to start.",
+                    failure.get());
         }
     }
 
@@ -343,13 +350,12 @@ public class DatabaseManagementServiceFactory {
             LogService logService = globalModule.getLogService();
             InternalLog internalLog = logService.getInternalLog(GlobalProcedures.class);
             Log proceduresLog = logService.getUserLog(GlobalProcedures.class);
+            AbstractSecurityLog securityLog =
+                    globalModule.getGlobalDependencies().resolveDependency(AbstractSecurityLog.class);
 
             ProcedureConfig procedureConfig = editionModule.getProcedureConfig(globalConfig);
-            Edition neo4jEdition = globalModule.getDbmsInfo().edition;
-            SpecialBuiltInProcedures builtInProcedures =
-                    SpecialBuiltInProcedures.from(Version.getNeo4jVersion(), neo4jEdition.toString());
             GlobalProceduresRegistry globalProcedures =
-                    new GlobalProceduresRegistry(builtInProcedures, proceduresDirectory, internalLog, procedureConfig);
+                    new GlobalProceduresRegistry(proceduresDirectory, internalLog, securityLog, procedureConfig);
 
             try (var registry = globalProcedures.bulk()) {
                 registry.registerType(Node.class, NTNode);
@@ -395,15 +401,13 @@ public class DatabaseManagementServiceFactory {
                 registry.registerComponent(URLAccessChecker.class, Context::urlAccessChecker, true);
                 registry.registerComponent(ProcedureCallContext.class, Context::procedureCallContext, true);
                 registry.registerComponent(
-                        FulltextAdapter.class,
-                        ctx -> ctx.dependencyResolver().resolveDependency(FulltextAdapter.class),
-                        true);
-                registry.registerComponent(
                         GraphDatabaseService.class,
                         ctx -> new ProcedureGraphDatabaseAPI(
                                 ctx.graphDatabaseAPI(),
                                 new ProcedureLoginContextTransformer(ctx),
-                                ctx.dependencyResolver().resolveDependency(Config.class)),
+                                ctx.dependencyResolver().resolveDependency(Config.class),
+                                globalModule.getGlobalClock(),
+                                ctx.multiVersioned()),
                         true);
                 registry.registerComponent(ValueMapper.class, Context::valueMapper, true);
                 registry.registerComponent(ProcedureMemory.class, new ProcedureMemoryProvider(), true);
@@ -413,7 +417,8 @@ public class DatabaseManagementServiceFactory {
                     editionModule.registerProcedures(
                             registry, procedureConfig, globalModule, databaseContextProvider, routingService);
                 } catch (KernelException e) {
-                    internalLog.error("Failed to register built-in edition procedures at start up: " + e.getMessage());
+                    throw new IllegalStateException(
+                            "Failed to register built-in edition procedures at start up!\n\nCause: " + e.getMessage());
                 }
             }
             globalModule.getGlobalLife().add(globalProcedures);
@@ -422,8 +427,8 @@ public class DatabaseManagementServiceFactory {
         };
         GlobalProcedures procedures = tryResolveOrCreate(
                 GlobalProcedures.class, globalModule.getExternalDependencyResolver(), procedureInitializer);
-        if (procedures instanceof Consumer) {
-            ((Consumer) procedures).accept(procedureInitializer);
+        if (procedures instanceof Consumer procedureConsumer) {
+            procedureConsumer.accept(procedureInitializer);
         }
         globalModule.getGlobalDependencies().satisfyDependency(procedures);
     }
@@ -434,7 +439,7 @@ public class DatabaseManagementServiceFactory {
             TransactionManager transactionManager,
             RoutingService routingService,
             Config config,
-            AdmissionControlService admissionControlService) {
+            ConnectionAdmissionControlTrackerFactory connectionTenantResolverFactory) {
 
         // Must be called before loading any Netty classes in order to override the factory
         InternalLoggerFactory.setDefaultFactory(
@@ -459,11 +464,12 @@ public class DatabaseManagementServiceFactory {
                 globalModule.getGlobalDependencies(),
                 edition.getBoltAuthManager(globalModule.getGlobalDependencies()),
                 edition.getBoltInClusterAuthManager(),
-                edition.getBoltLoopbackAuthManager(),
+                edition.getBoltDomainSocketAuthManager(),
                 globalModule.getMemoryPools(),
                 routingService,
                 edition.getDefaultDatabaseResolver(),
-                admissionControlService);
+                connectionTenantResolverFactory,
+                globalModule.getGlobalDependencies().resolveDependency(AbstractSecurityLog.class));
     }
 
     private static void dumpDbmsInfo(InternalLog log, GraphDatabaseAPI system) {

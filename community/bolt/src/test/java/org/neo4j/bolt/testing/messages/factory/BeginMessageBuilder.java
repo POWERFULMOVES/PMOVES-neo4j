@@ -24,7 +24,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
-import org.neo4j.bolt.negotiation.ProtocolVersion;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 import org.neo4j.bolt.protocol.v44.BoltProtocolV44;
 import org.neo4j.bolt.protocol.v50.BoltProtocolV50;
 import org.neo4j.packstream.io.PackstreamBuf;
@@ -79,6 +79,6 @@ public final class BeginMessageBuilder implements NotificationsMessageBuilder<Be
         return PackstreamBuf.allocUnpooled()
                 .writeStructHeader(new StructHeader(1, MESSAGE_TAG_BEGIN))
                 .writeMap(meta)
-                .getTarget();
+                .raw();
     }
 }

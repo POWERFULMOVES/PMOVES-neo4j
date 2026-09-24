@@ -32,12 +32,14 @@ import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.KernelVersion;
-import org.neo4j.kernel.database.MetadataCache;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
-import org.neo4j.kernel.impl.transaction.log.files.TransactionLogInitializer;
+import org.neo4j.storageengine.api.LogMetadataProvider;
+import org.neo4j.storageengine.api.LogMetadataProviderImpl;
 import org.neo4j.storageengine.api.MetadataProvider;
 import org.neo4j.storageengine.api.StorageEngineFactory;
 import org.neo4j.storageengine.api.TransactionIdStore;
+import org.neo4j.wal.LogTailMetadata;
+import org.neo4j.wal.entry.LogFormat;
+import org.neo4j.wal.files.TransactionLogInitializer;
 
 class LogsMigrator {
     private static final String MIGRATION_CHECKPOINT = "Migration checkpoint.";
@@ -111,12 +113,17 @@ class LogsMigrator {
         }
 
         MigrationTransactionIds migrate() {
+            LogMetadataProvider logMetadataProvider = new LogMetadataProviderImpl(logTailSupplier.get());
             try (MetadataProvider store = getMetaDataStore()) {
                 // Always migrate to the latest kernel version
-                MetadataCache metadataCache = new MetadataCache(KernelVersion.getLatestVersion(config));
+                KernelVersion latestVersion = KernelVersion.getLatestVersion(config);
+                logMetadataProvider.setKernelVersion(latestVersion);
+                // Picking latest logformat while protecting from downgrade if feature flag has changed
+                logMetadataProvider.setCurrentLogFormat(LogFormat.pickLogFormatOnUpgrade(
+                        latestVersion, latestVersion, config, logMetadataProvider.getCurrentLogFormat()));
 
                 TransactionLogInitializer logInitializer =
-                        new TransactionLogInitializer(fs, store, storageEngineFactory, metadataCache);
+                        new TransactionLogInitializer(fs, store, logMetadataProvider, storageEngineFactory);
                 Path transactionLogsDirectory = databaseLayout.getTransactionLogsDirectory();
 
                 if (logsMissing) {
@@ -126,39 +133,16 @@ class LogsMigrator {
                     return new MigrationTransactionIds(
                             TransactionIdStore.BASE_TX_ID,
                             logInitializer.initializeEmptyLogFile(
-                                    databaseLayout, transactionLogsDirectory, MIGRATION_CHECKPOINT));
+                                    databaseLayout, transactionLogsDirectory, MIGRATION_CHECKPOINT, config));
                 } else {
                     return new MigrationTransactionIds(
                             lastTxId,
                             logInitializer.migrateExistingLogFiles(
-                                    databaseLayout, transactionLogsDirectory, MIGRATION_CHECKPOINT));
+                                    databaseLayout, transactionLogsDirectory, MIGRATION_CHECKPOINT, config));
                 }
             } catch (Exception exception) {
                 throw new UnableToMigrateException(
                         "Failure on attempt to migrate transaction logs to new version.", exception);
-            }
-        }
-
-        MigrationTransactionIds upgrade() {
-            if (!logsMissing) {
-                return new MigrationTransactionIds(lastTxId, lastTxId);
-            }
-
-            // The log files are missing entirely, but since we made it through the check,
-            // we were told to not think of this as an error condition,
-            // so we instead initialize an empty log file.
-            try (MetadataProvider store = getMetaDataStore()) {
-                MetadataCache metadataCache = new MetadataCache(logTailSupplier.get());
-                TransactionLogInitializer logInitializer =
-                        new TransactionLogInitializer(fs, store, storageEngineFactory, metadataCache);
-                Path transactionLogsDirectory = databaseLayout.getTransactionLogsDirectory();
-                return new MigrationTransactionIds(
-                        TransactionIdStore.BASE_TX_ID,
-                        logInitializer.initializeEmptyLogFile(
-                                databaseLayout, transactionLogsDirectory, MIGRATION_CHECKPOINT));
-            } catch (Exception exception) {
-                throw new UnableToMigrateException(
-                        "Failure on attempt to upgrade transaction logs to new version.", exception);
             }
         }
     }
@@ -171,7 +155,6 @@ class LogsMigrator {
                 pageCache,
                 DatabaseReadOnlyChecker.readOnly(),
                 contextFactory,
-                logTailSupplier.get(),
                 pageCacheTracer);
     }
 

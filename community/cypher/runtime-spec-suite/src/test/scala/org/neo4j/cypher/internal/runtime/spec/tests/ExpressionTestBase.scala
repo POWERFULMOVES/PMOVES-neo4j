@@ -24,18 +24,22 @@ import org.neo4j.cypher.internal.CypherRuntime
 import org.neo4j.cypher.internal.RuntimeContext
 import org.neo4j.cypher.internal.expressions.HasALabel
 import org.neo4j.cypher.internal.expressions.HasALabelOrType
+import org.neo4j.cypher.internal.expressions.StringInterpolation
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.andsReorderable
 import org.neo4j.cypher.internal.logical.plans.IndexOrderNone
+import org.neo4j.cypher.internal.notification.RuntimeUnsatisfiableRelationshipTypeExpression
 import org.neo4j.cypher.internal.runtime.SelectivityTracker
 import org.neo4j.cypher.internal.runtime.ast.RuntimeConstant
 import org.neo4j.cypher.internal.runtime.spec.Edition
 import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
+import org.neo4j.exceptions.CypherTypeException
 import org.neo4j.exceptions.EntityNotFoundException
 import org.neo4j.graphdb.Label.label
 import org.neo4j.graphdb.Node
 import org.neo4j.graphdb.Relationship
 import org.neo4j.graphdb.RelationshipType
+import org.neo4j.internal.kernel.api.exceptions.schema.IllegalTokenNameException
 import org.neo4j.internal.kernel.api.procs.Neo4jTypes
 import org.neo4j.internal.kernel.api.procs.QualifiedName
 import org.neo4j.internal.kernel.api.procs.UserAggregationReducer
@@ -52,6 +56,8 @@ import org.neo4j.values.storable.Values.intValue
 import org.neo4j.values.virtual.VirtualValues.list
 
 import java.util.Locale
+
+object ExpressionTestBase
 
 abstract class ExpressionTestBase[CONTEXT <: RuntimeContext](edition: Edition[CONTEXT], runtime: CypherRuntime[CONTEXT])
     extends RuntimeTestSuite(edition, runtime) {
@@ -86,6 +92,8 @@ abstract class ExpressionTestBase[CONTEXT <: RuntimeContext](edition: Edition[CO
         override def create(ctx: Context): UserAggregator = ???
       }
     )
+    // Refresh the transaction so its ProcedureView snapshot includes the function and aggregation we just registered.
+    restartTx()
   }
 
   test("hasLabel on top of allNodeScan") {
@@ -776,7 +784,21 @@ abstract class ExpressionTestBase[CONTEXT <: RuntimeContext](edition: Edition[CO
     an[org.neo4j.exceptions.ArithmeticException] should be thrownBy consume(runtimeResult)
   }
 
-  test("AND: should return FALSE if at least one predicate is FALSE") {
+  test("AND: should return FALSE if first predicate is FALSE") {
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("y")
+      .projection("FALSE AND 1/x > 1 AND TRUE AND FALSE AS y")
+      .input(variables = Seq("x"))
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime, inputValues(Array[Any](1), Array[Any](0), Array[Any](1)))
+
+    runtimeResult should beColumns("y").withRows(singleColumn(List(false, false, false)))
+  }
+
+  test("AND: should return fail if first predicate fails I") {
 
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
@@ -787,10 +809,10 @@ abstract class ExpressionTestBase[CONTEXT <: RuntimeContext](edition: Edition[CO
 
     val runtimeResult = execute(logicalQuery, runtime, inputValues(Array[Any](1), Array[Any](0), Array[Any](1)))
 
-    runtimeResult should beColumns("y").withRows(singleColumn(List(false, false, false)))
+    an[org.neo4j.exceptions.ArithmeticException] should be thrownBy consume(runtimeResult)
   }
 
-  test("AND: should fail if one predicate fails and no other is FALSE") {
+  test("AND: should fail l if first predicate fails II") {
 
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
@@ -818,7 +840,7 @@ abstract class ExpressionTestBase[CONTEXT <: RuntimeContext](edition: Edition[CO
     an[org.neo4j.exceptions.ArithmeticException] should be thrownBy consume(runtimeResult)
   }
 
-  test("Reorderable AND: should return FALSE if at least one predicate is FALSE") {
+  test("Reorderable AND: should return FALSE or throw if one argument is FALSE and one throws") {
 
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
@@ -829,7 +851,11 @@ abstract class ExpressionTestBase[CONTEXT <: RuntimeContext](edition: Edition[CO
 
     val runtimeResult = execute(logicalQuery, runtime, inputValues(Array[Any](1), Array[Any](0), Array[Any](1)))
 
-    runtimeResult should beColumns("y").withRows(singleColumn(List(false, false, false)))
+    try {
+      runtimeResult should beColumns("y").withRows(singleColumn(List(false, false, false)))
+    } catch {
+      case _: org.neo4j.exceptions.ArithmeticException => // ignore, this is fine
+    }
   }
 
   test("Reorderable AND: should fail if one predicate fails and no other is FALSE") {
@@ -861,7 +887,7 @@ abstract class ExpressionTestBase[CONTEXT <: RuntimeContext](edition: Edition[CO
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("result")
       .aggregation(Seq.empty, Seq("count(*) AS result"))
-      .filterExpressionOrString(andsReorderable("n.prop > 25", "n.prop < 75"), "n.prop <> 42")
+      .filter(andsReorderable("n.prop > 25", "n.prop < 75"), "n.prop <> 42")
       .allNodeScan("n")
       .build()
 
@@ -890,7 +916,21 @@ abstract class ExpressionTestBase[CONTEXT <: RuntimeContext](edition: Edition[CO
     an[org.neo4j.exceptions.ArithmeticException] should be thrownBy consume(runtimeResult)
   }
 
-  test("OR: should return TRUE if at least one predicate is TRUE") {
+  test("OR: should not fail if first predicate is TRUE") {
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("y")
+      .projection("TRUE OR 1/x > 0 OR FALSE OR TRUE AS y")
+      .input(variables = Seq("x"))
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime, inputValues(Array[Any](1), Array[Any](0), Array[Any](1)))
+
+    runtimeResult should beColumns("y").withRows(singleColumn(List(true, true, true)))
+  }
+
+  test("OR: should fail if first predicate fails I") {
 
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
@@ -901,10 +941,10 @@ abstract class ExpressionTestBase[CONTEXT <: RuntimeContext](edition: Edition[CO
 
     val runtimeResult = execute(logicalQuery, runtime, inputValues(Array[Any](1), Array[Any](0), Array[Any](1)))
 
-    runtimeResult should beColumns("y").withRows(singleColumn(List(true, true, true)))
+    an[org.neo4j.exceptions.ArithmeticException] should be thrownBy consume(runtimeResult)
   }
 
-  test("OR: should fail if one predicate fails and no other is FALSE") {
+  test("OR: should fail if first predicate fails II") {
 
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
@@ -934,7 +974,7 @@ abstract class ExpressionTestBase[CONTEXT <: RuntimeContext](edition: Edition[CO
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("n")
-      .filterExpression(hasAnyLabel(varFor("n"), "C", "B"))
+      .filter(hasAnyLabel(varFor("n"), "C", "B"))
       .allNodeScan("n")
       .build()
 
@@ -963,7 +1003,7 @@ abstract class ExpressionTestBase[CONTEXT <: RuntimeContext](edition: Edition[CO
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("n")
-      .filterExpression(hasAnyLabel(varFor("n"), "C", "B"))
+      .filter(hasAnyLabel(varFor("n"), "C", "B"))
       .input(nodes = Seq("n"))
       .build()
 
@@ -993,7 +1033,7 @@ abstract class ExpressionTestBase[CONTEXT <: RuntimeContext](edition: Edition[CO
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("n")
-      .filterExpression(hasDynamicLabels(varFor("n"), prop("n", "foo")))
+      .filter(hasDynamicLabels(varFor("n"), prop("n", "foo")))
       .input(nodes = Seq("n"))
       .build()
 
@@ -1021,7 +1061,7 @@ abstract class ExpressionTestBase[CONTEXT <: RuntimeContext](edition: Edition[CO
 
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("n")
-      .filterExpression(hasAnyDynamicLabel(varFor("n"), prop("n", "prop")))
+      .filter(hasAnyDynamicLabel(varFor("n"), prop("n", "prop")))
       .input(nodes = Seq("n"))
       .build()
 
@@ -1029,6 +1069,73 @@ abstract class ExpressionTestBase[CONTEXT <: RuntimeContext](edition: Edition[CO
 
     val expected = Seq(nodes(0), nodes(2))
     result should beColumns("n").withRows(singleColumn(expected))
+  }
+
+  test("should fail when trying to filter with a set of invalid dynamic labels (all)") {
+    // given
+    val n = givenGraph {
+      tx.createNode(label("C"))
+    }
+
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("n")
+      .filter(hasDynamicLabels(varFor("n"), varFor("label")))
+      .input(nodes = Array("n"), variables = Array("label"))
+      .build()
+
+    def theDynamicLabel(v: Any): Unit = consume(execute(logicalQuery, runtime, inputValues(Array(n, v))))
+
+    // then
+    the[CypherTypeException] thrownBy theDynamicLabel(
+      1
+    ) should have message "Expected node label to be a string or list of strings."
+    the[CypherTypeException] thrownBy theDynamicLabel(
+      Array(1)
+    ) should have message "Expected node label to be a string or list of strings."
+    the[CypherTypeException] thrownBy theDynamicLabel(
+      null
+    ) should have message "Expected node label to be a string or list of strings."
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicLabel(""))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicLabel("\u0000"))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicLabel(Array("\u0000")))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicLabel(Array("\u0000", "\u0000")))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicLabel(Array("", "\u0000")))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicLabel(Array("C", "\u0000")))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicLabel(Array("D", "\u0000")))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicLabel(Array("", "C")))
+  }
+
+  test("should fail when trying to filter with a set of invalid dynamic labels (any)") {
+    // given
+    val n = givenGraph {
+      tx.createNode(label("C"))
+    }
+
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("n")
+      .filter(hasAnyDynamicLabel(varFor("n"), varFor("label")))
+      .input(nodes = Array("n"), variables = Array("label"))
+      .build()
+
+    def theDynamicLabel(v: Any): Unit = consume(execute(logicalQuery, runtime, inputValues(Array(n, v))))
+
+    the[CypherTypeException] thrownBy theDynamicLabel(
+      1
+    ) should have message "Expected node label to be a string or list of strings."
+    the[CypherTypeException] thrownBy theDynamicLabel(
+      Array(1)
+    ) should have message "Expected node label to be a string or list of strings."
+    the[CypherTypeException] thrownBy theDynamicLabel(
+      null
+    ) should have message "Expected node label to be a string or list of strings."
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicLabel(""))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicLabel("\u0000"))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicLabel(Array("\u0000")))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicLabel(Array("\u0000", "\u0000")))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicLabel(Array("", "\u0000")))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicLabel(Array("C", "\u0000")))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicLabel(Array("D", "\u0000")))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicLabel(Array("", "C")))
   }
 
   test("should handle non-existing node with has any label expression") {
@@ -1043,7 +1150,7 @@ abstract class ExpressionTestBase[CONTEXT <: RuntimeContext](edition: Edition[CO
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("n")
-      .filterExpression(hasAnyLabel("n", "Label"))
+      .filter(hasAnyLabel("n", "Label"))
       .input(nodes = Seq("n"))
       .build()
 
@@ -1071,7 +1178,7 @@ abstract class ExpressionTestBase[CONTEXT <: RuntimeContext](edition: Edition[CO
 
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("r")
-      .filterExpression(hasAnyDynamicType(varFor("r"), prop("s", "prop")))
+      .filter(hasAnyDynamicType(varFor("r"), prop("s", "prop")))
       .expand("(s)-[r]->(t)")
       .nodeByLabelScan("s", "S")
       .build()
@@ -1099,7 +1206,7 @@ abstract class ExpressionTestBase[CONTEXT <: RuntimeContext](edition: Edition[CO
 
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("r")
-      .filterExpression(hasDynamicType(varFor("r"), prop("s", "prop")))
+      .filter(hasDynamicType(varFor("r"), prop("s", "prop")))
       .expand("(s)-[r]->(t)")
       .nodeByLabelScan("s", "S")
       .build()
@@ -1107,6 +1214,95 @@ abstract class ExpressionTestBase[CONTEXT <: RuntimeContext](edition: Edition[CO
     val runtimeResult = execute(logicalQuery, runtime)
 
     runtimeResult should beColumns("r").withRows(singleColumn(Seq(rels(0))))
+  }
+
+  test("should throw the correct error if the dynamic type is invalid (all)") {
+    // given
+    val rel = givenGraph {
+      val a = tx.createNode()
+      tx.createNode().createRelationshipTo(a, RelationshipType.withName("R"))
+    }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("r")
+      .filter(hasDynamicType(varFor("r"), varFor("type")))
+      .input(relationships = Seq("r"), variables = Seq("type"))
+      .build()
+
+    def theResultFor(v: Any) = execute(logicalQuery, runtime, inputValues(Array(rel, v)))
+    def theDynamicType(v: Any): Unit = consume(theResultFor(v))
+
+    // then
+    theResultFor(Array[String]("C", "C")) should beColumns("r").withNoNotifications()
+    theResultFor(Array[String]("C", "D")) should beColumns("r").withNotifications(
+      RuntimeUnsatisfiableRelationshipTypeExpression(List("C", "D"))
+    )
+    the[CypherTypeException] thrownBy theDynamicType(
+      1
+    ) should have message "Expected relationship type to be a string or list of strings."
+    the[CypherTypeException] thrownBy theDynamicType(
+      Array(1)
+    ) should have message "Expected relationship type to be a string or list of strings."
+    the[CypherTypeException] thrownBy theDynamicType(
+      null
+    ) should have message "Expected relationship type to be a string or list of strings."
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicType(""))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicType("\u0000"))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicType(Array("\u0000")))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicType(Array("\u0000", "\u0000")))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicType(Array("", "\u0000")))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicType(Array("C", "\u0000")))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicType(Array("", "C")))
+  }
+
+  test("should throw the correct error if the dynamic type is invalid (any)") {
+    // given
+    val rel = givenGraph {
+      val a = tx.createNode()
+      tx.createNode().createRelationshipTo(a, RelationshipType.withName("R"))
+    }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("r")
+      .filter(hasAnyDynamicType(varFor("r"), varFor("type")))
+      .input(relationships = Seq("r"), variables = Seq("type"))
+      .build()
+
+    def theDynamicType(v: Any) = consume(execute(logicalQuery, runtime, inputValues(Array(rel, v))))
+
+    // then
+    the[CypherTypeException] thrownBy theDynamicType(
+      1
+    ) should have message "Expected relationship type to be a string or list of strings."
+    the[CypherTypeException] thrownBy theDynamicType(
+      Array(1)
+    ) should have message "Expected relationship type to be a string or list of strings."
+    the[CypherTypeException] thrownBy theDynamicType(
+      null
+    ) should have message "Expected relationship type to be a string or list of strings."
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicType(""))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicType("\u0000"))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicType(Array("\u0000")))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicType(Array("\u0000", "\u0000")))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicType(Array("", "\u0000")))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicType(Array("C", "\u0000")))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicType(Array("", "C")))
+    // a match on an earlier element must not skip validation of later elements
+    the[CypherTypeException] thrownBy theDynamicType(
+      Array[Any]("R", 1)
+    ) should have message "Expected relationship type to be a string or list of strings."
+    the[CypherTypeException] thrownBy theDynamicType(
+      Array[Any]("R", null)
+    ) should have message "Expected relationship type to be a string or list of strings."
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicType(Array("R", "\u0000")))
+    an[IllegalTokenNameException] shouldBe thrownBy(theDynamicType(Array("R", "")))
+    // valid lists still match regardless of element order
+    execute(logicalQuery, runtime, inputValues(Array(rel, Array("R", "S")))) should
+      beColumns("r").withRows(singleColumn(Seq(rel)))
+    execute(logicalQuery, runtime, inputValues(Array(rel, Array("S", "R")))) should
+      beColumns("r").withRows(singleColumn(Seq(rel)))
   }
 
   test("should get type of relationship") {
@@ -1128,6 +1324,22 @@ abstract class ExpressionTestBase[CONTEXT <: RuntimeContext](edition: Edition[CO
 
     // then
     runtimeResult should beColumns("t").withRows(singleColumn((1 to size).map(_ => "TO")))
+  }
+
+  test("should compile type() when no operator in the pipeline reads from the store") {
+    // given an empty db: the relationship comes from a projected null rather than a scan or expand, so nothing
+    // else in the fused pipeline declares the data-read accessor that type() needs.
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("t")
+      .projection("type(r) AS t")
+      .projection("NULL AS r")
+      .limit(0)
+      .argument()
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    runtimeResult should beColumns("t").withNoRows()
   }
 
   test("should be able to access what runtime that was used in a UDF") {
@@ -1310,7 +1522,8 @@ abstract class ExpressionTestBase[CONTEXT <: RuntimeContext](edition: Edition[CO
       .argument()
       .build()
 
-    execute(query, runtime) should beColumns("var1").withSingleRow(false)
+    val runtimeResult = execute(query, runtime)
+    an[org.neo4j.exceptions.CypherTypeException] should be thrownBy consume(runtimeResult)
   }
 }
 
@@ -1578,7 +1791,7 @@ trait ExpressionWithTxStateChangesTests[CONTEXT <: RuntimeContext] {
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("x")
-      .filterExpression(and(
+      .filter(and(
         allInList(varFor("a1"), listOf(varFor("x")), trueLiteral),
         RuntimeConstant(varFor("foo"), trueLiteral)
       ))
@@ -1639,6 +1852,32 @@ trait ExpressionWithTxStateChangesTests[CONTEXT <: RuntimeContext] {
     an[org.neo4j.exceptions.ArithmeticException] should be thrownBy consume(execute(logicalQuery, runtime))
   }
 
+  test("should not overflow when returning size of a ridiculously huge list") {
+    // given, an empty db
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("size")
+      .projection(s"size(range(${Long.MinValue} ,${Long.MaxValue}))  AS size")
+      .argument()
+      .build()
+
+    // then
+    an[org.neo4j.exceptions.ArithmeticException] should be thrownBy consume(execute(logicalQuery, runtime))
+  }
+
+  test("should not overflow when returning size of a too huge negative range list") {
+    // given, an empty db
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("size")
+      .projection(s"size(range(0, ${Long.MinValue}, -1))  AS size")
+      .argument()
+      .build()
+
+    // then
+    an[org.neo4j.exceptions.ArithmeticException] should be thrownBy consume(execute(logicalQuery, runtime))
+  }
+
   test("should be able to index into a huge list") {
     // given, an empty db
     // when
@@ -1652,5 +1891,42 @@ trait ExpressionWithTxStateChangesTests[CONTEXT <: RuntimeContext] {
 
     // then
     result should beColumns("last").withSingleRow(Values.longValue(Long.MaxValue))
+  }
+
+  test("should evaluate string interpolation") {
+    // given, an empty db
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("result")
+      .projection(Map("result" -> StringInterpolation(Seq(literal("a-"), literal("-b")), Seq(varFor("x")))(pos)))
+      .unwind("[5] AS x")
+      .argument()
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("result").withSingleRow("a-5-b")
+  }
+
+  test("should evaluate string interpolation with a null embedded expression to null") {
+    // given, an empty db
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("result")
+      .projection(Map(
+        "result" -> StringInterpolation(
+          Seq(literal("a-"), literal("-b-"), literal("-c")),
+          Seq(varFor("x"), literal(null))
+        )(pos)
+      ))
+      .unwind("[5] AS x")
+      .argument()
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("result").withSingleRow(null)
   }
 }

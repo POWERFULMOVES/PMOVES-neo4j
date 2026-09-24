@@ -22,7 +22,6 @@ package org.neo4j.bolt.protocol.common.fsm.response;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.util.ReferenceCountUtil;
-import java.io.Closeable;
 import java.util.LinkedList;
 import java.util.List;
 import org.neo4j.bolt.protocol.common.connector.connection.Connection;
@@ -32,7 +31,7 @@ import org.neo4j.packstream.signal.FrameSignal;
 import org.neo4j.packstream.struct.StructHeader;
 import org.neo4j.values.AnyValue;
 
-public class NetworkRecordHandler implements RecordHandler, Closeable {
+public final class NetworkRecordHandler implements RecordHandler {
     public static final short RECORD_TAG = 0x71;
 
     private final Connection connection;
@@ -56,7 +55,7 @@ public class NetworkRecordHandler implements RecordHandler, Closeable {
         // if no buffer has been allocated yet (e.g. because a prior record was flushed or this is
         // the first record), we'll allocate a new instance
         if (this.buffer == null) {
-            this.buffer = PackstreamBuf.wrap(connection.channel().alloc().buffer(bufferSize));
+            this.buffer = PackstreamBuf.wrap(connection.allocator().buffer(bufferSize));
             this.writerContext = connection.writerContext(this.buffer);
         }
 
@@ -70,12 +69,12 @@ public class NetworkRecordHandler implements RecordHandler, Closeable {
 
     @Override
     public void onCompleted() {
-        var buffer = this.buffer.getTarget();
+        var buffer = this.buffer.raw();
 
         this.pendingMessages.add(buffer.readRetainedSlice(buffer.readableBytes()));
         buffer.markWriterIndex();
 
-        if (this.flushThreshold == 0 || this.buffer.getTarget().writerIndex() >= this.flushThreshold) {
+        if (this.flushThreshold == 0 || this.buffer.raw().writerIndex() >= this.flushThreshold) {
             // if there is no flush threshold, or we have exceeded the configured amount, we'll flush
             // the record into the network pipeline - this is necessary as writes and especially
             // flushing can be somewhat costly
@@ -122,5 +121,22 @@ public class NetworkRecordHandler implements RecordHandler, Closeable {
         // write any pending records to the pipeline without explicitly flushing - this will always
         // be followed by a result message and a flush call
         this.writePending();
+    }
+
+    public static class Factory implements RecordHandler.Factory {
+        private final Connection connection;
+        private final int bufferSize;
+        private final int flushThreshold;
+
+        public Factory(Connection connection, int bufferSize, int flushThreshold) {
+            this.connection = connection;
+            this.bufferSize = bufferSize;
+            this.flushThreshold = flushThreshold;
+        }
+
+        @Override
+        public NetworkRecordHandler newInstance(int numberOfFields) {
+            return new NetworkRecordHandler(connection, numberOfFields, bufferSize, flushThreshold);
+        }
     }
 }

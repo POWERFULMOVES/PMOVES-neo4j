@@ -38,7 +38,18 @@ case class CachedProperties(entries: Map[LogicalVariable, CachedProperties.Entry
               Set(cachedProperty.propertyKey)
             ))
         }
-      case (acc, _) => acc
+    }
+    CachedProperties(updatedEntries)
+  }
+
+  def add(
+    logicalVariable: LogicalVariable,
+    entityType: EntityType,
+    propertyKeys: Set[PropertyKeyName]
+  ): CachedProperties = {
+    val updatedEntries = entries.updatedWith(logicalVariable) {
+      case Some(entry) => Some(entry.copy(properties = entry.properties.union(propertyKeys)))
+      case None        => Some(Entry(logicalVariable, entityType, propertyKeys))
     }
     CachedProperties(updatedEntries)
   }
@@ -116,6 +127,24 @@ case class CachedProperties(entries: Map[LogicalVariable, CachedProperties.Entry
     )
   }
 
+  /**
+   * This method only retains the variables and properties present in the map. It will prune out everything else.
+   * This is currently useful in very few and specific cases, where the runtime clears up memory to only retain grouping keys required in an eager aggregation.
+   *
+   * @param variableToPropertyNames - the variables and properties to retain.
+   * @return pruned cached properties
+   */
+  def retain(variableToPropertyNames: Map[LogicalVariable, Set[PropertyKeyName]]): CachedProperties = {
+    CachedProperties(
+      this.entries.collect {
+        case (variable, entry) if variableToPropertyNames.contains(variable) =>
+          variable -> entry.copy(properties = variableToPropertyNames(variable))
+      }
+    )
+  }
+
+  def nonEmpty: Boolean = this.entries.nonEmpty
+  def isEmpty: Boolean = this.entries.isEmpty
 }
 
 object CachedProperties {
@@ -137,7 +166,7 @@ object CachedProperties {
     }
 
     // TODO: do we need to check the consistency of originalEntity and entityType?
-    def union(otherEntry: Entry): Entry =
+    infix def union(otherEntry: Entry): Entry =
       copy(properties = properties.union(otherEntry.properties))
 
   }

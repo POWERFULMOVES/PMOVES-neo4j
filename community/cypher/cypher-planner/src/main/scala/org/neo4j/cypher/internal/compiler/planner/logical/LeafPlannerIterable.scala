@@ -20,13 +20,9 @@
 package org.neo4j.cypher.internal.compiler.planner.logical
 
 import org.neo4j.cypher.internal.compiler.planner.logical.ordering.InterestingOrderConfig
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.leafplanner.LeafPlanner
 import org.neo4j.cypher.internal.ir.QueryGraph
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
-
-/**
- * @param groupedPlans for each unique combination of available symbols, all plans that solve these symbols.
- */
-case class PlansPerAvailableSymbols(groupedPlans: Iterable[Seq[LogicalPlan]])
 
 trait LeafPlannerIterable {
 
@@ -50,6 +46,18 @@ case class LeafPlannerList(leafPlanners: IndexedSeq[LeafPlanner]) extends LeafPl
   }
 }
 
+/**
+ * A LeafPlannerIterable that first tries the leaf planners in the priority list. If they produce
+ * any candidates, those are returned exclusively — the fallback is not consulted.
+ *
+ * Any symbols not directly covered by a priority leaf plan are expected to be reachable via
+ * expansion along node connections within the same connected component.
+ *
+ * The fallback is only used when the priority planners produce no candidates at all.
+ *
+ * @param priority the preferred leaf planners, which will be tried first
+ * @param fallback the alternative leaf planners, which will only be tried if the priority leaf planners return no candidates
+ */
 case class PriorityLeafPlannerList(priority: LeafPlannerIterable, fallback: LeafPlannerIterable)
     extends LeafPlannerIterable {
 

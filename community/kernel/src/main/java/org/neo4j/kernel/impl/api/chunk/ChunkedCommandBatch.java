@@ -28,6 +28,7 @@ import org.neo4j.common.Subject;
 import org.neo4j.internal.helpers.collection.Visitor;
 import org.neo4j.kernel.KernelVersion;
 import org.neo4j.storageengine.api.CommandBatch;
+import org.neo4j.storageengine.api.Leases;
 import org.neo4j.storageengine.api.StorageCommand;
 
 public record ChunkedCommandBatch(List<StorageCommand> commands, ChunkMetadata chunkMetadata) implements CommandBatch {
@@ -55,6 +56,11 @@ public record ChunkedCommandBatch(List<StorageCommand> commands, ChunkMetadata c
     @Override
     public int getLeaseId() {
         return chunkMetadata.leaseId();
+    }
+
+    @Override
+    public Leases leases() {
+        return Leases.NO_LEASES;
     }
 
     @Override
@@ -114,6 +120,25 @@ public record ChunkedCommandBatch(List<StorageCommand> commands, ChunkMetadata c
             throw new IllegalStateException("Append index was not generated for the batch yet.");
         }
         return appendIndex;
+    }
+
+    /**
+     * Returns the append index of this batch without performing sanity checks on the value.
+     * <p><b>Note: </b>Use {@code #appendIndex} instead unless we expect to be dealing with representations of txs that
+     * cannot have a set value for this field.
+     */
+    public long appendIndexUnverified() {
+        return chunkMetadata.appendIndex().longValue();
+    }
+
+    @Override
+    public long previousBatchAppendIndex() {
+        return chunkMetadata.previousBatchAppendIndex();
+    }
+
+    @Override
+    public long chunkId() {
+        return chunkMetadata.chunkId();
     }
 
     @Override

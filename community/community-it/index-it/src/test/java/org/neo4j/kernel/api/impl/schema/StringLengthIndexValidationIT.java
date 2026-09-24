@@ -34,7 +34,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.graphdb.Node;
@@ -42,6 +41,9 @@ import org.neo4j.graphdb.Transaction;
 import org.neo4j.graphdb.schema.IndexDefinition;
 import org.neo4j.graphdb.schema.Schema;
 import org.neo4j.internal.kernel.api.IndexMonitor;
+import org.neo4j.internal.kernel.api.SchemaWrite;
+import org.neo4j.internal.kernel.api.Token;
+import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexPrototype;
 import org.neo4j.internal.schema.IndexProviderDescriptor;
 import org.neo4j.internal.schema.IndexType;
@@ -56,10 +58,11 @@ import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.DbmsExtension;
 import org.neo4j.test.extension.ExtensionCallback;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.test.extension.SkipOnSpd;
 
 @DbmsExtension(configurationCallback = "configure")
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 public abstract class StringLengthIndexValidationIT {
     private static final String propKey = "largeString";
 
@@ -99,7 +102,7 @@ public abstract class StringLengthIndexValidationIT {
         Monitors monitors = new Monitors();
         IndexMonitor.MonitorAdapter trappingMonitor = new IndexMonitor.MonitorAdapter() {
             @Override
-            public void indexPopulationScanComplete() {
+            public void indexPopulationScanComplete(IndexDescriptor[] indexDescriptors) {
                 if (trapPopulation.get()) {
                     populationScanFinished.reached();
                 }
@@ -162,6 +165,7 @@ public abstract class StringLengthIndexValidationIT {
     }
 
     @Test
+    @SkipOnSpd(reason = "nodeId in error message differs since it's from the property shard and not graph shard")
     void indexPopulationMustFailIfExceedingIndexKeySizeLimit() throws KernelException {
         // Write
         String propValue = getString(random, singleKeySizeLimit + 1);
@@ -174,6 +178,7 @@ public abstract class StringLengthIndexValidationIT {
     }
 
     @Test
+    @SkipOnSpd
     public void externalUpdatesMustNotFailIndexPopulationIfWithinIndexKeySizeLimit()
             throws InterruptedException, KernelException {
         trapPopulation.set(true);
@@ -205,6 +210,7 @@ public abstract class StringLengthIndexValidationIT {
     }
 
     @Test
+    @SkipOnSpd
     public void externalUpdatesMustFailIndexPopulationIfExceedingIndexKeySizeLimit()
             throws InterruptedException, KernelException {
         trapPopulation.set(true);
@@ -308,15 +314,15 @@ public abstract class StringLengthIndexValidationIT {
         long indexId;
 
         try (Transaction tx = db.beginTx()) {
-            var token = ((TransactionImpl) tx).kernelTransaction().token();
-            var labelId = token.labelGetOrCreateForName(LABEL_ONE.name());
-            var propertyId = token.propertyKeyGetOrCreateForName(propKey);
-            var schemaWrite = ((TransactionImpl) tx).kernelTransaction().schemaWrite();
-            var indexPrototype = IndexPrototype.forSchema(SchemaDescriptors.forLabel(labelId, propertyId))
+            Token token = ((TransactionImpl) tx).kernelTransaction().token();
+            int labelId = token.labelGetOrCreateForName(LABEL_ONE.name());
+            int propertyId = token.propertyKeyGetOrCreateForName(propKey);
+            SchemaWrite schemaWrite = ((TransactionImpl) tx).kernelTransaction().schemaWrite();
+            IndexPrototype indexPrototype = IndexPrototype.forSchema(SchemaDescriptors.forLabel(labelId, propertyId))
                     .withIndexType(getIndexType())
                     .withName("coolName")
                     .withIndexProvider(getIndexProvider());
-            var indexDescriptor = schemaWrite.indexCreate(indexPrototype);
+            IndexDescriptor indexDescriptor = schemaWrite.indexCreate(indexPrototype);
             indexId = indexDescriptor.getId();
             tx.commit();
         }

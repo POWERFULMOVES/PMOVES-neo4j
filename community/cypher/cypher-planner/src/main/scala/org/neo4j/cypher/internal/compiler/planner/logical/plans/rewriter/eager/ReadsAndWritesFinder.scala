@@ -39,7 +39,6 @@ import org.neo4j.cypher.internal.expressions.LabelName
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.Ors
 import org.neo4j.cypher.internal.expressions.PropertyKeyName
-import org.neo4j.cypher.internal.expressions.SymbolicName
 import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.ir.helpers.CachedFunction
 import org.neo4j.cypher.internal.logical.plans.AbstractLetSelectOrSemiApply
@@ -55,7 +54,6 @@ import org.neo4j.cypher.internal.logical.plans.CartesianProduct
 import org.neo4j.cypher.internal.logical.plans.ForeachApply
 import org.neo4j.cypher.internal.logical.plans.LeftOuterHashJoin
 import org.neo4j.cypher.internal.logical.plans.LogicalBinaryPlan
-import org.neo4j.cypher.internal.logical.plans.LogicalLeafPlan
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 import org.neo4j.cypher.internal.logical.plans.LogicalPlans
 import org.neo4j.cypher.internal.logical.plans.NodeHashJoin
@@ -69,10 +67,12 @@ import org.neo4j.cypher.internal.logical.plans.SubqueryForeach
 import org.neo4j.cypher.internal.logical.plans.TransactionForeach
 import org.neo4j.cypher.internal.logical.plans.Union
 import org.neo4j.cypher.internal.logical.plans.ValueHashJoin
+import org.neo4j.cypher.internal.logical.plans.ValueMergeJoin
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.cypher.internal.util.CancellationChecker
 import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.Ref
+import org.neo4j.cypher.internal.util.SymbolicName
 import org.neo4j.cypher.internal.util.helpers.MapSupport.PowerMap
 
 object ReadsAndWritesFinder {
@@ -225,8 +225,8 @@ object ReadsAndWritesFinder {
       val compositeExpression = mergePlan match {
         case _: Union | _: OrderedUnion =>
           // Union expresses OR
-          Ors(Seq(lhs.expression, rhs.expression))(InputPosition.NONE)
-        case _: NodeHashJoin | _: ValueHashJoin | _: AssertSameNode | _: AssertSameRelationship =>
+          Ors.of2(lhs.expression, rhs.expression)
+        case _: NodeHashJoin | _: ValueHashJoin | _: ValueMergeJoin | _: AssertSameNode | _: AssertSameRelationship =>
           // Joins express AND
           // Let's use withAddedExpression to avoid nesting Ands
           lhs.withAddedExpression(rhs.expression).expression
@@ -344,7 +344,8 @@ object ReadsAndWritesFinder {
     readRelProperties: ReadingPlansProvider[PropertyKeyName] = ReadingPlansProvider(),
     relationshipFilterExpressions: Map[LogicalVariable, FilterExpressions] = Map.empty,
     possibleRelDeleteConflictPlans: Map[LogicalVariable, PossibleDeleteConflictPlans] = Map.empty,
-    callInTxPlans: Set[Ref[LogicalPlan]] = Set.empty
+    callInTxPlans: Set[Ref[LogicalPlan]] = Set.empty,
+    variableReferenceMap: Map[LogicalVariable, Set[LogicalVariable]] = Map.empty
   ) {
 
     /**
@@ -373,7 +374,7 @@ object ReadsAndWritesFinder {
      * @return all plans that could read the given label.
      */
     def plansReadingLabel(label: Option[LabelName]): Iterator[PlanWithAccessor] =
-      label.map(readLabels.plansReadingSymbol).getOrElse(readLabels.plansReadingAnySymbol)
+      label.map(readLabels.plansReadingSymbol).getOrElse(readLabels.plansReadingAnySymbol())
 
     def withNodePropertyRead(accessedProperty: AccessedProperty, plan: LogicalPlan): Reads =
       copy(readNodeProperties =
@@ -405,6 +406,10 @@ object ReadsAndWritesFinder {
 
     def withCallInTx(plan: LogicalPlan): Reads = {
       copy(callInTxPlans = callInTxPlans + Ref(plan))
+    }
+
+    def withVariableReferenceMap(newMap: Map[LogicalVariable, Set[LogicalVariable]]): Reads = {
+      copy(variableReferenceMap = variableReferenceMap.fuse(newMap)(_ ++ _))
     }
 
     /**
@@ -469,11 +474,8 @@ object ReadsAndWritesFinder {
         if (prev.plansThatIntroduceVariable.isEmpty) {
           // This plan introduces the variable.
 
-          // We should take predicates on leaf plans into account.
-          val expressionsToInclude = plan match {
-            case _: LogicalLeafPlan => expressions
-            case _                  => Seq.empty[Expression]
-          }
+          val expressionsToInclude =
+            expressions.filter(_.dependencies == Set(variable))
           Set(PlanThatIntroducesVariable(Ref(plan), expressionsToInclude))
         } else {
           prev.plansThatIntroduceVariable
@@ -493,7 +495,7 @@ object ReadsAndWritesFinder {
      *
      * @param expressions all expressions in `plan` that filter on `variable`.
      */
-    def withUpdatedPossibleDeleteNodeConflictPlans(
+    def withUpdatedPossibleNodeDeleteConflictPlans(
       plan: LogicalPlan,
       variable: LogicalVariable,
       expressions: Seq[Expression]
@@ -551,7 +553,7 @@ object ReadsAndWritesFinder {
         acc => {
           planReads.nodeFilterExpressions.foldLeft(acc) {
             case (acc, (variable, expressions)) =>
-              val acc2 = acc.withUpdatedPossibleDeleteNodeConflictPlans(plan, variable, expressions)
+              val acc2 = acc.withUpdatedPossibleNodeDeleteConflictPlans(plan, variable, expressions)
               if (expressions.isEmpty) {
                 // The plan introduces the variable but has no filter expressions
                 acc2.withIntroducedNodeVariable(variable, plan)
@@ -598,7 +600,8 @@ object ReadsAndWritesFinder {
             case (acc, maybeVar) => acc.withUnknownRelPropertiesRead(plan, maybeVar)
           }
         },
-        acc => if (planReads.callInTx) acc.withCallInTx(plan) else acc
+        acc => if (planReads.callInTx) acc.withCallInTx(plan) else acc,
+        acc => acc.withVariableReferenceMap(planReads.referencedVariableMap)
       ))(this)
     }
 
@@ -1013,7 +1016,15 @@ object ReadsAndWritesFinder {
   ): ReadsAndWrites = {
     def processPlan(acc: ReadsAndWrites, plan: LogicalPlan): ReadsAndWrites = {
       val planReads =
-        collectReads(plan, semanticTable, anonymousVariableNameGenerator, childrenIds, cancellationChecker)
+        collectReads(
+          plan,
+          semanticTable,
+          anonymousVariableNameGenerator,
+          childrenIds,
+          cancellationChecker,
+          acc.reads.variableReferenceMap
+        )
+
       val planWrites = collectWrites(plan)
 
       childrenIds.recordChildren(plan)

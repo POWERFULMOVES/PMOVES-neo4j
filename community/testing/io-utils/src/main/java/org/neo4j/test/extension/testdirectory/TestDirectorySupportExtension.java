@@ -32,6 +32,7 @@ import org.junit.jupiter.api.extension.AfterEachCallback;
 import org.junit.jupiter.api.extension.BeforeAllCallback;
 import org.junit.jupiter.api.extension.BeforeEachCallback;
 import org.junit.jupiter.api.extension.DynamicTestInvocationContext;
+import org.junit.jupiter.api.extension.ExtensionConfigurationException;
 import org.junit.jupiter.api.extension.ExtensionContext;
 import org.junit.jupiter.api.extension.ExtensionContext.Namespace;
 import org.junit.jupiter.api.extension.InvocationInterceptor;
@@ -56,9 +57,26 @@ public class TestDirectorySupportExtension extends StatefulFieldExtension<TestDi
     public static final Namespace TEST_DIRECTORY_NAMESPACE = Namespace.create(TEST_DIRECTORY);
     private static final String JUNIT4_ASSUMPTION_EXCEPTION = "org.junit.AssumptionViolatedException";
 
+    public static TestDirectory getTestDirectory(ExtensionContext context) {
+        return (TestDirectory)
+                context.getStore(TEST_DIRECTORY_NAMESPACE).get(TestDirectorySupportExtension.TEST_DIRECTORY);
+    }
+
     @Override
     public void beforeAll(ExtensionContext context) throws IOException {
         if (getLifecycle(context) == PER_CLASS) {
+            // Detect problematic pattern: PER_CLASS nested inheriting uninitialized TD from PER_METHOD parent
+            TestDirectory td = getStoredValue(context);
+            if (td != null && !td.isInitialised() && parentSharesDirectory(context, td)) {
+                throw new ExtensionConfigurationException(String.format(
+                        "Test class %s has PER_CLASS lifecycle but inherits an uninitialized TestDirectory from "
+                                + "enclosing class %s which has PER_METHOD lifecycle. Add @TestInstance(Lifecycle.PER_CLASS) "
+                                + "to the enclosing class, or give each nested class its own @TestDirectoryExtension.",
+                        context.getRequiredTestClass().getSimpleName(),
+                        context.getParent()
+                                .map(p -> p.getRequiredTestClass().getSimpleName())
+                                .orElse("unknown")));
+            }
             prepare(context);
         }
     }
@@ -74,6 +92,8 @@ public class TestDirectorySupportExtension extends StatefulFieldExtension<TestDi
     public void afterEach(ExtensionContext context) {
         if (getLifecycle(context) == PER_METHOD) {
             cleanUp(context);
+        } else if (context.getExecutionException().isPresent()) {
+            getTestDirectoryStore(context).put(FAILURE_MARKER, TRUE);
         }
     }
 
@@ -119,6 +139,13 @@ public class TestDirectorySupportExtension extends StatefulFieldExtension<TestDi
 
     private static TestInstance.Lifecycle getLifecycle(ExtensionContext context) {
         return context.getTestInstanceLifecycle().orElse(PER_METHOD);
+    }
+
+    private boolean parentSharesDirectory(ExtensionContext context, TestDirectory directory) {
+        return context.getParent()
+                .map(parent -> parent.getStore(getNameSpace()).get(getFieldKey(), getFieldType()))
+                .map(parentDir -> parentDir == directory)
+                .orElse(false);
     }
 
     public void prepare(ExtensionContext context) throws IOException {

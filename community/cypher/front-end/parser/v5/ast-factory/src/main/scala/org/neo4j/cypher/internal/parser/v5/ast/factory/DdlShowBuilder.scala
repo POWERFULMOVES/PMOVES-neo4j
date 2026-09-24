@@ -17,6 +17,7 @@
 
 package org.neo4j.cypher.internal.parser.v5.ast.factory
 
+import org.neo4j.cypher.internal.ast.AdditiveProjection
 import org.neo4j.cypher.internal.ast.AliasedReturnItem
 import org.neo4j.cypher.internal.ast.AllConstraints
 import org.neo4j.cypher.internal.ast.AllDatabasesScope
@@ -25,17 +26,23 @@ import org.neo4j.cypher.internal.ast.AllFunctions
 import org.neo4j.cypher.internal.ast.AllIndexes
 import org.neo4j.cypher.internal.ast.BuiltInFunctions
 import org.neo4j.cypher.internal.ast.Clause
+import org.neo4j.cypher.internal.ast.CommaSeparatedNames
 import org.neo4j.cypher.internal.ast.CommandClause
+import org.neo4j.cypher.internal.ast.CommandClauseNames
 import org.neo4j.cypher.internal.ast.CommandResultItem
 import org.neo4j.cypher.internal.ast.CurrentUser
 import org.neo4j.cypher.internal.ast.DatabaseName
+import org.neo4j.cypher.internal.ast.DatabaseScope
 import org.neo4j.cypher.internal.ast.DefaultDatabaseScope
 import org.neo4j.cypher.internal.ast.ExecutableBy
+import org.neo4j.cypher.internal.ast.ExpressionNames
+import org.neo4j.cypher.internal.ast.FreeProjection
 import org.neo4j.cypher.internal.ast.FulltextIndexes
 import org.neo4j.cypher.internal.ast.HomeDatabaseScope
 import org.neo4j.cypher.internal.ast.KeyConstraints
 import org.neo4j.cypher.internal.ast.Limit
 import org.neo4j.cypher.internal.ast.LookupIndexes
+import org.neo4j.cypher.internal.ast.NoNames
 import org.neo4j.cypher.internal.ast.NodeAllExistsConstraints
 import org.neo4j.cypher.internal.ast.NodeKeyConstraints
 import org.neo4j.cypher.internal.ast.NodePropExistsConstraints
@@ -60,7 +67,7 @@ import org.neo4j.cypher.internal.ast.ShowAllPrivileges
 import org.neo4j.cypher.internal.ast.ShowConstraintType
 import org.neo4j.cypher.internal.ast.ShowConstraintsClause
 import org.neo4j.cypher.internal.ast.ShowCurrentUser
-import org.neo4j.cypher.internal.ast.ShowDatabase
+import org.neo4j.cypher.internal.ast.ShowDatabasesClause
 import org.neo4j.cypher.internal.ast.ShowFunctionType
 import org.neo4j.cypher.internal.ast.ShowFunctionsClause
 import org.neo4j.cypher.internal.ast.ShowIndexType
@@ -93,6 +100,7 @@ import org.neo4j.cypher.internal.ast.With
 import org.neo4j.cypher.internal.ast.Yield
 import org.neo4j.cypher.internal.ast.YieldOrWhere
 import org.neo4j.cypher.internal.expressions.Expression
+import org.neo4j.cypher.internal.expressions.ListLiteral
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.StringLiteral
 import org.neo4j.cypher.internal.expressions.Variable
@@ -105,6 +113,9 @@ import org.neo4j.cypher.internal.parser.ast.util.Util.pos
 import org.neo4j.cypher.internal.parser.v5.Cypher5Parser
 import org.neo4j.cypher.internal.parser.v5.Cypher5Parser.ShowConstraintMultiContext
 import org.neo4j.cypher.internal.parser.v5.Cypher5ParserListener
+import org.neo4j.cypher.internal.parser.v5.ast.factory.DdlShowBuilder.NoEntity
+import org.neo4j.cypher.internal.parser.v5.ast.factory.DdlShowBuilder.Node
+import org.neo4j.cypher.internal.parser.v5.ast.factory.DdlShowBuilder.Rel
 import org.neo4j.cypher.internal.parser.v5.ast.factory.DdlShowBuilder.ShowWrapper
 import org.neo4j.cypher.internal.util.InputPosition
 
@@ -185,9 +196,9 @@ trait DdlShowBuilder extends Cypher5ParserListener {
   ): Unit = {
     val returnItems =
       if (ctx.TIMES() != null)
-        ReturnItems(includeExisting = true, Seq.empty)(pos(ctx.YIELD().getSymbol))
+        ReturnItems(AdditiveProjection, Seq.empty)(pos(ctx.YIELD().getSymbol))
       else {
-        ReturnItems(includeExisting = false, astSeq[ReturnItem](ctx.yieldItem()))(pos(ctx.yieldItem().get(0)))
+        ReturnItems(FreeProjection, astSeq[ReturnItem](ctx.yieldItem()))(pos(ctx.yieldItem().get(0)))
       }
     ctx.ast = Yield(
       returnItems,
@@ -210,7 +221,8 @@ trait DdlShowBuilder extends Cypher5ParserListener {
       yieldedItems = yieldedItems,
       yieldAll = yieldAll,
       yieldClause = y,
-      returnClause = astOpt[Return](ctx.returnClause())
+      returnClause =
+        astOpt[Return](ctx.returnClause())
     )
   }
 
@@ -268,14 +280,12 @@ trait DdlShowBuilder extends Cypher5ParserListener {
     ctx: Cypher5Parser.ShowIndexesAllowBriefContext
   ): Unit = {
     ctx.ast = astOpt[ShowWrapper](ctx.showBriefAndYield(), ShowWrapper())
-      .copy(composableClauses = astOpt[Seq[Clause]](ctx.composableCommandClauses()))
   }
 
   final override def exitShowIndexesNoBrief(
     ctx: Cypher5Parser.ShowIndexesNoBriefContext
   ): Unit = {
     ctx.ast = decomposeYield(astOpt(ctx.showCommandYield()))
-      .copy(composableClauses = astOpt[Seq[Clause]](ctx.composableCommandClauses()))
   }
 
   override def exitShowConstraintCommand(ctx: Cypher5Parser.ShowConstraintCommandContext): Unit = {
@@ -358,17 +368,11 @@ trait DdlShowBuilder extends Cypher5ParserListener {
     }
   }
 
-  sealed private trait ConstraintEntity
-  private case object Node extends ConstraintEntity
-  private case object Rel extends ConstraintEntity
-  private case object NoEntity extends ConstraintEntity
-
   final override def exitShowConstraintsAllowBriefAndYield(
     ctx: Cypher5Parser.ShowConstraintsAllowBriefAndYieldContext
   ): Unit = {
     ctx.ast =
       astOpt[ShowWrapper](ctx.showBriefAndYield(), ShowWrapper())
-        .copy(composableClauses = astOpt[Seq[Clause]](ctx.composableCommandClauses()))
   }
 
   final override def exitShowConstraintsAllowBrief(
@@ -381,14 +385,12 @@ trait DdlShowBuilder extends Cypher5ParserListener {
     ctx: Cypher5Parser.ShowConstraintsAllowYieldContext
   ): Unit = {
     ctx.ast = decomposeYield(astOpt(ctx.showCommandYield()))
-      .copy(composableClauses = astOpt[Seq[Clause]](ctx.composableCommandClauses()))
   }
 
   final override def exitShowProcedures(
     ctx: Cypher5Parser.ShowProceduresContext
   ): Unit = {
     ctx.ast = decomposeYield(astOpt(ctx.showCommandYield()))
-      .copy(composableClauses = astOpt[Seq[Clause]](ctx.composableCommandClauses()))
       .buildProcedureClauses(astOpt[ExecutableBy](ctx.executableBy), pos(ctx.getParent))
   }
 
@@ -396,7 +398,6 @@ trait DdlShowBuilder extends Cypher5ParserListener {
     ctx: Cypher5Parser.ShowFunctionsContext
   ): Unit = {
     ctx.ast = decomposeYield(astOpt(ctx.showCommandYield()))
-      .copy(composableClauses = astOpt[Seq[Clause]](ctx.composableCommandClauses()))
       .buildFunctionClauses(
         astOpt[ShowFunctionType](ctx.showFunctionsType, AllFunctions),
         astOpt[ExecutableBy](ctx.executableBy),
@@ -418,14 +419,16 @@ trait DdlShowBuilder extends Cypher5ParserListener {
     val name = ctx.symbolicNameString()
     ctx.ast =
       if (name != null) {
-        User(ctx.symbolicNameString().ast())
+        User(name.ast())(pos(name))
       } else CurrentUser
   }
 
   final override def exitShowTransactions(
     ctx: Cypher5Parser.ShowTransactionsContext
   ): Unit = {
-    ctx.ast = ctx.namesAndClauses().ast[ShowWrapper]().buildShowTransactions(pos(ctx.getParent))
+    ctx.ast = astOpt[ShowWrapper](ctx.namesAndClauses(), ShowWrapper())
+      .copy(composableClauses = astOpt[Seq[Clause]](ctx.composableCommandClauses()))
+      .buildShowTransactions(pos(ctx.getParent))
   }
 
   final override def exitTerminateTransactions(
@@ -434,7 +437,7 @@ trait DdlShowBuilder extends Cypher5ParserListener {
     ctx.ast = decomposeYield(astOpt(ctx.showCommandYield()))
       .copy(
         composableClauses = astOpt[Seq[Clause]](ctx.composableCommandClauses()),
-        names = ctx.stringsOrExpression().ast[Either[List[String], Expression]]
+        names = ctx.stringsOrExpression().ast[CommandClauseNames]
       )
       .buildTerminateTransaction(pos(ctx.getParent))
   }
@@ -442,16 +445,18 @@ trait DdlShowBuilder extends Cypher5ParserListener {
   final override def exitShowSettings(
     ctx: Cypher5Parser.ShowSettingsContext
   ): Unit = {
-    ctx.ast = ctx.namesAndClauses().ast[ShowWrapper]().buildSettingsClauses(pos(ctx.getParent))
+    ctx.ast = astOpt[ShowWrapper](ctx.namesAndClauses(), ShowWrapper()).buildSettingsClauses(pos(ctx.getParent))
   }
 
   override def exitNamesAndClauses(
     ctx: Cypher5Parser.NamesAndClausesContext
   ): Unit = {
     ctx.ast = decomposeYield(astOpt(ctx.showCommandYield()))
-      .copy(
-        composableClauses = astOpt[Seq[Clause]](ctx.composableCommandClauses()),
-        names = astOpt[Either[List[String], Expression]](ctx.stringsOrExpression(), Left(List.empty))
+      .copy(names =
+        astOpt[CommandClauseNames](
+          ctx.stringsOrExpression(),
+          NoNames
+        )
       )
   }
 
@@ -460,11 +465,11 @@ trait DdlShowBuilder extends Cypher5ParserListener {
   ): Unit = {
     val stringList = ctx.stringList()
     ctx.ast = if (stringList != null) {
-      Left[List[String], Expression](
-        stringList.ast[Seq[StringLiteral]]().map(_.value).toList
+      CommaSeparatedNames(
+        ListLiteral(stringList.ast[Seq[StringLiteral]]())(pos(ctx))
       )
     } else {
-      Right[List[String], Expression](ctx.expression.ast())
+      ExpressionNames(ctx.expression.ast())
     }
   }
 
@@ -489,7 +494,9 @@ trait DdlShowBuilder extends Cypher5ParserListener {
   ): Unit = {
     ctx.ast = ShowRoles(
       ctx.WITH() != null,
-      ctx.POPULATED() == null,
+      withAuthRules = false,
+      showAll = ctx.POPULATED() == null,
+      false,
       astOpt[Either[(Yield, Option[Return]), Where]](ctx.showCommandYield())
     )(pos(ctx))
   }
@@ -499,7 +506,8 @@ trait DdlShowBuilder extends Cypher5ParserListener {
   ): Unit = {
     ctx.ast = ShowUsers(
       astOpt[Either[(Yield, Option[Return]), Where]](ctx.showCommandYield()),
-      withAuth = ctx.AUTH() != null
+      withAuth = ctx.AUTH() != null,
+      false
     )(pos(ctx))
   }
 
@@ -525,7 +533,7 @@ trait DdlShowBuilder extends Cypher5ParserListener {
     val (asCommand, asRevoke) = astOpt[(Boolean, Boolean)](ctx.privilegeAsCommand(), (false, false))
     val cmdYield = astOpt[Either[(Yield, Option[Return]), Where]](ctx.showCommandYield())
     ctx.ast = if (asCommand)
-      ShowPrivilegeCommands(ShowAllPrivileges()(pos(ctx)), asRevoke, cmdYield)(pos(ctx))
+      ShowPrivilegeCommands(ShowAllPrivileges()(pos(ctx)), asRevoke, cmdYield, fromCypher5 = true)(pos(ctx))
     else {
       ShowPrivileges(ShowAllPrivileges()(pos(ctx)), cmdYield)(pos(ctx))
     }
@@ -540,7 +548,7 @@ trait DdlShowBuilder extends Cypher5ParserListener {
       ctx.roleNames.symbolicNameOrStringParameterList().ast[Seq[Expression]]().toList
     )(pos(ctx))
     ctx.ast = if (asCommand) {
-      ShowPrivilegeCommands(scope, asRevoke, cmdYield)(pos(ctx))
+      ShowPrivilegeCommands(scope, asRevoke, cmdYield, fromCypher5 = true)(pos(ctx))
     } else {
       ShowPrivileges(scope, cmdYield)(pos(ctx))
     }
@@ -556,7 +564,7 @@ trait DdlShowBuilder extends Cypher5ParserListener {
       ShowUsersPrivileges(namesList.ast[ArraySeq[Expression]]().toList)(pos(ctx))
     else ShowUserPrivileges(None)(pos(ctx))
     ctx.ast = if (asCommand) {
-      ShowPrivilegeCommands(scope, asRevoke, cmdYield)(pos(ctx))
+      ShowPrivilegeCommands(scope, asRevoke, cmdYield, fromCypher5 = true)(pos(ctx))
     } else {
       ShowPrivileges(scope, cmdYield)(pos(ctx))
     }
@@ -575,10 +583,11 @@ trait DdlShowBuilder extends Cypher5ParserListener {
       else if (ctx.HOME() != null) HomeDatabaseScope()(pos(ctx))
       else if (ctx.DEFAULT() != null) DefaultDatabaseScope()(pos(ctx))
       else AllDatabasesScope()(pos(ctx))
-    ctx.ast = ShowDatabase(
-      dbScope,
-      astOpt[Either[(Yield, Option[Return]), Where]](ctx.showCommandYield())
-    )(pos(ctx.getParent))
+    ctx.ast = decomposeYield(astOpt(ctx.showCommandYield()))
+      .buildShowDatabases(
+        dbScope,
+        pos(ctx.getParent)
+      )
   }
 
   final override def exitShowAliases(
@@ -586,13 +595,20 @@ trait DdlShowBuilder extends Cypher5ParserListener {
   ): Unit = {
     ctx.ast = ShowAliases(
       astOpt[DatabaseName](ctx.aliasName()),
-      astOpt[Either[(Yield, Option[Return]), Where]](ctx.showCommandYield())
+      astOpt[Either[(Yield, Option[Return]), Where]](ctx.showCommandYield()),
+      cypher5ColumnsOnly = true,
+      oidcCredentialForwardingEnabled = false
     )(pos(ctx))
   }
 
 }
 
 object DdlShowBuilder {
+
+  sealed private trait ConstraintEntity
+  private case object Node extends ConstraintEntity
+  private case object Rel extends ConstraintEntity
+  private case object NoEntity extends ConstraintEntity
 
   case class ShowWrapper(
     where: Option[Where] = None,
@@ -601,7 +617,7 @@ object DdlShowBuilder {
     yieldClause: Option[Yield] = None,
     returnClause: Option[Return] = None,
     composableClauses: Option[Seq[Clause]] = None,
-    names: Either[List[String], Expression] = Left(List.empty)
+    names: CommandClauseNames = NoNames
   ) {
 
     def buildConstraintClauses(constraintType: ShowConstraintType, position: InputPosition): Seq[Clause] = {
@@ -610,7 +626,9 @@ object DdlShowBuilder {
           constraintType,
           where,
           yieldedItems,
-          yieldAll
+          yieldAll,
+          yieldClause.map(turnYieldToWith),
+          returnCypher5Columns = true
         )(position)
       )
     }
@@ -621,7 +639,8 @@ object DdlShowBuilder {
           indexType,
           where,
           yieldedItems,
-          yieldAll = yieldAll
+          yieldAll,
+          yieldClause.map(turnYieldToWith)
         )(position)
       )
     }
@@ -637,48 +656,76 @@ object DdlShowBuilder {
           executableBy,
           where,
           yieldedItems,
-          yieldAll
+          yieldAll,
+          yieldClause.map(turnYieldToWith)
         )(position)
       )
     }
 
     def buildProcedureClauses(executableBy: Option[ExecutableBy], position: InputPosition): Seq[Clause] = {
       buildClauses(
-        ShowProceduresClause(executableBy, where, yieldedItems, yieldAll)(position)
+        ShowProceduresClause(executableBy, where, yieldedItems, yieldAll, yieldClause.map(turnYieldToWith))(position)
       )
     }
 
     def buildSettingsClauses(position: InputPosition): Seq[Clause] = {
       buildClauses(
-        ShowSettingsClause(names, where, yieldedItems, yieldAll)(position)
+        ShowSettingsClause(names, where, yieldedItems, yieldAll, yieldClause.map(turnYieldToWith))(position)
       )
     }
 
     def buildShowTransactions(position: InputPosition): Seq[Clause] = {
       buildClauses(
-        ShowTransactionsClause(names, where, yieldedItems, yieldAll, returnCypher5Types = true)(position)
+        ShowTransactionsClause(
+          names,
+          where,
+          yieldedItems,
+          yieldAll,
+          yieldClause.map(turnYieldToWith),
+          returnCypher5Types = true
+        )(position)
       )
     }
 
     def buildTerminateTransaction(position: InputPosition): Seq[Clause] = {
       buildClauses(
-        TerminateTransactionsClause(names, yieldedItems, yieldAll, where.map(_.position))(position)
+        TerminateTransactionsClause(
+          names,
+          yieldedItems,
+          yieldAll,
+          yieldClause.map(turnYieldToWith),
+          where.map(_.position)
+        )(position)
+      )
+    }
+
+    def buildShowDatabases(dbScope: DatabaseScope, position: InputPosition): Seq[Clause] = {
+      buildClauses(
+        ShowDatabasesClause(
+          dbScope,
+          where,
+          yieldedItems,
+          yieldAll,
+          yieldClause.map(turnYieldToWith),
+          cypher5ColumnsOnly = true
+        )(position)
       )
     }
 
     private def buildClauses(cmdClause: Clause): Seq[Clause] = {
       ArraySeq.from(
-        Seq(cmdClause) ++ yieldClause.map(turnYieldToWith) ++ returnClause ++ composableClauses.getOrElse(Seq.empty)
+        Seq(cmdClause) ++ returnClause ++ composableClauses.getOrElse(Seq.empty)
       )
     }
 
-    private def turnYieldToWith(yieldClause: Yield): Clause = {
+    private def turnYieldToWith(yieldClause: Yield): With = {
       val returnItems = yieldClause.returnItems
       val itemOrder = Option.when(returnItems.items.nonEmpty)(returnItems.items.map(_.name).toList)
       val (orderBy, where) = CommandClause.updateAliasedVariablesFromYieldInOrderByAndWhere(yieldClause)
       With(
         distinct = false,
-        ReturnItems(includeExisting = true, Seq(), itemOrder)(returnItems.position),
+        ReturnItems(AdditiveProjection, Seq(), itemOrder)(returnItems.position),
+        yieldClause.groupBy,
         orderBy,
         yieldClause.skip,
         yieldClause.limit,

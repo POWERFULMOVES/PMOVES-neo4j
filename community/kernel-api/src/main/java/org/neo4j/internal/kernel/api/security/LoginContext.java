@@ -29,16 +29,24 @@ import org.neo4j.token.api.TokenConstants;
 
 /**
  * The LoginContext hold the executing authenticated user (subject).
- * By calling {@link #authorize(IdLookup, String, AbstractSecurityLog)} the user is also authorized, and a full SecurityContext is returned,
+ * By calling {@link #authorize(IdLookup, PrivilegeDatabaseReference, AbstractSecurityLog, long)} the user is also authorized, and a full SecurityContext is returned,
  * which can be used to assert user permissions during query execution.
  */
 public abstract class LoginContext {
     protected final AuthSubject subject;
     private final ClientConnectionInfo connectionInfo;
+    private final String token;
 
     public LoginContext(AuthSubject subject, ClientConnectionInfo connectionInfo) {
         this.subject = subject;
         this.connectionInfo = connectionInfo;
+        this.token = null;
+    }
+
+    public LoginContext(AuthSubject subject, ClientConnectionInfo connectionInfo, String token) {
+        this.subject = subject;
+        this.connectionInfo = connectionInfo;
+        this.token = token;
     }
 
     /**
@@ -66,10 +74,14 @@ public abstract class LoginContext {
      * @param idLookup token lookup, used to compile fine grained security verification
      * @param dbReference a reference to the database the user should be authorized against
      * @param securityLog where to log security related messages
+     * @param timeOfEvaluationMillis the time of evaluation in milliseconds since epoch. This is used to evaluate temporal role allocations.
      * @return the security context
      */
     public abstract SecurityContext authorize(
-            IdLookup idLookup, PrivilegeDatabaseReference dbReference, AbstractSecurityLog securityLog);
+            IdLookup idLookup,
+            PrivilegeDatabaseReference dbReference,
+            AbstractSecurityLog securityLog,
+            long timeOfEvaluationMillis);
 
     /**
      * Get a login context with full privileges.
@@ -80,16 +92,30 @@ public abstract class LoginContext {
         return new LoginContext(AuthSubject.AUTH_DISABLED, connectionInfo) {
             @Override
             public SecurityContext authorize(
-                    IdLookup idLookup, PrivilegeDatabaseReference dbReference, AbstractSecurityLog securityLog) {
-                return SecurityContext.authDisabled(AccessMode.Static.FULL, connectionInfo(), dbReference.name());
+                    IdLookup idLookup,
+                    PrivilegeDatabaseReference dbReference,
+                    AbstractSecurityLog securityLog,
+                    long timeOfEvaluationMillis) {
+                return SecurityContext.authDisabled(StaticAccessMode.FULL, connectionInfo(), dbReference.name());
             }
         };
+    }
+
+    /**
+     * The authToken is null if auth forwarding is not allowed
+     */
+    public String oidcToken() {
+        return token;
     }
 
     /**
      * A login context with full privileges, should only be used for transactions without external connection.
      */
     public static final LoginContext AUTH_DISABLED = fullAccess(EMBEDDED_CONNECTION);
+
+    public LoginContext withExternalShardAccess() {
+        return this;
+    }
 
     public interface IdLookup {
         int[] NO_SUCH_PROCEDURE = EMPTY_INT_ARRAY;

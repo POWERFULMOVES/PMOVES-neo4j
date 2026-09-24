@@ -24,10 +24,6 @@ import static java.util.Collections.singleton;
 import static org.apache.commons.lang3.ArrayUtils.EMPTY_INT_ARRAY;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.neo4j.common.EntityType.NODE;
 import static org.neo4j.common.EntityType.RELATIONSHIP;
 import static org.neo4j.internal.helpers.collection.Iterators.asSet;
@@ -35,7 +31,7 @@ import static org.neo4j.internal.helpers.collection.Iterators.single;
 import static org.neo4j.internal.schema.SchemaCache.NO_LOGICAL_KEYS;
 import static org.neo4j.internal.schema.SchemaDescriptors.forLabel;
 import static org.neo4j.internal.schema.SchemaDescriptors.forRelType;
-import static org.neo4j.internal.schema.SchemaDescriptors.fulltext;
+import static org.neo4j.internal.schema.SchemaDescriptors.forSemanticSearch;
 import static org.neo4j.internal.schema.constraints.ConstraintDescriptorFactory.existsForLabel;
 import static org.neo4j.internal.schema.constraints.ConstraintDescriptorFactory.keyForSchema;
 import static org.neo4j.internal.schema.constraints.ConstraintDescriptorFactory.uniqueForLabel;
@@ -59,9 +55,14 @@ import org.neo4j.internal.helpers.collection.Iterables;
 import org.neo4j.internal.helpers.collection.Iterators;
 import org.neo4j.internal.schema.IndexQuery.IndexQueryType;
 import org.neo4j.internal.schema.constraints.ConstraintDescriptorFactory;
+import org.neo4j.internal.schema.constraints.DefaultValue;
+import org.neo4j.internal.schema.constraints.PropertyTypeSet;
+import org.neo4j.internal.schema.constraints.SchemaValueType;
+import org.neo4j.internal.schema.constraints.TypeConstraintDescriptor;
 import org.neo4j.storageengine.api.StandardConstraintRuleAccessor;
 import org.neo4j.test.Race;
 import org.neo4j.util.Preconditions;
+import org.neo4j.values.ValueGenerators;
 import org.neo4j.values.storable.ValueCategory;
 
 class SchemaCacheTest {
@@ -77,13 +78,27 @@ class SchemaCacheTest {
     private final IndexDescriptor schema3_4 = newIndexRule(10, 3, 4);
     private final IndexDescriptor schema5_6_7 = newIndexRule(11, 5, 6, 7);
     private final IndexDescriptor schema5_8 = newIndexRule(12, 5, 8);
-    private final IndexDescriptor node35_8 = IndexPrototype.forSchema(fulltext(NODE, new int[] {3, 5}, new int[] {8}))
+    private final IndexDescriptor node35_8 = IndexPrototype.forSchema(
+                    forSemanticSearch(NODE, new int[] {3, 5}, new int[] {8}))
             .withName("index_13")
             .materialise(13);
     private final IndexDescriptor rel35_8 = IndexPrototype.forSchema(
-                    fulltext(RELATIONSHIP, new int[] {3, 5}, new int[] {8}))
+                    forSemanticSearch(RELATIONSHIP, new int[] {3, 5}, new int[] {8}))
             .withName("index_14")
             .materialise(14);
+    private final TypeConstraintDescriptor typeConstraint = ConstraintDescriptorFactory.typeForSchema(
+                    SchemaDescriptors.forLabel(1, 1), PropertyTypeSet.of(SchemaValueType.STRING), false)
+            .withId(15);
+    private final TypeConstraintDescriptor typeConstraintWithDefaultValueNode =
+            ConstraintDescriptorFactory.typeForSchema(
+                            SchemaDescriptors.forLabel(2, 2), PropertyTypeSet.of(SchemaValueType.UUID), true)
+                    .withDefaultValue(new DefaultValue.Generator(ValueGenerators.uuid))
+                    .withId(16);
+    private final TypeConstraintDescriptor typeConstraintWithDefaultValueRel =
+            ConstraintDescriptorFactory.typeForSchema(
+                            SchemaDescriptors.forRelType(2, 2), PropertyTypeSet.of(SchemaValueType.UUID), true)
+                    .withDefaultValue(new DefaultValue.Generator(ValueGenerators.uuid))
+                    .withId(17);
 
     @Test
     void shouldConstructSchemaCache() {
@@ -91,8 +106,8 @@ class SchemaCacheTest {
         SchemaCache cache = newSchemaCache(hans, witch, gretel, robot);
 
         // THEN
-        assertEquals(asSet(hans, gretel), Iterables.asSet(cache.indexes()));
-        assertEquals(asSet(witch, robot), Iterables.asSet(cache.constraints()));
+        assertThat(Iterables.asSet(cache.indexes())).isEqualTo(asSet(hans, gretel));
+        assertThat(Iterables.asSet(cache.constraints())).isEqualTo(asSet(witch, robot));
     }
 
     @Test
@@ -104,11 +119,11 @@ class SchemaCacheTest {
         cache.addSchemaRule(rule1);
         cache.addSchemaRule(rule2);
 
-        cache.removeSchemaRule(hans.getId());
-        cache.removeSchemaRule(witch.getId());
+        cache.removeSchemaRule(hans);
+        cache.removeSchemaRule(witch);
 
-        assertEquals(asSet(gretel, rule1, rule2), Iterables.asSet(cache.indexes()));
-        assertEquals(asSet(robot), Iterables.asSet(cache.constraints()));
+        assertThat(Iterables.asSet(cache.indexes())).isEqualTo(asSet(gretel, rule1, rule2));
+        assertThat(Iterables.asSet(cache.constraints())).isEqualTo(asSet(robot));
     }
 
     @Test
@@ -123,8 +138,8 @@ class SchemaCacheTest {
         cache.addSchemaRule(robot);
 
         // THEN
-        assertEquals(asSet(hans, gretel), Iterables.asSet(cache.indexes()));
-        assertEquals(asSet(witch, robot), Iterables.asSet(cache.constraints()));
+        assertThat(Iterables.asSet(cache.indexes())).isEqualTo(asSet(hans, gretel));
+        assertThat(Iterables.asSet(cache.constraints())).isEqualTo(asSet(witch, robot));
     }
 
     @Test
@@ -144,15 +159,15 @@ class SchemaCacheTest {
         ConstraintDescriptor existsRel = ConstraintDescriptorFactory.existsForRelType(false, 5, 6);
         ConstraintDescriptor existsNode = existsForLabel(false, 7, 8);
 
-        assertEquals(asSet(unique1, unique2, existsRel, existsNode), Iterables.asSet(cache.constraints()));
+        assertThat(Iterables.asSet(cache.constraints())).isEqualTo(asSet(unique1, unique2, existsRel, existsNode));
 
-        assertEquals(asSet(unique1), asSet(cache.constraintsForLabel(1)));
+        assertThat(asSet(cache.constraintsForLabel(1))).isEqualTo(asSet(unique1));
 
-        assertEquals(asSet(unique1), asSet(cache.constraintsForSchema(unique1.schema())));
+        assertThat(asSet(cache.constraintsForSchema(unique1.schema()))).isEqualTo(asSet(unique1));
 
-        assertEquals(asSet(), asSet(cache.constraintsForSchema(forLabel(1, 3))));
+        assertThat(asSet(cache.constraintsForSchema(forLabel(1, 3)))).isEqualTo(asSet());
 
-        assertEquals(asSet(existsRel), asSet(cache.constraintsForRelationshipType(5)));
+        assertThat(asSet(cache.constraintsForRelationshipType(5))).isEqualTo(asSet(existsRel));
     }
 
     @Test
@@ -160,20 +175,22 @@ class SchemaCacheTest {
         // GIVEN
         SchemaCache cache = newSchemaCache();
 
-        cache.addSchemaRule(uniquenessConstraint(0L, 1, 2, 133L));
-        cache.addSchemaRule(uniquenessConstraint(1L, 3, 4, 133L));
+        ConstraintDescriptor rule0 = uniquenessConstraint(0L, 1, 2, 133L);
+        cache.addSchemaRule(rule0);
+        ConstraintDescriptor rule1 = uniquenessConstraint(1L, 3, 4, 133L);
+        cache.addSchemaRule(rule1);
 
         // WHEN
-        cache.removeSchemaRule(0L);
+        cache.removeSchemaRule(rule0);
 
         // THEN
         ConstraintDescriptor dropped = uniqueForLabel(1, 1);
         ConstraintDescriptor unique = uniqueForLabel(3, 4);
-        assertEquals(asSet(unique), Iterables.asSet(cache.constraints()));
+        assertThat(Iterables.asSet(cache.constraints())).isEqualTo(asSet(unique));
 
-        assertEquals(asSet(), asSet(cache.constraintsForLabel(1)));
+        assertThat(asSet(cache.constraintsForLabel(1))).isEqualTo(asSet());
 
-        assertEquals(asSet(), asSet(cache.constraintsForSchema(dropped.schema())));
+        assertThat(asSet(cache.constraintsForSchema(dropped.schema()))).isEqualTo(asSet());
     }
 
     @Test
@@ -187,7 +204,7 @@ class SchemaCacheTest {
         cache.addSchemaRule(uniquenessConstraint(0L, 1, 2, 133L));
 
         // then
-        assertEquals(Collections.singletonList(uniqueForLabel(1, 2)), Iterables.asList(cache.constraints()));
+        assertThat(Iterables.asList(cache.constraints())).isEqualTo(Collections.singletonList(uniqueForLabel(1, 2)));
     }
 
     @Test
@@ -332,7 +349,7 @@ class SchemaCacheTest {
         cache.addSchemaRule(expected2 = newIndexRule(3L, IndexType.TEXT, label, 3));
         cache.addSchemaRule(newIndexRule(4L, label + 1, 2));
 
-        cache.removeSchemaRule(expected.getId());
+        cache.removeSchemaRule(expected);
         // When
 
         // Then
@@ -358,7 +375,7 @@ class SchemaCacheTest {
 
         // Then
         Set<IndexDescriptor> expected = asSet(newIndexRule(1L, 1, 2));
-        assertEquals(expected, indexes);
+        assertThat(indexes).isEqualTo(expected);
 
         assertThatThrownBy(() -> snapshot.addSchemaRule(newIndexRule(3L, 1, 4)))
                 .isInstanceOf(IllegalStateException.class)
@@ -374,7 +391,7 @@ class SchemaCacheTest {
         Iterator<IndexDescriptor> iterator = schemaCache.indexesForSchema(forLabel(1, 1));
 
         // Then
-        assertFalse(iterator.hasNext());
+        assertThat(iterator).isExhausted();
     }
 
     @Test
@@ -394,7 +411,7 @@ class SchemaCacheTest {
 
         // Then
         Set<ConstraintDescriptor> expected = asSet(rule1, rule3);
-        assertEquals(expected, listed);
+        assertThat(listed).isEqualTo(expected);
     }
 
     @Test
@@ -413,7 +430,7 @@ class SchemaCacheTest {
         Set<ConstraintDescriptor> listed = asSet(cache.constraintsForSchema(rule3.schema()));
 
         // Then
-        assertEquals(singleton(rule3), listed);
+        assertThat(listed).isEqualTo(singleton(rule3));
     }
 
     @Test
@@ -433,7 +450,7 @@ class SchemaCacheTest {
 
         // Then
         Set<ConstraintDescriptor> expected = asSet(rule1, rule3);
-        assertEquals(expected, listed);
+        assertThat(listed).isEqualTo(expected);
     }
 
     @Test
@@ -447,9 +464,9 @@ class SchemaCacheTest {
         }
         race.go();
 
-        assertEquals(indexNumber, Iterables.count(cache.indexes()));
+        assertThat(Iterables.count(cache.indexes())).isEqualTo(indexNumber);
         for (int labelId = 0; labelId < indexNumber; labelId++) {
-            assertEquals(1, Iterators.count(cache.indexesForLabel(labelId)));
+            assertThat(Iterators.count(cache.indexesForLabel(labelId))).isOne();
         }
     }
 
@@ -457,20 +474,23 @@ class SchemaCacheTest {
     void concurrentSchemaRuleRemove() throws Throwable {
         SchemaCache cache = newSchemaCache();
         int indexNumber = 20;
+        List<SchemaRule> rules = new ArrayList<>();
         for (int i = 0; i < indexNumber; i++) {
-            cache.addSchemaRule(newIndexRule(i, i, i));
+            var rule = newIndexRule(i, i, i);
+            rules.add(rule);
+            cache.addSchemaRule(rule);
         }
         Race race = new Race();
         int numberOfDeletions = 10;
         for (int i = 0; i < numberOfDeletions; i++) {
             int indexId = i;
-            race.addContestant(() -> cache.removeSchemaRule(indexId));
+            race.addContestant(() -> cache.removeSchemaRule(rules.get(indexId)));
         }
         race.go();
 
-        assertEquals(indexNumber - numberOfDeletions, Iterables.count(cache.indexes()));
+        assertThat(Iterables.count(cache.indexes())).isEqualTo(indexNumber - numberOfDeletions);
         for (int labelId = numberOfDeletions; labelId < indexNumber; labelId++) {
-            assertEquals(1, Iterators.count(cache.indexesForLabel(labelId)));
+            assertThat(Iterators.count(cache.indexesForLabel(labelId))).isOne();
         }
     }
 
@@ -480,10 +500,10 @@ class SchemaCacheTest {
 
         final int id = 1;
         final int[] repeatedLabels = {0, 1, 0};
-        final FulltextSchemaDescriptor schema = fulltext(NODE, repeatedLabels, new int[] {1});
+        final SemanticSearchSchemaDescriptor schema = forSemanticSearch(NODE, repeatedLabels, new int[] {1});
         IndexDescriptor index = newIndexRule(schema, id);
         cache.addSchemaRule(index);
-        cache.removeSchemaRule(id);
+        cache.removeSchemaRule(index);
     }
 
     @Test
@@ -492,10 +512,10 @@ class SchemaCacheTest {
 
         final int id = 1;
         final int[] repeatedRelTypes = {0, 1, 0};
-        final FulltextSchemaDescriptor schema = fulltext(RELATIONSHIP, repeatedRelTypes, new int[] {1});
+        final SemanticSearchSchemaDescriptor schema = forSemanticSearch(RELATIONSHIP, repeatedRelTypes, new int[] {1});
         IndexDescriptor index = newIndexRule(schema, id);
         cache.addSchemaRule(index);
-        cache.removeSchemaRule(id);
+        cache.removeSchemaRule(index);
     }
 
     @Test
@@ -542,14 +562,14 @@ class SchemaCacheTest {
         assertThat(cache.getValueIndexesRelatedTo(noEntityToken, noEntityToken, properties(), false, NODE))
                 .isEmpty();
 
-        assertTrue(cache.getValueIndexesRelatedTo(entityTokens(2), noEntityToken, properties(), false, NODE)
-                .isEmpty());
+        assertThat(cache.getValueIndexesRelatedTo(entityTokens(2), noEntityToken, properties(), false, NODE))
+                .isEmpty();
 
         assertThat(cache.getValueIndexesRelatedTo(noEntityToken, entityTokens(2), properties(1), false, NODE))
                 .isEmpty();
 
-        assertTrue(cache.getValueIndexesRelatedTo(entityTokens(2), entityTokens(2), properties(1), false, NODE)
-                .isEmpty());
+        assertThat(cache.getValueIndexesRelatedTo(entityTokens(2), entityTokens(2), properties(1), false, NODE))
+                .isEmpty();
     }
 
     @Test
@@ -575,13 +595,11 @@ class SchemaCacheTest {
     @Test
     void removalsShouldOnlyRemoveCorrectProxy() {
         SchemaCache cache = newSchemaCacheWithRulesForRelatedToCalls();
-        cache.removeSchemaRule(node35_8.getId());
+        cache.removeSchemaRule(node35_8);
         assertThat(cache.getValueIndexesRelatedTo(entityTokens(3), noEntityToken, properties(), false, NODE))
                 .contains(schema3_4);
         assertThat(cache.getValueIndexesRelatedTo(entityTokens(3), noEntityToken, properties(), false, RELATIONSHIP))
                 .contains(rel35_8);
-
-        cache.removeSchemaRule(7);
         assertThat(cache.getValueIndexesRelatedTo(entityTokens(5), noEntityToken, properties(), false, NODE))
                 .contains(schema5_8, schema5_6_7);
         assertThat(cache.getValueIndexesRelatedTo(entityTokens(5), noEntityToken, properties(), false, RELATIONSHIP))
@@ -604,21 +622,18 @@ class SchemaCacheTest {
         cache.addSchemaRule(constraint3);
 
         // when/then
-        assertEquals(
-                asSet(constraint2),
-                cache.getUniquenessConstraintsRelatedTo(entityTokens(1), entityTokens(), properties(5), true, NODE));
-        assertEquals(
-                asSet(constraint1, constraint2),
-                cache.getUniquenessConstraintsRelatedTo(entityTokens(1), entityTokens(), properties(5), false, NODE));
-        assertEquals(
-                asSet(constraint1, constraint2),
-                cache.getUniquenessConstraintsRelatedTo(entityTokens(1), entityTokens(), properties(5, 6), true, NODE));
-        assertEquals(
-                asSet(constraint1, constraint2),
-                cache.getUniquenessConstraintsRelatedTo(entityTokens(), entityTokens(1), properties(5), false, NODE));
-        assertEquals(
-                asSet(constraint1, constraint2, constraint3),
-                cache.getUniquenessConstraintsRelatedTo(entityTokens(1, 2), entityTokens(), properties(), false, NODE));
+        assertThat(cache.getUniquenessConstraintsRelatedTo(entityTokens(1), entityTokens(), properties(5), true, NODE))
+                .isEqualTo(asSet(constraint2));
+        assertThat(cache.getUniquenessConstraintsRelatedTo(entityTokens(1), entityTokens(), properties(5), false, NODE))
+                .isEqualTo(asSet(constraint1, constraint2));
+        assertThat(cache.getUniquenessConstraintsRelatedTo(
+                        entityTokens(1), entityTokens(), properties(5, 6), true, NODE))
+                .isEqualTo(asSet(constraint1, constraint2));
+        assertThat(cache.getUniquenessConstraintsRelatedTo(entityTokens(), entityTokens(1), properties(5), false, NODE))
+                .isEqualTo(asSet(constraint1, constraint2));
+        assertThat(cache.getUniquenessConstraintsRelatedTo(
+                        entityTokens(1, 2), entityTokens(), properties(), false, NODE))
+                .isEqualTo(asSet(constraint1, constraint2, constraint3));
     }
 
     @Test
@@ -635,18 +650,17 @@ class SchemaCacheTest {
         cache.addSchemaRule(constraint1);
         cache.addSchemaRule(constraint2);
         cache.addSchemaRule(constraint3);
-        assertEquals(
-                asSet(constraint2),
-                cache.getUniquenessConstraintsRelatedTo(entityTokens(1), entityTokens(), properties(5), true, NODE));
+        assertThat(cache.getUniquenessConstraintsRelatedTo(entityTokens(1), entityTokens(), properties(5), true, NODE))
+                .isEqualTo(asSet(constraint2));
 
         // and when
-        cache.removeSchemaRule(constraint1.getId());
-        cache.removeSchemaRule(constraint2.getId());
-        cache.removeSchemaRule(constraint3.getId());
+        cache.removeSchemaRule(constraint1);
+        cache.removeSchemaRule(constraint2);
+        cache.removeSchemaRule(constraint3);
 
         // then
-        assertTrue(cache.getUniquenessConstraintsRelatedTo(entityTokens(1), entityTokens(), properties(5), true, NODE)
-                .isEmpty());
+        assertThat(cache.getUniquenessConstraintsRelatedTo(entityTokens(1), entityTokens(), properties(5), true, NODE))
+                .isEmpty();
     }
 
     @Test
@@ -704,10 +718,10 @@ class SchemaCacheTest {
         cache.addSchemaRule(constraint2);
         cache.addSchemaRule(index3);
 
-        assertEquals(List.of(index1, index2, index3), completed);
-        assertEquals(capability, cache.getIndex(index1.getId()).getCapability());
-        assertEquals(capability, cache.getIndex(index2.getId()).getCapability());
-        assertEquals(capability, cache.getIndex(index3.getId()).getCapability());
+        assertThat(completed).isEqualTo(List.of(index1, index2, index3));
+        assertThat(cache.getIndex(index1.getId()).getCapability()).isEqualTo(capability);
+        assertThat(cache.getIndex(index2.getId()).getCapability()).isEqualTo(capability);
+        assertThat(cache.getIndex(index3.getId()).getCapability()).isEqualTo(capability);
     }
 
     @Test
@@ -717,10 +731,10 @@ class SchemaCacheTest {
         IndexDescriptor index = newIndexRule(indexId, 2, 3);
         ConstraintDescriptor constraint = uniquenessConstraint(constraintId, 2, 3, indexId);
         SchemaCache cache = newSchemaCache(index, constraint);
-        assertTrue(cache.hasConstraintRule(constraintId));
-        assertTrue(cache.hasConstraintRule(constraint));
-        assertFalse(cache.hasConstraintRule(indexId));
-        assertTrue(cache.hasIndex(index));
+        assertThat(cache.hasConstraintRule(constraintId)).isTrue();
+        assertThat(cache.hasConstraintRule(constraint)).isTrue();
+        assertThat(cache.hasConstraintRule(indexId)).isFalse();
+        assertThat(cache.hasIndex(index)).isTrue();
     }
 
     @Test
@@ -729,7 +743,7 @@ class SchemaCacheTest {
         // Different rule id, but same type, schema and index type.
         ConstraintDescriptor checked = uniquenessConstraint(0, 2, 3, 4, IndexType.RANGE);
         SchemaCache cache = newSchemaCache(existing);
-        assertTrue(cache.hasConstraintRule(checked));
+        assertThat(cache.hasConstraintRule(checked)).isTrue();
     }
 
     @Test
@@ -738,17 +752,17 @@ class SchemaCacheTest {
         // Different index type.
         ConstraintDescriptor checked = uniquenessConstraint(0, 2, 4, 5, IndexType.RANGE);
         SchemaCache cache = newSchemaCache(existing);
-        assertFalse(cache.hasConstraintRule(checked));
+        assertThat(cache.hasConstraintRule(checked)).isFalse();
     }
 
     @Test
     void shouldCacheDependentState() {
         SchemaCache cache = newSchemaCache();
         MutableInt mint = cache.getOrCreateDependantState(MutableInt.class, MutableInt::new, 1);
-        assertEquals(1, mint.getValue());
+        assertThat(mint.getValue()).isOne();
         mint.setValue(2);
         mint = cache.getOrCreateDependantState(MutableInt.class, MutableInt::new, 1);
-        assertEquals(2, mint.getValue());
+        assertThat(mint.getValue()).isEqualTo(2);
     }
 
     @Test
@@ -758,8 +772,8 @@ class SchemaCacheTest {
         IndexDescriptor second =
                 IndexPrototype.forSchema(forLabel(2, 3)).withName("index_2").materialise(2);
         SchemaCache cache = newSchemaCache(first, second);
-        assertEquals(first, single(cache.indexesForRelationshipType(2)));
-        assertEquals(first.getId(), single(cache.indexesForRelationshipType(2)).getId());
+        assertThat(single(cache.indexesForRelationshipType(2))).isEqualTo(first);
+        assertThat(single(cache.indexesForRelationshipType(2)).getId()).isEqualTo(first.getId());
     }
 
     @Test
@@ -767,9 +781,9 @@ class SchemaCacheTest {
         IndexDescriptor index =
                 IndexPrototype.forSchema(forLabel(2, 3)).withName("index name").materialise(1);
         SchemaCache cache = newSchemaCache(index);
-        assertEquals(index, cache.indexForName("index name"));
-        cache.removeSchemaRule(index.getId());
-        assertNull(cache.indexForName("index name"));
+        assertThat(cache.indexForName("index name")).isEqualTo(index);
+        cache.removeSchemaRule(index);
+        assertThat(cache.indexForName("index name")).isNull();
     }
 
     @Test
@@ -777,9 +791,9 @@ class SchemaCacheTest {
         ConstraintDescriptor constraint =
                 nodePropertyExistenceConstraint(1, 2, 3, false).withName("constraint name");
         SchemaCache cache = newSchemaCache(constraint);
-        assertEquals(constraint, cache.constraintForName("constraint name"));
-        cache.removeSchemaRule(constraint.getId());
-        assertNull(cache.constraintForName("constraint name"));
+        assertThat(cache.constraintForName("constraint name")).isEqualTo(constraint);
+        cache.removeSchemaRule(constraint);
+        assertThat(cache.constraintForName("constraint name")).isNull();
     }
 
     @Test
@@ -789,8 +803,8 @@ class SchemaCacheTest {
                 .materialise(1);
         ConstraintDescriptor constraint = uniquenessConstraint(4, 2, 3, 1).withName("schema name");
         SchemaCache cache = newSchemaCache(index, constraint);
-        assertEquals(index, cache.indexForName("schema name"));
-        assertEquals(constraint, cache.constraintForName("schema name"));
+        assertThat(cache.indexForName("schema name")).isEqualTo(index);
+        assertThat(cache.constraintForName("schema name")).isEqualTo(constraint);
     }
 
     @Test
@@ -948,7 +962,7 @@ class SchemaCacheTest {
                 .as("All properties exist that make up the logical key for the node/label")
                 .isEqualTo(logicalKeys(propertyId1, propertyId2));
 
-        cache.removeSchemaRule(existenceConstraint.getId());
+        cache.removeSchemaRule(existenceConstraint);
         assertThat(cache.constraintsGetPropertyTokensForLogicalKey(labelId, NODE))
                 .as("logical key requires both the uniqueness and existence constraints")
                 .isEqualTo(NO_LOGICAL_KEYS);
@@ -985,7 +999,7 @@ class SchemaCacheTest {
                 .as("should still be the one property that makes up the logical key for the relationship")
                 .isEqualTo(logicalKeys(propertyId1));
 
-        cache.removeSchemaRule(existenceConstraint.getId());
+        cache.removeSchemaRule(existenceConstraint);
         assertThat(cache.constraintsGetPropertyTokensForLogicalKey(relType, RELATIONSHIP))
                 .as("logical key requires both the uniqueness and existence constraints")
                 .isEqualTo(NO_LOGICAL_KEYS);
@@ -1043,6 +1057,136 @@ class SchemaCacheTest {
         assertThat(cache.constraintsGetPropertyTokensForLogicalKey(relType, RELATIONSHIP))
                 .as("should find the properties that makes up the logical key for the rel/type")
                 .isEqualTo(logicalKeys(propertyId1, propertyId2));
+    }
+
+    @Test
+    void shouldRemoveIndexForIndexAndConstraintWithSameId() {
+        // This can happen during recovery btw
+        // given
+        var cache = newSchemaCache();
+        long id = 5;
+        var index = IndexPrototype.forSchema(SchemaDescriptors.forLabel(1, 2))
+                .withName("I")
+                .materialise(id);
+        var constraint = ConstraintDescriptorFactory.existsForLabel(false, 5, 6)
+                .withName("C")
+                .withId(id);
+        cache.addSchemaRule(index);
+        cache.addSchemaRule(constraint);
+
+        // when
+        cache.removeSchemaRule(index);
+
+        // then
+        assertThat(cache.indexForName("I")).isNull();
+        assertThat(cache.constraintForName("C")).isEqualTo(constraint);
+    }
+
+    @Test
+    void shouldRemoveConstraintForIndexAndConstraintWithSameId() {
+        // This can happen during recovery btw
+        // given
+        var cache = newSchemaCache();
+        long id = 5;
+        var index = IndexPrototype.forSchema(SchemaDescriptors.forLabel(1, 2))
+                .withName("I")
+                .materialise(id);
+        var constraint = ConstraintDescriptorFactory.existsForLabel(false, 5, 6)
+                .withName("C")
+                .withId(id);
+        cache.addSchemaRule(index);
+        cache.addSchemaRule(constraint);
+
+        // when
+        cache.removeSchemaRule(constraint);
+
+        // then
+        assertThat(cache.indexForName("I")).isEqualTo(index);
+        assertThat(cache.constraintForName("C")).isNull();
+    }
+
+    @Test
+    void shouldProvideTypeConstraintsWithDefaultValue() {
+        // given
+        var cache = newSchemaCache();
+        assertThat(cache.hasAnyTypeConstraintWithDefaultValue(NODE)).isFalse();
+        assertThat(cache.hasAnyTypeConstraintWithDefaultValue(RELATIONSHIP)).isFalse();
+
+        // when/then
+        cache.addSchemaRule(typeConstraint);
+        assertThat(cache.hasAnyTypeConstraintWithDefaultValue(NODE)).isFalse();
+        assertThat(cache.hasAnyTypeConstraintWithDefaultValue(RELATIONSHIP)).isFalse();
+
+        // when/then
+        cache.addSchemaRule(typeConstraintWithDefaultValueNode);
+        assertThat(cache.typeConstraintsWithDefaultValue(
+                        typeConstraintWithDefaultValueNode.schema().getLabelId(), NODE))
+                .hasSameElementsAs(List.of(typeConstraintWithDefaultValueNode));
+        assertThat(cache.hasAnyTypeConstraintWithDefaultValue(RELATIONSHIP)).isFalse();
+
+        // when/then
+        cache.addSchemaRule(typeConstraintWithDefaultValueRel);
+        assertThat(cache.typeConstraintsWithDefaultValue(
+                        typeConstraintWithDefaultValueNode.schema().getLabelId(), NODE))
+                .hasSameElementsAs(List.of(typeConstraintWithDefaultValueNode));
+        assertThat(cache.typeConstraintsWithDefaultValue(
+                        typeConstraintWithDefaultValueRel.schema().getRelTypeId(), RELATIONSHIP))
+                .hasSameElementsAs(List.of(typeConstraintWithDefaultValueRel));
+    }
+
+    @Test
+    void shouldRemoveTypeConstraintWithDefaultValueFromCache() {
+        // given
+        var cache = newSchemaCache();
+        cache.addSchemaRule(typeConstraintWithDefaultValueNode);
+        cache.addSchemaRule(typeConstraintWithDefaultValueRel);
+        assertThat(cache.typeConstraintsWithDefaultValue(
+                        typeConstraintWithDefaultValueNode.schema().getLabelId(), NODE))
+                .hasSameElementsAs(List.of(typeConstraintWithDefaultValueNode));
+        assertThat(cache.typeConstraintsWithDefaultValue(
+                        typeConstraintWithDefaultValueRel.schema().getRelTypeId(), RELATIONSHIP))
+                .hasSameElementsAs(List.of(typeConstraintWithDefaultValueRel));
+
+        // when/then
+        cache.removeSchemaRule(typeConstraintWithDefaultValueNode);
+        assertThat(cache.hasAnyTypeConstraintWithDefaultValue(NODE)).isFalse();
+        assertThat(cache.typeConstraintsWithDefaultValue(
+                        typeConstraintWithDefaultValueRel.schema().getRelTypeId(), RELATIONSHIP))
+                .hasSameElementsAs(List.of(typeConstraintWithDefaultValueRel));
+
+        // when/then
+        cache.removeSchemaRule(typeConstraintWithDefaultValueRel);
+        assertThat(cache.hasAnyTypeConstraintWithDefaultValue(NODE)).isFalse();
+        assertThat(cache.hasAnyTypeConstraintWithDefaultValue(RELATIONSHIP)).isFalse();
+    }
+
+    @Test
+    void shouldSnapshotTypeConstraintsWithDefaultValues() {
+        // given
+        var cache = newSchemaCache();
+        cache.addSchemaRule(typeConstraintWithDefaultValueNode);
+        cache.addSchemaRule(typeConstraintWithDefaultValueRel);
+        SchemaCache snapshot = cache.snapshot();
+        assertThat(snapshot.typeConstraintsWithDefaultValue(
+                        typeConstraintWithDefaultValueNode.schema().getLabelId(), NODE))
+                .hasSameElementsAs(List.of(typeConstraintWithDefaultValueNode));
+        assertThat(snapshot.typeConstraintsWithDefaultValue(
+                        typeConstraintWithDefaultValueRel.schema().getRelTypeId(), RELATIONSHIP))
+                .hasSameElementsAs(List.of(typeConstraintWithDefaultValueRel));
+
+        // when
+        cache.removeSchemaRule(typeConstraintWithDefaultValueNode);
+        cache.removeSchemaRule(typeConstraintWithDefaultValueRel);
+        assertThat(cache.hasAnyTypeConstraintWithDefaultValue(NODE)).isFalse();
+        assertThat(cache.hasAnyTypeConstraintWithDefaultValue(RELATIONSHIP)).isFalse();
+
+        // then
+        assertThat(snapshot.typeConstraintsWithDefaultValue(
+                        typeConstraintWithDefaultValueNode.schema().getLabelId(), NODE))
+                .hasSameElementsAs(List.of(typeConstraintWithDefaultValueNode));
+        assertThat(snapshot.typeConstraintsWithDefaultValue(
+                        typeConstraintWithDefaultValueRel.schema().getRelTypeId(), RELATIONSHIP))
+                .hasSameElementsAs(List.of(typeConstraintWithDefaultValueRel));
     }
 
     // HELPERS

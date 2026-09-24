@@ -17,12 +17,10 @@
 package org.neo4j.cypher.internal.ast.factory.expression
 
 import org.neo4j.cypher.internal.ast.Statements
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher25
 import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
+import org.neo4j.cypher.internal.ast.test.util.AstParsing.ParserInTest
 import org.neo4j.cypher.internal.ast.test.util.AstParsingTestBase
 import org.neo4j.cypher.internal.expressions.Variable
-import org.neo4j.cypher.internal.parser.v5.Cypher5Parser
 import org.neo4j.cypher.internal.util.test_helpers.CypherScalaCheckDrivenPropertyChecks
 
 class VariableParserTest extends AstParsingTestBase
@@ -81,9 +79,13 @@ class VariableParserTest extends AstParsingTestBase
 
   test("variables are not allowed uneven number of backticks") {
     "RETURN `a`b`" should notParse[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'b'")
+      case Cypher5 => _.withSyntaxError(
+          """Invalid input 'b': expected an expression, ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'FOREACH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 11 (offset: 10))
+            |"RETURN `a`b`"
+            |           ^""".stripMargin
+        )
       case _ => _.withSyntaxError(
-          """Invalid input 'b': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 11 (offset: 10))
+          """Invalid input 'b': expected an expression, ',', 'AS', 'GROUP BY', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'FOREACH', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NEXT', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SHOW', 'SKIP', 'TERMINATE', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 11 (offset: 10))
             |"RETURN `a`b`"
             |           ^""".stripMargin
         )
@@ -92,9 +94,13 @@ class VariableParserTest extends AstParsingTestBase
 
   test("variables are now allowed start with number") {
     "1bcd" should notParse[Variable].in {
-      case Cypher5JavaCc => _.withMessageContaining("Was expecting one of:")
-      case _ => _.withSyntaxError(
+      case Cypher5 => _.withSyntaxError(
           """Invalid input '1bcd': expected an identifier (line 1, column 1 (offset: 0))
+            |"1bcd"
+            | ^""".stripMargin
+        )
+      case _ => _.withSyntaxError(
+          """Invalid input '1bcd': expected a variable name (line 1, column 1 (offset: 0))
             |"1bcd"
             | ^""".stripMargin
         )
@@ -104,20 +110,17 @@ class VariableParserTest extends AstParsingTestBase
   test("variables are not allowed to start with currency symbols") {
     Seq("$", "¢", "£", "₲", "₶", "\u20BD", "＄", "﹩").foreach { curr =>
       s"${curr}var" should notParse[Variable].in {
-        case Cypher5JavaCc => _.withMessageContaining("Was expecting one of:")
         case Cypher5 => _.withSyntaxError(
             s"""Invalid input '$curr': expected an identifier (line 1, column 1 (offset: 0))
                |"${curr}var"
                | ^""".stripMargin
           )
-        case Cypher25 if curr == "$" || curr == "¢" || curr == "£" =>
+        case _ =>
+          val invalid =
+            if (curr == "$" || curr == "¢" || curr == "£") curr
+            else s"${curr}var"
           _.withSyntaxError(
-            s"""Invalid input '$curr': expected an identifier (line 1, column 1 (offset: 0))
-               |"${curr}var"
-               | ^""".stripMargin
-          )
-        case _ => _.withSyntaxError(
-            s"""Invalid input '${curr}var': expected an identifier (line 1, column 1 (offset: 0))
+            s"""Invalid input '$invalid': expected a variable name (line 1, column 1 (offset: 0))
                |"${curr}var"
                | ^""".stripMargin
           )
@@ -126,27 +129,27 @@ class VariableParserTest extends AstParsingTestBase
   }
 
   test("keywords can be variables") {
-    val vocab = Cypher5Parser.VOCABULARY
-    Range.inclusive(1, vocab.getMaxTokenType)
-      .flatMap { tokenType =>
-        Option(vocab.getSymbolicName(tokenType)) ++
-          Option(vocab.getDisplayName(tokenType)) ++
-          Option(vocab.getLiteralName(tokenType))
+    val names = for {
+      parser <- ParserInTest.AllParsers
+      vocab = parser.vocabulary
+      tokenType <- Range.inclusive(1, vocab.getMaxTokenType)
+      name <- Seq(vocab.getSymbolicName(tokenType), vocab.getDisplayName(tokenType), vocab.getLiteralName(tokenType))
+      if name != null
+      massagedName <- Seq(name, name.replace("_", ""))
+    } yield massagedName
+
+    names.distinct.foreach { name =>
+      val cypher = cleanName(name)
+      if (Character.isAlphabetic(cypher.charAt(0))) {
+        cypher should parseTo[Variable](varFor(cypher))
       }
-      .flatMap(n => Seq(n, n.replace("_", "")))
-      .distinct
-      .foreach { name =>
-        val cypher = cleanName(name)
-        if (Character.isAlphabetic(cypher.charAt(0))) {
-          cypher should parseTo[Variable](varFor(cypher))
-        }
-        if (cypher != "``") {
-          s"`$cypher`" should parseIn[Variable] {
-            case Cypher5 => _.toAst(varFor(cypher, isIsolated = true))
-            case _       => _.toAst(varFor(cypher, isIsolated = false))
-          }
+      if (cypher != "``") {
+        s"`$cypher`" should parseIn[Variable] {
+          case Cypher5 => _.toAst(varFor(cypher, isIsolated = true))
+          case _       => _.toAst(varFor(cypher, isIsolated = false))
         }
       }
+    }
   }
 
   private def cleanName(input: String): String = {

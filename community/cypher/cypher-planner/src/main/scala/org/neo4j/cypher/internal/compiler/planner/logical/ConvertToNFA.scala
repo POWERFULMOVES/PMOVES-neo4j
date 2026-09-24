@@ -19,6 +19,8 @@
  */
 package org.neo4j.cypher.internal.compiler.planner.logical
 
+import org.neo4j.cypher.internal.expressions.AllReducePredicate
+import org.neo4j.cypher.internal.expressions.AllReduceSingletonPredicate
 import org.neo4j.cypher.internal.expressions.AndedPropertyInequalities
 import org.neo4j.cypher.internal.expressions.Ands
 import org.neo4j.cypher.internal.expressions.Expression
@@ -26,12 +28,12 @@ import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.RelTypeName
 import org.neo4j.cypher.internal.expressions.RelationshipUniquenessPredicate
 import org.neo4j.cypher.internal.expressions.SemanticDirection
+import org.neo4j.cypher.internal.expressions.SemanticDirection.BOTH
 import org.neo4j.cypher.internal.expressions.UnPositionedVariable.varFor
 import org.neo4j.cypher.internal.expressions.VarLengthLowerBound
 import org.neo4j.cypher.internal.expressions.VarLengthUpperBound
 import org.neo4j.cypher.internal.expressions.functions.EndNode
 import org.neo4j.cypher.internal.expressions.functions.StartNode
-import org.neo4j.cypher.internal.frontend.phases.Namespacer
 import org.neo4j.cypher.internal.ir.ExhaustiveNodeConnection
 import org.neo4j.cypher.internal.ir.PatternRelationship
 import org.neo4j.cypher.internal.ir.QuantifiedPathPattern
@@ -39,6 +41,7 @@ import org.neo4j.cypher.internal.ir.Selections
 import org.neo4j.cypher.internal.ir.SelectivePathPattern
 import org.neo4j.cypher.internal.ir.SimplePatternLength
 import org.neo4j.cypher.internal.ir.VarPatternLength
+import org.neo4j.cypher.internal.ir.ast.ForAllRepetitions
 import org.neo4j.cypher.internal.ir.ast.IRExpression
 import org.neo4j.cypher.internal.logical.plans.Expand.VariablePredicate
 import org.neo4j.cypher.internal.logical.plans.NFA
@@ -76,7 +79,7 @@ object ConvertToNFA {
     val directedConnections = if (fromLeft) connections else connections.reverse
 
     val syntheticVarLengthSingletons = spp.varLengthRelationships.map { rel =>
-      val singletonRelName = Namespacer.genName(
+      val singletonRelName = AnonymousVariableNameGenerator.genName(
         anonymousVariableNameGenerator,
         rel.name
       )
@@ -100,11 +103,20 @@ object ConvertToNFA {
   }
 
   /**
+   * AlLReduce cannot be inlined in the NFA.
+   */
+  private def isAllReduceExpression(expression: Expression): Boolean =
+    expression match {
+      case _: AllReducePredicate | _: AllReduceSingletonPredicate => true
+      case _                                                      => false
+    }
+
+  /**
    * Return True if the given expression
    * - does depend on at least one of the given entities
    */
   def canBeInlined(expression: Expression, entities: Set[LogicalVariable]): Boolean =
-    (expression.dependencies intersect entities).nonEmpty
+    (expression.dependencies intersect entities).nonEmpty && !isAllReduceExpression(expression)
 
   /**
    * Return True if the given expression
@@ -127,8 +139,14 @@ object ConvertToNFA {
     anonymousVariableNameGenerator: AnonymousVariableNameGenerator,
     syntheticVarLengthSingleton: Map[LogicalVariable, LogicalVariable]
   ): Selections = {
-    // we cannot inline uniqueness predicates but we do not have to solve them as the algorithm for finding shortest paths will do that.
+    // Relationship uniqueness predicates cannot be inlined, but any such predicate makes the inferred
+    // traversal path mode at least Trail (see TraversalPathMode.getFromPredicates), which enforces it at runtime.
     val selectionsWithoutUniquenessPredicates = selections.filter(_.expr match {
+      case far: ForAllRepetitions =>
+        far.originalInnerPredicate match {
+          case _: RelationshipUniquenessPredicate => false
+          case _                                  => true
+        }
       case _: RelationshipUniquenessPredicate => false
       case _                                  => true
     })
@@ -173,35 +191,53 @@ object ConvertToNFA {
       sourceVariable: LogicalVariable,
       relationshipVariable: LogicalVariable,
       targetVariable: LogicalVariable,
-      alreadySolvedPredicates: ListSet[Expression]
+      alreadySolvedPredicates: ListSet[Expression],
+      maybeQppPredicates: Seq[Expression]
     ): ListSet[(Expression, Expression)] = {
-      val (startNode, endNode) = (dir, fromLeft) match {
-        case (SemanticDirection.BOTH, _) =>
-          // We cannot inline extra predicates for relationships with direction BOTH
-          return ListSet.empty
-        case (SemanticDirection.OUTGOING, true)  => (sourceVariable, targetVariable)
-        case (SemanticDirection.OUTGOING, false) => (targetVariable, sourceVariable)
-        case (SemanticDirection.INCOMING, true)  => (targetVariable, sourceVariable)
-        case (SemanticDirection.INCOMING, false) => (sourceVariable, targetVariable)
+      val (maybeStartNode, maybeEndNode) = (dir, fromLeft) match {
+        case (SemanticDirection.BOTH, _)         => (None, None)
+        case (SemanticDirection.OUTGOING, true)  => (Some(sourceVariable), Some(targetVariable))
+        case (SemanticDirection.OUTGOING, false) => (Some(targetVariable), Some(sourceVariable))
+        case (SemanticDirection.INCOMING, true)  => (Some(targetVariable), Some(sourceVariable))
+        case (SemanticDirection.INCOMING, false) => (Some(sourceVariable), Some(targetVariable))
       }
 
-      def rewrite(expression: Expression): Expression = expression.endoRewrite(topDown(Rewriter.lift {
-        case `startNode` => StartNode(relationshipVariable)(InputPosition.NONE)
-        case `endNode`   => EndNode(relationshipVariable)(InputPosition.NONE)
-        case AndedPropertyInequalities(v, _, inequalities) if v == startNode || v == endNode =>
-          Ands.create(inequalities.map(rewrite).toListSet)
-      }))
+      def rewrite(expression: Expression): Expression =
+        expression.endoRewrite(topDown(Rewriter.lift {
+          case startNode if maybeStartNode.contains(startNode) => StartNode(relationshipVariable)(InputPosition.NONE)
+          case endNode if maybeEndNode.contains(endNode)       => EndNode(relationshipVariable)(InputPosition.NONE)
+          case AndedPropertyInequalities(v, _, inequalities)
+            if maybeStartNode.contains(v) || maybeEndNode.contains(v) =>
+            Ands.create(inequalities.map(rewrite).toListSet)
+        }))
 
-      val allPredicatesGiven = getTopLevelPredicates(Set(
+      def rewriteToRelationshipPredicate(nodePredicate: Expression): Option[Expression] = {
+        dir match {
+          case BOTH =>
+            // Replace the innerStartNode by TraversalEndpoint(newAnonymousVariable, From)
+            // Replace the innerEndNode by TraversalEndpoint(newAnonymousVariable, To)
+            Some(nodePredicate.endoRewrite(NodeToRelationshipExpressionRewriter(
+              startNode = sourceVariable,
+              globalRelationshipVariable = relationshipVariable,
+              endNode = targetVariable,
+              perIterationRelationshipVariable = relationshipVariable,
+              nameGenerator = anonymousVariableNameGenerator,
+              isDirected = false
+            )))
+          case _ => None
+        }
+      }
+
+      val allPredicatesGiven = (getTopLevelPredicates(Set(
         sourceVariable,
         relationshipVariable,
         targetVariable
-      ))
+      )) ++ maybeQppPredicates)
         // We cannot rewrite IRExpressions, since in QueryGraphs Variables cannot be replaced by Expressions.
         .filter(_.folder.treeFindByClass[IRExpression].isEmpty)
 
       val allApplicablePredicates = allPredicatesGiven -- alreadySolvedPredicates
-      allApplicablePredicates.map(p => p -> rewrite(p))
+      allApplicablePredicates.map(p => p -> rewriteToRelationshipPredicate(p).getOrElse(rewrite(p)))
     }
 
     // go over the node connections and keep track of selections we could inline
@@ -226,7 +262,8 @@ object ConvertToNFA {
             sourceState.variable,
             relationshipVariable,
             targetState.variable,
-            inlinedSelections.flatPredicates.to(ListSet) ++ relPredicates ++ nodePredicates
+            inlinedSelections.flatPredicates.to(ListSet) ++ relPredicates ++ nodePredicates,
+            Seq.empty
           )
 
           val relVariablePredicates =
@@ -402,7 +439,6 @@ object ConvertToNFA {
               getPredicates(qppSelections, availableSymbols + sourceInner)
             val variablePredicateOnSourceInner =
               toVariablePredicates(sourceInner, predicatesOnSourceInner.to(ListSet))
-            // var because it will get overwritten if the lower bound is > 1
             var lastSourceInnerState = builder.addAndGetState(sourceInner, variablePredicateOnSourceInner)
             builder.addTransition(
               sourceOuterState,
@@ -425,15 +461,19 @@ object ConvertToNFA {
 
             val nonInlinedQppSelections = addQppInnerTransitions()
             if (nonInlinedQppSelections.nonEmpty) {
-              throw new InternalException(s"$nonInlinedQppSelections could not be inlined into NFA")
+              throw InternalException.internalError(
+                this.getClass.getSimpleName,
+                s"$nonInlinedQppSelections could not be inlined into NFA"
+              )
             }
+
             // === 2.b) Unrolling for lower bound ===
             // If the lower bound is larger than 1, repeat the inner steps of the QPP (min - 1) times.
             for (_ <- 1L to (repetition.min - 1)) {
-              val targetInnerState = builder.getLastState
+              val newTargetInnerState = builder.getLastState
               lastSourceInnerState = builder.addAndGetState(sourceInner, variablePredicateOnSourceInner)
               builder.addTransition(
-                targetInnerState,
+                newTargetInnerState,
                 NFA.NodeJuxtapositionTransition(lastSourceInnerState.id)
               )
               addQppInnerTransitions()
@@ -457,6 +497,7 @@ object ConvertToNFA {
                     NFA.NodeJuxtapositionTransition(sourceInnerState.id)
                   )
                   addQppInnerTransitions()
+
                   builder.getLastState
                 }
             }
@@ -485,6 +526,7 @@ object ConvertToNFA {
                 NFA.NodeJuxtapositionTransition(targetOuterState.id)
               )
             }
+
             Selections.from(predicatesOnSourceInner ++ predicatesOnTargetOuter)
         }
         (builder, inlinedSelections ++ newlyInlinedSelections)

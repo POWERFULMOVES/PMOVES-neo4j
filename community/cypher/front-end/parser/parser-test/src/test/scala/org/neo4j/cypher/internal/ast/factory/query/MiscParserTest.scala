@@ -19,6 +19,8 @@ package org.neo4j.cypher.internal.ast.factory.query
 import org.neo4j.cypher.internal.ast.AliasedReturnItem
 import org.neo4j.cypher.internal.ast.AstConstructionTestSupport.VariableStringInterpolator
 import org.neo4j.cypher.internal.ast.Clause
+import org.neo4j.cypher.internal.ast.DefaultReturn
+import org.neo4j.cypher.internal.ast.FreeProjection
 import org.neo4j.cypher.internal.ast.LoadCSV
 import org.neo4j.cypher.internal.ast.Match
 import org.neo4j.cypher.internal.ast.Remove
@@ -31,11 +33,9 @@ import org.neo4j.cypher.internal.ast.SingleQuery
 import org.neo4j.cypher.internal.ast.Statement
 import org.neo4j.cypher.internal.ast.Statements
 import org.neo4j.cypher.internal.ast.UnaliasedReturnItem
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher25
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
+import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
 import org.neo4j.cypher.internal.ast.test.util.AstParsing.ParseSuccess
 import org.neo4j.cypher.internal.ast.test.util.AstParsingTestBase
-import org.neo4j.cypher.internal.ast.test.util.LegacyAstParsingTestSupport
 import org.neo4j.cypher.internal.ast.test.util.Parses
 import org.neo4j.cypher.internal.expressions.AllIterablePredicate
 import org.neo4j.cypher.internal.expressions.AnyIterablePredicate
@@ -51,7 +51,7 @@ import org.neo4j.cypher.internal.expressions.Pattern.ForMatch
 import org.neo4j.cypher.internal.expressions.PatternComprehension
 import org.neo4j.cypher.internal.expressions.PatternExpression
 import org.neo4j.cypher.internal.expressions.PatternPart.AllPaths
-import org.neo4j.cypher.internal.expressions.PatternPartWithSelector
+import org.neo4j.cypher.internal.expressions.PrefixedPatternPart
 import org.neo4j.cypher.internal.expressions.Range
 import org.neo4j.cypher.internal.expressions.RelationshipChain
 import org.neo4j.cypher.internal.expressions.RelationshipPattern
@@ -65,13 +65,12 @@ import org.neo4j.cypher.internal.expressions.SignedDecimalIntegerLiteral
 import org.neo4j.cypher.internal.expressions.SingleIterablePredicate
 import org.neo4j.cypher.internal.expressions.StringLiteral
 import org.neo4j.cypher.internal.label_expressions.LabelExpression.Leaf
-import org.neo4j.cypher.internal.parser.javacc.TokenMgrException
 import org.neo4j.cypher.internal.util.InputPosition
-import org.neo4j.cypher.internal.util.OpenCypherExceptionFactory
 import org.neo4j.cypher.internal.util.symbols.CTAny
 import org.neo4j.exceptions.SyntaxException
+import org.neo4j.gqlstatus.GqlStatusInfoCodes
 
-class MiscParserTest extends AstParsingTestBase with LegacyAstParsingTestSupport {
+class MiscParserTest extends AstParsingTestBase {
 
   test("RETURN 1 AS x //l33t comment") {
     parsesTo[Statement] {
@@ -166,7 +165,12 @@ class MiscParserTest extends AstParsingTestBase with LegacyAstParsingTestSupport
       )
 
     for (keyword <- keywords) {
-      parsing[Statement](s"WITH $$$keyword AS x RETURN x AS $keyword")
+      s"WITH $$$keyword AS x RETURN x AS $keyword" should parseTo[Statement](
+        singleQuery(
+          with_(aliasedReturnItem(parameter(keyword, CTAny), "x")),
+          return_(aliasedReturnItem(varFor("x"), keyword))
+        )
+      )
     }
   }
 
@@ -181,7 +185,7 @@ class MiscParserTest extends AstParsingTestBase with LegacyAstParsingTestSupport
 
     "REMOVE map.node.property" should parseTo[Clause](
       Remove(Seq(
-        RemovePropertyItem(chainedProperties)
+        RemovePropertyItem(chainedProperties)(pos)
       ))(pos)
     )
   }
@@ -224,14 +228,11 @@ class MiscParserTest extends AstParsingTestBase with LegacyAstParsingTestSupport
   }
 
   test("should not parse pattern comprehensions with single nodes") {
-    "[p = (x) | p]" should notParse[PatternComprehension].in {
-      case Cypher5JavaCc => _.withMessageStart("Encountered \" \"|\" \"|\"\" at line 1, column 10.")
-      case _ => _.withSyntaxError(
-          """Invalid input '|': expected '-' (line 1, column 10 (offset: 9))
-            |"[p = (x) | p]"
-            |          ^""".stripMargin
-        )
-    }
+    "[p = (x) | p]" should notParse[PatternComprehension].withSyntaxError(
+      """Invalid input '|': expected '-' (line 1, column 10 (offset: 9))
+        |"[p = (x) | p]"
+        |          ^""".stripMargin
+    )
   }
 
   test("should handle escaping in string literals") {
@@ -253,20 +254,22 @@ class MiscParserTest extends AstParsingTestBase with LegacyAstParsingTestSupport
         Match(
           optional = false,
           DifferentRelationships(implicitlyCreated = true)(InputPosition(0, 1, 1)),
-          ForMatch(List(PatternPartWithSelector(
+          ForMatch(List(PrefixedPatternPart(
             AllPaths()(InputPosition(11, 1, 12)),
             PathPatternPart(NodePattern(Some(varFor("m")), None, None, None)(InputPosition(11, 1, 12)))
           )))(InputPosition(11, 1, 12)),
           List(),
+          None,
           None
         )(InputPosition(0, 1, 1)),
         Return(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             List(UnaliasedReturnItem(varFor("m"), "m")(InputPosition(22, 1, 23))),
             None
           )(InputPosition(22, 1, 23)),
+          None,
           None,
           None,
           None,
@@ -399,25 +402,14 @@ class MiscParserTest extends AstParsingTestBase with LegacyAstParsingTestSupport
         |RETURN 3 AS x
         |""".stripMargin
 
-    q should parseIn[Statement] {
-      case Cypher25 => _.toAst(
-          union(
-            union(
-              singleQuery(returnLit(1 -> "x")),
-              singleQuery(returnLit(2 -> "x"))
-            ),
-            singleQuery(returnLit(3 -> "x"))
-          )
-        )
-      case _ => _.toAst(
-          union(
-            union(
-              singleQuery(returnLit(1 -> "x")),
-              singleQuery(returnLit(2 -> "x"))
-            ),
-            singleQuery(returnLit(3 -> "x"))
-          )
-        )
+    q should parseTo[Statement] {
+      union(
+        union(
+          singleQuery(returnLit(1 -> "x")),
+          singleQuery(returnLit(2 -> "x"))
+        ),
+        singleQuery(returnLit(3 -> "x"))
+      )
     }
   }
 
@@ -430,22 +422,23 @@ class MiscParserTest extends AstParsingTestBase with LegacyAstParsingTestSupport
           optional = false,
           DifferentRelationships(implicitlyCreated = true)(pos),
           ForMatch(Seq(
-            PatternPartWithSelector(
+            PrefixedPatternPart(
               AllPaths()(pos),
               PathPatternPart(NodePattern(Some(varFor("src")), Some(Leaf(LabelName("A")(pos))), None, None)(pos))
             ),
-            PatternPartWithSelector(
+            PrefixedPatternPart(
               AllPaths()(pos),
               PathPatternPart(NodePattern(Some(varFor("dst")), Some(Leaf(LabelName("D")(pos))), None, None)(pos))
             )
           ))(pos),
           Seq(),
+          None,
           None
         )(pos),
         Return(
           distinct = false,
           ReturnItems(
-            includeExisting = false,
+            FreeProjection,
             Seq(AliasedReturnItem(
               ShortestPathExpression(ShortestPathsPatternPart(
                 RelationshipChain(
@@ -462,8 +455,9 @@ class MiscParserTest extends AstParsingTestBase with LegacyAstParsingTestSupport
           None,
           None,
           None,
+          None,
           Set(),
-          addedInRewrite = false
+          returnType = DefaultReturn
         )(pos)
       ))(pos)))
     }
@@ -471,13 +465,18 @@ class MiscParserTest extends AstParsingTestBase with LegacyAstParsingTestSupport
 
   test("MATCH (a)->(b) RETURN *") {
     failsParsing[Statements].in {
-      case Cypher5JavaCc => (a: Parses[Statements]) =>
-          a.throws[OpenCypherExceptionFactory.SyntaxException]
-            .withMessageStart("Invalid input '-': expected")
-      case _ => (a: Parses[Statements]) =>
+      case Cypher5 => (a: Parses[Statements]) =>
           a.throws[SyntaxException]
             .withMessage(
               """Invalid input '>': expected '-' (line 1, column 11 (offset: 10))
+                |"MATCH (a)->(b) RETURN *"
+                |           ^""".stripMargin
+            )
+      // ≥ Cypher25
+      case _ => (a: Parses[Statements]) =>
+          a.throws[SyntaxException]
+            .withMessage(
+              """Invalid input '>': expected '-' or '[' (line 1, column 11 (offset: 10))
                 |"MATCH (a)->(b) RETURN *"
                 |           ^""".stripMargin
             )
@@ -485,60 +484,51 @@ class MiscParserTest extends AstParsingTestBase with LegacyAstParsingTestSupport
   }
 
   test("MATCH (a)--->(b) RETURN *") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.throws[OpenCypherExceptionFactory.SyntaxException]
-          .withMessageStart("Invalid input '-': expected")
-      case _ =>
-        _.throws[SyntaxException]
-          .withMessage(
-            """Invalid input '-': expected '(' (line 1, column 12 (offset: 11))
-              |"MATCH (a)--->(b) RETURN *"
-              |            ^""".stripMargin
-          )
-    }
+    failsParsing[Statements].throws[SyntaxException]
+      .withMessage(
+        """Invalid input '-': expected '(' (line 1, column 12 (offset: 11))
+          |"MATCH (a)--->(b) RETURN *"
+          |            ^""".stripMargin
+      )
   }
 
   test("RETURN RETURN 1") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.throws[OpenCypherExceptionFactory.SyntaxException]
-          .withMessageStart("Invalid input '1': expected")
-      case _ =>
-        _.throws[SyntaxException]
-          .withMessage(
-            """Invalid input '1': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 15 (offset: 14))
-              |"RETURN RETURN 1"
-              |               ^""".stripMargin
-          )
+    parseIn[Statements] {
+      case Cypher5 => _.withMessage(
+          """Invalid input '1': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 15 (offset: 14))
+            |"RETURN RETURN 1"
+            |               ^""".stripMargin
+        )
+      case _ => _.withMessage(
+          """Invalid input '1': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 15 (offset: 14))
+            |"RETURN RETURN 1"
+            |               ^""".stripMargin
+        )
     }
   }
 
   test("RETURN 'hell") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc =>
-        _.throws[TokenMgrException]
-          .withMessageStart("Lexical error at line 1, column 13.  Encountered: <EOF> after : \"\"")
-      case _ =>
-        _.throws[SyntaxException]
-          .withMessage(
-            """Failed to parse string literal. The query must contain an even number of non-escaped quotes. (line 1, column 8 (offset: 7))
-              |"RETURN 'hell"
-              |        ^""".stripMargin
-          )
-    }
+    failsParsing[Statements].withSyntaxErrorContaining(
+      """Failed to parse string literal. The query must contain an even number of non-escaped quotes. (line 1, column 8 (offset: 7))
+        |"RETURN 'hell"
+        |        ^""".stripMargin,
+      GqlStatusInfoCodes.STATUS_42I19,
+      "error: syntax error or access rule violation - invalid string literal. Failed to parse string literal. The query must contain an even number of non-escaped quotes.",
+      position = Some(InputPosition(7, 1, 8))
+    )
   }
 
   test("correct positions in errors with unicode escapes and comments") {
     val query = "/* \\u003A\\u0029 */  MATCH /* */ (a)/* */->/* */(b)/* */RETURN *"
-    query should notParse[Statements].in {
-      case Cypher5JavaCc =>
-        _.throws[OpenCypherExceptionFactory.SyntaxException]
-          .withMessageStart("Invalid input '-': expected")
-          .withMessageContaining("(line 1, column 41 (offset: 40))")
-      case _ =>
-        _.withSyntaxError(
+    query should parseIn[Statements] {
+      case Cypher5 => _.withMessage(
           s"""Invalid input '>': expected '-' (line 1, column 42 (offset: 41))
+             |"$query"
+             |                                          ^""".stripMargin
+        )
+      // ≥ Cypher25
+      case _ => _.withMessage(
+          s"""Invalid input '>': expected '-' or '[' (line 1, column 42 (offset: 41))
              |"$query"
              |                                          ^""".stripMargin
         )
@@ -546,95 +536,96 @@ class MiscParserTest extends AstParsingTestBase with LegacyAstParsingTestSupport
   }
 
   test("MATCH (n) WHERE n.prop = 'ab + 1") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Lexical error at")
-      case _ => _.withSyntaxError(
-          """Failed to parse string literal. The query must contain an even number of non-escaped quotes. (line 1, column 26 (offset: 25))
-            |"MATCH (n) WHERE n.prop = 'ab + 1"
-            |                          ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxErrorContaining(
+      """Failed to parse string literal. The query must contain an even number of non-escaped quotes. (line 1, column 26 (offset: 25))
+        |"MATCH (n) WHERE n.prop = 'ab + 1"
+        |                          ^""".stripMargin,
+      GqlStatusInfoCodes.STATUS_42I19,
+      "error: syntax error or access rule violation - invalid string literal. Failed to parse string literal. The query must contain an even number of non-escaped quotes.",
+      position = Some(InputPosition(25, 1, 26))
+    )
   }
 
   test("MATCH (n) WHERE n.prop = 'ab'' + 1") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Lexical error at")
-      case _ => _.withSyntaxError(
-          """Failed to parse string literal. The query must contain an even number of non-escaped quotes. (line 1, column 30 (offset: 29))
-            |"MATCH (n) WHERE n.prop = 'ab'' + 1"
-            |                              ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxErrorContaining(
+      """Failed to parse string literal. The query must contain an even number of non-escaped quotes. (line 1, column 30 (offset: 29))
+        |"MATCH (n) WHERE n.prop = 'ab'' + 1"
+        |                              ^""".stripMargin,
+      GqlStatusInfoCodes.STATUS_42I19,
+      "error: syntax error or access rule violation - invalid string literal. Failed to parse string literal. The query must contain an even number of non-escaped quotes.",
+      position = Some(InputPosition(29, 1, 30))
+    )
   }
 
   test("MATCH (n) WHERE n.prop = '") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Lexical error at")
-      case _ => _.withSyntaxError(
-          """Failed to parse string literal. The query must contain an even number of non-escaped quotes. (line 1, column 26 (offset: 25))
-            |"MATCH (n) WHERE n.prop = '"
-            |                          ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxErrorContaining(
+      """Failed to parse string literal. The query must contain an even number of non-escaped quotes. (line 1, column 26 (offset: 25))
+        |"MATCH (n) WHERE n.prop = '"
+        |                          ^""".stripMargin,
+      GqlStatusInfoCodes.STATUS_42I19,
+      "error: syntax error or access rule violation - invalid string literal. Failed to parse string literal. The query must contain an even number of non-escaped quotes.",
+      position = Some(InputPosition(25, 1, 26))
+    )
   }
 
   test("MATCH (n) WHERE n.'prop") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Lexical error at")
-      case _ => _.withSyntaxError(
-          """Failed to parse string literal. The query must contain an even number of non-escaped quotes. (line 1, column 19 (offset: 18))
-            |"MATCH (n) WHERE n.'prop"
-            |                   ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxErrorContaining(
+      """Failed to parse string literal. The query must contain an even number of non-escaped quotes. (line 1, column 19 (offset: 18))
+        |"MATCH (n) WHERE n.'prop"
+        |                   ^""".stripMargin,
+      GqlStatusInfoCodes.STATUS_42I19,
+      "error: syntax error or access rule violation - invalid string literal. Failed to parse string literal. The query must contain an even number of non-escaped quotes.",
+      position = Some(InputPosition(18, 1, 19))
+    )
   }
 
   test("SHOW SETTING 'a', 'b''") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Lexical error at")
-      case _ => _.withSyntaxError(
-          """Failed to parse string literal. The query must contain an even number of non-escaped quotes. (line 1, column 22 (offset: 21))
-            |"SHOW SETTING 'a', 'b''"
-            |                      ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxErrorContaining(
+      """Failed to parse string literal. The query must contain an even number of non-escaped quotes. (line 1, column 22 (offset: 21))
+        |"SHOW SETTING 'a', 'b''"
+        |                      ^""".stripMargin,
+      GqlStatusInfoCodes.STATUS_42I19,
+      "error: syntax error or access rule violation - invalid string literal. Failed to parse string literal. The query must contain an even number of non-escaped quotes.",
+      position = Some(InputPosition(21, 1, 22))
+    )
 
   }
 
   test("MATCH (n) WHERE n.prop = 'ab\\'c' AND 'b\\'c' AND 'c\\'") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Lexical error at line 1, column 53")
-      case _ => _.withSyntaxError(
-          """Failed to parse string literal. The query must contain an even number of non-escaped quotes. (line 1, column 49 (offset: 48))
-            |"MATCH (n) WHERE n.prop = 'ab\'c' AND 'b\'c' AND 'c\'"
-            |                                                 ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxErrorContaining(
+      """Failed to parse string literal. The query must contain an even number of non-escaped quotes. (line 1, column 49 (offset: 48))
+        |"MATCH (n) WHERE n.prop = 'ab\'c' AND 'b\'c' AND 'c\'"
+        |                                                 ^""".stripMargin,
+      GqlStatusInfoCodes.STATUS_42I19,
+      "error: syntax error or access rule violation - invalid string literal. Failed to parse string literal. The query must contain an even number of non-escaped quotes.",
+      position = Some(InputPosition(48, 1, 49))
+    )
   }
 
   test("RETURN '\\\\'") {
     parsesTo[Statements](Statements(List(SingleQuery(List(Return(
       false,
-      ReturnItems(false, List(UnaliasedReturnItem(StringLiteral("\\")(pos.withInputLength(0)), "'\\\\'")(pos)), None)(
+      ReturnItems(
+        FreeProjection,
+        List(UnaliasedReturnItem(StringLiteral("\\")(pos.withInputLength(0)), "'\\\\'")(pos)),
+        None
+      )(
         pos
       ),
       None,
       None,
       None,
-      Set(),
-      false
+      None,
+      Set()
     )(pos)))(pos))))
   }
 
   test("RETURN /* abc */ 1 /*'") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Lexical error at line 1, column 23.")
-      case _ => _.withSyntaxError(
-          """Failed to parse comment. A comment starting on `/*` must have a closing `*/`. (line 1, column 21 (offset: 20))
-            |"RETURN /* abc */ 1 /*'"
-            |                     ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Failed to parse comment. A comment starting on `/*` must have a closing `*/`. (line 1, column 21 (offset: 20))
+        |"RETURN /* abc */ 1 /*'"
+        |                     ^""".stripMargin
+    )
   }
 
   test("return item text parses correctly") {
@@ -655,13 +646,13 @@ class MiscParserTest extends AstParsingTestBase with LegacyAstParsingTestSupport
       Statements(Seq(singleQuery(return_(
         returnItem(
           add(
-            SignedDecimalIntegerLiteral("1")(InputPosition(7, 1, 8)),
-            SignedDecimalIntegerLiteral("2")(InputPosition(24, 1, 25))
+            SignedDecimalIntegerLiteral("1")(InputPosition(7, 1, 8).withInputLength(1)),
+            SignedDecimalIntegerLiteral("2")(InputPosition(24, 1, 25).withInputLength(1))
           ),
           "1 +  /* hello */ 2"
         ),
         returnItem(
-          SignedDecimalIntegerLiteral("3")(InputPosition(27, 1, 28)),
+          SignedDecimalIntegerLiteral("3")(InputPosition(27, 1, 28).withInputLength(1)),
           "3"
         )
       ))))

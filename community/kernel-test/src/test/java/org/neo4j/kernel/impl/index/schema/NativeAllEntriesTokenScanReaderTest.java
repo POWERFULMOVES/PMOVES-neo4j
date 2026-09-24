@@ -35,21 +35,20 @@ import org.eclipse.collections.api.map.primitive.MutableIntObjectMap;
 import org.eclipse.collections.impl.map.mutable.primitive.IntObjectHashMap;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.index.internal.gbptree.Seeker;
 import org.neo4j.internal.helpers.collection.Pair;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class NativeAllEntriesTokenScanReaderTest {
     @Inject
     private RandomSupport random;
 
     @Test
     void shouldSeeNonOverlappingRanges() throws Exception {
-        var idLayout = new DefaultTokenIndexIdLayout();
+        DefaultTokenIndexIdLayout idLayout = new DefaultTokenIndexIdLayout();
         // new ranges at: 0, 4, 8, 12 ...
         shouldIterateCorrectlyOver(
                 idLayout,
@@ -61,7 +60,7 @@ class NativeAllEntriesTokenScanReaderTest {
 
     @Test
     void shouldSeeOverlappingRanges() throws Exception {
-        var idLayout = new DefaultTokenIndexIdLayout();
+        DefaultTokenIndexIdLayout idLayout = new DefaultTokenIndexIdLayout();
         // new ranges at: 0, 4, 8, 12 ...
         shouldIterateCorrectlyOver(
                 idLayout,
@@ -73,7 +72,7 @@ class NativeAllEntriesTokenScanReaderTest {
 
     @Test
     void shouldSeeRangesFromRandomData() throws Exception {
-        var idLayout = new DefaultTokenIndexIdLayout();
+        DefaultTokenIndexIdLayout idLayout = new DefaultTokenIndexIdLayout();
         List<Labels> labels = randomData(random, idLayout);
 
         shouldIterateCorrectlyOver(idLayout, labels.toArray(Labels[]::new));
@@ -162,14 +161,14 @@ class NativeAllEntriesTokenScanReaderTest {
     private static long highestRangeId(Labels[] data) {
         long highest = 0;
         for (Labels labels : data) {
-            Pair<TokenScanKey, TokenScanValue> highestEntry = labels.entries.get(labels.entries.size() - 1);
+            Pair<TokenScanKey, TokenScanValue> highestEntry = labels.entries.getLast();
             highest = max(highest, highestEntry.first().idRange);
         }
         return highest;
     }
 
     private static IntFunction<Seeker<TokenScanKey, TokenScanValue>> store(Labels... labels) {
-        final MutableIntObjectMap<Labels> labelsMap = new IntObjectHashMap<>(labels.length);
+        MutableIntObjectMap<Labels> labelsMap = new IntObjectHashMap<>(labels.length);
         for (Labels item : labels) {
             labelsMap.put(item.labelId, item);
         }

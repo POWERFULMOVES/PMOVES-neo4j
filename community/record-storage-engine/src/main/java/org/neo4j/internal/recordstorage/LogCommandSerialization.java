@@ -20,16 +20,29 @@
 package org.neo4j.internal.recordstorage;
 
 import java.io.IOException;
-import org.neo4j.internal.recordstorage.indexcommand.IndexUpdateCommand;
 import org.neo4j.io.fs.ReadableChannel;
 import org.neo4j.io.fs.WritableChannel;
-import org.neo4j.kernel.impl.transaction.log.LogPositionAwareChannel;
+import org.neo4j.kernel.KernelVersion;
+import org.neo4j.memory.MemoryTracker;
 import org.neo4j.storageengine.api.BaseCommandReader;
+import org.neo4j.storageengine.api.StorageCommand;
+import org.neo4j.wal.LogPositionAwareChannel;
 
 public abstract class LogCommandSerialization extends BaseCommandReader {
+    private final KernelVersion kernelVersion;
+
+    LogCommandSerialization(KernelVersion kernelVersion) {
+        this.kernelVersion = kernelVersion;
+    }
 
     @Override
-    public final Command read(byte commandType, ReadableChannel channel) throws IOException {
+    public KernelVersion kernelVersion() {
+        return kernelVersion;
+    }
+
+    @Override
+    public final StorageCommand read(byte commandType, ReadableChannel channel, MemoryTracker memoryTracker)
+            throws IOException {
         return switch (commandType) {
             case NeoCommandType.NODE_COMMAND -> readNodeCommand(channel);
             case NeoCommandType.CREATE_NODE_COMMAND -> readCreatedNodeCommand(channel);
@@ -58,9 +71,7 @@ public abstract class LogCommandSerialization extends BaseCommandReader {
             case NeoCommandType.UPDATE_GROUP_DEGREE_COMMAND -> readGroupDegreeCommand(channel);
             case NeoCommandType.ENRICHMENT_COMMAND -> readEnrichmentCommand(channel);
 
-            case NeoCommandType.INDEX_UPDATE_COMMAND -> readIndexUpdateCommand(channel);
-
-                // legacy indexes
+            // legacy indexes
             case NeoCommandType.INDEX_DEFINE_COMMAND -> readIndexDefineCommand(channel);
             case NeoCommandType.INDEX_ADD_COMMAND -> readIndexAddNodeCommand(channel);
             case NeoCommandType.INDEX_ADD_RELATIONSHIP_COMMAND -> readIndexAddRelationshipCommand(channel);
@@ -144,10 +155,6 @@ public abstract class LogCommandSerialization extends BaseCommandReader {
     }
 
     protected Command readNodeCommand(ReadableChannel channel) throws IOException {
-        throw unsupportedInThisVersionException();
-    }
-
-    protected Command readIndexUpdateCommand(ReadableChannel channel) throws IOException {
         throw unsupportedInThisVersionException();
     }
 
@@ -261,10 +268,6 @@ public abstract class LogCommandSerialization extends BaseCommandReader {
     }
 
     public void writeMetaDataCommand(WritableChannel channel, Command.MetaDataCommand command) throws IOException {
-        throw unsupportedInThisVersionException();
-    }
-
-    public void writeIndexUpdateCommand(WritableChannel channel, IndexUpdateCommand command) throws IOException {
         throw unsupportedInThisVersionException();
     }
 

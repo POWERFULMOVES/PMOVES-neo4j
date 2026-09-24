@@ -21,16 +21,15 @@ package org.neo4j.graphdb.factory.module.id;
 
 import static java.util.Objects.requireNonNull;
 import static java.util.function.Function.identity;
+import static org.neo4j.configuration.GraphDatabaseInternalSettings.force_small_id_cache;
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
 
 import java.util.function.Function;
-import org.neo4j.configuration.Config;
-import org.neo4j.configuration.GraphDatabaseInternalSettings;
-import org.neo4j.graphdb.factory.module.id.IdContextFactory.IdGeneratorFactoryCreator;
 import org.neo4j.internal.id.DefaultIdGeneratorFactory;
 import org.neo4j.internal.id.IdGeneratorFactory;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.database.IdContextFactory.IdGeneratorFactoryCreator;
 import org.neo4j.logging.internal.LogService;
 import org.neo4j.logging.internal.NullLogService;
 import org.neo4j.scheduler.JobScheduler;
@@ -40,21 +39,16 @@ public final class IdContextFactoryBuilder {
     private JobScheduler jobScheduler;
     private IdGeneratorFactoryCreator idGeneratorFactoryProvider;
     private Function<IdGeneratorFactory, IdGeneratorFactory> factoryWrapper;
-    private Config config;
     private PageCacheTracer pageCacheTracer;
     private LogService logService = NullLogService.getInstance();
 
     private IdContextFactoryBuilder() {}
 
     public static IdContextFactoryBuilder of(
-            FileSystemAbstraction fileSystemAbstraction,
-            JobScheduler jobScheduler,
-            Config config,
-            PageCacheTracer pageCacheTracer) {
+            FileSystemAbstraction fileSystemAbstraction, JobScheduler jobScheduler, PageCacheTracer pageCacheTracer) {
         IdContextFactoryBuilder builder = new IdContextFactoryBuilder();
         builder.fileSystemAbstraction = fileSystemAbstraction;
         builder.jobScheduler = jobScheduler;
-        builder.config = config;
         builder.pageCacheTracer = pageCacheTracer;
         return builder;
     }
@@ -80,8 +74,7 @@ public final class IdContextFactoryBuilder {
             requireNonNull(fileSystemAbstraction, "File system is required to build id generator factory.");
             // Note on the RecoveryCleanupWorkCollector: this is just using the immediate() because we aren't
             // expecting any cleanup to be performed on main startup (this is after recovery).
-            idGeneratorFactoryProvider =
-                    defaultIdGeneratorFactoryProvider(fileSystemAbstraction, config, pageCacheTracer);
+            idGeneratorFactoryProvider = defaultIdGeneratorFactoryProvider(fileSystemAbstraction, pageCacheTracer);
         }
         if (factoryWrapper == null) {
             factoryWrapper = identity();
@@ -90,15 +83,13 @@ public final class IdContextFactoryBuilder {
     }
 
     public static IdGeneratorFactoryCreator defaultIdGeneratorFactoryProvider(
-            FileSystemAbstraction fs, Config config, PageCacheTracer pageCacheTracer) {
-        return (databaseId, allocationEnabled) -> {
+            FileSystemAbstraction fs, PageCacheTracer pageCacheTracer) {
+        return (databaseConfig, databaseId, allocationEnabled, directToCache, multiVersion) -> {
             // There's no point allocating large ID caches for the system database because it generally sees very low
             // activity.
             // Also take into consideration if user has explicitly overridden the behaviour to always force small
             // caches.
-            boolean allowLargeIdCaches =
-                    !config.get(GraphDatabaseInternalSettings.force_small_id_cache) && !databaseId.isSystemDatabase();
-            boolean isMultiVersion = DefaultIdContextFactory.isMultiVersion(config);
+            boolean allowLargeIdCaches = !databaseConfig.get(force_small_id_cache) && !databaseId.isSystemDatabase();
             return new DefaultIdGeneratorFactory(
                     fs,
                     immediate(),
@@ -106,7 +97,8 @@ public final class IdContextFactoryBuilder {
                     pageCacheTracer,
                     databaseId.name(),
                     allocationEnabled,
-                    !isMultiVersion);
+                    directToCache && !multiVersion,
+                    null);
         };
     }
 }

@@ -22,6 +22,7 @@ package org.neo4j.kernel.api.impl.index.storage;
 import static java.lang.Integer.parseInt;
 import static java.util.Arrays.asList;
 import static org.apache.commons.lang3.ArrayUtils.isEmpty;
+import static org.apache.commons.lang3.RandomStringUtils.insecure;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -35,24 +36,23 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
-import org.apache.commons.lang3.RandomStringUtils;
-import org.apache.lucene.document.Document;
-import org.apache.lucene.document.Field;
-import org.apache.lucene.document.StringField;
-import org.apache.lucene.index.IndexWriter;
-import org.apache.lucene.index.IndexWriterConfig;
-import org.apache.lucene.store.Directory;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.neo4j.configuration.Config;
 import org.neo4j.io.IOUtils;
 import org.neo4j.io.fs.DefaultFileSystemAbstraction;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.fs.StoreChannel;
 import org.neo4j.io.memory.HeapScopedBuffer;
+import org.neo4j.io.memory.ScopedBuffer;
 import org.neo4j.kernel.api.impl.index.IndexWriterConfigBuilder;
-import org.neo4j.kernel.api.impl.index.TestIndexWriterModes;
-import org.neo4j.kernel.api.impl.index.storage.DirectoryFactory.InMemoryDirectoryFactory;
+import org.neo4j.kernel.api.impl.index.IndexWriterConfigMode;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneContext;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDirectory;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDocument;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneIndexWriter;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneIndexWriterConfig;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
@@ -60,73 +60,82 @@ import org.neo4j.test.utils.TestDirectory;
 
 @TestDirectoryExtension
 class PartitionedIndexStorageTest {
-    private static final InMemoryDirectoryFactory directoryFactory = new InMemoryDirectoryFactory();
-
     @Inject
     private DefaultFileSystemAbstraction fs;
 
     @Inject
     private TestDirectory testDir;
 
-    private PartitionedIndexStorage storage;
+    private DirectoryFactory directoryFactory;
 
-    @BeforeEach
-    void createIndexStorage() {
-        storage = new PartitionedIndexStorage(directoryFactory, fs, testDir.homePath());
+    @AfterEach
+    void tearDown() throws Exception {
+        directoryFactory.close();
     }
 
-    @Test
-    void prepareFolderCreatesFolder() throws IOException {
+    @ParameterizedTest
+    @EnumSource
+    void prepareFolderCreatesFolder(LuceneContext luceneContext) throws IOException {
         Path folder = createRandomFolder(testDir.homePath());
+        PartitionedIndexStorage storage = createIndexStorage(luceneContext);
 
         storage.prepareFolder(folder);
 
         assertTrue(fs.fileExists(folder));
     }
 
-    @Test
-    void prepareFolderRemovesFromFileSystem() throws IOException {
+    @ParameterizedTest
+    @EnumSource
+    void prepareFolderRemovesFromFileSystem(LuceneContext luceneContext) throws IOException {
         Path folder = createRandomFolder(testDir.homePath());
         createRandomFilesAndFolders(folder);
 
+        PartitionedIndexStorage storage = createIndexStorage(luceneContext);
         storage.prepareFolder(folder);
 
         assertTrue(fs.fileExists(folder));
         assertTrue(isEmpty(fs.listFiles(folder)));
     }
 
-    @Test
-    void prepareFolderRemovesFromLucene() throws IOException {
+    @ParameterizedTest
+    @EnumSource
+    void prepareFolderRemovesFromLucene(LuceneContext luceneContext) throws IOException {
+        PartitionedIndexStorage storage = createIndexStorage(luceneContext);
         Path folder = createRandomFolder(testDir.homePath());
-        Directory dir = createRandomLuceneDir(folder);
+        try (LuceneDirectory dir = createRandomLuceneDir(folder, luceneContext)) {
 
-        assertFalse(isEmpty(dir.listAll()));
+            assertFalse(isEmpty(dir.listAll()));
 
-        storage.prepareFolder(folder);
+            storage.prepareFolder(folder);
 
-        assertTrue(fs.fileExists(folder));
-        assertTrue(isEmpty(dir.listAll()));
+            assertTrue(fs.fileExists(folder));
+            assertTrue(isEmpty(dir.listAll()));
+        }
     }
 
-    @Test
-    void openIndexDirectoriesForEmptyIndex() throws IOException {
+    @ParameterizedTest
+    @EnumSource
+    void openIndexDirectoriesForEmptyIndex(LuceneContext luceneContext) throws IOException {
+        PartitionedIndexStorage storage = createIndexStorage(luceneContext);
         storage.getIndexFolder();
 
-        Map<Path, Directory> directories = storage.openIndexDirectories();
+        Map<Path, LuceneDirectory> directories = storage.openIndexDirectories();
 
         assertTrue(directories.isEmpty());
     }
 
-    @Test
-    void openIndexDirectories() throws IOException {
+    @ParameterizedTest
+    @EnumSource
+    void openIndexDirectories(LuceneContext luceneContext) throws IOException {
+        PartitionedIndexStorage storage = createIndexStorage(luceneContext);
         Path indexFolder = storage.getIndexFolder();
-        createRandomLuceneDir(indexFolder).close();
-        createRandomLuceneDir(indexFolder).close();
+        createRandomLuceneDir(indexFolder, luceneContext).close();
+        createRandomLuceneDir(indexFolder, luceneContext).close();
 
-        Map<Path, Directory> directories = storage.openIndexDirectories();
+        Map<Path, LuceneDirectory> directories = storage.openIndexDirectories();
         try {
             assertEquals(2, directories.size());
-            for (Directory dir : directories.values()) {
+            for (LuceneDirectory dir : directories.values()) {
                 assertFalse(isEmpty(dir.listAll()));
             }
         } finally {
@@ -134,8 +143,10 @@ class PartitionedIndexStorageTest {
         }
     }
 
-    @Test
-    void listFoldersForEmptyFolder() throws IOException {
+    @ParameterizedTest
+    @EnumSource
+    void listFoldersForEmptyFolder(LuceneContext luceneContext) throws IOException {
+        PartitionedIndexStorage storage = createIndexStorage(luceneContext);
         Path indexFolder = storage.getIndexFolder();
         fs.mkdirs(indexFolder);
 
@@ -144,8 +155,10 @@ class PartitionedIndexStorageTest {
         assertTrue(folders.isEmpty());
     }
 
-    @Test
-    void listFolders() throws IOException {
+    @ParameterizedTest
+    @EnumSource
+    void listFolders(LuceneContext luceneContext) throws IOException {
+        PartitionedIndexStorage storage = createIndexStorage(luceneContext);
         Path indexFolder = storage.getIndexFolder();
         fs.mkdirs(indexFolder);
 
@@ -159,8 +172,9 @@ class PartitionedIndexStorageTest {
         assertEquals(asSet(folder1, folder2), new HashSet<>(folders));
     }
 
-    @Test
-    void shouldListIndexPartitionsSorted() throws Exception {
+    @ParameterizedTest
+    @EnumSource
+    void shouldListIndexPartitionsSorted(LuceneContext luceneContext) throws Exception {
         // GIVEN
         try (FileSystemAbstraction scramblingFs = new DefaultFileSystemAbstraction() {
             @Override
@@ -170,8 +184,9 @@ class PartitionedIndexStorageTest {
                 return files.toArray(new Path[0]);
             }
         }) {
+            directoryFactory = luceneContext.directoryFactory().newInMemoryDirectoryFactory(fs);
             PartitionedIndexStorage myStorage =
-                    new PartitionedIndexStorage(directoryFactory, scramblingFs, testDir.homePath());
+                    new PartitionedIndexStorage(luceneContext, directoryFactory, scramblingFs, testDir.homePath());
             Path parent = myStorage.getIndexFolder();
             int directoryCount = 10;
             for (int i = 0; i < directoryCount; i++) {
@@ -179,12 +194,12 @@ class PartitionedIndexStorageTest {
             }
 
             // WHEN
-            Map<Path, Directory> directories = myStorage.openIndexDirectories();
+            Map<Path, LuceneDirectory> directories = myStorage.openIndexDirectories();
 
             // THEN
             assertEquals(directoryCount, directories.size());
             int previous = 0;
-            for (Map.Entry<Path, Directory> directory : directories.entrySet()) {
+            for (Map.Entry<Path, LuceneDirectory> directory : directories.entrySet()) {
                 int current = parseInt(directory.getKey().getFileName().toString());
                 assertTrue(
                         current > previous,
@@ -192,6 +207,11 @@ class PartitionedIndexStorageTest {
                 previous = current;
             }
         }
+    }
+
+    private PartitionedIndexStorage createIndexStorage(LuceneContext luceneContext) {
+        directoryFactory = luceneContext.directoryFactory().newInMemoryDirectoryFactory(fs);
+        return new PartitionedIndexStorage(luceneContext, directoryFactory, fs, testDir.homePath());
     }
 
     private void createRandomFilesAndFolders(Path rootFolder) throws IOException {
@@ -205,13 +225,13 @@ class PartitionedIndexStorageTest {
         }
     }
 
-    private Directory createRandomLuceneDir(Path rootFolder) throws IOException {
+    private LuceneDirectory createRandomLuceneDir(Path rootFolder, LuceneContext luceneContext) throws IOException {
         Path folder = createRandomFolder(rootFolder);
-        Directory directory = directoryFactory.open(folder);
+        LuceneDirectory directory = directoryFactory.open(folder);
         Config config = Config.defaults();
-        IndexWriterConfig writerConfig = new IndexWriterConfigBuilder(TestIndexWriterModes.STANDARD, config).build();
-        try (IndexWriter writer = new IndexWriter(directory, writerConfig)) {
-            writer.addDocument(randomDocument());
+        LuceneIndexWriterConfig writerConfig = new IndexWriterConfigBuilder(IndexWriterConfigMode.TEXT, config).build();
+        try (LuceneIndexWriter writer = directory.newWriter(writerConfig)) {
+            writer.addDocument(randomDocument(luceneContext));
             writer.commit();
         }
         return directory;
@@ -220,11 +240,12 @@ class PartitionedIndexStorageTest {
     private void createRandomFile(Path rootFolder) throws IOException {
         Path file;
         do {
-            file = rootFolder.resolve(RandomStringUtils.randomNumeric(5));
+            file = rootFolder.resolve(insecure().nextNumeric(5));
         } while (fs.fileExists(file));
 
         try (StoreChannel channel = fs.write(file);
-                var scopedBuffer = new HeapScopedBuffer(100, ByteOrder.LITTLE_ENDIAN, EmptyMemoryTracker.INSTANCE)) {
+                ScopedBuffer scopedBuffer =
+                        new HeapScopedBuffer(100, ByteOrder.LITTLE_ENDIAN, EmptyMemoryTracker.INSTANCE)) {
             channel.writeAll(scopedBuffer.getBuffer());
         }
     }
@@ -232,16 +253,16 @@ class PartitionedIndexStorageTest {
     private Path createRandomFolder(Path rootFolder) throws IOException {
         Path folder;
         do {
-            folder = rootFolder.resolve(RandomStringUtils.randomNumeric(5));
+            folder = rootFolder.resolve(insecure().nextNumeric(5));
         } while (fs.fileExists(folder));
 
         fs.mkdirs(folder);
         return folder;
     }
 
-    private static Document randomDocument() {
-        Document doc = new Document();
-        doc.add(new StringField("field", RandomStringUtils.randomNumeric(5), Field.Store.YES));
+    private static LuceneDocument randomDocument(LuceneContext luceneContext) {
+        LuceneDocument doc = luceneContext.documentsFactory().newDocument();
+        doc.addStringField("field", insecure().nextNumeric(5), true);
         return doc;
     }
 }

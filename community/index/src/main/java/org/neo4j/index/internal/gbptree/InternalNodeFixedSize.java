@@ -20,7 +20,6 @@
 package org.neo4j.index.internal.gbptree;
 
 import static java.lang.String.format;
-import static org.neo4j.index.internal.gbptree.GBPTreeGenerationTarget.NO_GENERATION_TARGET;
 import static org.neo4j.index.internal.gbptree.GenerationSafePointerPair.read;
 import static org.neo4j.index.internal.gbptree.Layout.FIXED_SIZE_KEY;
 import static org.neo4j.index.internal.gbptree.TreeNodeUtil.BASE_HEADER_LENGTH;
@@ -200,11 +199,21 @@ final class InternalNodeFixedSize<KEY> implements InternalNodeBehaviour<KEY> {
 
     @Override
     public int availableSpace(PageCursor cursor, int currentKeyCount) {
-        return maxKeyCount - currentKeyCount * (keySize + SIZE_PAGE_REFERENCE);
+        return (maxKeyCount - currentKeyCount) * (keySize + SIZE_PAGE_REFERENCE);
     }
 
     @Override
     public int totalSpaceOfKeyChild(KEY key) {
+        return keySize + SIZE_PAGE_REFERENCE;
+    }
+
+    @Override
+    public int totalSpaceOfKeyChildAt(PageCursor cursor, int pos) {
+        return keySize + SIZE_PAGE_REFERENCE;
+    }
+
+    @Override
+    public int maxEntrySizeBound(CursorCreator cursorCreator, long treeNodeId, int keyCount) {
         return keySize + SIZE_PAGE_REFERENCE;
     }
 
@@ -324,18 +333,15 @@ final class InternalNodeFixedSize<KEY> implements InternalNodeBehaviour<KEY> {
 
     @Override
     public long childAt(PageCursor cursor, int pos, long stableGeneration, long unstableGeneration) {
-        return childAt(cursor, pos, stableGeneration, unstableGeneration, NO_GENERATION_TARGET);
+        return childWithGenerationAt(cursor, pos, stableGeneration, unstableGeneration)
+                .pointer();
     }
 
     @Override
-    public long childAt(
-            PageCursor cursor,
-            int pos,
-            long stableGeneration,
-            long unstableGeneration,
-            GBPTreeGenerationTarget generationTarget) {
+    public PointerWithGeneration childWithGenerationAt(
+            PageCursor cursor, int pos, long stableGeneration, long unstableGeneration) {
         cursor.setOffset(childOffset(pos));
-        return read(cursor, stableGeneration, unstableGeneration, generationTarget);
+        return read(cursor, stableGeneration, unstableGeneration);
     }
 
     @Override

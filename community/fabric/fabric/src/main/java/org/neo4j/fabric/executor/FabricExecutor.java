@@ -19,66 +19,72 @@
  */
 package org.neo4j.fabric.executor;
 
-import static org.neo4j.fabric.stream.StatementResults.withErrorMapping;
 import static scala.jdk.javaapi.CollectionConverters.asJava;
+import static scala.jdk.javaapi.CollectionConverters.asScala;
 
-import java.util.Collection;
-import java.util.Collections;
+import java.time.Clock;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
-import org.neo4j.bolt.protocol.common.message.AccessMode;
-import org.neo4j.cypher.internal.FullyParsedQuery;
+import org.neo4j.boltmessages.AccessMode;
 import org.neo4j.cypher.internal.compiler.helpers.SignatureResolver;
 import org.neo4j.cypher.internal.evaluator.StaticEvaluation;
-import org.neo4j.cypher.internal.frontend.phases.InternalSyntaxUsageStats;
+import org.neo4j.cypher.internal.frontend.phases.InternalUsageStats;
+import org.neo4j.cypher.internal.frontend.phases.QueryLanguage;
+import org.neo4j.cypher.internal.preparser.FullyParsedQuery;
+import org.neo4j.dbms.systemgraph.DefaultQueryLanguageLookup;
 import org.neo4j.exceptions.InvalidSemanticsException;
 import org.neo4j.fabric.config.FabricConfig;
+import org.neo4j.fabric.config.FabricConstants;
+import org.neo4j.fabric.eval.Catalog;
 import org.neo4j.fabric.eval.UseEvaluation;
 import org.neo4j.fabric.executor.QueryStatementLifecycles.StatementLifecycle;
 import org.neo4j.fabric.planning.FabricPlan;
 import org.neo4j.fabric.planning.FabricPlanner;
 import org.neo4j.fabric.planning.Fragment;
-import org.neo4j.fabric.stream.Prefetcher;
+import org.neo4j.fabric.stream.DelegatingFragmentResult;
+import org.neo4j.fabric.stream.FragmentResult;
 import org.neo4j.fabric.stream.Record;
 import org.neo4j.fabric.stream.Records;
 import org.neo4j.fabric.stream.StatementResult;
 import org.neo4j.fabric.stream.StatementResults;
-import org.neo4j.fabric.stream.summary.MergedQueryStatistics;
 import org.neo4j.fabric.stream.summary.MergedSummary;
-import org.neo4j.fabric.stream.summary.Summary;
+import org.neo4j.fabric.stream.summary.PlanlessSummary;
 import org.neo4j.fabric.transaction.FabricTransaction;
+import org.neo4j.fabric.transaction.TransactionMode;
 import org.neo4j.graphdb.GqlStatusObject;
-import org.neo4j.graphdb.Notification;
-import org.neo4j.graphdb.QueryExecutionType;
+import org.neo4j.graphdb.QueryStatistics;
 import org.neo4j.kernel.database.NormalizedDatabaseName;
 import org.neo4j.kernel.impl.query.NotificationConfiguration;
 import org.neo4j.kernel.impl.query.QueryRoutingMonitor;
 import org.neo4j.logging.InternalLog;
 import org.neo4j.logging.InternalLogProvider;
 import org.neo4j.monitoring.Monitors;
+import org.neo4j.notifications.NotificationImplementation;
+import org.neo4j.notifications.StandardGqlStatusObject;
+import org.neo4j.scheduler.CallableExecutor;
+import org.neo4j.values.AnyValue;
 import org.neo4j.values.virtual.MapValue;
-import org.reactivestreams.Publisher;
-import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
 
 public class FabricExecutor {
     public static final String WRITING_IN_READ_NOT_ALLOWED_MSG = "Writing in read access mode not allowed";
     private final FabricConfig.DataStream dataStreamConfig;
+    private final Supplier<FabricConfig.Profiling> profilingConfig;
     private final FabricPlanner planner;
     private final UseEvaluation useEvaluation;
     private final InternalLog log;
     private final QueryStatementLifecycles statementLifecycles;
-    private final Executor fabricWorkerExecutor;
+    private final CallableExecutor fabricWorkerExecutor;
     private final QueryRoutingMonitor queryRoutingMonitor;
-    private final InternalSyntaxUsageStats internalSyntaxUsageStats;
+    private final InternalUsageStats internalUsageStats;
+    private final DefaultQueryLanguageLookup defaultQueryLanguageLookup;
+    private final Clock clock;
 
     public FabricExecutor(
             FabricConfig config,
@@ -86,17 +92,22 @@ public class FabricExecutor {
             UseEvaluation useEvaluation,
             InternalLogProvider internalLog,
             QueryStatementLifecycles statementLifecycles,
-            Executor fabricWorkerExecutor,
+            CallableExecutor fabricWorkerExecutor,
             Monitors monitors,
-            InternalSyntaxUsageStats internalSyntaxUsageStats) {
+            InternalUsageStats internalUsageStats,
+            DefaultQueryLanguageLookup defaultQueryLanguageLookup,
+            Clock clock) {
         this.dataStreamConfig = config.getDataStream();
+        this.profilingConfig = config::getProfiling;
         this.planner = planner;
         this.useEvaluation = useEvaluation;
         this.log = internalLog.getLog(getClass());
         this.statementLifecycles = statementLifecycles;
         this.fabricWorkerExecutor = fabricWorkerExecutor;
         this.queryRoutingMonitor = monitors.newMonitor(QueryRoutingMonitor.class);
-        this.internalSyntaxUsageStats = internalSyntaxUsageStats;
+        this.internalUsageStats = internalUsageStats;
+        this.defaultQueryLanguageLookup = defaultQueryLanguageLookup;
+        this.clock = clock;
     }
 
     public StatementResult run(FabricTransaction fabricTransaction, String statement, MapValue parameters) {
@@ -108,20 +119,31 @@ public class FabricExecutor {
 
         var procedures = fabricTransaction.contextlessProcedures();
         var signatureResolver = SignatureResolver.from(procedures);
-        var evaluator = StaticEvaluation.from(procedures);
 
         try {
             var defaultGraphName = fabricTransaction.getTransactionInfo().getSessionDatabaseReference();
-
             var catalog = fabricTransaction.getCatalogSnapshot();
+
+            final var defaultLanguage = defaultQueryLanguageLookup.dbDefaultQueryLanguage(
+                    fabricTransaction.defaultQueryLanguageScope(),
+                    defaultGraphName.namedDatabaseId(),
+                    planner.cypherConfig().systemDefaultLanguage());
+
+            final var shadowedFunctions = fabricTransaction
+                    .contextlessProcedures()
+                    .shadowedNamespaces(QueryLanguage.toKernelScope(defaultLanguage));
+
             var plannerInstance = planner.instance(
                     signatureResolver,
                     statement,
                     parameters,
                     defaultGraphName,
                     catalog,
-                    internalSyntaxUsageStats,
-                    fabricTransaction.cancellationChecker());
+                    internalUsageStats,
+                    fabricTransaction.cancellationChecker(),
+                    defaultLanguage,
+                    asScala(shadowedFunctions).toSet());
+            lifecycle.donePreParsing(plannerInstance.query());
             var plan = plannerInstance.plan();
             var query = plan.query();
 
@@ -134,6 +156,8 @@ public class FabricExecutor {
                 log.debug(String.format("Fabric plan: %s", Fragment.pretty().asString(query)));
             }
 
+            var evaluator =
+                    StaticEvaluation.from(procedures, plannerInstance.query().resolvedLanguage());
             var statementResult = fabricTransaction.execute(ctx -> {
                 var useEvaluator =
                         useEvaluation.instance(evaluator, plannerInstance.signatureResolver(), statement, catalog);
@@ -171,8 +195,7 @@ public class FabricExecutor {
                 return execution.run();
             });
 
-            return withErrorMapping(
-                    statementResult, FabricSecondaryException.class, FabricSecondaryException::getPrimaryException);
+            return statementResult;
         } catch (RuntimeException e) {
             lifecycle.endFailure(e);
             // NOTE: We should not rollback the transaction here, since that is the responsibility of outer layers,
@@ -191,14 +214,10 @@ public class FabricExecutor {
         private final UseEvaluation.Instance useEvaluator;
         private final MapValue queryParams;
         private final FabricTransaction.FabricExecutionContext ctx;
-        private final MergedQueryStatistics statistics = new MergedQueryStatistics();
-        private final Set<Notification> notifications = ConcurrentHashMap.newKeySet();
-        private final Set<GqlStatusObject> gqlStatusObjects = ConcurrentHashMap.newKeySet();
-        private final AtomicReference<Collection<GqlStatusObject>> lastAddedGqlStatusObjects = new AtomicReference<>();
+        private final List<NotificationImplementation> planNotifications;
         private final StatementLifecycle lifecycle;
-        private final Prefetcher prefetcher;
         private final AccessMode accessMode;
-        private final NotificationConfiguration notificationConfiguration;
+        private final ProfilingContext profilingContext;
 
         FabricStatementExecution(
                 FabricPlan plan,
@@ -216,18 +235,21 @@ public class FabricExecutor {
             this.queryParams = queryParams;
             this.ctx = ctx;
             this.lifecycle = lifecycle;
-            this.prefetcher = new Prefetcher(dataStreamConfig);
             this.accessMode = accessMode;
-            this.notificationConfiguration = notificationConfiguration;
-        }
-
-        StatementResult run() {
             var filteredNotifications = plan.notifications()
                     .filter(notificationConfiguration::includes)
                     .toList();
-            notifications.addAll(asJava(filteredNotifications));
-            gqlStatusObjects.addAll(asJava(filteredNotifications));
+            planNotifications = asJava(filteredNotifications);
 
+            if (plan.executionType() == FabricPlan.PROFILE()) {
+                profilingContext = new ProfilingContextImpl(
+                        lifecycle.getMonitoredQuery(), profilingConfig.get().outputDir(), clock);
+            } else {
+                profilingContext = ProfilingContext.NO_OP;
+            }
+        }
+
+        StatementResult run() {
             lifecycle.startExecution(false);
             var query = plan.query();
 
@@ -235,153 +257,128 @@ public class FabricExecutor {
             // because it is very hard to produce anything better without actually executing the query
             if (plan.executionType() == FabricPlan.EXPLAIN() && plan.inCompositeContext()) {
                 lifecycle.endSuccess();
-                return StatementResults.create(
-                        asJava(query.outputColumns()),
-                        Flux.empty(),
-                        Mono.just(new MergedSummary(
-                                Mono.just(plan.query().description()),
-                                statistics,
-                                notifications,
-                                gqlStatusObjects,
-                                lastAddedGqlStatusObjects)),
-                        Mono.just(EffectiveQueryType.queryExecutionType(plan, accessMode)));
+
+                Set<GqlStatusObject> gqlStatusObjects = new HashSet<>(planNotifications);
+                // EXPLAIN queries always give OMITTED RESULT
+                gqlStatusObjects.add(StandardGqlStatusObject.OMITTED_RESULT);
+                return StatementResults.emptyStream(
+                        asJava(query.resultColumns()),
+                        new MergedSummary(
+                                plan.query().description(),
+                                QueryStatistics.EMPTY,
+                                new HashSet<>(planNotifications),
+                                gqlStatusObjects),
+                        EffectiveQueryType.queryExecutionType(plan, accessMode));
             } else {
                 FragmentResult fragmentResult = run(query, null);
-
-                List<String> columns;
-                Flux<Record> records;
-                if (query.producesResults()) {
-                    columns = asJava(query.outputColumns());
-                    records = fragmentResult.records();
-                } else {
-                    columns = Collections.emptyList();
-                    records =
-                            fragmentResult.records().then(Mono.<Record>empty()).flux();
-                }
-
-                Mono<Summary> summary = Mono.just(new MergedSummary(
-                        fragmentResult.planDescription(),
-                        statistics,
-                        notifications,
-                        gqlStatusObjects,
-                        lastAddedGqlStatusObjects));
-
-                return StatementResults.create(
-                        columns,
-                        records.doOnComplete(lifecycle::endSuccess)
-                                .doOnCancel(lifecycle::endSuccess)
-                                .doOnError(lifecycle::endFailure),
-                        summary,
-                        fragmentResult.executionType());
+                return new FabricExecutorResult(
+                        fragmentResult, planNotifications, query.producesResults(), lifecycle, profilingContext);
             }
         }
 
-        FragmentResult run(Fragment fragment, Record argument) {
-
-            if (fragment instanceof Fragment.Init) {
-                return runInit();
-            } else if (fragment instanceof Fragment.Apply apply) {
-                if (apply.inTransactionsParameters().isEmpty()) {
-                    return runApply(apply, argument);
-                } else {
-                    return runCallInTransactions(apply, argument);
-                }
-
-            } else if (fragment instanceof Fragment.Union) {
-                return runUnion((Fragment.Union) fragment, argument);
-            } else if (fragment instanceof Fragment.Exec) {
-                return runExec((Fragment.Exec) fragment, argument);
-            } else {
-                throw notImplemented("Invalid query fragment", fragment);
-            }
+        private FragmentResult run(Fragment fragment, Record argument) {
+            return switch (fragment) {
+                case Fragment.Init init -> runInit();
+                case Fragment.Apply apply ->
+                    apply.inTransactionsParameters().isEmpty()
+                            ? runApply(apply, argument)
+                            : runCallInTransactions(apply, argument);
+                case Fragment.Union union -> runUnion(union, argument);
+                case Fragment.Exec exec -> runExec(exec, argument);
+                default -> throw notImplemented("Invalid query fragment", fragment);
+            };
         }
 
-        FragmentResult runInit() {
-            return new FragmentResult(Flux.just(Records.empty()), Mono.empty(), Mono.empty());
+        private FragmentResult runInit() {
+            return StatementResults.oneRecord(List.of(), Records.empty(), null);
         }
 
-        FragmentResult runApply(Fragment.Apply apply, Record argument) {
-            FragmentResult input = run(apply.input(), argument);
-
-            Function<Record, Publisher<Record>> runInner =
-                    apply.inner().outputColumns().isEmpty()
-                            ? (Record record) -> runAndProduceOnlyRecord(apply.inner(), record) // Unit subquery
-                            : (Record record) -> runAndProduceJoinedResult(apply.inner(), record); // Returning subquery
-
-            Flux<Record> resultRecords = input.records().flatMap(runInner, dataStreamConfig.getConcurrency(), 1);
-
+        private FragmentResult runApply(Fragment.Apply apply, Record argument) {
             // TODO: merge executionType here for subqueries
             // For now, just return global value as seen by fabric
-            Mono<QueryExecutionType> executionType = Mono.just(EffectiveQueryType.queryExecutionType(plan, accessMode));
+            var queryExecutionType = EffectiveQueryType.queryExecutionType(plan, accessMode);
+            FragmentResult input = run(apply.input(), argument);
 
-            return new FragmentResult(resultRecords, Mono.empty(), executionType);
+            var remoteBatchExecutor = new RemoteBatchExecutor(
+                    fabricWorkerExecutor,
+                    record -> run(apply.inner(), record),
+                    FabricConstants.BUFFER_SIZE,
+                    FabricConstants.STREAM_CONCURRENCY);
+            return new ApplyExecutor(
+                    asJava(apply.outputColumns()),
+                    input,
+                    apply.inner().outputColumns().isEmpty(),
+                    queryExecutionType,
+                    remoteBatchExecutor,
+                    record -> run(apply.inner(), record),
+                    record -> isRemoteFragment(apply.inner(), record));
         }
 
-        private Flux<Record> runAndProduceJoinedResult(Fragment fragment, Record record) {
-            return run(fragment, record).records().map(outputRecord -> Records.join(record, outputRecord));
+        private boolean isRemoteFragment(Fragment fragment, Record argument) {
+            if (fragment instanceof Fragment.Exec exec) {
+                Map<String, AnyValue> argumentValues = SingleQueryFragmentExecutor.argumentValues(fragment, argument);
+                Catalog.Graph graph = useEvaluator
+                        .evaluate(
+                                exec.use().graphSelection(),
+                                queryParams,
+                                argumentValues,
+                                ctx.getSessionDatabaseReference())
+                        .graph();
+                TransactionMode transactionMode = SingleQueryFragmentExecutor.getTransactionMode(
+                        plan, accessMode, exec.queryType(), graph.reference().toPrettyString());
+
+                var location = ctx.locationOf(graph, transactionMode.requiresWrite());
+                return location instanceof Location.Remote;
+            }
+
+            return false;
         }
 
-        private Mono<Record> runAndProduceOnlyRecord(Fragment fragment, Record record) {
-            return run(fragment, record).records().then(Mono.just(record));
-        }
-
-        FragmentResult runUnion(Fragment.Union union, Record argument) {
+        private FragmentResult runUnion(Fragment.Union union, Record argument) {
             FragmentResult lhs = run(union.lhs(), argument);
             FragmentResult rhs = run(union.rhs(), argument);
-            Flux<Record> merged = Flux.merge(lhs.records(), rhs.records());
-            Mono<QueryExecutionType> executionType = mergeExecutionType(lhs.executionType(), rhs.executionType());
+            FragmentResult mergedResult = StatementResults.mergeUnion(lhs, rhs);
+
             if (union.distinct()) {
-                return new FragmentResult(merged.distinct(), Mono.empty(), executionType);
-            } else {
-                return new FragmentResult(merged, Mono.empty(), executionType);
+                return StatementResults.distinct(mergedResult);
             }
+
+            return mergedResult;
         }
 
-        FragmentResult runExec(Fragment.Exec fragment, Record argument) {
+        private FragmentResult runExec(Fragment.Exec fragment, Record argument) {
             return new StandardQueryExecutor(
                             fragment,
                             plannerInstance,
-                            fabricWorkerExecutor,
                             ctx,
                             useEvaluator,
                             plan,
                             queryParams,
                             accessMode,
-                            notifications,
-                            gqlStatusObjects,
-                            lastAddedGqlStatusObjects,
                             lifecycle,
-                            prefetcher,
                             queryRoutingMonitor,
-                            statistics,
                             tracer(),
+                            profilingContext,
                             FabricStatementExecution.this::run)
                     .run(argument);
         }
 
-        FragmentResult runCallInTransactions(Fragment.Apply fragment, Record argument) {
-            var resultRecords = new CallInTransactionsExecutor(
+        private FragmentResult runCallInTransactions(Fragment.Apply fragment, Record argument) {
+            return new CallInTransactionsExecutor(
                             fragment,
                             plannerInstance,
-                            fabricWorkerExecutor,
                             ctx,
                             useEvaluator,
                             plan,
                             queryParams,
                             accessMode,
-                            notifications,
-                            gqlStatusObjects,
-                            lastAddedGqlStatusObjects,
                             lifecycle,
-                            prefetcher,
                             queryRoutingMonitor,
-                            statistics,
                             tracer(),
+                            EffectiveQueryType.queryExecutionType(plan, accessMode),
+                            profilingContext,
                             FabricStatementExecution.this::run)
                     .run(argument);
-
-            Mono<QueryExecutionType> executionType = Mono.just(EffectiveQueryType.queryExecutionType(plan, accessMode));
-            return new FragmentResult(resultRecords, Mono.empty(), executionType);
         }
 
         SingleQueryFragmentExecutor.Tracer tracer() {
@@ -401,20 +398,12 @@ public class FabricExecutor {
             };
         }
 
-        private Mono<QueryExecutionType> mergeExecutionType(
-                Mono<QueryExecutionType> lhs, Mono<QueryExecutionType> rhs) {
-            return Mono.zip(lhs, rhs)
-                    .map(both -> QueryTypes.merge(both.getT1(), both.getT2()))
-                    .switchIfEmpty(lhs)
-                    .switchIfEmpty(rhs);
-        }
-
         private RuntimeException notImplemented(String msg, Object object) {
             return notImplemented(msg, object.toString());
         }
 
         private RuntimeException notImplemented(String msg, String info) {
-            return new InvalidSemanticsException(msg + ": " + info);
+            return InvalidSemanticsException.internalError(this.getClass().getSimpleName(), msg + ": " + info);
         }
     }
 
@@ -482,21 +471,42 @@ public class FabricExecutor {
         }
 
         private FragmentResult doTraceRecords(String id, FragmentResult fragmentResult) {
-            var records = fragmentResult
-                    .records()
-                    .doOnNext(record -> {
+            return new DelegatingFragmentResult(fragmentResult) {
+
+                boolean completed = false;
+
+                @Override
+                public Record next() {
+                    Record record;
+                    try {
+                        record = super.next();
+                    } catch (RuntimeException e) {
+                        String rec = e.getClass().getSimpleName() + ": " + e.getMessage();
+                        trace(id, "error", rec);
+                        throw e;
+                    }
+                    if (record == null) {
+                        completed = true;
+                        trace(id, "complete", "complete");
+                    } else {
                         String rec = IntStream.range(0, record.size())
                                 .mapToObj(i -> record.getValue(i).toString())
                                 .collect(Collectors.joining(", ", "[", "]"));
                         trace(id, "output", rec);
-                    })
-                    .doOnError(err -> {
-                        String rec = err.getClass().getSimpleName() + ": " + err.getMessage();
-                        trace(id, "error", rec);
-                    })
-                    .doOnCancel(() -> trace(id, "cancel", "cancel"))
-                    .doOnComplete(() -> trace(id, "complete", "complete"));
-            return new FragmentResult(records, fragmentResult.planDescription(), fragmentResult.executionType());
+                    }
+
+                    return record;
+                }
+
+                @Override
+                public PlanlessSummary consume() {
+                    if (!completed) {
+                        trace(id, "cancel", "cancel");
+                    }
+
+                    return delegate.consume();
+                }
+            };
         }
 
         private void trace(String id, String event, String data) {

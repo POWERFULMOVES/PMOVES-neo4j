@@ -68,9 +68,10 @@ class IndexSizesTest {
 
         indexes = new ArrayList<>();
         indexAccessors = mock(IndexAccessors.class);
-        when(indexAccessors.onlineRules(any())).then(invocation -> indexes.stream()
-                .filter(index -> index.schema().entityType() == invocation.getArgument(0))
-                .collect(Collectors.toList()));
+        when(indexAccessors.onlineRules(any()))
+                .then(invocation -> indexes.stream()
+                        .filter(index -> index.schema().entityType() == invocation.getArgument(0))
+                        .collect(Collectors.toList()));
         when(indexAccessors.accessorFor(any())).then(invocation -> {
             IndexAccessor mock = mock(IndexAccessor.class);
             when(mock.estimateNumberOfEntries(any(CursorContext.class)))
@@ -174,9 +175,11 @@ class IndexSizesTest {
     void shouldTreatFulltextAsLargeEvenThoughHasNoValueCapability(EntityType entityType) throws Exception {
         // given
         int highId = entityType == NODE ? highNodeId : highRelationshipId;
-        indexes.add(IndexPrototype.forSchema(SchemaDescriptors.fulltext(entityType, new int[] {1}, new int[] {2}))
-                .withName("foobar")
-                .materialise(highId / 2) /*w/o value capability*/);
+        indexes.add(
+                IndexPrototype.forSchema(SchemaDescriptors.forSemanticSearch(entityType, new int[] {1}, new int[] {2}))
+                        .withName("foobar")
+                        .withIndexType(IndexType.FULLTEXT)
+                        .materialise(highId / 2) /*w/o value capability*/);
         sizes.initialize();
 
         // when/then
@@ -188,9 +191,10 @@ class IndexSizesTest {
     @EnumSource(EntityType.class)
     void shouldTreatSmallFulltextAsSmall(EntityType entityType) throws Exception {
         // given
-        indexes.add(IndexPrototype.forSchema(SchemaDescriptors.fulltext(entityType, new int[] {1}, new int[] {2}))
-                .withName("foobar")
-                .materialise(1) /*w/o value capability*/);
+        indexes.add(
+                IndexPrototype.forSchema(SchemaDescriptors.forSemanticSearch(entityType, new int[] {1}, new int[] {2}))
+                        .withName("foobar")
+                        .materialise(1) /*w/o value capability*/);
         sizes.initialize();
 
         // when/then
@@ -212,8 +216,8 @@ class IndexSizesTest {
         sizes.initialize();
 
         // when/then
-        assertThat(sizes.largeIndexes(entityType).size()).isEqualTo(1);
-        assertThat(sizes.smallIndexes(entityType).size()).isEqualTo(0);
+        assertThat(sizes.largeIndexes(entityType)).hasSize(1);
+        assertThat(sizes.smallIndexes(entityType)).hasSize(0);
     }
 
     private void createIndexes(int numSmall, int numLarge, EntityType entityType) {

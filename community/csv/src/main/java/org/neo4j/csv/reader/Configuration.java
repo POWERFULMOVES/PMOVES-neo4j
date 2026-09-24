@@ -19,20 +19,28 @@
  */
 package org.neo4j.csv.reader;
 
+import static org.neo4j.io.ByteUnit.kibiBytes;
 import static org.neo4j.io.ByteUnit.mebiBytes;
 
 import java.util.function.Predicate;
+import org.neo4j.common.EntityType;
 import org.neo4j.function.Predicates;
 
 /**
  * Configuration options around reading CSV data, or similar.
  */
 public class Configuration {
-    public static final Configuration COMMAS =
-            newBuilder().withDelimiter(',').withArrayDelimiter(';').build();
+    public static final Configuration COMMAS = newBuilder()
+            .withDelimiter(',')
+            .withArrayDelimiter(';')
+            .withVectorDelimiter(';')
+            .build();
 
-    public static final Configuration TABS =
-            newBuilder().withDelimiter('\t').withArrayDelimiter(',').build();
+    public static final Configuration TABS = newBuilder()
+            .withDelimiter('\t')
+            .withArrayDelimiter(',')
+            .withVectorDelimiter(',')
+            .build();
 
     public static final boolean DEFAULT_LEGACY_STYLE_QUOTING = false;
 
@@ -41,9 +49,11 @@ public class Configuration {
     private final char quotationCharacter;
     private final char delimiter;
     private final char arrayDelimiter;
+    private final char vectorDelimiter;
     private final int bufferSize;
     private final Predicate<String> multilineDocuments;
-    private final boolean legacyMultilineFields;
+    private final boolean legacyMultilineFieldsForNodes;
+    private final boolean legacyMultilineFieldsForRelationships;
     private final boolean trimStrings;
     private final boolean emptyQuotedStringsAsNull;
     private final boolean legacyStyleQuoting;
@@ -53,9 +63,11 @@ public class Configuration {
         this.quotationCharacter = b.quotationCharacter;
         this.delimiter = b.delimiter;
         this.arrayDelimiter = b.arrayDelimiter;
+        this.vectorDelimiter = b.vectorDelimiter;
         this.bufferSize = b.bufferSize;
         this.multilineDocuments = b.multilineDocuments;
-        this.legacyMultilineFields = b.legacyMultilineFields;
+        this.legacyMultilineFieldsForNodes = b.legacyMultilineFieldsForNodes;
+        this.legacyMultilineFieldsForRelationships = b.legacyMultilineFieldsForRelationships;
         this.trimStrings = b.trimStrings;
         this.emptyQuotedStringsAsNull = b.emptyQuotedStringsAsNull;
         this.legacyStyleQuoting = b.legacyStyleQuoting;
@@ -72,6 +84,10 @@ public class Configuration {
 
     public char arrayDelimiter() {
         return arrayDelimiter;
+    }
+
+    public char vectorDelimiter() {
+        return vectorDelimiter;
     }
 
     /**
@@ -119,8 +135,11 @@ public class Configuration {
      * Whether or not fields are allowed to have newline characters in them, i.e. span multiple lines. This is applied to
      * all source documents, irrespective of whether the source in question has any multiline fields ot not.
      */
-    public boolean legacyMultilineFields() {
-        return legacyMultilineFields;
+    public boolean legacyMultilineFields(EntityType entityType) {
+        return switch (entityType) {
+            case NODE -> legacyMultilineFieldsForNodes;
+            case RELATIONSHIP -> legacyMultilineFieldsForRelationships;
+        };
     }
 
     /**
@@ -130,21 +149,54 @@ public class Configuration {
         return readIsForSampling;
     }
 
+    @Override
+    public String toString() {
+        return "Configuration{ delimiter="
+                + delimiter
+                + " arrayDelimiter="
+                + arrayDelimiter
+                + " vectorDelimiter="
+                + vectorDelimiter
+                + " quotationCharacter="
+                + quotationCharacter
+                + " bufferSize="
+                + bufferSize
+                + " legacyMultilineFieldsForNodes="
+                + legacyMultilineFieldsForNodes
+                + " legacyMultilineFieldsForRelationships="
+                + legacyMultilineFieldsForRelationships
+                + " trimStrings="
+                + trimStrings
+                + " emptyQuotedStringsAsNull="
+                + emptyQuotedStringsAsNull
+                + " legacyStyleQuoting="
+                + legacyStyleQuoting
+                + " readIsForSampling="
+                + readIsForSampling
+                + " }";
+    }
+
     public Builder toBuilder() {
         final var builder = new Builder()
                 .withQuotationCharacter(quotationCharacter)
                 .withDelimiter(delimiter)
                 .withArrayDelimiter(arrayDelimiter)
+                .withVectorDelimiter(vectorDelimiter)
                 .withBufferSize(bufferSize)
                 .withTrimStrings(trimStrings)
                 .withEmptyQuotedStringsAsNull(emptyQuotedStringsAsNull)
                 .withLegacyStyleQuoting(legacyStyleQuoting)
-                .withReadIsForSampling(readIsForSampling);
-        if (legacyMultilineFields) {
-            return builder.withLegacyMultilineBehaviour();
-        } else {
-            return builder.withMultilineDocuments(multilineDocuments);
+                .withReadIsForSampling(readIsForSampling)
+                .withMultilineDocuments(multilineDocuments);
+
+        if (legacyMultilineFieldsForNodes) {
+            builder.withLegacyMultilineBehaviour(EntityType.NODE);
         }
+        if (legacyMultilineFieldsForRelationships) {
+            builder.withLegacyMultilineBehaviour(EntityType.RELATIONSHIP);
+        }
+
+        return builder;
     }
 
     public static Builder newBuilder() {
@@ -152,11 +204,15 @@ public class Configuration {
     }
 
     public static class Builder {
+        public static final int DEFAULT_BUFFER_SIZE_IF_SKIDBLADNIR = (int) kibiBytes(64);
+
         private char quotationCharacter = '"';
         private char delimiter = ',';
         private char arrayDelimiter = ';';
+        private char vectorDelimiter = ';';
         private int bufferSize = (int) mebiBytes(4);
-        private boolean legacyMultilineFields;
+        private boolean legacyMultilineFieldsForNodes;
+        private boolean legacyMultilineFieldsForRelationships;
         private Predicate<String> multilineDocuments = Predicates.alwaysFalse();
         private boolean trimStrings;
         private boolean emptyQuotedStringsAsNull;
@@ -178,19 +234,25 @@ public class Configuration {
             return this;
         }
 
+        public Builder withVectorDelimiter(char vectorDelimiter) {
+            this.vectorDelimiter = vectorDelimiter;
+            return this;
+        }
+
         public Builder withBufferSize(int bufferSize) {
             this.bufferSize = bufferSize;
             return this;
         }
 
-        public Builder withLegacyMultilineBehaviour() {
-            this.legacyMultilineFields = true;
-            this.multilineDocuments = Predicates.alwaysFalse();
+        public Builder withLegacyMultilineBehaviour(EntityType entityType) {
+            switch (entityType) {
+                case NODE -> this.legacyMultilineFieldsForNodes = true;
+                case RELATIONSHIP -> this.legacyMultilineFieldsForRelationships = true;
+            }
             return this;
         }
 
         public Builder withMultilineDocuments(Predicate<String> multilineDocuments) {
-            this.legacyMultilineFields = false;
             this.multilineDocuments = multilineDocuments;
             return this;
         }

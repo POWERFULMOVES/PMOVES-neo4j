@@ -25,13 +25,12 @@ import static org.neo4j.token.api.TokenConstants.NO_TOKEN;
 
 import java.util.Arrays;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.graphdb.Direction;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class RelationshipSelectionTest {
     @Inject
     private RandomSupport random;
@@ -51,6 +50,7 @@ class RelationshipSelectionTest {
 
         // then
         assertThat(selection.highestType()).isEqualTo(typesReference[typesReference.length - 1]);
+        assertThat(selection.lowestType()).isEqualTo(typesReference[0]);
     }
 
     @Test
@@ -69,10 +69,27 @@ class RelationshipSelectionTest {
 
         // then
         assertThat(selection.highestType()).isEqualTo(5);
+        assertThat(selection.lowestType()).isEqualTo(0);
         assertThat(selection.numberOfCriteria()).isEqualTo(6);
         assertThat(selection.test(NO_TOKEN)).isFalse();
         for (int i = 0; i < 6; i++) {
             assertThat(selection.test(i)).isTrue();
         }
+    }
+
+    @Test
+    void shouldHaveDecentLowestTypeForAllNoTokens() {
+        // given
+        var types = new int[] {3};
+        Arrays.fill(types, NO_TOKEN);
+
+        // when
+        var selection = RelationshipSelection.selection(types, Direction.OUTGOING);
+
+        // then
+        assertThat(selection.highestType()).isEqualTo(-1);
+        assertThat(selection.lowestType()).isEqualTo(-1);
+        assertThat(selection.numberOfCriteria()).isEqualTo(0);
+        assertThat(selection.test(NO_TOKEN)).isFalse();
     }
 }

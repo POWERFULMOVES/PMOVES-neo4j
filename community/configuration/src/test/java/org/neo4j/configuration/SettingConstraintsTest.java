@@ -19,9 +19,8 @@
  */
 package org.neo4j.configuration;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import org.junit.jupiter.api.Test;
 import org.neo4j.configuration.helpers.SocketAddress;
@@ -29,28 +28,33 @@ import org.neo4j.configuration.helpers.SocketAddress;
 class SettingConstraintsTest {
     @Test
     void invalidAdvertisedAddress() {
-        assertThat(assertThrows(IllegalArgumentException.class, () -> Config.newBuilder()
+        assertThatThrownBy(() -> Config.newBuilder()
                         .set(GraphDatabaseSettings.default_advertised_address, new SocketAddress("0.0.00.000"))
-                        .build()))
+                        .build())
+                .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("advertised address cannot be '0.0.0.0'");
-        assertThat(assertThrows(IllegalArgumentException.class, () -> Config.newBuilder()
+
+        assertThatThrownBy(() -> Config.newBuilder()
                         .set(GraphDatabaseSettings.default_advertised_address, new SocketAddress("::"))
-                        .build()))
+                        .build())
+                .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("advertised address cannot be '::'");
     }
 
     @Test
     void invalidDefaultAddress() {
-        assertThat(assertThrows(IllegalArgumentException.class, () -> Config.newBuilder()
+        assertThatThrownBy(() -> Config.newBuilder()
                         .set(GraphDatabaseSettings.default_advertised_address, new SocketAddress("localhost", 1234))
-                        .build()))
+                        .build())
+                .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("can not have a port");
     }
 
     @Test
     void validDefaultAdvertisedAddress() {
-        assertDoesNotThrow(() -> Config.newBuilder()
-                .set(GraphDatabaseSettings.default_advertised_address, new SocketAddress("localhost"))
-                .build());
+        assertThatCode(() -> Config.newBuilder()
+                        .set(GraphDatabaseSettings.default_advertised_address, new SocketAddress("localhost"))
+                        .build())
+                .doesNotThrowAnyException();
     }
 }

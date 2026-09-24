@@ -21,30 +21,32 @@ package org.neo4j.cypher.internal.schema
 
 import org.eclipse.collections.api.factory.Lists
 import org.eclipse.collections.api.factory.Sets
+import org.neo4j.configuration.Config
 import org.neo4j.cypher.internal.CypherVersion
+import org.neo4j.cypher.internal.ast
+import org.neo4j.cypher.internal.ast.AlterCurrentGraphType
+import org.neo4j.cypher.internal.ast.AlterCurrentGraphType.AlterOperation
 import org.neo4j.cypher.internal.ast.CreateConstraint
 import org.neo4j.cypher.internal.ast.CreateFulltextIndex
 import org.neo4j.cypher.internal.ast.CreateLookupIndex
 import org.neo4j.cypher.internal.ast.CreateSingleLabelPropertyIndex
+import org.neo4j.cypher.internal.ast.CreateVectorIndex
 import org.neo4j.cypher.internal.ast.DropConstraintOnName
 import org.neo4j.cypher.internal.ast.DropIndexOnName
+import org.neo4j.cypher.internal.ast.GraphType
 import org.neo4j.cypher.internal.ast.IfExistsDo
 import org.neo4j.cypher.internal.ast.IfExistsDoNothing
-import org.neo4j.cypher.internal.ast.NodePropertyExistence
-import org.neo4j.cypher.internal.ast.NodePropertyUniqueness
 import org.neo4j.cypher.internal.ast.Options
 import org.neo4j.cypher.internal.ast.OptionsParam
 import org.neo4j.cypher.internal.ast.PointCreateIndex
 import org.neo4j.cypher.internal.ast.RangeCreateIndex
-import org.neo4j.cypher.internal.ast.RelationshipPropertyExistence
-import org.neo4j.cypher.internal.ast.RelationshipPropertyUniqueness
 import org.neo4j.cypher.internal.ast.TextCreateIndex
-import org.neo4j.cypher.internal.ast.VectorCreateIndex
 import org.neo4j.cypher.internal.expressions.ElementTypeName
+import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.LabelName
-import org.neo4j.cypher.internal.expressions.Parameter
 import org.neo4j.cypher.internal.expressions.Property
 import org.neo4j.cypher.internal.expressions.RelTypeName
+import org.neo4j.cypher.internal.expressions.StringLiteral
 import org.neo4j.cypher.internal.optionsmap.CreateFulltextIndexOptionsConverter
 import org.neo4j.cypher.internal.optionsmap.CreateIndexWithFullOptions
 import org.neo4j.cypher.internal.optionsmap.CreateLookupIndexOptionsConverter
@@ -93,10 +95,7 @@ import java.util
 
 import scala.jdk.CollectionConverters.IterableHasAsJava
 
-class SchemaCommandConverter(
-  private val cypherVersion: CypherVersion,
-  private val latestVectorIndexVersion: VectorIndexVersion
-) {
+class SchemaCommandConverter(config: Config) {
 
   private val ERROR_SUFFIX = " in import schema commands."
 
@@ -116,7 +115,11 @@ class SchemaCommandConverter(
   }
 
   @throws[SchemaCommandReaderException]
-  def apply(command: org.neo4j.cypher.internal.ast.SchemaCommand): SchemaCommand = command match {
+  def apply(
+    command: org.neo4j.cypher.internal.ast.SchemaCommand,
+    cypherVersion: CypherVersion,
+    latestVectorIndexVersion: VectorIndexVersion
+  ): SchemaCommand = command match {
     case DropConstraintOnName(name, ifExists, None) =>
       new ConstraintCommand.Drop(checkName(name, "constraint name"), ifExists);
     case DropIndexOnName(name, ifExists, None) => new IndexCommand.Drop(checkName(name, "index name"), ifExists);
@@ -124,11 +127,12 @@ class SchemaCommandConverter(
       val desc = if (isNodeIndex) indexType.nodeDescription else indexType.relDescription
       val name = indexName.map(n => checkName(n, desc + " name")).orNull
       val notExists = ifNotExists(ifExistsDo)
-      validateOptions(options, CreateLookupIndexOptionsConverter(providerContext))
+      validateOptions(options, CreateLookupIndexOptionsConverter(providerContext), cypherVersion, Some(config))
       if (isNodeIndex) new NodeLookup(name, notExists)
       else new RelationshipLookup(name, notExists)
     case index @ CreateFulltextIndex(_, entityNames, properties, indexName, _, ifExistsDo, options) =>
-      val config = validateOptions(options, CreateFulltextIndexOptionsConverter(providerContext))
+      val providerOptions =
+        validateOptions(options, CreateFulltextIndexOptionsConverter(providerContext), cypherVersion, Some(config))
       val desc = index.entityIndexDescription
       val name = indexName.map(n => checkName(n, desc + " name")).orNull
       val props = setLikeList(properties.map((p: Property) => p.propertyKey.name), desc, "property")
@@ -139,14 +143,58 @@ class SchemaCommandConverter(
             setLikeList(labels.map(l => l.name), desc, "label"),
             props,
             ifNotExists(ifExistsDo),
-            indexConfig(config)
+            indexConfig(providerOptions)
           )
         case Right(types) => new RelationshipFulltext(
             name,
             setLikeList(types.map(t => t.name), desc, "relationship"),
             props,
             ifNotExists(ifExistsDo),
-            indexConfig(config)
+            indexConfig(providerOptions)
+          )
+      }
+    case index @ CreateVectorIndex(
+        _,
+        entityNames,
+        properties,
+        additionalProperties,
+        indexName,
+        _,
+        ifExistsDo,
+        options
+      ) =>
+      val providerOptions =
+        validateOptions(
+          options,
+          CreateVectorIndexOptionsConverter(providerContext, latestVectorIndexVersion),
+          cypherVersion,
+          Some(config)
+        )
+      val desc = index.entityIndexDescription
+      val name = indexName.map(n => checkName(n, desc + " name")).orNull
+      val vectorProperty = singleProperty(properties)
+      val additionalProps =
+        setLikeList(additionalProperties.map(_.propertyKey.name), desc, "additional property")
+      entityNames match {
+        case Left(labels) =>
+          new NodeVector(
+            name,
+            setLikeList(labels.map(l => l.name), desc, "label"),
+            vectorProperty,
+            additionalProps,
+            latestVectorIndexVersion.descriptor,
+            ifNotExists(ifExistsDo),
+            indexConfig(providerOptions)
+          )
+        case Right(types) =>
+          new RelationshipVector(
+            name,
+            setLikeList(types.map(t => t.name), desc, "relationship"),
+            vectorProperty,
+            additionalProps,
+            latestVectorIndexVersion.descriptor,
+            ifNotExists(ifExistsDo),
+            indexConfig(providerOptions)
           )
       }
     case index @ CreateSingleLabelPropertyIndex(
@@ -165,7 +213,7 @@ class SchemaCommandConverter(
       indexType match {
         case _: RangeCreateIndex =>
           val props = setLikeList(properties.map((p: Property) => p.propertyKey.name), desc, "property")
-          validateOptions(options, CreateRangeIndexOptionsConverter(desc, providerContext))
+          validateOptions(options, CreateRangeIndexOptionsConverter(desc, providerContext), cypherVersion, Some(config))
           if (isNode) {
             new NodeRange(
               name,
@@ -182,7 +230,7 @@ class SchemaCommandConverter(
             )
           }
         case TextCreateIndex =>
-          validateOptions(options, CreateTextIndexOptionsConverter(providerContext))
+          validateOptions(options, CreateTextIndexOptionsConverter(providerContext), cypherVersion, Some(config))
           if (isNode) {
             new NodeText(
               name,
@@ -199,14 +247,15 @@ class SchemaCommandConverter(
             )
           }
         case PointCreateIndex =>
-          val config = validateOptions(options, CreatePointIndexOptionsConverter(providerContext))
+          val providerOptions =
+            validateOptions(options, CreatePointIndexOptionsConverter(providerContext), cypherVersion, Some(config))
           if (isNode) {
             new NodePoint(
               name,
               entityName,
               singleProperty(properties),
               ifNotExists(ifExistsDo),
-              indexConfig(config)
+              indexConfig(providerOptions)
             )
           } else {
             new RelationshipPoint(
@@ -214,27 +263,7 @@ class SchemaCommandConverter(
               entityName,
               singleProperty(properties),
               ifNotExists(ifExistsDo),
-              indexConfig(config)
-            )
-          }
-        case VectorCreateIndex =>
-          val config =
-            validateOptions(options, CreateVectorIndexOptionsConverter(providerContext, latestVectorIndexVersion))
-          if (isNode) {
-            new NodeVector(
-              name,
-              entityName,
-              singleProperty(properties),
-              ifNotExists(ifExistsDo),
-              indexConfig(config)
-            )
-          } else {
-            new RelationshipVector(
-              name,
-              entityName,
-              singleProperty(properties),
-              ifNotExists(ifExistsDo),
-              indexConfig(config)
+              indexConfig(providerOptions)
             )
           }
         case _ =>
@@ -245,83 +274,113 @@ class SchemaCommandConverter(
       val name = constraintName.map(n => checkName(n, desc + " name")).orNull
       val entityName = tokenName(elementName)
       constraintType match {
-        case _: org.neo4j.cypher.internal.ast.NodeKey =>
-          validateOptions(options, IndexBackedConstraintsOptionsConverter("range index", providerContext))
+        case _: ast.NodeKey =>
+          validateOptions(
+            options,
+            IndexBackedConstraintsOptionsConverter("range index", providerContext),
+            cypherVersion
+          )
           new NodeKey(
             name,
             entityName,
             asList(properties.map(p => p.propertyKey.name)),
             ifNotExists(ifExistsDo)
           )
-        case _: org.neo4j.cypher.internal.ast.RelationshipKey =>
-          validateOptions(options, IndexBackedConstraintsOptionsConverter("range index", providerContext))
+        case _: ast.RelationshipKey =>
+          validateOptions(
+            options,
+            IndexBackedConstraintsOptionsConverter("range index", providerContext),
+            cypherVersion
+          )
           new RelationshipKey(
             name,
             entityName,
             asList(properties.map(p => p.propertyKey.name)),
             ifNotExists(ifExistsDo)
           )
-        case NodePropertyUniqueness =>
-          validateOptions(options, IndexBackedConstraintsOptionsConverter("range index", providerContext))
+        case _: ast.NodePropertyUniqueness =>
+          validateOptions(
+            options,
+            IndexBackedConstraintsOptionsConverter("range index", providerContext),
+            cypherVersion
+          )
           new NodeUniqueness(
             name,
             entityName,
             asList(properties.map(p => p.propertyKey.name)),
             ifNotExists(ifExistsDo)
           )
-        case RelationshipPropertyUniqueness =>
-          validateOptions(options, IndexBackedConstraintsOptionsConverter("range index", providerContext))
+        case _: ast.RelationshipPropertyUniqueness =>
+          validateOptions(
+            options,
+            IndexBackedConstraintsOptionsConverter("range index", providerContext),
+            cypherVersion
+          )
           new RelationshipUniqueness(
             name,
             entityName,
             asList(properties.map(p => p.propertyKey.name)),
             ifNotExists(ifExistsDo)
           )
-        case NodePropertyExistence =>
+        case ast.NodePropertyExistence =>
           validateOptions(
             options,
-            PropertyExistenceOrTypeConstraintOptionsConverter("node", "existence", providerContext)
+            PropertyExistenceOrTypeConstraintOptionsConverter("node", "existence", providerContext),
+            cypherVersion
           )
-          new NodeExistence(name, entityName, singleProperty(properties), ifNotExists(ifExistsDo))
-        case RelationshipPropertyExistence =>
+          new NodeExistence(name, entityName, singleProperty(properties), false, ifNotExists(ifExistsDo))
+        case ast.RelationshipPropertyExistence =>
           validateOptions(
             options,
-            PropertyExistenceOrTypeConstraintOptionsConverter("relationship", "existence", providerContext)
+            PropertyExistenceOrTypeConstraintOptionsConverter("relationship", "existence", providerContext),
+            cypherVersion
           )
-          new RelationshipExistence(name, entityName, singleProperty(properties), ifNotExists(ifExistsDo))
-        case org.neo4j.cypher.internal.ast.NodePropertyType(propType) =>
-          validateOptions(options, PropertyExistenceOrTypeConstraintOptionsConverter("node", "type", providerContext))
+          new RelationshipExistence(name, entityName, singleProperty(properties), false, ifNotExists(ifExistsDo))
+        case ast.NodePropertyType(propType) =>
+          validateOptions(
+            options,
+            PropertyExistenceOrTypeConstraintOptionsConverter("node", "type", providerContext),
+            cypherVersion
+          )
           new NodePropertyType(
             name,
             entityName,
             singleProperty(properties),
             PropertyTypeMapper.asPropertyTypeSet(propType),
+            null,
+            false,
             ifNotExists(ifExistsDo)
           )
-        case org.neo4j.cypher.internal.ast.RelationshipPropertyType(propType) =>
+        case ast.RelationshipPropertyType(propType) =>
           validateOptions(
             options,
-            PropertyExistenceOrTypeConstraintOptionsConverter("relationship", "type", providerContext)
+            PropertyExistenceOrTypeConstraintOptionsConverter("relationship", "type", providerContext),
+            cypherVersion
           )
           new RelationshipPropertyType(
             name,
             entityName,
             singleProperty(properties),
             PropertyTypeMapper.asPropertyTypeSet(propType),
+            null,
+            false,
             ifNotExists(ifExistsDo)
           )
       }
+    case AlterCurrentGraphType(gt, operation, _) =>
+      graphType(gt, operation)
     case _ =>
       throw new SchemaCommandReaderException("Unrecognised schema change found: " + command.getClass.getSimpleName)
   }
 
   @throws[SchemaCommandReaderException]
-  private def checkName(name: Either[String, Parameter], message: String): String = name
-    .swap
-    .getOrElse(throw new SchemaCommandReaderException("Parameters are not allowed to be used as a %s%s".formatted(
-      message,
-      ERROR_SUFFIX
-    )))
+  private def checkName(name: Expression, message: String): String = name match {
+    case s: StringLiteral => s.value
+    case _ => throw new SchemaCommandReaderException("Parameters are not allowed to be used as a %s%s".formatted(
+        message,
+        ERROR_SUFFIX
+      ))
+  }
 
   @throws[SchemaCommandReaderException]
   private def tokenName(name: ElementTypeName): String =
@@ -337,10 +396,15 @@ class SchemaCommandConverter(
     providerOptions.map(opts => opts.config).orElse(Option.apply(IndexConfig.empty())).get
 
   @throws[SchemaCommandReaderException]
-  private def validateOptions[OPTION](options: Options, converter: IndexOptionsConverter[OPTION]): Option[OPTION] = {
+  private def validateOptions[OPTION](
+    options: Options,
+    converter: IndexOptionsConverter[OPTION],
+    cypherVersion: CypherVersion,
+    config: Option[Config] = None
+  ): Option[OPTION] = {
     if (options.isInstanceOf[OptionsParam])
       throw new SchemaCommandReaderException("Parameterised options are not allowed" + ERROR_SUFFIX)
-    converter.convert(cypherVersion, options, MapValue.EMPTY, Option.empty).toOption
+    converter.convert(cypherVersion, options, MapValue.EMPTY, config).toOption
   }
 
   private def asList[TYPE](list: Seq[TYPE]): util.List[TYPE] =
@@ -365,6 +429,9 @@ class SchemaCommandConverter(
     }
     values
   }
+
+  protected def graphType(gt: GraphType, operation: AlterOperation): SchemaCommand.GraphType =
+    throw new IllegalStateException("graph type support exists in enterprise edition")
 
   private def singleProperty(properties: Seq[Property]): String =
     singleItem(properties, (p: Property) => p.propertyKey.name)

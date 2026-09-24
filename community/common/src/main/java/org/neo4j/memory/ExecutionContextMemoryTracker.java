@@ -22,7 +22,6 @@ package org.neo4j.memory;
 import static java.lang.Math.max;
 import static java.util.Objects.requireNonNull;
 import static org.neo4j.internal.helpers.Numbers.ceilingPowerOfTwo;
-import static org.neo4j.kernel.api.exceptions.Status.General.TransactionOutOfMemoryError;
 import static org.neo4j.memory.HighWaterMarkMemoryPool.NO_TRACKING;
 import static org.neo4j.util.Preconditions.requireNonNegative;
 import static org.neo4j.util.Preconditions.requirePositive;
@@ -109,6 +108,8 @@ public class ExecutionContextMemoryTracker implements LimitedMemoryTracker {
      */
     private long allocatedBytesNative;
 
+    private final HeapEstimatorCache heapEstimatorCache;
+
     public ExecutionContextMemoryTracker() {
         this(NO_TRACKING);
     }
@@ -123,7 +124,14 @@ public class ExecutionContextMemoryTracker implements LimitedMemoryTracker {
             long grabSize,
             long maxGrabSize,
             String limitSettingName) {
-        this(memoryPool, localBytesLimit, grabSize, maxGrabSize, limitSettingName, () -> true);
+        this(
+                memoryPool,
+                localBytesLimit,
+                grabSize,
+                maxGrabSize,
+                HeapEstimatorCacheConfig.DEFAULT,
+                limitSettingName,
+                () -> true);
     }
 
     public ExecutionContextMemoryTracker(
@@ -131,6 +139,7 @@ public class ExecutionContextMemoryTracker implements LimitedMemoryTracker {
             long localBytesLimit,
             long grabSize,
             long maxGrabSize,
+            HeapEstimatorCacheConfig heapEstimatorCacheConfig,
             String limitSettingName,
             BooleanSupplier openCheck) {
         this.memoryPool = requireNonNull(memoryPool);
@@ -144,6 +153,8 @@ public class ExecutionContextMemoryTracker implements LimitedMemoryTracker {
 
         // NOTE: We do not want the threshold to apply on the first grab
         this.clientCallsSinceLastPoolInteraction = CLIENT_CALLS_PER_POOL_INTERACTION_THRESHOLD;
+
+        this.heapEstimatorCache = heapEstimatorCacheConfig.newDefaultHeapEstimatorCache();
     }
 
     @Override
@@ -158,12 +169,8 @@ public class ExecutionContextMemoryTracker implements LimitedMemoryTracker {
 
         if (allocatedBytesHeap + allocatedBytesNative > localBytesLimit) {
             allocatedBytesNative -= bytes;
-            throw new MemoryLimitExceededException(
-                    bytes,
-                    localBytesLimit,
-                    allocatedBytesHeap + allocatedBytesNative,
-                    TransactionOutOfMemoryError,
-                    limitSettingName);
+            throw MemoryLimitExceededException.transactionMemoryLimitExceeded(
+                    bytes, localBytesLimit, allocatedBytesHeap + allocatedBytesNative, limitSettingName);
         }
 
         try {
@@ -196,12 +203,8 @@ public class ExecutionContextMemoryTracker implements LimitedMemoryTracker {
 
         if (allocatedBytesHeap + allocatedBytesNative > localBytesLimit) {
             allocatedBytesHeap -= bytes;
-            throw new MemoryLimitExceededException(
-                    bytes,
-                    localBytesLimit,
-                    allocatedBytesHeap + allocatedBytesNative,
-                    TransactionOutOfMemoryError,
-                    limitSettingName);
+            throw MemoryLimitExceededException.transactionMemoryLimitExceeded(
+                    bytes, localBytesLimit, allocatedBytesHeap + allocatedBytesNative, limitSettingName);
         }
 
         localHeapPool -= bytes;
@@ -254,6 +257,7 @@ public class ExecutionContextMemoryTracker implements LimitedMemoryTracker {
 
     @Override
     public void reset() {
+        heapEstimatorCache.fullReset();
         // Only release or reserve heap if the transaction is still open
         if (openCheck.getAsBoolean()) {
             long localHeapToRelease = localHeapPool;
@@ -268,7 +272,12 @@ public class ExecutionContextMemoryTracker implements LimitedMemoryTracker {
 
     @Override
     public MemoryTracker getScopedMemoryTracker() {
-        return new DefaultScopedMemoryTracker(this);
+        return new DefaultScopedMemoryTracker(this, getHeapEstimatorCache());
+    }
+
+    @Override
+    public HeapEstimatorCache getHeapEstimatorCache() {
+        return heapEstimatorCache;
     }
 
     @Override

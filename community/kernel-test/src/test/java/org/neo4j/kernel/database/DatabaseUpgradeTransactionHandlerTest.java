@@ -23,6 +23,7 @@ import static java.lang.Integer.max;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -30,9 +31,11 @@ import static org.neo4j.internal.kernel.api.security.LoginContext.AUTH_DISABLED;
 import static org.neo4j.test.assertion.Assert.assertEventually;
 import static org.neo4j.test.conditions.Conditions.equalityCondition;
 
+import java.util.Iterator;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import org.junit.jupiter.api.AfterEach;
@@ -48,6 +51,8 @@ import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.KernelVersionProvider;
 import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.impl.api.KernelImpl;
+import org.neo4j.kernel.impl.api.KernelTransactions;
+import org.neo4j.kernel.impl.locking.LockManager;
 import org.neo4j.kernel.internal.event.DatabaseTransactionEventListeners;
 import org.neo4j.kernel.internal.event.InternalTransactionEventListener;
 import org.neo4j.lock.Lock;
@@ -55,6 +60,8 @@ import org.neo4j.logging.AssertableLogProvider;
 import org.neo4j.logging.LogAssertions;
 import org.neo4j.test.LatestVersions;
 import org.neo4j.test.Race;
+import org.neo4j.wal.LogFormatVersionProvider;
+import org.neo4j.wal.entry.LogFormat;
 
 class DatabaseUpgradeTransactionHandlerTest {
     private volatile KernelVersion currentKernelVersion;
@@ -64,6 +71,7 @@ class DatabaseUpgradeTransactionHandlerTest {
     private final ConcurrentLinkedQueue<RegisteredTransaction> registeredTransactions = new ConcurrentLinkedQueue<>();
     private final AssertableLogProvider logProvider = new AssertableLogProvider();
     private final RWUpgradeLocker lock = new RWUpgradeLocker();
+    private final AtomicLong txSequenceNumber = new AtomicLong(5);
 
     @AfterEach
     void checkTransactionStreamConsistency() {
@@ -193,29 +201,22 @@ class DatabaseUpgradeTransactionHandlerTest {
      * - V4_2,V4_2,V4_2,UPGRADE(V4_2->V4_3),V4_3,V4_3
      */
     private void assertCorrectTransactionStream() {
-        KernelVersion checkVersion = null;
-        boolean justSawUpgrade = false;
-        for (RegisteredTransaction registeredTransaction : registeredTransactions) {
-            if (registeredTransaction.isUpgradeTransaction) {
-                if (checkVersion != null) {
-                    assertThat(registeredTransaction.version).isEqualTo(checkVersion);
-                }
-                checkVersion = registeredTransaction.version;
-                justSawUpgrade = true;
+        if (registeredTransactions.isEmpty()) {
+            return;
+        }
+
+        assertThat(registeredTransactions).hasSizeGreaterThanOrEqualTo(2);
+
+        Iterator<RegisteredTransaction> itr = registeredTransactions.iterator();
+        RegisteredTransaction prevTx = itr.next();
+        while (itr.hasNext()) {
+            RegisteredTransaction tx = itr.next();
+            if (prevTx.isUpgradeTransaction) {
+                assertThat(tx.version).as(registeredTransactions::toString).isGreaterThan(prevTx.version);
             } else {
-                if (checkVersion != null) {
-                    if (justSawUpgrade) {
-                        assertThat(registeredTransaction.version.isGreaterThan(checkVersion))
-                                .isTrue();
-                        checkVersion = registeredTransaction.version;
-                    } else {
-                        assertThat(registeredTransaction.version).isEqualTo(checkVersion);
-                    }
-                } else {
-                    checkVersion = registeredTransaction.version;
-                }
-                justSawUpgrade = false;
+                assertThat(tx.version).as(registeredTransactions::toString).isEqualTo(prevTx.version);
             }
+            prevTx = tx;
         }
     }
 
@@ -229,6 +230,8 @@ class DatabaseUpgradeTransactionHandlerTest {
                 .when(dbmsRuntimeVersionProvider)
                 .getVersion();
         KernelVersionProvider kernelVersionProvider = this::getKernelVersion;
+        LogFormatVersionProvider logFormatVersionProvider =
+                () -> LogFormat.fromKernelVersion(kernelVersionProvider.kernelVersion());
         DatabaseTransactionEventListeners databaseTransactionEventListeners =
                 mock(DatabaseTransactionEventListeners.class);
         doAnswer(inv -> listener = inv.getArgument(0, InternalTransactionEventListener.class))
@@ -240,18 +243,21 @@ class DatabaseUpgradeTransactionHandlerTest {
 
         KernelImpl kernelMock = mock(KernelImpl.class);
         KernelTransaction txMock = mock(KernelTransaction.class);
-        when(txMock.getTransactionSequenceNumber()).thenReturn(500L);
-        when(kernelMock.beginTransaction(KernelTransaction.Type.IMPLICIT, AUTH_DISABLED))
-                .thenReturn(txMock);
+        KernelTransactions kernelTransactions = mock(KernelTransactions.class);
+        when(txMock.getTransactionSequenceNumber()).thenReturn(txSequenceNumber.incrementAndGet());
+        when(kernelMock.beginTransaction(any(), eq(AUTH_DISABLED))).thenReturn(txMock);
         DatabaseUpgradeTransactionHandler handler = new DatabaseUpgradeTransactionHandler(
                 dbmsRuntimeVersionProvider,
                 kernelVersionProvider,
+                logFormatVersionProvider,
                 databaseTransactionEventListeners,
                 lock,
                 logProvider,
                 Config.defaults(),
-                kernelMock);
-        handler.registerUpgradeListener((fromKernelVersion, toKernelVersion, tx) -> {
+                kernelMock,
+                kernelTransactions,
+                false);
+        handler.registerUpgradeListener((fromKernelVersion, toKernelVersion, tx, currentLogFormat) -> {
             // The tx being sent in here is just a mock, so we create the tx here
             // and treat it as a regular tx to see that we get pass beforeCommit for the upgrade tx.
             doATransaction(false, true, tx.getTransactionSequenceNumber());
@@ -275,11 +281,11 @@ class DatabaseUpgradeTransactionHandlerTest {
     }
 
     private void doATransaction() {
-        doATransaction(false, false, 100);
+        doATransaction(false, false, txSequenceNumber.incrementAndGet());
     }
 
     private void doATransactionWithSomeSleeping() {
-        doATransaction(true, false, 100);
+        doATransaction(true, false, txSequenceNumber.incrementAndGet());
     }
 
     private void doATransaction(boolean doSomeSleeping, boolean isUpgrade, long txNbr) {
@@ -303,21 +309,7 @@ class DatabaseUpgradeTransactionHandlerTest {
         }
     }
 
-    private static class RegisteredTransaction {
-        private final KernelVersion version;
-        private final boolean isUpgradeTransaction;
-
-        RegisteredTransaction(KernelVersion version, boolean isUpgradeTransaction) {
-            this.version = version;
-            this.isUpgradeTransaction = isUpgradeTransaction;
-        }
-
-        @Override
-        public String toString() {
-            return "RegisteredTransaction{" + "version=" + version + ", isUpgradeTransaction=" + isUpgradeTransaction
-                    + '}';
-        }
-    }
+    private record RegisteredTransaction(KernelVersion version, boolean isUpgradeTransaction) {}
 
     private static class RWUpgradeLocker implements UpgradeLocker {
         private final ReadWriteLock realLock = new ReentrantReadWriteLock();
@@ -331,6 +323,11 @@ class DatabaseUpgradeTransactionHandlerTest {
                     realLock.writeLock().unlock();
                 }
             };
+        }
+
+        @Override
+        public Lock acquireWriteLock(LockManager.Client lockClient) {
+            throw new UnsupportedOperationException("Only used through raft triggered upgrade");
         }
 
         @Override

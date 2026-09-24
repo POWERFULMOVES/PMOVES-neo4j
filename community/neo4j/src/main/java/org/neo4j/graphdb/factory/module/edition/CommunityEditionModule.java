@@ -22,7 +22,6 @@ package org.neo4j.graphdb.factory.module.edition;
 import static org.neo4j.configuration.GraphDatabaseSettings.SYSTEM_DATABASE_NAME;
 import static org.neo4j.configuration.GraphDatabaseSettings.initial_default_database;
 import static org.neo4j.dbms.database.DatabaseContextProviderDelegate.delegate;
-import static org.neo4j.dbms.routing.RoutingTableTTLProvider.ttlFromConfig;
 
 import java.util.Set;
 import org.neo4j.bolt.dbapi.BoltGraphDatabaseManagementServiceSPI;
@@ -30,10 +29,12 @@ import org.neo4j.bolt.tx.TransactionManager;
 import org.neo4j.collection.Dependencies;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
+import org.neo4j.dbms.CommunityDatabaseState;
 import org.neo4j.dbms.CommunityDatabaseStateService;
 import org.neo4j.dbms.CommunityKernelPanicListener;
 import org.neo4j.dbms.DatabaseStateService;
 import org.neo4j.dbms.api.DatabaseManagementService;
+import org.neo4j.dbms.database.CommunityDatabaseObjectRepositoryModelProvider;
 import org.neo4j.dbms.database.DatabaseContext;
 import org.neo4j.dbms.database.DatabaseContextProvider;
 import org.neo4j.dbms.database.DatabaseLifecycles;
@@ -59,27 +60,28 @@ import org.neo4j.dbms.identity.DefaultIdentityModule;
 import org.neo4j.dbms.identity.ServerIdentity;
 import org.neo4j.dbms.identity.ServerIdentityFactory;
 import org.neo4j.dbms.routing.ClientRoutingDomainChecker;
-import org.neo4j.dbms.routing.DefaultDatabaseAvailabilityChecker;
-import org.neo4j.dbms.routing.DefaultRoutingService;
-import org.neo4j.dbms.routing.LocalRoutingTableServiceValidator;
-import org.neo4j.dbms.routing.RoutingOption;
+import org.neo4j.dbms.routing.CommunityRoutingService;
 import org.neo4j.dbms.routing.RoutingService;
-import org.neo4j.dbms.routing.SingleAddressRoutingTableProvider;
+import org.neo4j.dbms.systemgraph.CommunityDefaultQueryLanguageLookup;
 import org.neo4j.dbms.systemgraph.CommunityTopologyGraphComponent;
+import org.neo4j.dbms.systemgraph.ContextBasedSystemDatabaseProvider;
 import org.neo4j.dbms.systemgraph.SystemDatabaseProvider;
+import org.neo4j.fleetmanagement.systemgraph.FleetManagementGraphComponent;
 import org.neo4j.graphdb.factory.module.GlobalModule;
+import org.neo4j.internal.kernel.api.security.AbstractSecurityLog;
 import org.neo4j.internal.kernel.api.security.CommunitySecurityLog;
 import org.neo4j.io.device.DeviceMapper;
 import org.neo4j.kernel.api.security.SecurityModule;
 import org.neo4j.kernel.api.security.provider.NoAuthSecurityProvider;
 import org.neo4j.kernel.api.security.provider.SecurityProvider;
-import org.neo4j.kernel.database.DatabaseId;
 import org.neo4j.kernel.database.DatabaseIdRepository;
 import org.neo4j.kernel.database.DatabaseReferenceRepository;
+import org.neo4j.kernel.database.DefaultDatabaseResolver;
 import org.neo4j.kernel.database.MapCachingDatabaseIdRepository;
 import org.neo4j.kernel.database.MapCachingDatabaseReferenceRepository;
-import org.neo4j.kernel.database.SystemGraphDatabaseIdRepository;
-import org.neo4j.kernel.database.SystemGraphDatabaseReferenceRepository;
+import org.neo4j.kernel.database.ModelBasedDatabaseIdRepository;
+import org.neo4j.kernel.database.ModelBasedDatabaseReferenceRepository;
+import org.neo4j.kernel.database.NamedDatabaseId;
 import org.neo4j.kernel.impl.api.TransactionalProcessFactory;
 import org.neo4j.kernel.impl.factory.DbmsInfo;
 import org.neo4j.kernel.impl.factory.DefaultTransactionalProcessFactory;
@@ -95,23 +97,21 @@ import org.neo4j.server.CommunityNeoWebServer;
 import org.neo4j.server.config.AuthConfigProvider;
 import org.neo4j.server.rest.repr.CommunityAuthConfigProvider;
 import org.neo4j.server.security.auth.CommunitySecurityModule;
-import org.neo4j.server.security.systemgraph.CommunityDefaultDatabaseResolver;
-import org.neo4j.ssl.config.SslPolicyLoader;
+import org.neo4j.ssl.config.DefaultSslPolicyProvider;
 
 /**
  * This implementation of {@link AbstractEditionModule} creates the implementations of services
  * that are specific to the Community edition.
  */
 public class CommunityEditionModule extends AbstractEditionModule implements DefaultDatabaseContextFactoryComponents {
-    protected final SslPolicyLoader sslPolicyLoader;
     protected final GlobalModule globalModule;
     protected final ServerIdentity identityModule;
-    private final MapCachingDatabaseReferenceRepository databaseReferenceRepo;
     private final DeviceMapper deviceMapper;
     private final InternalLogProvider logProvider;
     private final CommunitySecurityLog securityLog;
 
-    protected DatabaseStateService databaseStateService;
+    protected DatabaseStateService<CommunityDatabaseState> databaseStateService;
+    private MapCachingDatabaseReferenceRepository databaseReferenceRepo;
     private Lifecycle defaultDatabaseInitializer = new LifecycleAdapter();
     private SystemGraphComponents systemGraphComponents;
 
@@ -121,9 +121,9 @@ public class CommunityEditionModule extends AbstractEditionModule implements Def
         LogService logService = globalModule.getLogService();
         this.globalModule = globalModule;
 
-        this.sslPolicyLoader =
-                SslPolicyLoader.create(globalModule.getFileSystem(), globalConfig, logService.getInternalLogProvider());
-        globalDependencies.satisfyDependency(sslPolicyLoader); // for bolt and web server
+        var sslPolicyProvider = new DefaultSslPolicyProvider(
+                globalModule.getFileSystem(), globalConfig, true, logService.getInternalLogProvider());
+        globalDependencies.satisfyDependency(sslPolicyProvider); // for bolt and web server
         globalDependencies.satisfyDependency(new DatabaseOperationCounts.Counter()); // for global metrics
         globalDependencies.satisfyDependency(new DatabaseStateMonitor.Counter()); // for global metrics
 
@@ -131,6 +131,7 @@ public class CommunityEditionModule extends AbstractEditionModule implements Def
 
         logProvider = globalModule.getLogService().getInternalLogProvider();
         securityLog = new CommunitySecurityLog(logProvider.getLog(CommunitySecurityModule.class));
+        globalDependencies.satisfyDependency(securityLog);
         globalDependencies.satisfyDependency(new URIAccessRules(securityLog, globalConfig));
 
         identityModule = tryResolveOrCreate(
@@ -144,7 +145,6 @@ public class CommunityEditionModule extends AbstractEditionModule implements Def
         globalDependencies.satisfyDependency(deviceMapper);
 
         connectionTracker = globalDependencies.satisfyDependency(createConnectionTracker());
-        databaseReferenceRepo = globalDependencies.satisfyDependency(new MapCachingDatabaseReferenceRepository());
     }
 
     @Override
@@ -162,18 +162,20 @@ public class CommunityEditionModule extends AbstractEditionModule implements Def
 
         var databaseIdRepo = new MapCachingDatabaseIdRepository();
         var databaseRepository = new DatabaseRepository<StandaloneDatabaseContext>(databaseIdRepo);
-        var rootDatabaseIdRepository = AbstractEditionModule.tryResolveOrCreate(
+        var systemDatabaseProvider =
+                new ContextBasedSystemDatabaseProvider(databaseRepository, globalModule.getDatabaseEventListeners());
+        var modelProvider = new CommunityDatabaseObjectRepositoryModelProvider(systemDatabaseProvider);
+
+        databaseIdRepo.setDelegate(AbstractEditionModule.tryResolveOrCreate(
                 DatabaseIdRepository.class,
                 globalModule.getExternalDependencyResolver(),
-                () -> new SystemGraphDatabaseIdRepository(
-                        () -> databaseRepository.getDatabaseContext(DatabaseId.SYSTEM_DATABASE_ID),
-                        globalModule.getLogService().getInternalLogProvider()));
-        var rootDatabaseReferenceRepository = AbstractEditionModule.tryResolveOrCreate(
-                DatabaseReferenceRepository.class,
-                globalModule.getExternalDependencyResolver(),
-                () -> new SystemGraphDatabaseReferenceRepository(databaseRepository::getSystemDatabaseContext));
-        databaseIdRepo.setDelegate(rootDatabaseIdRepository);
-        databaseReferenceRepo.setDelegate(rootDatabaseReferenceRepository);
+                () -> new ModelBasedDatabaseIdRepository(modelProvider)));
+        databaseReferenceRepo = globalModule
+                .getGlobalDependencies()
+                .satisfyDependency(new MapCachingDatabaseReferenceRepository(AbstractEditionModule.tryResolveOrCreate(
+                        DatabaseReferenceRepository.class,
+                        globalModule.getExternalDependencyResolver(),
+                        () -> new ModelBasedDatabaseReferenceRepository(modelProvider))));
         var databaseIdCacheCleaner = new DatabaseReferenceCacheClearingListener(databaseIdRepo, databaseReferenceRepo);
 
         var kernelPanicListener =
@@ -184,7 +186,8 @@ public class CommunityEditionModule extends AbstractEditionModule implements Def
                 databaseRepository,
                 globalModule.getGlobalConfig().get(initial_default_database),
                 databaseContextFactory,
-                globalModule.getLogService().getInternalLogProvider());
+                globalModule.getLogService().getInternalLogProvider(),
+                globalModule.getExceptionHandlerService());
         databaseStateService = new CommunityDatabaseStateService(databaseRepository);
 
         globalModule.getGlobalLife().add(databaseLifecycles.systemDatabaseStarter());
@@ -201,6 +204,14 @@ public class CommunityEditionModule extends AbstractEditionModule implements Def
         globalModule
                 .getGlobalDependencies()
                 .satisfyDependency(SystemGraphComponents.UpgradeChecker.UPGRADE_ALWAYS_ALLOWED);
+
+        var defaultQueryLanguage = new CommunityDefaultQueryLanguageLookup(
+                systemDatabaseProvider, globalModule.getJobScheduler(), logProvider);
+        globalModule.getGlobalDependencies().satisfyDependency(defaultQueryLanguage);
+        globalModule.getGlobalLife().add(defaultQueryLanguage.life());
+        globalModule
+                .getTransactionEventListeners()
+                .registerTransactionEventListener(SYSTEM_DATABASE_NAME, defaultQueryLanguage.transactionListener());
 
         return databaseRepository;
     }
@@ -239,29 +250,11 @@ public class CommunityEditionModule extends AbstractEditionModule implements Def
     @Override
     public RoutingService createRoutingService(
             DatabaseContextProvider<?> databaseContextProvider, ClientRoutingDomainChecker clientRoutingDomainChecker) {
-        var logService = globalModule.getLogService();
-        var portRegister = globalModule.getConnectorPortRegister();
-        var config = globalModule.getGlobalConfig();
-        var logProvider = globalModule.getLogService().getInternalLogProvider();
-        var databaseAvailabilityChecker = new DefaultDatabaseAvailabilityChecker(databaseContextProvider);
-
-        LocalRoutingTableServiceValidator validator =
-                new LocalRoutingTableServiceValidator(databaseAvailabilityChecker);
-        SingleAddressRoutingTableProvider routingTableProvider = new SingleAddressRoutingTableProvider(
-                portRegister, RoutingOption.ROUTE_WRITE_AND_READ, config, logProvider, ttlFromConfig(config));
-
-        return new DefaultRoutingService(
-                logService.getInternalLogProvider(),
-                validator,
-                routingTableProvider,
-                routingTableProvider,
-                clientRoutingDomainChecker,
-                config,
-                () -> true,
+        return new CommunityRoutingService(
+                databaseContextProvider,
                 defaultDatabaseResolver,
-                databaseReferenceRepo,
-                true,
-                globalModule.getGlobalClock());
+                globalModule.getConnectorPortRegister(),
+                globalModule.getGlobalConfig());
     }
 
     @Override
@@ -302,8 +295,10 @@ public class CommunityEditionModule extends AbstractEditionModule implements Def
         var clock = globalModule.getGlobalClock();
         var systemGraphComponent = new DefaultSystemGraphComponent(config, clock);
         var communityTopologyGraphComponentComponent = new CommunityTopologyGraphComponent(config, log);
+        var fleetManagementGraphComponent = new FleetManagementGraphComponent(config, log);
         systemGraphComponentsBuilder.register(systemGraphComponent);
         systemGraphComponentsBuilder.register(communityTopologyGraphComponentComponent);
+        systemGraphComponentsBuilder.register(fleetManagementGraphComponent);
         registerSecurityGraphComponent(systemGraphComponentsBuilder, globalModule);
         this.systemGraphComponents = systemGraphComponentsBuilder.build();
     }
@@ -326,17 +321,11 @@ public class CommunityEditionModule extends AbstractEditionModule implements Def
     }
 
     @Override
-    public void createSecurityModule(GlobalModule globalModule) {
+    public void createSecurityModule(GlobalModule globalModule, SystemDatabaseProvider systemDatabaseProvider) {
         setSecurityProvider(makeSecurityModule(globalModule));
     }
 
-    @Override
-    public DatabaseReferenceRepository getDatabaseReferenceRepo() {
-        return databaseReferenceRepo;
-    }
-
     private SecurityProvider makeSecurityModule(GlobalModule globalModule) {
-        globalModule.getGlobalDependencies().satisfyDependency(CommunitySecurityLog.NULL_LOG);
         if (globalModule.getGlobalConfig().get(GraphDatabaseSettings.auth_enabled)) {
             SecurityModule securityModule = new CommunitySecurityModule(
                     globalModule.getLogService(),
@@ -351,12 +340,8 @@ public class CommunityEditionModule extends AbstractEditionModule implements Def
 
     @Override
     public void createDefaultDatabaseResolver(SystemDatabaseProvider systemDatabaseProvider) {
-        var defaultDatabaseResolver =
-                new CommunityDefaultDatabaseResolver(globalModule.getGlobalConfig(), systemDatabaseProvider);
-        globalModule
-                .getTransactionEventListeners()
-                .registerTransactionEventListener(SYSTEM_DATABASE_NAME, defaultDatabaseResolver);
-        this.defaultDatabaseResolver = defaultDatabaseResolver;
+        this.defaultDatabaseResolver =
+                DefaultDatabaseResolver.constant(globalModule.getGlobalConfig().get(initial_default_database));
     }
 
     @Override
@@ -367,7 +352,7 @@ public class CommunityEditionModule extends AbstractEditionModule implements Def
         globalReadOnlyChecker = createGlobalReadOnlyChecker(
                 Set.of(SystemGraphReadOnlyDatabaseLookupFactory.DEFAULT_PROVIDER),
                 systemDatabaseProvider,
-                databaseIdRepository,
+                name -> databaseIdRepository.getByName(name).map(NamedDatabaseId::databaseId),
                 ReadOnlyChangeListener.NO_OP,
                 globalModule);
         globalModule
@@ -396,7 +381,7 @@ public class CommunityEditionModule extends AbstractEditionModule implements Def
                 globalModule.getLogService(),
                 databaseRepository,
                 databaseReferenceRepo,
-                CommunitySecurityLog.NULL_LOG);
+                globalModule.getGlobalDependencies().resolveDependency(AbstractSecurityLog.class));
         globalModule
                 .getGlobalDependencies()
                 .satisfyDependency(queryRouterBootstrap.bootstrapServices(databaseManagementService));

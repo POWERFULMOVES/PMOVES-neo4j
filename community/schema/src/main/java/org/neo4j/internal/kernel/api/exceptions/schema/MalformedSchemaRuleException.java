@@ -19,27 +19,63 @@
  */
 package org.neo4j.internal.kernel.api.exceptions.schema;
 
+import java.util.Collections;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
+import org.neo4j.gqlstatus.GqlHelper;
+import org.neo4j.gqlstatus.GqlParams;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.kernel.api.exceptions.Status;
+import org.neo4j.values.storable.Value;
 
 /**
  * Signals that a schema rule in the schema store was malformed, i.e. contained corrupted data and could not
  * be parsed.
  */
 public class MalformedSchemaRuleException extends SchemaKernelException {
-    public MalformedSchemaRuleException(String message, Throwable cause) {
-        super(Status.General.SchemaCorruptionDetected, message, cause);
-    }
 
-    public MalformedSchemaRuleException(ErrorGqlStatusObject gqlStatusObject, String message, Throwable cause) {
+    private MalformedSchemaRuleException(ErrorGqlStatusObject gqlStatusObject, String message, Throwable cause) {
         super(gqlStatusObject, Status.General.SchemaCorruptionDetected, message, cause);
     }
 
-    public MalformedSchemaRuleException(String message) {
-        super(Status.General.SchemaCorruptionDetected, message);
+    private MalformedSchemaRuleException(ErrorGqlStatusObject gqlStatusObject, String message) {
+        super(gqlStatusObject, Status.General.SchemaCorruptionDetected, message);
     }
 
-    public MalformedSchemaRuleException(ErrorGqlStatusObject gqlStatusObject, String message) {
-        super(gqlStatusObject, Status.General.SchemaCorruptionDetected, message);
+    public static MalformedSchemaRuleException internalError(String msgTitle, String message) {
+        ErrorGqlStatusObject gql = GqlHelper.get50N00(msgTitle, message);
+        return new MalformedSchemaRuleException(gql, message);
+    }
+
+    public static MalformedSchemaRuleException internalError(String msgTitle, String message, Throwable cause) {
+        ErrorGqlStatusObject gql = GqlHelper.get50N00(msgTitle, message);
+        return new MalformedSchemaRuleException(gql, message, cause);
+    }
+
+    public static MalformedSchemaRuleException propertyTypeMismatch(
+            String property, Value value, Class<? extends Value> expectedType) {
+        if (value == null) {
+            return propertyUnexpectedlyNull(property, expectedType);
+        }
+        ErrorGqlStatusObject gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N01)
+                .withParam(GqlParams.StringParam.value, value.prettyPrint())
+                .withParam(GqlParams.ListParam.valueTypeList, Collections.singletonList(expectedType.getSimpleName()))
+                .withParam(GqlParams.StringParam.valueType, value.getClass().getSimpleName())
+                .build();
+        String legacyMessage = String.format(
+                "Expected property %s to be a %s but was %s", property, expectedType.getSimpleName(), value);
+        return new MalformedSchemaRuleException(gql, legacyMessage);
+    }
+
+    public static MalformedSchemaRuleException propertyUnexpectedlyNull(
+            String property, Class<? extends Value> expectedType) {
+        ErrorGqlStatusObject gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N01)
+                .withParam(GqlParams.StringParam.value, "null")
+                .withParam(GqlParams.ListParam.valueTypeList, Collections.singletonList(expectedType.getSimpleName()))
+                .withParam(GqlParams.StringParam.valueType, "null")
+                .build();
+        String legacyMessage = String.format(
+                "Expected property %s to be a %s but was %s", property, expectedType.getSimpleName(), null);
+        return new MalformedSchemaRuleException(gql, legacyMessage);
     }
 }

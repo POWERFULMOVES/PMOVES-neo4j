@@ -20,7 +20,7 @@
 package org.neo4j.values.storable;
 
 public abstract class TextArray extends ArrayValue {
-    public abstract String stringValue(int offset);
+    public abstract StringValue stringValue(int offset);
 
     @Override
     protected int unsafeCompareTo(Value otherValue) {
@@ -65,10 +65,5 @@ public abstract class TextArray extends ArrayValue {
     @Override
     public ValueRepresentation valueRepresentation() {
         return ValueRepresentation.TEXT_ARRAY;
-    }
-
-    @Override
-    public NumberType numberType() {
-        return NumberType.NO_NUMBER;
     }
 }

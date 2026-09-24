@@ -68,6 +68,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.ExtensionContext;
 import org.junit.jupiter.api.extension.TestWatcher;
+import org.junit.platform.engine.TestExecutionResult;
 import org.junit.platform.testkit.engine.EngineTestKit;
 import org.junit.platform.testkit.engine.Events;
 import org.neo4j.cli.CommandFailedException;
@@ -75,6 +76,7 @@ import org.neo4j.configuration.BootloaderSettings;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.graphdb.config.Setting;
+import org.neo4j.internal.helpers.Exceptions;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
@@ -83,7 +85,7 @@ import picocli.CommandLine;
 
 @TestDirectoryExtension
 @ExtendWith(BootloaderCommandTestBase.FailureOutputProvider.class)
-abstract class BootloaderCommandTestBase {
+public abstract class BootloaderCommandTestBase {
     @Inject
     private TestDirectory testDirectory;
 
@@ -94,10 +96,10 @@ abstract class BootloaderCommandTestBase {
     protected ByteArrayOutputStream err = new ByteArrayOutputStream();
     Path confFile;
     protected Path home;
-    Config config;
+    protected Config config;
 
     @BeforeEach
-    void setUp() throws Exception {
+    protected void setUp() throws Exception {
         // Windows allows us to do any simple character except for '\', '/', '.', '?', and '*
         // ` - _ [ ] { } $% ! ; @ =
         // Windows also limits path length to 260
@@ -203,6 +205,7 @@ abstract class BootloaderCommandTestBase {
                             .setPermissions(
                                     AclEntryPermission.READ_DATA,
                                     AclEntryPermission.WRITE_DATA,
+                                    AclEntryPermission.DELETE,
                                     AclEntryPermission.READ_ATTRIBUTES,
                                     AclEntryPermission.WRITE_ATTRIBUTES,
                                     AclEntryPermission.READ_NAMED_ATTRS,
@@ -251,7 +254,7 @@ abstract class BootloaderCommandTestBase {
      * Using System.setOut( os ), like SuppressOutputExtension, does not stop that
      * Wrapping the fork in a fork is the only option to reliably capture that output while not introducing possible flakyness with concurrent tests
      */
-    protected static class TestInFork {
+    public static class TestInFork {
         public interface TestCode {
             void run() throws Exception;
         }
@@ -283,10 +286,11 @@ abstract class BootloaderCommandTestBase {
                 test.run();
                 return false;
             } else {
-                var frame = StackWalker.getInstance().walk(frames -> frames.skip(1)
-                        .filter(BootloaderCommandTestBase::isTestFrame)
-                        .findFirst()
-                        .orElseThrow());
+                var frame = StackWalker.getInstance()
+                        .walk(frames -> frames.skip(1)
+                                .filter(BootloaderCommandTestBase::isTestFrame)
+                                .findFirst()
+                                .orElseThrow());
                 assertNotNull(frame, "No test found");
 
                 var process = start(
@@ -322,9 +326,21 @@ abstract class BootloaderCommandTestBase {
                     .enableImplicitConfigurationParameters(true)
                     .execute()
                     .testEvents();
-
-            testEvents.assertThatEvents().haveExactly(1, event(finishedSuccessfully()));
+            testEvents
+                    .assertThatEvents()
+                    .as(() -> getExecutionExceptionsIfAny(testEvents))
+                    .haveExactly(1, event(finishedSuccessfully()));
             System.exit(SUCCESS_CODE);
+        }
+
+        private static String getExecutionExceptionsIfAny(Events testEvents) {
+            StringBuilder sb = new StringBuilder();
+            testEvents.list().forEach(event -> {
+                event.getPayload(TestExecutionResult.class)
+                        .flatMap(TestExecutionResult::getThrowable)
+                        .ifPresent(t -> sb.append(Exceptions.stringify(t)).append(System.lineSeparator()));
+            });
+            return sb.isEmpty() ? "No execution exceptions found." : sb.toString();
         }
     }
 

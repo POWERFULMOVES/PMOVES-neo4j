@@ -27,17 +27,23 @@ import org.neo4j.configuration.Config
 import org.neo4j.csv.reader.CharReadable
 import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.expressions.SemanticDirection
+import org.neo4j.cypher.internal.frontend.phases.InternalUsageStats
 import org.neo4j.cypher.internal.logical.plans.IndexOrder
 import org.neo4j.cypher.internal.planner.spi.ReadTokenContext
+import org.neo4j.cypher.internal.runtime.admin.topology.ShowDatabaseService
+import org.neo4j.cypher.internal.runtime.cursors.ExpressionCursors
 import org.neo4j.dbms.database.DatabaseContext
 import org.neo4j.dbms.database.DatabaseContextProvider
 import org.neo4j.graphdb.Entity
 import org.neo4j.graphdb.GraphDatabaseService
 import org.neo4j.internal.kernel.api.CursorFactory
 import org.neo4j.internal.kernel.api.DefaultCloseListenable
+import org.neo4j.internal.kernel.api.IndexQueryConstraints
 import org.neo4j.internal.kernel.api.IndexReadSession
 import org.neo4j.internal.kernel.api.KernelReadTracer
 import org.neo4j.internal.kernel.api.Locks
+import org.neo4j.internal.kernel.api.MutatingEntityCursor
+import org.neo4j.internal.kernel.api.MutationCallback
 import org.neo4j.internal.kernel.api.NodeCursor
 import org.neo4j.internal.kernel.api.NodeLabelIndexCursor
 import org.neo4j.internal.kernel.api.NodeValueIndexCursor
@@ -54,6 +60,7 @@ import org.neo4j.internal.kernel.api.SchemaWrite
 import org.neo4j.internal.kernel.api.Token
 import org.neo4j.internal.kernel.api.TokenRead
 import org.neo4j.internal.kernel.api.TokenReadSession
+import org.neo4j.internal.kernel.api.TokenSet
 import org.neo4j.internal.kernel.api.TokenWrite
 import org.neo4j.internal.kernel.api.Write
 import org.neo4j.internal.kernel.api.exceptions.ProcedureException
@@ -68,8 +75,11 @@ import org.neo4j.internal.schema.IndexConfig
 import org.neo4j.internal.schema.IndexDescriptor
 import org.neo4j.internal.schema.IndexProviderDescriptor
 import org.neo4j.internal.schema.IndexType
-import org.neo4j.internal.schema.constraints.PropertyTypeSet
+import org.neo4j.internal.schema.SchemaCommand.ConstraintCommand
+import org.neo4j.internal.schema.SchemaDescriptor
 import org.neo4j.io.pagecache.context.CursorContext
+import org.neo4j.kernel.KernelVersion
+import org.neo4j.kernel.KernelVersionProvider
 import org.neo4j.kernel.api.ExecutionContext
 import org.neo4j.kernel.api.KernelTransaction
 import org.neo4j.kernel.api.StatementConstants.NO_SUCH_NODE
@@ -82,10 +92,13 @@ import org.neo4j.kernel.impl.query.FunctionInformation
 import org.neo4j.kernel.impl.query.QueryExecutionConfiguration
 import org.neo4j.kernel.impl.query.statistic.StatisticProvider
 import org.neo4j.logging.InternalLogProvider
+import org.neo4j.memory.HeapEstimatorCacheConfig
 import org.neo4j.memory.MemoryTracker
 import org.neo4j.scheduler.JobScheduler
+import org.neo4j.storageengine.api.Degrees
 import org.neo4j.storageengine.api.PropertySelection
 import org.neo4j.storageengine.api.Reference
+import org.neo4j.storageengine.api.RelationshipSelection
 import org.neo4j.util.VisibleForTesting
 import org.neo4j.values.AnyValue
 import org.neo4j.values.ElementIdMapper
@@ -96,7 +109,10 @@ import org.neo4j.values.virtual.VirtualNodeValue
 import org.neo4j.values.virtual.VirtualRelationshipValue
 
 import java.net.URI
+import java.util
 import java.util.Optional
+
+import scala.collection.immutable.ArraySeq
 
 /*
  * Developer note: This is an attempt at an internal graph database API, which defines a clean cut between
@@ -110,9 +126,17 @@ import java.util.Optional
  * The driver for this was clarifying who is responsible for ensuring query isolation. By exposing a query concept in
  * the core layer, we can move that responsibility outside of the scope of cypher.
  */
-trait QueryContext extends ReadQueryContext with WriteQueryContext
+trait QueryContext extends ReadQueryContext with WriteQueryContext with MutationCallback {
 
-trait ReadQueryContext extends ReadTokenContext with DbAccess with AutoCloseable {
+  override def onMutation(
+    nodesCreated: Int,
+    relationshipsCreated: Int,
+    labelsCreated: Int,
+    propertiesCreated: Int
+  ): Unit = {}
+}
+
+trait ReadQueryContext extends ReadTokenContext with DbAccess with KernelVersionProvider with AutoCloseable {
   type ProcedureIterator = ResourceRawIterator[Array[AnyValue], ProcedureException]
 
   // See QueryContextAdaptation if you need a dummy that overrides all methods as ??? for writing a test
@@ -121,7 +145,11 @@ trait ReadQueryContext extends ReadTokenContext with DbAccess with AutoCloseable
 
   def transactionalContext: QueryTransactionalContext
 
+  override def kernelVersion: KernelVersion = transactionalContext.kernelVersion
+
   def resources: ResourceManager
+
+  def queryConfig: QueryRuntimeConfig
 
   def nodeReadOps: NodeReadOperations
 
@@ -131,31 +159,43 @@ trait ReadQueryContext extends ReadTokenContext with DbAccess with AutoCloseable
     node: Long,
     dir: SemanticDirection,
     types: Array[Int]
-  ): ClosingLongIterator with RelationshipIterator
+  ): ClosingRelationshipIterator
 
   def getRelationshipsByType(
     tokenReadSession: TokenReadSession,
     relType: Int,
-    indexOrder: IndexOrder
-  ): ClosingLongIterator with RelationshipIterator
+    indexOrder: IndexOrder,
+    includeChangesFromThisTransaction: Boolean = true
+  ): ClosingRelationshipIterator
 
   def nodeCursor(): NodeCursor
 
   def nodeLabelIndexCursor(): NodeLabelIndexCursor
 
+  def nodeValueIndexCursor(): NodeValueIndexCursor
+
   def relationshipTypeIndexCursor(): RelationshipTypeIndexCursor
 
   def traversalCursor(): RelationshipTraversalCursor
+
+  def propertyCursor(): PropertyCursor
 
   def scanCursor(): RelationshipScanCursor
 
   def getAllIndexes(): Map[IndexDescriptor, IndexInfo]
 
+  def indexReferences(entityId: Int, entityType: EntityType, properties: Int*): util.Iterator[IndexDescriptor]
+
   def indexReference(indexType: IndexType, entityId: Int, entityType: EntityType, properties: Int*): IndexDescriptor
 
   def lookupIndexReference(entityType: EntityType): IndexDescriptor
 
-  def fulltextIndexReference(entityIds: List[Int], entityType: EntityType, properties: Int*): IndexDescriptor
+  def semanticIndexReference(
+    indexType: IndexType,
+    entityIds: List[Int],
+    entityType: EntityType,
+    properties: Int*
+  ): IndexDescriptor
 
   def getIndexUsageStatistics(index: IndexDescriptor): IndexUsageStats
 
@@ -173,27 +213,41 @@ trait ReadQueryContext extends ReadTokenContext with DbAccess with AutoCloseable
     index: IndexReadSession,
     needsValues: Boolean,
     indexOrder: IndexOrder,
-    queries: Seq[PropertyIndexQuery]
+    queries: Seq[PropertyIndexQuery],
+    includeChangesFromThisTransaction: Boolean = true
+  ): NodeValueIndexCursor
+
+  def nodeFulltextIndexSeek(
+    index: IndexReadSession,
+    constraints: IndexQueryConstraints,
+    query: PropertyIndexQuery.FulltextSearchPredicate
   ): NodeValueIndexCursor
 
   def nodeIndexSeekByContains(
     index: IndexReadSession,
     needsValues: Boolean,
     indexOrder: IndexOrder,
-    value: TextValue
+    value: TextValue,
+    includeChangesFromThisTransaction: Boolean = true
   ): NodeValueIndexCursor
 
   def nodeIndexSeekByEndsWith(
     index: IndexReadSession,
     needsValues: Boolean,
     indexOrder: IndexOrder,
-    value: TextValue
+    value: TextValue,
+    includeChangesFromThisTransaction: Boolean = true
   ): NodeValueIndexCursor
 
-  def nodeIndexScan(index: IndexReadSession, needsValues: Boolean, indexOrder: IndexOrder): NodeValueIndexCursor
+  def nodeIndexScan(
+    index: IndexReadSession,
+    needsValues: Boolean,
+    indexOrder: IndexOrder,
+    includeChangesFromThisTransaction: Boolean = true
+  ): NodeValueIndexCursor
 
   def nodeLockingUniqueIndexSeek(
-    index: IndexDescriptor,
+    index: IndexReadSession,
     queries: Seq[PropertyIndexQuery.ExactPredicate]
   ): NodeValueIndexCursor
 
@@ -201,11 +255,18 @@ trait ReadQueryContext extends ReadTokenContext with DbAccess with AutoCloseable
     index: IndexReadSession,
     needsValues: Boolean,
     indexOrder: IndexOrder,
-    queries: Seq[PropertyIndexQuery]
+    queries: Seq[PropertyIndexQuery],
+    includeChangesFromThisTransaction: Boolean = true
+  ): RelationshipValueIndexCursor
+
+  def relationshipFulltextIndexSeek(
+    index: IndexReadSession,
+    constraints: IndexQueryConstraints,
+    query: PropertyIndexQuery.FulltextSearchPredicate
   ): RelationshipValueIndexCursor
 
   def relationshipLockingUniqueIndexSeek(
-    index: IndexDescriptor,
+    index: IndexReadSession,
     queries: Seq[PropertyIndexQuery.ExactPredicate]
   ): RelationshipValueIndexCursor
 
@@ -213,23 +274,31 @@ trait ReadQueryContext extends ReadTokenContext with DbAccess with AutoCloseable
     index: IndexReadSession,
     needsValues: Boolean,
     indexOrder: IndexOrder,
-    value: TextValue
+    value: TextValue,
+    includeChangesFromThisTransaction: Boolean = true
   ): RelationshipValueIndexCursor
 
   def relationshipIndexSeekByEndsWith(
     index: IndexReadSession,
     needsValues: Boolean,
     indexOrder: IndexOrder,
-    value: TextValue
+    value: TextValue,
+    includeChangesFromThisTransaction: Boolean = true
   ): RelationshipValueIndexCursor
 
   def relationshipIndexScan(
     index: IndexReadSession,
     needsValues: Boolean,
-    indexOrder: IndexOrder
+    indexOrder: IndexOrder,
+    includeChangesFromThisTransaction: Boolean = true
   ): RelationshipValueIndexCursor
 
-  def getNodesByLabel(tokenReadSession: TokenReadSession, id: Int, indexOrder: IndexOrder): ClosingLongIterator
+  def getNodesByLabel(
+    tokenReadSession: TokenReadSession,
+    id: Int,
+    indexOrder: IndexOrder,
+    includeChangesFromThisTransaction: Boolean = true
+  ): ClosingLongIterator
 
   def getConstraintInformation(name: String): ConstraintInformation
 
@@ -241,13 +310,20 @@ trait ReadQueryContext extends ReadTokenContext with DbAccess with AutoCloseable
 
   def getAllConstraints(): Map[ConstraintDescriptor, ConstraintInfo]
 
+  def getGeneratedNameForConstraint(
+    forNode: Boolean,
+    entityId: Int,
+    propertyIds: ArraySeq[Int],
+    descriptor: SchemaDescriptor => ConstraintDescriptor
+  ): String
+
   def getOptStatistics: Option[QueryStatistics] = None
 
   def addStatistics(statistics: QueryStatistics): Unit = {}
 
   def getImportDataConnection(uri: URI): CharReadable
 
-  def nodeGetDegreeWithMax(maxDegree: Int, node: Long, dir: SemanticDirection, nodeCursor: NodeCursor): Int =
+  def nodeGetDegreeWithMax(maxDegree: Long, node: Long, dir: SemanticDirection, nodeCursor: NodeCursor): Long =
     dir match {
       case SemanticDirection.OUTGOING => nodeGetOutgoingDegreeWithMax(maxDegree, node, nodeCursor)
       case SemanticDirection.INCOMING => nodeGetIncomingDegreeWithMax(maxDegree, node, nodeCursor)
@@ -255,24 +331,24 @@ trait ReadQueryContext extends ReadTokenContext with DbAccess with AutoCloseable
     }
 
   def nodeGetDegreeWithMax(
-    maxDegree: Int,
+    maxDegree: Long,
     node: Long,
     dir: SemanticDirection,
     relTypeId: Int,
     nodeCursor: NodeCursor
-  ): Int = dir match {
+  ): Long = dir match {
     case SemanticDirection.OUTGOING => nodeGetOutgoingDegreeWithMax(maxDegree, node, relTypeId, nodeCursor)
     case SemanticDirection.INCOMING => nodeGetIncomingDegreeWithMax(maxDegree, node, relTypeId, nodeCursor)
     case SemanticDirection.BOTH     => nodeGetTotalDegreeWithMax(maxDegree, node, relTypeId, nodeCursor)
   }
 
-  def nodeGetDegree(node: Long, dir: SemanticDirection, nodeCursor: NodeCursor): Int = dir match {
+  def nodeGetDegree(node: Long, dir: SemanticDirection, nodeCursor: NodeCursor): Long = dir match {
     case SemanticDirection.OUTGOING => nodeGetOutgoingDegree(node, nodeCursor)
     case SemanticDirection.INCOMING => nodeGetIncomingDegree(node, nodeCursor)
     case SemanticDirection.BOTH     => nodeGetTotalDegree(node, nodeCursor)
   }
 
-  def nodeGetDegree(node: Long, dir: SemanticDirection, relTypeId: Int, nodeCursor: NodeCursor): Int = dir match {
+  def nodeGetDegree(node: Long, dir: SemanticDirection, relTypeId: Int, nodeCursor: NodeCursor): Long = dir match {
     case SemanticDirection.OUTGOING => nodeGetOutgoingDegree(node, relTypeId, nodeCursor)
     case SemanticDirection.INCOMING => nodeGetIncomingDegree(node, relTypeId, nodeCursor)
     case SemanticDirection.BOTH     => nodeGetTotalDegree(node, relTypeId, nodeCursor)
@@ -310,9 +386,13 @@ trait ReadQueryContext extends ReadTokenContext with DbAccess with AutoCloseable
 
   def logProvider: InternalLogProvider
 
+  def internalUsageStats: InternalUsageStats
+
   def providedLanguageFunctions: Seq[FunctionInformation]
 
   def getConfig: Config
+
+  def getShowDatabaseService: ShowDatabaseService
 
   def entityTransformer: EntityTransformer
 
@@ -489,7 +569,8 @@ trait ReadQueryContext extends ReadTokenContext with DbAccess with AutoCloseable
       databaseId.name(),
       databaseId.isSystemDatabase,
       context.kernelExecutingQuery.cypherRuntime(),
-      memoryTracker
+      memoryTracker,
+      context.kernelExecutingQuery.queryLanguage()
     )
   }
 
@@ -507,7 +588,8 @@ trait ReadQueryContext extends ReadTokenContext with DbAccess with AutoCloseable
       databaseId.name(),
       databaseId.isSystemDatabase,
       context.kernelExecutingQuery.cypherRuntime(),
-      memoryTracker
+      memoryTracker,
+      context.kernelExecutingQuery.queryLanguage()
     )
   }
 }
@@ -530,6 +612,18 @@ trait WriteQueryContext extends IndexProviderContext {
   def createNodeId(labels: Array[Int]): Long
 
   def createRelationshipId(start: Long, end: Long, relType: Int): Long
+
+  def mergeInto(
+    nodeCursor: NodeCursor,
+    traversalCursor: RelationshipTraversalCursor,
+    propertyCursor: PropertyCursor,
+    source: Long,
+    relType: Int,
+    direction: SemanticDirection,
+    target: Long,
+    onMatch: IntObjectMap[Value],
+    onCreate: IntObjectMap[Value]
+  ): MutatingEntityCursor
 
   def getOrCreateRelTypeId(relTypeName: String): Int
 
@@ -586,9 +680,10 @@ trait WriteQueryContext extends IndexProviderContext {
   ): IndexDescriptor
 
   def addVectorIndexRule(
-    entityId: Int,
+    entityIds: List[Int],
     entityType: EntityType,
     propertyKeyIds: Seq[Int],
+    additionalPropertyKeyIds: Seq[Int],
     name: Option[String],
     provider: Option[IndexProviderDescriptor],
     indexConfig: IndexConfig
@@ -596,61 +691,9 @@ trait WriteQueryContext extends IndexProviderContext {
 
   def dropIndexRule(name: String): Unit
 
-  /* throws if failed or pre-existing */
-  def createNodeKeyConstraint(
-    labelId: Int,
-    propertyKeyIds: Seq[Int],
-    name: Option[String],
-    provider: Option[IndexProviderDescriptor]
-  ): Unit
+  def createConstraint(constraint: ConstraintCommand.Create): Unit
 
-  /* throws if failed or pre-existing */
-  def createRelationshipKeyConstraint(
-    relTypeId: Int,
-    propertyKeyIds: Seq[Int],
-    name: Option[String],
-    provider: Option[IndexProviderDescriptor]
-  ): Unit
-
-  /* throws if failed or pre-existing */
-  def createNodeUniqueConstraint(
-    labelId: Int,
-    propertyKeyIds: Seq[Int],
-    name: Option[String],
-    provider: Option[IndexProviderDescriptor]
-  ): Unit
-
-  /* throws if failed or pre-existing */
-  def createRelationshipUniqueConstraint(
-    relTypeId: Int,
-    propertyKeyIds: Seq[Int],
-    name: Option[String],
-    provider: Option[IndexProviderDescriptor]
-  ): Unit
-
-  /* throws if failed or pre-existing */
-  def createNodePropertyExistenceConstraint(labelId: Int, propertyKeyId: Int, name: Option[String]): Unit
-
-  /* throws if failed or pre-existing */
-  def createRelationshipPropertyExistenceConstraint(relTypeId: Int, propertyKeyId: Int, name: Option[String]): Unit
-
-  /* throws if failed or pre-existing */
-  def createNodePropertyTypeConstraint(
-    labelId: Int,
-    propertyKeyId: Int,
-    propertyTypes: PropertyTypeSet,
-    name: Option[String]
-  ): Unit
-
-  /* throws if failed or pre-existing */
-  def createRelationshipPropertyTypeConstraint(
-    relTypeId: Int,
-    propertyKeyId: Int,
-    propertyTypes: PropertyTypeSet,
-    name: Option[String]
-  ): Unit
-
-  def dropNamedConstraint(name: String): Unit
+  def dropNamedConstraint(name: String, allowDependent: Boolean): Unit
 
   /**
    * Delete the node with the specified id and all of its relationships and return the number of deleted relationships.
@@ -733,7 +776,9 @@ trait ReadOperations[T, CURSOR] {
 
   def isDeletedInThisTx(id: Long): Boolean
 
-  def all: ClosingLongIterator
+  final def all: ClosingLongIterator = all(includeChangesFromThisTransaction = true)
+
+  def all(includeChangesFromThisTransaction: Boolean): ClosingLongIterator
 
   def acquireExclusiveLock(obj: Long): Unit
 
@@ -770,7 +815,7 @@ trait RelationshipWriteOperations extends WriteOperations[VirtualRelationshipVal
 trait RelationshipOperations extends Operations[VirtualRelationshipValue, RelationshipScanCursor]
     with RelationshipReadOperations with RelationshipWriteOperations
 
-trait QueryTransactionalContext extends CloseableResource {
+trait QueryTransactionalContext extends KernelVersionProvider with CloseableResource {
 
   def transactionHeapHighWaterMark: Long
   def commitTransaction(): Unit
@@ -778,6 +823,8 @@ trait QueryTransactionalContext extends CloseableResource {
   def kernelExecutionContext: ExecutionContext
 
   def kernelQueryContext: org.neo4j.internal.kernel.api.QueryContext
+
+  override def kernelVersion: KernelVersion = kernelQueryContext.kernelVersion
 
   def cursors: CursorFactory
 
@@ -842,7 +889,9 @@ trait QueryTransactionalContext extends CloseableResource {
 
   def constituentTransactionFactory: ConstituentTransactionFactory
 
-  def createExecutionContextMemoryTracker(): MemoryTracker
+  def createExecutionContextMemoryTracker(heapEstimatorCacheConfig: HeapEstimatorCacheConfig): MemoryTracker
+
+  def registerTransactionResource(resource: AutoCloseable): Unit
 }
 
 trait KernelPredicate[T] {
@@ -861,10 +910,11 @@ trait CloseableResource extends AutoCloseable {
 }
 
 object NodeValueHit {
-  val EMPTY = new NodeValueHit(NO_SUCH_NODE, null, null)
+  val EMPTY = new NodeValueHit(NO_SUCH_NODE, null, null, null)
 }
 
-class NodeValueHit(val nodeId: Long, val values: Array[Value], read: Read) extends DefaultCloseListenable
+class NodeValueHit(val nodeId: Long, val values: Array[Value], read: Read, cursor: NodeValueIndexCursor)
+    extends DefaultCloseListenable
     with NodeValueIndexCursor {
 
   private var _next = nodeId != -1L
@@ -896,6 +946,43 @@ class NodeValueHit(val nodeId: Long, val values: Array[Value], read: Read) exten
   // this cursor doesn't need tracing since all values has already been read.
   override def setTracer(tracer: KernelReadTracer): Unit = {}
   override def removeTracer(): Unit = {}
+
+  override def readFromStore(): Boolean = cursor.readFromStore()
+
+  override def labels(): TokenSet = cursor.labels()
+
+  override def labelsIgnoringTxStateSetRemove(): TokenSet = cursor.labelsIgnoringTxStateSetRemove()
+
+  override def hasLabel(label: Int): Boolean = cursor.hasLabel(label)
+
+  override def hasLabel: Boolean = cursor.hasLabel
+
+  override def relationships(relationships: RelationshipTraversalCursor, selection: RelationshipSelection): Unit =
+    cursor.relationships(relationships, selection)
+
+  override def supportsFastRelationshipsTo(): Boolean = cursor.supportsFastRelationshipsTo()
+
+  override def relationshipsTo(
+    relationships: RelationshipTraversalCursor,
+    selection: RelationshipSelection,
+    neighbourNodeReference: Long
+  ): Unit = cursor.relationshipsTo(relationships, selection, neighbourNodeReference)
+
+  override def relationshipsReference(): Long = cursor.relationshipsReference()
+
+  override def supportsFastDegreeLookup(): Boolean = cursor.supportsFastDegreeLookup()
+
+  override def relationshipTypes(): Array[Int] = cursor.relationshipTypes()
+  override def degrees(selection: RelationshipSelection): Degrees = cursor.degrees(selection)
+
+  override def degree(selection: RelationshipSelection): Long = cursor.degree(selection)
+
+  override def degreeWithMax(maxDegree: Long, selection: RelationshipSelection): Long =
+    cursor.degreeWithMax(maxDegree, selection)
+
+  override def properties(propertyCursor: PropertyCursor, selection: PropertySelection): Unit =
+    cursor.properties(propertyCursor, selection)
+  override def propertiesReference(): Reference = cursor.propertiesReference()
 }
 
 object RelationshipValueHit {
@@ -976,5 +1063,7 @@ case class ConstraintInformation(
   name: String,
   labelOrRelType: String,
   properties: List[String],
-  propertyType: Option[String]
+  propertyType: Option[String],
+  impliedLabel: Option[String],
+  forSourceNode: Option[Boolean]
 )

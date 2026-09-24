@@ -20,17 +20,18 @@
 package org.neo4j.bolt.protocol.common.message.decoder.streaming;
 
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.neo4j.bolt.testing.util.ErrorUtil.useNewMessage;
 
 import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.neo4j.bolt.protocol.common.message.decoder.NonEmptyMessageDecoderTest;
-import org.neo4j.bolt.protocol.common.message.request.streaming.AbstractStreamingMessage;
 import org.neo4j.bolt.testing.mock.ConnectionMockFactory;
+import org.neo4j.boltmessages.request.streaming.AbstractStreamingMessage;
 import org.neo4j.packstream.error.reader.PackstreamReaderException;
 import org.neo4j.packstream.error.struct.IllegalStructArgumentException;
 import org.neo4j.packstream.io.PackstreamBuf;
-import org.neo4j.packstream.io.value.PackstreamValueReader;
+import org.neo4j.packstream.io.value.AbstractPackstreamValueReader;
 import org.neo4j.packstream.struct.StructHeader;
 import org.neo4j.values.storable.Values;
 import org.neo4j.values.virtual.MapValueBuilder;
@@ -46,7 +47,7 @@ public interface StreamingMessageDecoderTest<
 
     @Test
     default void shouldReadMessage() throws PackstreamReaderException {
-        var reader = Mockito.mock(PackstreamValueReader.class);
+        var reader = Mockito.mock(AbstractPackstreamValueReader.class);
         var buf = PackstreamBuf.allocUnpooled();
 
         var builder = new MapValueBuilder();
@@ -69,7 +70,7 @@ public interface StreamingMessageDecoderTest<
 
     @Test
     default void shouldPermitOmittedStatementId() throws PackstreamReaderException {
-        var reader = Mockito.mock(PackstreamValueReader.class);
+        var reader = Mockito.mock(AbstractPackstreamValueReader.class);
         var buf = PackstreamBuf.allocUnpooled();
 
         var builder = new MapValueBuilder();
@@ -92,7 +93,7 @@ public interface StreamingMessageDecoderTest<
     @Test
     default void shouldFailWithIllegalStructArgumentWhenNegativeStreamLimitIsGiven() throws PackstreamReaderException {
         var buf = PackstreamBuf.allocUnpooled();
-        var reader = Mockito.mock(PackstreamValueReader.class);
+        var reader = Mockito.mock(AbstractPackstreamValueReader.class);
 
         var meta = new MapValueBuilder();
         meta.add("n", Values.longValue(-2));
@@ -106,15 +107,17 @@ public interface StreamingMessageDecoderTest<
         assertThatExceptionOfType(IllegalStructArgumentException.class)
                 .isThrownBy(() -> this.getDecoder().read(connection, buf, new StructHeader(1, (short) 0x42)))
                 .withMessage(
-                        "Illegal value for field \"meta\": Illegal value for field \"n\": Expecting size to be at least 1, but got: -2")
+                        useNewMessage("08N06: General network protocol error.")
+                                .whenLegacyFallbackTo(
+                                        "Illegal value for field \"meta\": Illegal value for field \"n\": Expecting size to be at least 1, but got: -2"))
                 .withCauseInstanceOf(IllegalStructArgumentException.class);
     }
 
     @Test
     default void shouldFailWithIllegalStructArgumentWhenInvalidArgumentIsPassed() throws PackstreamReaderException {
         var buf = PackstreamBuf.allocUnpooled();
-        var reader = Mockito.mock(PackstreamValueReader.class);
-        var ex = new PackstreamReaderException("Something went kaput :(");
+        var reader = Mockito.mock(AbstractPackstreamValueReader.class);
+        var ex = PackstreamReaderException.internalError(this.getClass().getSimpleName(), "Something went kaput :(");
 
         Mockito.doThrow(ex).when(reader).readMap();
 
@@ -123,7 +126,8 @@ public interface StreamingMessageDecoderTest<
 
         assertThatExceptionOfType(IllegalStructArgumentException.class)
                 .isThrownBy(() -> this.getDecoder().read(connection, buf, new StructHeader(1, (short) 0x42)))
-                .withMessage("Illegal value for field \"meta\": Something went kaput :(")
+                .withMessage(useNewMessage("08N06: General network protocol error.")
+                        .whenLegacyFallbackTo("Illegal value for field \"meta\": Something went kaput :("))
                 .withCause(ex);
     }
 
@@ -131,7 +135,7 @@ public interface StreamingMessageDecoderTest<
     default void shouldFailWithIllegalStructArgumentWhenInvalidMetadataEntryIsPassed()
             throws PackstreamReaderException {
         var buf = PackstreamBuf.allocUnpooled();
-        var reader = Mockito.mock(PackstreamValueReader.class);
+        var reader = Mockito.mock(AbstractPackstreamValueReader.class);
 
         var meta = new MapValueBuilder();
         meta.add("n", Values.stringValue("✨✨ nonsense ✨✨"));
@@ -143,14 +147,16 @@ public interface StreamingMessageDecoderTest<
 
         assertThatExceptionOfType(IllegalStructArgumentException.class)
                 .isThrownBy(() -> this.getDecoder().read(connection, buf, new StructHeader(1, (short) 0x42)))
-                .withMessage("Illegal value for field \"meta\": Illegal value for field \"n\": Expected long")
+                .withMessage(useNewMessage("08N06: General network protocol error.")
+                        .whenLegacyFallbackTo(
+                                "Illegal value for field \"meta\": Illegal value for field \"n\": Expected long"))
                 .withCauseInstanceOf(IllegalStructArgumentException.class);
     }
 
     @Test
     default void shouldFailWithIllegalStructArgumentWhenNumberOfRecordsIsOmitted() throws PackstreamReaderException {
-        var reader = Mockito.mock(PackstreamValueReader.class);
-        var ex = new PackstreamReaderException("Something went kaput :(");
+        var reader = Mockito.mock(AbstractPackstreamValueReader.class);
+        var ex = PackstreamReaderException.internalError(this.getClass().getSimpleName(), "Something went kaput :(");
 
         Mockito.doThrow(ex).when(reader).readMap();
 
@@ -160,7 +166,8 @@ public interface StreamingMessageDecoderTest<
 
         assertThatExceptionOfType(IllegalStructArgumentException.class)
                 .isThrownBy(() -> this.getDecoder().read(connection, buf, new StructHeader(1, (short) 0x42)))
-                .withMessage("Illegal value for field \"meta\": Something went kaput :(")
+                .withMessage(useNewMessage("08N06: General network protocol error.")
+                        .whenLegacyFallbackTo("Illegal value for field \"meta\": Something went kaput :("))
                 .withCause(ex);
     }
 }

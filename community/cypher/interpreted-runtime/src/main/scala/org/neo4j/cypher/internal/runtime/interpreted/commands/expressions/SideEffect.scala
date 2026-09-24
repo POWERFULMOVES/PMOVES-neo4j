@@ -22,7 +22,6 @@ package org.neo4j.cypher.internal.runtime.interpreted.commands.expressions
 import org.neo4j.cypher.internal.runtime.CastSupport
 import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.runtime.IsNoValue
-import org.neo4j.cypher.internal.runtime.LenientCreateRelationship
 import org.neo4j.cypher.internal.runtime.interpreted.IsMap
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.CreateNode.handleNaNValue
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.CreateNode.handleNoValue
@@ -35,7 +34,7 @@ import org.neo4j.cypher.internal.runtime.makeValueNeoSafe
 import org.neo4j.cypher.operations.CypherFunctions
 import org.neo4j.cypher.operations.CypherTypeValueMapper
 import org.neo4j.exceptions.CypherTypeException
-import org.neo4j.exceptions.InternalException
+import org.neo4j.exceptions.InvalidArgumentException
 import org.neo4j.exceptions.InvalidSemanticsException
 import org.neo4j.values.AnyValue
 import org.neo4j.values.storable.FloatingPointValue
@@ -56,7 +55,7 @@ case class CreateNode(command: CreateNodeCommand, allowNullOrNaNProperty: Boolea
     val query = state.query
     val labelIds = command.labels.map(_.getOrCreateId(query))
     val dynamicLabelIds = command.labelExpressions.flatMap(expr =>
-      CypherFunctions.asStringList(expr(row, state)).asScala.map(query.getOrCreateLabelId)
+      CypherFunctions.nodeLabelsAsStringList(expr(row, state)).asScala.map(query.getOrCreateLabelId)
     )
     val node = query.createNodeId((labelIds ++ dynamicLabelIds).toArray)
     command.properties.foreach(p =>
@@ -89,16 +88,12 @@ object CreateNode {
 
   def handleNoValue(labels: Seq[String], key: String): Unit = {
     val labelsString = if (labels.nonEmpty) ":" + labels.mkString(":") else ""
-    throw new InvalidSemanticsException(
-      s"Cannot merge the following node because of null property value for '$key': ($labelsString {$key: null})"
-    )
+    throw InvalidSemanticsException.cannotMergeNodeNullProperty(key, labelsString)
   }
 
   def handleNaNValue(labels: Seq[String], key: String): Unit = {
     val labelsString = if (labels.nonEmpty) ":" + labels.mkString(":") else ""
-    throw new InvalidSemanticsException(
-      s"Cannot merge the following node because of NaN property value for '$key': ($labelsString {$key: NaN})"
-    )
+    throw InvalidSemanticsException.cannotMergeNodeNaNProperty(key, labelsString)
   }
 }
 
@@ -148,8 +143,15 @@ case class CreateRelationship(command: CreateRelationshipCommand, allowNullOrNaN
       case n: VirtualNodeValue => n
       case IsNoValue() =>
         if (lenient) null
-        else throw new InternalException(LenientCreateRelationship.errorMsg(relName, name))
-      case x => throw new InternalException(s"Expected to find a node at '$name' but found instead: $x")
+        else {
+          throw InvalidArgumentException.createRelationshipMissingNode(relName, name)
+        }
+      case x =>
+        throw CypherTypeException.expectedNodeButGot(
+          x.prettyPrint(),
+          x.getTypeName,
+          CypherTypeValueMapper.valueType(x)
+        )
     }
 }
 
@@ -174,9 +176,13 @@ object CreateRelationship {
       } else {
         endVariableName
       }
-    s"($startVarPart)-[:$stringifiedRelType {$key: $value}]->($endVarPart)"
-    throw new InvalidSemanticsException(
-      s"Cannot merge the following relationship because of $value property value for '$key': ($startVarPart)-[:$stringifiedRelType {$key: $value}]->($endVarPart)"
+
+    throw InvalidSemanticsException.cannotMergeRelPropertyValue(
+      value,
+      key,
+      startVarPart,
+      stringifiedRelType,
+      endVarPart
     )
   }
 
@@ -200,7 +206,9 @@ case class RemoveLabelsOperation(nodeName: String, labels: Seq[LazyLabel], dynam
     if (!(value eq Values.NO_VALUE)) {
       val nodeId = CastSupport.castOrFail[VirtualNodeValue](value).id()
       val labelIds = labels.map(_.getOrCreateId(state.query)) ++ dynamicLabels.flatMap(e => {
-        CypherFunctions.asStringList(e(executionContext, state)).asScala.map(l => state.query.getOrCreateLabelId(l))
+        CypherFunctions.nodeLabelsAsStringList(e(executionContext, state)).asScala.map(l =>
+          state.query.getOrCreateLabelId(l)
+        )
       })
       state.query.removeLabelsFromNode(nodeId, labelIds.iterator)
     }

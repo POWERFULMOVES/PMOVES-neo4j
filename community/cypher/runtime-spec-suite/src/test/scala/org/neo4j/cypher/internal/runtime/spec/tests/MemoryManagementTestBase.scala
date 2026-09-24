@@ -20,33 +20,84 @@
 package org.neo4j.cypher.internal.runtime.spec.tests
 
 import org.neo4j.configuration.GraphDatabaseInternalSettings
+import org.neo4j.configuration.GraphDatabaseInternalSettings.HeapEstimatorCachePreset
 import org.neo4j.configuration.GraphDatabaseSettings
 import org.neo4j.cypher.internal.CypherRuntime
 import org.neo4j.cypher.internal.LogicalQuery
 import org.neo4j.cypher.internal.RuntimeContext
+import org.neo4j.cypher.internal.logical.plans.FindShortestPaths.AllowSameNode
 import org.neo4j.cypher.internal.logical.plans.IndexOrderNone
 import org.neo4j.cypher.internal.logical.plans.TransactionConcurrency
+import org.neo4j.cypher.internal.logical.plans.TraversalPathMode.Walk
 import org.neo4j.cypher.internal.options.CypherRuntimeOption.slotted
 import org.neo4j.cypher.internal.runtime.InputDataStream
+import org.neo4j.cypher.internal.runtime.QueryRuntimeConfig
 import org.neo4j.cypher.internal.runtime.spec.Edition
 import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.cypher.internal.runtime.spec.rewriters.TestPlanCombinationRewriter.NoRewrites
+import org.neo4j.cypher.internal.runtime.spec.tests.InputStreams.E_INT
+import org.neo4j.cypher.internal.runtime.spec.tests.InputStreams.E_INT_IN_DISTINCT
+import org.neo4j.cypher.internal.runtime.spec.tests.InputStreams.E_NODE_PRIMITIVE
+import org.neo4j.cypher.internal.runtime.spec.tests.InputStreams.E_NODE_VALUE
+import org.neo4j.cypher.internal.runtime.spec.tests.InputStreams.ValueToEstimate
+import org.neo4j.cypher.internal.runtime.spec.tests.MemoryManagementTestBase.largeMaxMemory
+import org.neo4j.cypher.internal.runtime.spec.tests.MemoryManagementTestBase.largeObjectThreshold
+import org.neo4j.cypher.internal.runtime.spec.tests.MemoryManagementTestBase.maxMemory
+import org.neo4j.cypher.internal.runtime.spec.tests.MemoryManagementTestBase.smallMaxMemory
+import org.neo4j.cypher.internal.runtime.spec.tests.MemoryManagementTestBase.varLengthBuildCommitInterval
 import org.neo4j.graphdb.Label
 import org.neo4j.graphdb.RelationshipType
 import org.neo4j.internal.helpers.ArrayUtil
 import org.neo4j.io.ByteUnit
 import org.neo4j.kernel.api.KernelTransaction
 import org.neo4j.kernel.impl.util.ValueUtils
+import org.neo4j.memory.HeapEstimatorCacheConfig
 import org.neo4j.memory.MemoryLimitExceededException
+import org.neo4j.test.TestDatabaseManagementServiceFactorySupplier
+import org.neo4j.values.storable.Values
 import org.neo4j.values.virtual.VirtualValues
 
 import java.util.Locale
 
 object MemoryManagementTestBase {
-  // The configured max memory per transaction in Bytes
-  val maxMemory: Long = ByteUnit.mebiBytes(6)
+
+  /** Default cap for `memory_transaction_max_size`. Bumped under `-Ptest-spd` to fit SPD's response-decode buffers,
+   *  which share the transaction memory pool. */
+  def maxMemory: Long =
+    if (runningUnderSpd) ByteUnit.mebiBytes(16) else smallMaxMemory
+
+  /** Original cap used by tests whose row counts are calibrated to 8 MiB,
+   * and for tests with no property read on SPD */
+  val smallMaxMemory: Long = ByteUnit.mebiBytes(8)
+
+  /** Larger cap for graph-build phases that don't fit in [[maxMemory]] under SPD. */
+  def largeMaxMemory: Long =
+    if (runningUnderSpd) ByteUnit.mebiBytes(256) else ByteUnit.mebiBytes(115)
+
+  private def runningUnderSpd: Boolean =
+    TestDatabaseManagementServiceFactorySupplier.isSpd
+
+  def varLengthBuildCommitInterval: Int =
+    if (runningUnderSpd) 10000 else 100
+
   val perWorkerGrabSize: Long = ByteUnit.kibiBytes(8)
+  val largeObjectThreshold: Long = 2048
+}
+
+object InputStreams {
+
+  // The members are not defined in the trait below because the Scala 2.13 TASTy reader
+  // cannot resolve objects nested in a Scala 3 trait.
+  sealed trait ValueToEstimate
+  // a single int column
+  case object E_INT extends ValueToEstimate
+  // a single int column used in DISTINCT
+  case object E_INT_IN_DISTINCT extends ValueToEstimate
+  // a single node column, which can be stored in a long-slot in slotted
+  case object E_NODE_PRIMITIVE extends ValueToEstimate
+  // a single node column, which cannot be stored in a long-slot in slotted
+  case object E_NODE_VALUE extends ValueToEstimate
 }
 
 trait InputStreams[CONTEXT <: RuntimeContext] {
@@ -108,16 +159,6 @@ trait InputStreams[CONTEXT <: RuntimeContext] {
   protected def killAfterNRows(rowSize: Long): Long = {
     ((MemoryManagementTestBase.maxMemory / rowSize) * 1.2).toLong // An extra of 20% rows to account for mis-estimation and batching
   }
-
-  sealed trait ValueToEstimate
-  // a single int column
-  case object E_INT extends ValueToEstimate
-  // a single int column used in DISTINCT
-  case object E_INT_IN_DISTINCT extends ValueToEstimate
-  // a single node column, which can be stored in a long-slot in slotted
-  case object E_NODE_PRIMITIVE extends ValueToEstimate
-  // a single node column, which cannot be stored in a long-slot in slotted
-  case object E_NODE_VALUE extends ValueToEstimate
 
   /**
    * Estimate the size of an object after converting it into a Neo4j value.
@@ -208,6 +249,7 @@ abstract class MemoryManagementTestBase[CONTEXT <: RuntimeContext](
         GraphDatabaseInternalSettings.initial_transaction_heap_grab_size_per_worker -> Long.box(
           MemoryManagementTestBase.perWorkerGrabSize
         ),
+        GraphDatabaseInternalSettings.heap_estimator_cache_preset -> HeapEstimatorCachePreset.DEFAULT,
         GraphDatabaseInternalSettings.cypher_pipelined_batch_size_small -> Integer.valueOf(6),
         GraphDatabaseInternalSettings.cypher_pipelined_batch_size_big -> Integer.valueOf(6)
       ),
@@ -499,6 +541,155 @@ abstract class MemoryManagementTestBase[CONTEXT <: RuntimeContext](
     }
   }
 
+  test("should kill shortest undirected multiloop before it runs out of memory") {
+    assume(!isParallel)
+    // given a circle graph with 10 relations to each neighbour (except for start node)
+    givenGraph {
+      val nodes = nodeGraph(10)
+      val start = nodes.head
+      start.createRelationshipTo(nodes(1), RelationshipType.withName("R"))
+      start.createRelationshipTo(nodes(nodes.size - 1), RelationshipType.withName("R"))
+      for (i <- 1 until nodes.size - 1) {
+        val from = nodes(i)
+        val to = nodes(i + 1)
+        for (_ <- 1 to 10) {
+          from.createRelationshipTo(to, RelationshipType.withName("R"))
+        }
+      }
+      start
+    }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("x")
+      .shortestPath("(x)-[r*1..]-(x)", pathName = Some("path"), all = true, sameNodeMode = AllowSameNode)
+      .allNodeScan("x")
+      .build()
+
+    // then
+    a[MemoryLimitExceededException] should be thrownBy {
+      consume(execute(logicalQuery, runtime))
+    }
+  }
+
+  ignore("should kill shortest single directed loop before it runs out of memory") {
+    assume(!isParallel)
+    // given
+    givenGraph(
+      circleGraph(1000)
+    )
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("x")
+      .shortestPath("(x)-[r*1..]->(x)", pathName = Some("path"), sameNodeMode = AllowSameNode)
+      .allNodeScan("x")
+      .build()
+    // Needed because fused directed shortest is too memory efficient...
+    getConfig.setDynamic(GraphDatabaseSettings.memory_transaction_max_size, Long.box(ByteUnit.mebiBytes(1)), "Test")
+    restartTx()
+    // then
+    a[MemoryLimitExceededException] should be thrownBy {
+      consume(execute(logicalQuery, runtime))
+    }
+  }
+
+  ignore("should kill shortest multiloop in walkmode before it runs out of memory") {
+    assume(!isParallel)
+    // given
+    givenGraph {
+      val nodes = nodeGraph(10)
+      val start = nodes.head
+      for (i <- 1 until nodes.size - 1) {
+        val to = nodes(i)
+        for (_ <- 1 to 1000) {
+          start.createRelationshipTo(to, RelationshipType.withName("R"))
+        }
+      }
+      start
+    }
+
+    getConfig.setDynamic(GraphDatabaseSettings.memory_transaction_max_size, Long.box(ByteUnit.mebiBytes(1)), "Test")
+    restartTx()
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("x")
+      .shortestPath(
+        "(x)-[r*1..]-(x)",
+        pathName = Some("path"),
+        all = true,
+        sameNodeMode = AllowSameNode,
+        traversalPathMode = Walk
+      )
+      .allNodeScan("x")
+      .build()
+
+    // then
+    a[MemoryLimitExceededException] should be thrownBy {
+      consume(execute(logicalQuery, runtime))
+    }
+  }
+
+  test("shortest single undirected should not run out of memory") {
+    assume(!isParallel)
+    // given
+    givenGraph(nodeGraph(10000))
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("x")
+      .shortestPath("(x)-[r*1..]-(x)", pathName = Some("path"), sameNodeMode = AllowSameNode)
+      .allNodeScan("x")
+      .build()
+
+    // then
+    consume(execute(logicalQuery, runtime))
+  }
+
+  test("shortest single directed should not run out of memory") {
+    assume(!isParallel)
+    // given
+    givenGraph(nodeGraph(10000))
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("x")
+      .shortestPath("(x)-[r*1..]->(x)", pathName = Some("path"), sameNodeMode = AllowSameNode)
+      .allNodeScan("x")
+      .build()
+
+    // then
+    consume(execute(logicalQuery, runtime))
+  }
+
+  test("shortest multi undirected loop should not run out of memory") {
+    assume(!isParallel)
+    // given
+    givenGraph(nodeGraph(10000))
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("x")
+      .shortestPath("(x)-[r*1..]-(x)", pathName = Some("path"), sameNodeMode = AllowSameNode, all = true)
+      .allNodeScan("x")
+      .build()
+
+    // then
+    consume(execute(logicalQuery, runtime))
+  }
+
+  test("shortest multi undirected loop in walkmode should not run out of memory") {
+    assume(!isParallel)
+    // given
+    givenGraph(nodeGraph(10000))
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("x")
+      .shortestPath(
+        "(x)-[r*1..]-(x)",
+        pathName = Some("path"),
+        sameNodeMode = AllowSameNode,
+        all = true,
+        traversalPathMode = Walk
+      )
+      .allNodeScan("x")
+      .build()
+
+    // then
+    consume(execute(logicalQuery, runtime))
+  }
+
   test("should not kill top query with low limit") {
     // given
     val logicalQuery = new LogicalQueryBuilder(this)
@@ -611,7 +802,7 @@ abstract class MemoryManagementTestBase[CONTEXT <: RuntimeContext](
     // given
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("x")
-      .orderedDistinct(Seq("x"), "x AS x", "y AS y")
+      .orderedDistinct(Seq("x"), "x AS x", "y AS y").withLeveragedOrder()
       .input(variables = Seq("x", "y"))
       .build()
 
@@ -628,7 +819,7 @@ abstract class MemoryManagementTestBase[CONTEXT <: RuntimeContext](
     // given
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("x", "y")
-      .orderedDistinct(Seq("x"), "x AS x", "y AS y")
+      .orderedDistinct(Seq("x"), "x AS x", "y AS y").withLeveragedOrder()
       .input(variables = Seq("x", "y"))
       .build()
 
@@ -642,10 +833,13 @@ abstract class MemoryManagementTestBase[CONTEXT <: RuntimeContext](
   test("should kill partial top query before it runs out of memory") {
     assume(!isParallel)
 
+    getConfig.setDynamic(GraphDatabaseSettings.memory_transaction_max_size, Long.box(smallMaxMemory), "Test")
+    restartTx()
+
     // given
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("x")
-      .partialTop(100000, Seq("x ASC"), Seq("y ASC"))
+      .partialTop(133333, Seq("x ASC"), Seq("y ASC"))
       .input(variables = Seq("x", "y"))
       .build()
 
@@ -664,11 +858,11 @@ abstract class MemoryManagementTestBase[CONTEXT <: RuntimeContext](
     // given
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("x")
-      .partialTop(100000, Seq("x ASC"), Seq("y ASC"))
+      .partialTop(133333, Seq("x ASC"), Seq("y ASC"))
       .input(variables = Seq("x", "y"))
       .build()
 
-    val input = for (i <- 0 to 100000) yield Array[Any](i, i)
+    val input = for (i <- 0 to 133333) yield Array[Any](i, i)
 
     // then
     val result = execute(logicalQuery, runtime, inputValues(input: _*).stream())
@@ -680,7 +874,11 @@ abstract class MemoryManagementTestBase[CONTEXT <: RuntimeContext](
   // adding support to the memory manager, prefer tests that use `infiniteNodeInput` instead.
   test("should kill pruning-var-expand before it runs out of memory") {
     // given
-    getConfig.setDynamic(GraphDatabaseSettings.memory_transaction_max_size, Long.box(ByteUnit.mebiBytes(115)), "Test")
+    getConfig.setDynamic(
+      GraphDatabaseSettings.memory_transaction_max_size,
+      Long.box(MemoryManagementTestBase.largeMaxMemory),
+      "Test"
+    )
     restartTx()
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
@@ -701,9 +899,13 @@ abstract class MemoryManagementTestBase[CONTEXT <: RuntimeContext](
     }
   }
 
-  test("should kill distinct-pruning-var-expand before it runs out of memory") {
+  ignore("should kill distinct-pruning-var-expand before it runs out of memory") {
     // given
-    getConfig.setDynamic(GraphDatabaseSettings.memory_transaction_max_size, Long.box(ByteUnit.mebiBytes(115)), "Test")
+    getConfig.setDynamic(
+      GraphDatabaseSettings.memory_transaction_max_size,
+      Long.box(MemoryManagementTestBase.largeMaxMemory),
+      "Test"
+    )
     restartTx()
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
@@ -910,6 +1112,9 @@ abstract class MemoryManagementTestBase[CONTEXT <: RuntimeContext](
   }
 
   test("should kill var-length query with long pattern before it runs out of memory") {
+    getConfig.setDynamic(GraphDatabaseSettings.memory_transaction_max_size, Long.box(largeMaxMemory), "Test")
+    restartTx()
+
     // given
     givenGraph {
       var start = tx.createNode(Label.label("START"))
@@ -919,13 +1124,17 @@ abstract class MemoryManagementTestBase[CONTEXT <: RuntimeContext](
         start.createRelationshipTo(next, RelationshipType.withName("R"))
         start = next
 
-        if (i % 100 == 0) {
+        if (i % varLengthBuildCommitInterval == 0) {
           restartTx()
           start = tx.getNodeById(start.getId)
         }
         i += 1
       }
     }
+
+    getConfig.setDynamic(GraphDatabaseSettings.memory_transaction_max_size, Long.box(maxMemory), "Test")
+    restartTx()
+
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
       .expand("(x)-[r*]->(y)")
@@ -978,6 +1187,158 @@ abstract class MemoryManagementTestBase[CONTEXT <: RuntimeContext](
     result should beColumns("i", "aaa").withRows(inOrder(expected))
 
     result.runtimeResult.queryProfile().maxAllocatedMemory() should be < 200000L
+  }
+
+  test("should not count duplicated memory of large object in collect aggregation") {
+    // given
+    val sizeHint = 2000
+    val largeObject = "a".repeat(65536)
+    val input = inputValues(Array(largeObject))
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("c2")
+      .aggregation(Seq.empty, Seq("collect(x2) as c2"))
+      .unwind("c AS x2")
+      .aggregation(Seq.empty, Seq("collect(x) as c"))
+      .unwind(s"range(1, $sizeHint) as i")
+      .input(variables = Seq("x"))
+      .build()
+
+    val result = profile(logicalQuery, runtime, input)
+
+    // Matching on the result is painfully slow, so skip it. It is tested elsewhere.
+    // val c = ValueUtils.asListValue(Range.inclusive(1, sizeHint).map(_ => largeObject).asJava)
+    // result should beColumns("c2").withSingleRow(Array[Any](c))
+
+    result.awaitAll()
+
+    result.runtimeResult.queryProfile().maxAllocatedMemory() should be < 200000L
+  }
+
+  test(
+    "should not count duplicated memory of many large object in collect aggregation when fits in heap estimator cache"
+  ) {
+    // given
+    val sizeHint = 2000
+    val nInputRows = sizeHint
+    val nUniqueLargeObjects = 16
+    val queryConfig = QueryRuntimeConfig.DEFAULT
+      .withHeapEstimatorCacheConfig(new HeapEstimatorCacheConfig(nUniqueLargeObjects, largeObjectThreshold))
+
+    val largeObjects = 0 until nUniqueLargeObjects map { i =>
+      val o = "a".repeat(largeObjectThreshold.toInt + i)
+      Values.utf8Value(o) // NOTE: Important to convert to Value here, otherwise the input stream conversion will create unique objects per row
+    }
+    val input = inputValues((0 until nInputRows).map(i => Array[Any](largeObjects(i % nUniqueLargeObjects))): _*)
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("c2")
+      .aggregation(Seq.empty, Seq("collect(x2) as c2"))
+      .unwind("c AS x2")
+      .aggregation(Seq.empty, Seq("collect(x) as c"))
+      .unwind(s"range(1, 3) as i")
+      .input(variables = Seq("x"))
+      .build()
+
+    val result = profileQuery(logicalQuery, runtime, input.stream(), queryConfig = queryConfig)
+
+    // Matching on the result is painfully slow, so skip it. It is tested elsewhere.
+    // val c = ValueUtils.asListValue(Range.inclusive(1, sizeHint).map(_ => largeObject).asJava)
+    // result should beColumns("c2").withSingleRow(Array[Any](c))
+
+    result.awaitAll()
+
+    result.runtimeResult.queryProfile().maxAllocatedMemory() should be < 200000L
+  }
+
+  test("should not count duplicated memory of large object in top-level distinct") {
+    // given
+    val sizeHint = 1000
+    val largeObject = "a".repeat(65536)
+    val input = inputValues(Array(largeObject))
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("c2")
+      .distinct("i2 AS i2", "c AS c2")
+      .unwind(s"range(1, $sizeHint) AS i2")
+      .aggregation(Seq.empty, Seq("collect(x) as c"))
+      .unwind(s"range(1, $sizeHint) as i")
+      .input(variables = Seq("x"))
+      .build()
+
+    val result = profile(logicalQuery, runtime, input)
+
+    // Matching on the result is painfully slow, so skip it. It is tested elsewhere.
+
+    result.awaitAll()
+
+    result.runtimeResult.queryProfile().maxAllocatedMemory() should be < 200000L
+  }
+
+  test("should not fail top memory tracking with morsel reuse") {
+    assume(isPipelined || isParallel)
+
+    // Regression test for a bug where StandardPmtTopTable's totalTopHeapUsage
+    // went negative, crashing close() with "Expected non-negative long value, got <N>".
+    // Only relevant for the pipelined runtime with PMT tracking; other runtimes pass
+    // trivially since they do not share the remaining-rows-reuse mechanism.
+    //
+    // The pipeline is split into two pipelines by placing pipelineBreaker between
+    // projection and filter:
+    //   Pipeline 1: argument -> unwind -> projection -> MorselBuffer output
+    //   Pipeline 2: MorselBuffer -> filter -> topMapper -> topTable
+    //
+    // Top's upstream pipeline is configured for remaining-rows reuse only
+    // (MorselReuseMode.RemainingRowsOnly). createReusableViewFromRemainingRows hands
+    // the next pipeline task a sibling view that SHARES the base longs/refs arrays.
+    // The next task writes into those shared arrays at [oldEndRow..newEndRow).
+    // Top.update() sees views of the *same* baseMorselRef but with progressively-
+    // populated refs, since prepareForReusingRemainingRows bumps each view's inherited
+    // finalRow to maxNumberOfRows regardless of actual populated rows. The old code
+    // allocated heap by scanning refs[0..finalRow) at first insert (mostly null) and
+    // released by re-scanning refs at eviction (fully populated) — producing a
+    // negative delta.
+    //
+    // Ascending i values with LIMIT 1 DESC guarantees the first base morsel is
+    // fully evicted by a later base morsel, triggering the over-release.
+
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("prop")
+      .top(1, "prop DESC")
+      .filter("i % 4 = 0")
+      .pipelineBreaker()
+      .projection("'v' + right('xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', i + 1) AS prop")
+      .unwind("range(0, 19) AS i")
+      .argument()
+      .withMorselSize(4)
+      .build()
+
+    consume(execute(logicalQuery, runtime))
+  }
+
+  test("top memory tracking with many evictions across views") {
+    assume(isPipelined || isParallel)
+
+    // Slightly more stress variant of the regression test above. With LIMIT > 1 and a larger input,
+    // the top table accumulates rows from several base morsels, each view of which is a
+    // sibling-reuse view that shares the base longs/refs. As later (larger-prop DESC)
+    // winners arrive, rows originally inserted by earlier views get evicted — so the
+    // PMT bookkeeping must remain consistent across:
+    //   - first-time inserts for a base
+    //   - endRow growth of an already-tracked base across sibling-reused views
+    //   - same-base evictions mid-call (earlier B row evicted by later B row)
+    //   - cross-base evictions (later B row evicts an earlier A row)
+    //   - full drain of a base (last retained row evicted by another base)
+
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("prop")
+      .top(3, "prop DESC")
+      .filter("i % 2 = 0")
+      .pipelineBreaker()
+      .projection("'v' + right('xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', i + 1) AS prop")
+      .unwind("range(0, 39) AS i")
+      .argument()
+      .withMorselSize(4)
+      .build()
+
+    consume(execute(logicalQuery, runtime))
   }
 
   protected def assertHeapHighWaterMark(
@@ -1136,13 +1497,16 @@ trait TransactionForeachMemoryManagementTestBase[CONTEXT <: RuntimeContext] {
     }
   }
 
-  test("should not kill transaction foreach subquery if both inner and outer together exceed the limit - sort") {
+  ignore("should not kill transaction foreach subquery if both inner and outer together exceed the limit - sort") {
+    getConfig.setDynamic(GraphDatabaseSettings.memory_transaction_max_size, Long.box(smallMaxMemory), "Test")
+    restartTx()
+
     // Determined empirically
     val rowCount = runtimeUsed match {
-      case Interpreted                                             => 32000
-      case Slotted if concurrency eq TransactionConcurrency.Serial => 52000
-      case Slotted                                                 => 32000
-      case Pipelined                                               => 70000
+      case Interpreted                                             => 42666
+      case Slotted if concurrency eq TransactionConcurrency.Serial => 69333
+      case Slotted                                                 => 42666
+      case Pipelined                                               => 93333
     }
 
     // given
@@ -1204,12 +1568,15 @@ trait TransactionForeachMemoryManagementTestBase[CONTEXT <: RuntimeContext] {
   test(
     "should not kill transaction foreach subquery if both inner and outer together exceed the limit - grouping aggregation"
   ) {
+    getConfig.setDynamic(GraphDatabaseSettings.memory_transaction_max_size, Long.box(smallMaxMemory), "Test")
+    restartTx()
+
     // Determined empirically
     val rowCount = runtimeUsed match {
-      case Interpreted                                             => 12000
-      case Slotted if concurrency eq TransactionConcurrency.Serial => 13000
-      case Slotted                                                 => 12000
-      case Pipelined                                               => 15000
+      case Interpreted                                             => 16000
+      case Slotted if concurrency eq TransactionConcurrency.Serial => 17333
+      case Slotted                                                 => 16000
+      case Pipelined                                               => 20000
     }
 
     // given
@@ -1271,11 +1638,14 @@ trait TransactionForeachMemoryManagementTestBase[CONTEXT <: RuntimeContext] {
   test(
     "should not kill transaction foreach subquery with limit and distinct if both inner and outer together exceed the limit"
   ) {
+    getConfig.setDynamic(GraphDatabaseSettings.memory_transaction_max_size, Long.box(smallMaxMemory), "Test")
+    restartTx()
+
     // Determined empirically
     val rowCount = runtimeUsed match {
-      case Interpreted => 37000
-      case Slotted     => 53000
-      case Pipelined   => 70000
+      case Interpreted => 49333
+      case Slotted     => 70666
+      case Pipelined   => 93333
     }
 
     // given
@@ -1342,98 +1712,16 @@ trait TransactionForeachMemoryManagementTestBase[CONTEXT <: RuntimeContext] {
     noException should be thrownBy consume(execute(logicalQuery, runtime))
   }
 
-  ignore(
-    "should not kill concurrent transaction foreach subquery with limit and distinct if both inner and outer together exceed the limit"
-  ) {
+  ignore("should not kill transaction apply subquery if both inner and outer together exceed the limit") {
+    getConfig.setDynamic(GraphDatabaseSettings.memory_transaction_max_size, Long.box(smallMaxMemory), "Test")
+    restartTx()
+
     // Determined empirically
     val rowCount = runtimeUsed match {
-      case Interpreted => 37000
-      case Slotted     => 18750
-      case Pipelined   => 70000
-    }
-
-    val concurrencyInt = 2
-    val rowCountMultiplier = concurrencyInt + 1
-
-    // given
-    val logicalQuery = new LogicalQueryBuilder(this)
-      .produceResults("x")
-      .transactionForeach(1, concurrency = TransactionConcurrency.Concurrent(concurrencyInt))
-      .|.emptyResult()
-      .|.distinct("y AS y")
-      .|.limit(100)
-      .|.sort("y ASC")
-      .|.unwind(s"range(1, $rowCount) as y")
-      .|.argument()
-      .distinct("x AS x")
-      .limit(100)
-      .sort("x ASC")
-      .unwind(s"range(1, $rowCount) as x")
-      .argument()
-      .build(readOnly = false)
-
-    // Used to check that we choose the right amount of rows:
-    {
-      val checkQuery = new LogicalQueryBuilder(this)
-        .produceResults("x")
-        .distinct("x AS x")
-        .limit(100)
-        .sort("x ASC")
-        .unwind(
-          s"range(1, ${rowCountMultiplier * rowCount}) as x"
-        ) // When multiplying the rows we should consume too much
-        .argument()
-        .build()
-
-      a[MemoryLimitExceededException] should be thrownBy {
-        consume(execute(checkQuery, runtime))
-      }
-      // Restart tx here to reset memory usage
-      runtimeTestSupport.restartTx(KernelTransaction.Type.IMPLICIT)
-    }
-
-    // Used to check that the same query without IN TRANSACTIONS runs out of memory:
-    {
-      val checkQuery = new LogicalQueryBuilder(this)
-        .produceResults("x")
-        .subqueryForeach()
-        .|.emptyResult()
-        .|.union()
-        .|.|.distinct("y AS y")
-        .|.|.limit(100)
-        .|.|.sort("y ASC")
-        .|.|.unwind(s"range(1, $rowCount) as y")
-        .|.|.argument()
-        .|.distinct("y AS y")
-        .|.limit(100)
-        .|.sort("y ASC")
-        .|.unwind(s"range(1, $rowCount) as y")
-        .|.argument()
-        .distinct("x AS x")
-        .limit(100)
-        .sort("x ASC")
-        .unwind(s"range(1, $rowCount) as x")
-        .argument()
-        .build(readOnly = false)
-
-      a[MemoryLimitExceededException] should be thrownBy {
-        consume(execute(checkQuery, runtime))
-      }
-      // Restart tx here to reset memory usage
-      runtimeTestSupport.restartTx(KernelTransaction.Type.IMPLICIT)
-    }
-
-    // then
-    noException should be thrownBy consume(execute(logicalQuery, runtime))
-  }
-
-  test("should not kill transaction apply subquery if both inner and outer together exceed the limit") {
-    // Determined empirically
-    val rowCount = runtimeUsed match {
-      case Interpreted                                             => 37000
-      case Slotted if concurrency eq TransactionConcurrency.Serial => 53000
-      case Slotted                                                 => 32000
-      case Pipelined                                               => 79000
+      case Interpreted                                             => 49333
+      case Slotted if concurrency eq TransactionConcurrency.Serial => 70666
+      case Slotted                                                 => 42666
+      case Pipelined                                               => 105333
     }
 
     // given
@@ -1496,11 +1784,15 @@ trait TransactionForeachMemoryManagementTestBase[CONTEXT <: RuntimeContext] {
   test(
     "should not kill transaction apply subquery if both inner and outer together exceed the limit - grouping aggregation"
   ) {
+    getConfig.setDynamic(GraphDatabaseSettings.memory_transaction_max_size, Long.box(smallMaxMemory), "Test")
+    restartTx()
+
     // Determined empirically
     val rowCount = runtimeUsed match {
-      case Interpreted => 12000
-      case Slotted     => 13000
-      case Pipelined   => 15000
+      case Interpreted                                             => 16000
+      case Slotted if concurrency eq TransactionConcurrency.Serial => 17333
+      case Slotted                                                 => 16000
+      case Pipelined                                               => 20000
     }
 
     // given

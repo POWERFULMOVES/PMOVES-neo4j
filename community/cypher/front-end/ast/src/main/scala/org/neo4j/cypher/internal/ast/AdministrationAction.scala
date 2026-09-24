@@ -58,6 +58,31 @@ case object StopDatabaseAction extends DatabaseAction("STOP")
 
 case object AccessDatabaseAction extends DatabaseAction("ACCESS")
 
+sealed abstract class DatabaseAndDbmsAction(override val name: String) extends DatabaseAction(name) {
+  def useCypher5: Boolean
+}
+
+case class AlterDatabaseAction(useCypher5: Boolean) extends DatabaseAndDbmsAction("ALTER DATABASE")
+
+case class SetDatabaseAccessAction(useCypher5: Boolean) extends DatabaseAndDbmsAction("SET DATABASE ACCESS")
+
+case class SetDatabaseDefaultLanguageAction(useCypher5: Boolean)
+    extends DatabaseAndDbmsAction("SET DATABASE DEFAULT LANGUAGE")
+
+/*
+ * This is an internal only sub-privilege of ALTER DATABASE, so we display it to the user as ALTER DATABASE since
+ * that is what they need to grant. ALTER DATABASE SET TOPOLOGY will check this.
+ */
+case class AlterDatabaseTopologyAction(useCypher5: Boolean) extends DatabaseAndDbmsAction("ALTER DATABASE")
+
+/*
+ * This is an internal only sub-privilege of ALTER DATABASE, so we display it to the user as ALTER DATABASE since
+ * that is what they need to grant. ALTER DATABASE SET / REMOVE OPTION will check this.
+ */
+case class AlterDatabaseOptionsAction(useCypher5: Boolean) extends DatabaseAndDbmsAction("ALTER DATABASE")
+
+case class AlterCompositeDatabaseAction(useCypher5: Boolean) extends DatabaseAndDbmsAction("ALTER COMPOSITE DATABASE")
+
 abstract class IndexManagementAction(override val name: String) extends DatabaseAction(name)
 
 case object AllIndexActions extends IndexManagementAction("INDEX MANAGEMENT")
@@ -120,9 +145,21 @@ case object ExecuteBoostedFunctionAction extends DbmsAction("EXECUTE BOOSTED USE
 
 case object ShowSettingAction extends DbmsAction("SHOW SETTING")
 
+abstract class SecretManagementAction(override val name: String) extends DbmsAction(name)
+
+case object AllSecretManagementActions extends SecretManagementAction("SECRETS MANAGEMENT")
+
+case object ReadSecretsAction extends SecretManagementAction("READ SECRETS")
+
+case object WriteSecretsAction extends SecretManagementAction("WRITE SECRETS")
+
+case object ShowSecretsAction extends SecretManagementAction("SHOW SECRETS")
+
 abstract class UserManagementAction(override val name: String) extends DbmsAction(name)
 
 case object AllUserActions extends UserManagementAction("USER MANAGEMENT")
+
+case object ShowUserCredentialsAction extends UserManagementAction("SHOW USER CREDENTIALS")
 
 case object ShowUserAction extends UserManagementAction("SHOW USER")
 
@@ -142,6 +179,14 @@ case object SetAuthAction extends UserManagementAction("SET AUTH")
 
 case object SetUserHomeDatabaseAction extends UserManagementAction("SET USER HOME DATABASE")
 
+abstract class UserMetadataManagementAction(override val name: String) extends DbmsAction(name)
+
+case object AllUserMetadataActions extends UserMetadataManagementAction("USER METADATA MANAGEMENT")
+
+case object ShowUserMetadataAction extends UserMetadataManagementAction("SHOW USER METADATA")
+
+case object SetUserMetadataAction extends UserMetadataManagementAction("SET USER METADATA")
+
 abstract class RoleManagementAction(override val name: String) extends DbmsAction(name)
 
 case object AllRoleActions extends RoleManagementAction("ROLE MANAGEMENT")
@@ -158,6 +203,20 @@ case object AssignRoleAction extends RoleManagementAction("ASSIGN ROLE")
 
 case object RemoveRoleAction extends RoleManagementAction("REMOVE ROLE")
 
+abstract class AuthRuleManagementAction(override val name: String) extends DbmsAction(name)
+
+case object ShowAuthRuleAction extends AuthRuleManagementAction("SHOW AUTH RULE")
+
+case object CreateAuthRuleAction extends AuthRuleManagementAction("CREATE AUTH RULE")
+
+case object DropAuthRuleAction extends AuthRuleManagementAction("DROP AUTH RULE")
+
+case object AlterAuthRuleAction extends AuthRuleManagementAction("ALTER AUTH RULE")
+
+case object RenameAuthRuleAction extends AuthRuleManagementAction("RENAME AUTH RULE")
+
+case object AllAuthRuleActions extends AuthRuleManagementAction("AUTH RULE MANAGEMENT")
+
 abstract class DatabaseManagementAction(override val name: String) extends DbmsAction(name)
 
 case object AllDatabaseManagementActions extends DatabaseManagementAction("DATABASE MANAGEMENT")
@@ -165,10 +224,6 @@ case object AllDatabaseManagementActions extends DatabaseManagementAction("DATAB
 case object CreateDatabaseAction extends DatabaseManagementAction("CREATE DATABASE")
 
 case object DropDatabaseAction extends DatabaseManagementAction("DROP DATABASE")
-
-case object AlterDatabaseAction extends DatabaseManagementAction("ALTER DATABASE")
-
-case object SetDatabaseAccessAction extends DatabaseManagementAction("SET DATABASE ACCESS")
 
 case object CompositeDatabaseManagementActions extends DatabaseManagementAction("COMPOSITE DATABASE MANAGEMENT")
 
@@ -197,14 +252,6 @@ case object ShowPrivilegeAction extends PrivilegeManagementAction("SHOW PRIVILEG
 case object AssignPrivilegeAction extends PrivilegeManagementAction("ASSIGN PRIVILEGE")
 
 case object RemovePrivilegeAction extends PrivilegeManagementAction("REMOVE PRIVILEGE")
-
-sealed trait UnassignableAction
-
-case object AssignImmutablePrivilegeAction extends PrivilegeManagementAction("ASSIGN IMMUTABLE PRIVILEGE")
-    with UnassignableAction
-
-case object RemoveImmutablePrivilegeAction extends PrivilegeManagementAction("REMOVE IMMUTABLE PRIVILEGE")
-    with UnassignableAction
 
 // Load privilege actions
 

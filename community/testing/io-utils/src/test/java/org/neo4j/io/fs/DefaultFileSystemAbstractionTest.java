@@ -22,33 +22,34 @@ package org.neo4j.io.fs;
 import static java.lang.String.format;
 import static java.util.concurrent.ThreadLocalRandom.current;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.neo4j.internal.helpers.Numbers.isPowerOfTwo;
 import static org.neo4j.io.fs.DefaultFileSystemAbstraction.UNABLE_TO_CREATE_DIRECTORY_FORMAT;
+import static org.neo4j.io.fs.FileSystemAbstraction.DEFAULT_OUTPUT_STREAM_BUFFER_SIZE;
 import static org.neo4j.io.fs.FileSystemAbstraction.INVALID_FILE_DESCRIPTOR;
 
 import java.io.BufferedOutputStream;
 import java.io.IOException;
+import java.nio.MappedByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermission;
 import java.util.EnumSet;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.io.ByteUnit;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.DisabledForRoot;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 public class DefaultFileSystemAbstractionTest extends FileSystemAbstractionTest {
 
     @Inject
@@ -94,7 +95,7 @@ public class DefaultFileSystemAbstractionTest extends FileSystemAbstractionTest 
     void retrieveBlockSize() throws IOException {
         var testFile = testDirectory.createFile("testBlock");
         long blockSize = fsa.getBlockSize(testFile);
-        assertTrue(isPowerOfTwo(blockSize), "Observed block size: " + blockSize);
+        assertThat(isPowerOfTwo(blockSize)).isTrue();
         assertThat(blockSize).isGreaterThanOrEqualTo(512L);
     }
 
@@ -110,7 +111,7 @@ public class DefaultFileSystemAbstractionTest extends FileSystemAbstractionTest 
             contentFromDrive = stream.readAllBytes();
         }
 
-        assertArrayEquals(sourceData, contentFromDrive);
+        assertThat(contentFromDrive).isEqualTo(sourceData);
     }
 
     @Test
@@ -121,7 +122,7 @@ public class DefaultFileSystemAbstractionTest extends FileSystemAbstractionTest 
         Files.write(testFile, sourceData);
 
         for (int bufferSize = 1; bufferSize < sourceData.length; bufferSize += (int) ByteUnit.kibiBytes(1)) {
-            assertArrayEquals(sourceData, readContent(testFile, bufferSize, sourceData.length));
+            assertThat(readContent(testFile, bufferSize, sourceData.length)).isEqualTo(sourceData);
         }
     }
 
@@ -138,7 +139,7 @@ public class DefaultFileSystemAbstractionTest extends FileSystemAbstractionTest 
         }
 
         byte[] contentFromDrive = Files.readAllBytes(testFile);
-        assertArrayEquals(sourceData, contentFromDrive);
+        assertThat(contentFromDrive).isEqualTo(sourceData);
     }
 
     @Test
@@ -147,17 +148,37 @@ public class DefaultFileSystemAbstractionTest extends FileSystemAbstractionTest 
         int size = current().nextInt((int) ByteUnit.mebiBytes(20));
 
         byte[] sourceData = random.nextBytes(size);
+        int baseBufferSize = DEFAULT_OUTPUT_STREAM_BUFFER_SIZE;
         try (var channel = new DefaultFileSystemAbstraction.NativeByteBufferOutputStream(
-                        (StoreFileChannel) fsa.write(testFile));
-                var buffered =
-                        new BufferedOutputStream(channel, (int) (ByteUnit.kibiBytes(8) + random.nextInt(10, 455)))) {
-            for (byte aByte : sourceData) {
-                buffered.write(aByte);
+                        fsa.write(testFile), baseBufferSize);
+                var buffered = new BufferedOutputStream(channel, baseBufferSize + random.nextInt(10, 455))) {
+            for (int i = 0; i < sourceData.length; ) {
+                if (random.nextBoolean()) {
+                    buffered.write(sourceData[i]);
+                    i++;
+                } else {
+                    int remaining = size - i;
+                    int bytesToWrite = remaining == 1 ? 1 : random.nextInt(1, Math.min(remaining, 256));
+                    buffered.write(sourceData, i, bytesToWrite);
+                    i += bytesToWrite;
+                }
             }
         }
 
         byte[] contentFromDrive = Files.readAllBytes(testFile);
-        assertArrayEquals(sourceData, contentFromDrive);
+        assertThat(contentFromDrive).isEqualTo(sourceData);
+    }
+
+    @Test
+    void mappingFile() throws IOException {
+        Path testFile = testDirectory.file("testFile");
+        try (DefaultFileSystemAbstraction fs = new DefaultFileSystemAbstraction()) {
+            StoreFileChannel channel = fs.open(
+                    testFile, Set.of(StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.READ));
+            MappedByteBuffer mapped = channel.map(FileChannel.MapMode.PRIVATE, 0, 32);
+            mapped.putLong(0, 42L);
+            assertThat(mapped.getLong(0)).isEqualTo(42L);
+        }
     }
 
     @Test
@@ -166,7 +187,7 @@ public class DefaultFileSystemAbstractionTest extends FileSystemAbstractionTest 
     @DisabledForRoot
     void shouldFailGracefullyWhenPathCannotBeCreated() throws Exception {
         Files.createDirectories(path);
-        assertTrue(fsa.fileExists(path));
+        assertThat(fsa.fileExists(path)).isTrue();
         Files.setPosixFilePermissions(
                 path,
                 EnumSet.of(
@@ -175,12 +196,12 @@ public class DefaultFileSystemAbstractionTest extends FileSystemAbstractionTest 
                         PosixFilePermission.OTHERS_READ));
         path = path.resolve("some_file");
 
-        IOException exception = assertThrows(IOException.class, () -> fsa.mkdirs(path));
-        assertFalse(fsa.isDirectory(path));
-        String expectedMessage = format(UNABLE_TO_CREATE_DIRECTORY_FORMAT, path);
-        assertThat(exception.getMessage()).isEqualTo(expectedMessage);
-        Throwable cause = exception.getCause();
-        assertThat(cause).isInstanceOf(AccessDeniedException.class);
+        assertThat(fsa.isDirectory(path)).isFalse();
+
+        assertThatThrownBy(() -> fsa.mkdirs(path))
+                .isInstanceOf(IOException.class)
+                .hasMessage(format(UNABLE_TO_CREATE_DIRECTORY_FORMAT, path))
+                .hasCauseInstanceOf(AccessDeniedException.class);
     }
 
     private byte[] readContent(Path testFile, int bufferSize, int dataLength) throws IOException {

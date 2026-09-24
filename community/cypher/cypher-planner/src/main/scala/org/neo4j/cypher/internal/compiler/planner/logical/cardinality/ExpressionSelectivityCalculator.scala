@@ -21,11 +21,13 @@ package org.neo4j.cypher.internal.compiler.planner.logical.cardinality
 
 import org.neo4j.cypher.internal.ast.IsTyped
 import org.neo4j.cypher.internal.ast.semantics.SemanticTable
+import org.neo4j.cypher.internal.ast.semantics.TokenTable
 import org.neo4j.cypher.internal.compiler.planner.logical.Metrics.CardinalityModel
 import org.neo4j.cypher.internal.compiler.planner.logical.Metrics.LabelInfo
 import org.neo4j.cypher.internal.compiler.planner.logical.Metrics.RelTypeInfo
 import org.neo4j.cypher.internal.compiler.planner.logical.PlannerDefaults.DEFAULT_EQUALITY_SELECTIVITY
 import org.neo4j.cypher.internal.compiler.planner.logical.PlannerDefaults.DEFAULT_LIST_CARDINALITY
+import org.neo4j.cypher.internal.compiler.planner.logical.PlannerDefaults.DEFAULT_NODES_UNIQUENESS_SELECTIVITY
 import org.neo4j.cypher.internal.compiler.planner.logical.PlannerDefaults.DEFAULT_NUMBER_OF_ID_LOOKUPS
 import org.neo4j.cypher.internal.compiler.planner.logical.PlannerDefaults.DEFAULT_PREDICATE_SELECTIVITY
 import org.neo4j.cypher.internal.compiler.planner.logical.PlannerDefaults.DEFAULT_PROPERTY_SELECTIVITY
@@ -41,6 +43,7 @@ import org.neo4j.cypher.internal.compiler.planner.logical.cardinality.Expression
 import org.neo4j.cypher.internal.compiler.planner.logical.cardinality.ExpressionSelectivityCalculator.indexSelectivityWithSizeHint
 import org.neo4j.cypher.internal.compiler.planner.logical.cardinality.ExpressionSelectivityCalculator.selectivityForPropertyEquality
 import org.neo4j.cypher.internal.compiler.planner.logical.cardinality.ExpressionSelectivityCalculator.subqueryCardinalityToExistsSelectivity
+import org.neo4j.cypher.internal.compiler.planner.logical.cardinality.histogram.EstimateSelectivityUsingHistogram
 import org.neo4j.cypher.internal.compiler.planner.logical.plans.AsBoundingBoxSeekable
 import org.neo4j.cypher.internal.compiler.planner.logical.plans.AsDistanceSeekable
 import org.neo4j.cypher.internal.compiler.planner.logical.plans.AsElementIdSeekable
@@ -54,11 +57,16 @@ import org.neo4j.cypher.internal.compiler.planner.logical.plans.InequalityRangeS
 import org.neo4j.cypher.internal.compiler.planner.logical.plans.PointBoundingBoxSeekable
 import org.neo4j.cypher.internal.compiler.planner.logical.plans.PointDistanceSeekable
 import org.neo4j.cypher.internal.compiler.planner.logical.plans.PrefixRangeSeekable
+import org.neo4j.cypher.internal.compiler.planner.logical.plans.PropertyScannablesFromDistanceComparison
 import org.neo4j.cypher.internal.compiler.planner.logical.plans.Scannable
+import org.neo4j.cypher.internal.compiler.planner.logical.schema.GraphSchemaOptimizations
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.IndexCompatiblePredicatesProviderContext
 import org.neo4j.cypher.internal.expressions.AssertIsNode
 import org.neo4j.cypher.internal.expressions.Contains
+import org.neo4j.cypher.internal.expressions.DifferentNodes
 import org.neo4j.cypher.internal.expressions.DifferentRelationships
+import org.neo4j.cypher.internal.expressions.DisjointNodes
+import org.neo4j.cypher.internal.expressions.DoubleLiteral
 import org.neo4j.cypher.internal.expressions.ElementTypeName
 import org.neo4j.cypher.internal.expressions.EndsWith
 import org.neo4j.cypher.internal.expressions.Equals
@@ -67,12 +75,14 @@ import org.neo4j.cypher.internal.expressions.False
 import org.neo4j.cypher.internal.expressions.GreaterThan
 import org.neo4j.cypher.internal.expressions.GreaterThanOrEqual
 import org.neo4j.cypher.internal.expressions.HasLabels
+import org.neo4j.cypher.internal.expressions.IsRepeatAcyclic
 import org.neo4j.cypher.internal.expressions.IsRepeatTrailUnique
 import org.neo4j.cypher.internal.expressions.LabelName
 import org.neo4j.cypher.internal.expressions.LessThan
 import org.neo4j.cypher.internal.expressions.LessThanOrEqual
 import org.neo4j.cypher.internal.expressions.LogicalProperty
 import org.neo4j.cypher.internal.expressions.LogicalVariable
+import org.neo4j.cypher.internal.expressions.NoneOfNodes
 import org.neo4j.cypher.internal.expressions.NoneOfRelationships
 import org.neo4j.cypher.internal.expressions.Not
 import org.neo4j.cypher.internal.expressions.Ors
@@ -82,10 +92,12 @@ import org.neo4j.cypher.internal.expressions.Property
 import org.neo4j.cypher.internal.expressions.PropertyKeyName
 import org.neo4j.cypher.internal.expressions.RegexMatch
 import org.neo4j.cypher.internal.expressions.RelTypeName
+import org.neo4j.cypher.internal.expressions.SignedDecimalIntegerLiteral
 import org.neo4j.cypher.internal.expressions.StringLiteral
 import org.neo4j.cypher.internal.expressions.True
 import org.neo4j.cypher.internal.expressions.UnPositionedVariable.varFor
 import org.neo4j.cypher.internal.expressions.Unique
+import org.neo4j.cypher.internal.expressions.UniqueNodes
 import org.neo4j.cypher.internal.expressions.VarLengthBound
 import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.ir.ast.ExistsIRExpression
@@ -110,7 +122,7 @@ import org.neo4j.cypher.internal.util.symbols.CypherType
 import org.neo4j.cypher.internal.util.symbols.PointType
 import org.neo4j.cypher.internal.util.symbols.StringType
 import org.neo4j.internal.helpers.MathUtil.Erf.erf
-import org.neo4j.internal.schema.constraints.SchemaValueType
+import org.neo4j.internal.schema.constraints.ConstrainableType
 
 case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: SelectivityCombiner) {
 
@@ -150,11 +162,12 @@ case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: Sel
     labelInfo: LabelInfo,
     relTypeInfo: RelTypeInfo,
     existenceConstraints: Set[(ElementTypeName, String)],
-    typeConstraints: Map[ElementTypeName, Map[String, Seq[SchemaValueType]]]
+    typeConstraints: Map[ElementTypeName, Map[String, Seq[ConstrainableType]]]
   )(
     implicit semanticTable: SemanticTable,
     indexPredicateProviderContext: IndexCompatiblePredicatesProviderContext,
-    cardinalityModel: CardinalityModel
+    cardinalityModel: CardinalityModel,
+    graphSchemaOptimizations: GraphSchemaOptimizations
   ): Selectivity = exp match {
     // WHERE a:Label
     case HasLabels(_, Seq(label)) =>
@@ -217,7 +230,8 @@ case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: Sel
 
     // WHERE distance(p.prop, otherPoint) <, <= number that could benefit from an index
     case AsDistanceSeekable(seekable) =>
-      calculateSelectivityForPointDistanceSeekable(seekable, labelInfo, relTypeInfo)
+      calculateSelectivityForPointDistanceSeekable(seekable.head, labelInfo, relTypeInfo)
+    // seekable.tail would be non-empty when `otherPoint` is a point property. It is ignored for cardinality estimation here.
 
     // WHERE point.withinBBox(p.prop, ll, ur) that could benefit from an index
     case AsBoundingBoxSeekable(seekable) =>
@@ -225,13 +239,15 @@ case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: Sel
 
     // WHERE x.prop <, <=, >=, > that could benefit from an index
     case AsValueRangeSeekable(seekable) =>
-      calculateSelectivityForValueRangeSeekable(seekable, labelInfo, relTypeInfo)
+      calculateSelectivityForValueRangeSeekable(seekable.head, labelInfo, relTypeInfo)
+    // possible seekable.tail is ignored here
 
     // WHERE NOT a.prop [...]
     case Not(inner @ AsPropertyScannable(scannable)) =>
       // Whether negated or not, predicates like CONTAINS and ENDS WITH will only apply to string properties
       val propertyTypeSelectivity =
-        propertyTypeSelectivityForScannable(scannable, labelInfo, relTypeInfo, existenceConstraints)
+        propertyTypeSelectivityForScannable(scannable.head, labelInfo, relTypeInfo, existenceConstraints)
+      // possible scannable.tail is ignored here.
       apply(inner, labelInfo, relTypeInfo, existenceConstraints, typeConstraints).negate * propertyTypeSelectivity
 
     // WHERE NOT [...]
@@ -281,24 +297,51 @@ case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: Sel
           }
         }
 
+    // WHERE point.distance(possiblePointProperty1, possiblePointProperty2) > possibleNumberProperty
+    case PropertyScannablesFromDistanceComparison(scannables) =>
+      val isNotNullSelectivity = scannables.map(scannable => {
+        calculateSelectivityForPropertyExistence(
+          scannable.variable,
+          labelInfo,
+          relTypeInfo,
+          scannable.property.propertyKey,
+          existenceConstraints
+        )
+      }).min // selectivity for the most selective `property IS NOT NULL` predicate
+      val defaultSelectivityForRangeGivenIsNotNull =
+        Selectivity(DEFAULT_RANGE_SELECTIVITY.factor / DEFAULT_PROPERTY_SELECTIVITY.factor)
+      // Probability that the range predicate holds given that the isNotNull predicate holds
+      //  = probability that both hold / probability that isNotNull predicate holds
+      //  = DEFAULT_RANGE_SELECTIVITY  / DEFAULT_PROPERTY_SELECTIVITY
+      isNotNullSelectivity * defaultSelectivityForRangeGivenIsNotNull
+
     // WHERE x.prop IS NOT NULL
-    case AsPropertyScannable(scannable) =>
-      calculateSelectivityForPropertyExistence(
-        scannable.ident,
-        labelInfo,
-        relTypeInfo,
-        scannable.propertyKey,
-        existenceConstraints
-      )
+    case AsPropertyScannable(scannables) =>
+      scannables.map(scannable =>
+        calculateSelectivityForPropertyExistence(
+          scannable.ident,
+          labelInfo,
+          relTypeInfo,
+          scannable.propertyKey,
+          existenceConstraints
+        )
+      ).min
 
     // Implicit relation uniqueness predicates
     case _: DifferentRelationships =>
       // This should not be the default. Instead, we should figure out the number of matching relationships and use it
       DEFAULT_REL_UNIQUENESS_SELECTIVITY
 
+    case _: DifferentNodes =>
+      DEFAULT_NODES_UNIQUENESS_SELECTIVITY
+
     case _: Unique | _: IsRepeatTrailUnique =>
       // These are currently only generated for var-length or QPP uniqueness predicates and
       // those are already included in the calculations in PatternRelationshipMultiplierCalculator.
+      Selectivity.ONE
+
+    case _: UniqueNodes | _: IsRepeatAcyclic | _: NoneOfNodes | _: DisjointNodes =>
+      // These are handled by QuantifiedPathPatternCardinalityModel
       Selectivity.ONE
 
     case _: NoneOfRelationships =>
@@ -337,13 +380,15 @@ case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: Sel
       DEFAULT_RANGE_SELECTIVITY
 
     case x: ExistsIRExpression =>
+      val dependencies = x.computedScopeDependencies.getOrElse(Set.empty)
       val subqueryCardinality = cardinalityModel.apply(
         x.query,
-        labelInfo,
-        relTypeInfo,
+        labelInfo.filter { case (variable, _) => dependencies.contains(variable) },
+        relTypeInfo.filter { case (variable, _) => dependencies.contains(variable) },
         semanticTable,
         indexPredicateProviderContext,
-        cardinalityModel
+        cardinalityModel,
+        graphSchemaOptimizations
       )
       subqueryCardinalityToExistsSelectivity(subqueryCardinality)
 
@@ -365,7 +410,7 @@ case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: Sel
     relTypeInfo: RelTypeInfo,
     propertyKey: PropertyKeyName,
     existenceConstraints: Set[(ElementTypeName, String)]
-  )(implicit semanticTable: SemanticTable): Selectivity = {
+  )(implicit tokenTable: TokenTable): Selectivity = {
     val labels = labelInfo.getOrElse(variable, Set.empty)
     val relTypes = relTypeInfo.get(variable)
     val relevantConstraints: Set[(ElementTypeName, String)] = (labels ++ relTypes).map(_ -> propertyKey.name)
@@ -381,7 +426,7 @@ case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: Sel
     labelInfo: LabelInfo,
     relTypeInfo: RelTypeInfo,
     propertyKey: PropertyKeyName
-  )(implicit semanticTable: SemanticTable): Selectivity = {
+  )(implicit tokenTable: TokenTable): Selectivity = {
     val indexTypesAbleToAnswerIsNotNull: Set[IndexType] = Set(IndexType.Range)
 
     val indexPropertyExistsSelectivities =
@@ -412,7 +457,7 @@ case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: Sel
     relTypeInfo: RelTypeInfo,
     propertyKey: PropertyKeyName,
     indexTypesPriorityOrder: Seq[IndexType]
-  )(implicit semanticTable: SemanticTable): Option[Selectivity] = {
+  )(implicit tokenTable: TokenTable): Option[Selectivity] = {
     val indexPropertyExistsSelectivities: Seq[(Selectivity, IndexType)] =
       multipleIndexPropertyExistsSelectivitiesFor(
         variable,
@@ -433,20 +478,20 @@ case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: Sel
     relTypeInfo: RelTypeInfo,
     propertyKey: PropertyKeyName,
     indexTypesPriorityOrder: Seq[IndexType]
-  )(implicit semanticTable: SemanticTable): Seq[(Selectivity, IndexType)] = {
+  )(implicit tokenTable: TokenTable): Seq[(Selectivity, IndexType)] = {
     val labels = labelInfo.getOrElse(variable, Set.empty)
     val relTypes = relTypeInfo.get(variable)
 
     val entityTypeAndPropertyIds: Seq[(NameId, PropertyKeyId)] = {
       labels.toIndexedSeq.flatMap { (labelName: LabelName) =>
         for {
-          labelId <- semanticTable.id(labelName)
-          propId <- semanticTable.id(propertyKey)
+          labelId <- tokenTable.id(labelName)
+          propId <- tokenTable.id(propertyKey)
         } yield (labelId, propId)
       } ++ relTypes.toIndexedSeq.flatMap { (relTypeName: RelTypeName) =>
         for {
-          relTypeId <- semanticTable.id(relTypeName)
-          propId <- semanticTable.id(propertyKey)
+          relTypeId <- tokenTable.id(relTypeName)
+          propId <- tokenTable.id(propertyKey)
         } yield (relTypeId, propId)
       }
     }
@@ -486,8 +531,8 @@ case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: Sel
     labelInfo: LabelInfo,
     relTypeInfo: RelTypeInfo,
     propertyKey: PropertyKeyName,
-    typeConstraints: Map[ElementTypeName, Map[String, Seq[SchemaValueType]]]
-  )(implicit semanticTable: SemanticTable): Selectivity = {
+    typeConstraints: Map[ElementTypeName, Map[String, Seq[ConstrainableType]]]
+  )(implicit tokenTable: TokenTable): Selectivity = {
     val valueTypeContradictsTypeConstraint =
       propertyTypeSelectivityFromTypeConstraints(
         variable,
@@ -509,10 +554,10 @@ case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: Sel
             nameId.map(id => indexTypesToConsider.map(IndexDescriptor(_, EntityType.of(id), Seq(propertyKeyId))))
               .getOrElse(Seq.empty)
 
-          val descriptors: Seq[IndexDescriptor] = (name, semanticTable.id(propertyKey)) match {
-            case (labelName: LabelName, Some(propKeyId)) => descriptorCreator(semanticTable.id(labelName), propKeyId)
+          val descriptors: Seq[IndexDescriptor] = (name, tokenTable.id(propertyKey)) match {
+            case (labelName: LabelName, Some(propKeyId)) => descriptorCreator(tokenTable.id(labelName), propKeyId)
             case (relTypeName: RelTypeName, Some(propKeyId)) =>
-              descriptorCreator(semanticTable.id(relTypeName), propKeyId)
+              descriptorCreator(tokenTable.id(relTypeName), propKeyId)
             case _ => Seq.empty
           }
 
@@ -539,6 +584,28 @@ case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: Sel
       combiner
     )
 
+  // Check if all inequality predicates can be handled using histograms.
+  // In the future we might want to use histograms for the parts that can be handled and fallback for the remaining parts.
+  // https://trello.com/c/3SYt6PQe/2993-use-histogram-for-part-of-inequalities-in-the-seekable-when-not-all-inequalities-can-be-handled
+  private def inequalityPredicatesCanBeHandleByHistogram(seekable: InequalityRangeSeekable): Boolean = {
+    seekable.expr.inequalities.forall(inequality => {
+      val literalTypeSupported = inequality.rhs match {
+        case _: SignedDecimalIntegerLiteral => true
+        case _: DoubleLiteral               => true
+        // Enable support for temporal type values: https://trello.com/c/n604vPK5/2978-histograms-support-for-date-values
+        // Enable support for Strings: https://trello.com/c/P9mnTaEl/2855-histograms-support-category-domains
+        case _ => false
+      }
+      val operatorSupported = inequality match {
+        case _: LessThan           => true
+        case _: LessThanOrEqual    => true
+        case _: GreaterThan        => true
+        case _: GreaterThanOrEqual => true
+      }
+      literalTypeSupported && operatorSupported
+    })
+  }
+
   private def calculateSelectivityForValueRangeSeekable(
     seekable: InequalityRangeSeekable,
     labelInfo: LabelInfo,
@@ -556,38 +623,66 @@ case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: Sel
 
     val indexTypesToConsider = indexTypesForRangeSeeks(seekable.propertyValueType(semanticTable))
 
-    val labels = labelInfo.getOrElse(seekable.ident, Set.empty)
-    val relTypes = relTypeInfo.get(seekable.ident)
+    val labelIds = labelInfo.getOrElse(seekable.ident, Set.empty).map(semanticTable.id)
+    val maybeRelTypeId = relTypeInfo.get(seekable.ident).map(semanticTable.id)
+    val propKeyId = semanticTable.id(seekable.property.propertyKey)
 
-    val idTuples = labels.toIndexedSeq.map { name =>
-      (semanticTable.id(name), semanticTable.id(seekable.expr.property.propertyKey))
-    } ++ relTypes.toIndexedSeq.map { name =>
-      (semanticTable.id(name), semanticTable.id(seekable.expr.property.propertyKey))
-    }
-
-    val indexRangeSelectivities: Seq[Selectivity] = idTuples.flatMap {
-      case (Some(labelOrRelTypeId), Some(propertyKeyId)) =>
-        val selectivities = for {
-          descriptor <- indexTypesToConsider.map(IndexDescriptor.forNameId(_, labelOrRelTypeId, Seq(propertyKeyId)))
-          propertyExistsSelectivity <- stats.indexPropertyIsNotNullSelectivity(descriptor)
-          propEqValueSelectivity <- stats.uniqueValueSelectivity(descriptor)
-        } yield {
-          val pRangeBounded: Selectivity = getPropertyPredicateRangeSelectivity(seekable, propEqValueSelectivity)
-          pRangeBounded * propertyExistsSelectivity
+    // Use histograms to estimate the current inequality predicates if
+    // 1) the feature flag for using histograms during planning is enable.
+    // 2) the values in the inequality predicates are integers or doubles. Other values are not supported.
+    //    When the value has been auto-parameterized, then we cannot use histograms anymore.
+    // 3) the operators are <, <=, >, >=. Other operators are not (yet) supported.
+    val useHistogramsInPlanningConfig =
+      true // https://trello.com/c/esdvGOrL/2987-cypher-option-to-not-use-histograms-during-planning
+    val useHistogramsInPlanning = useHistogramsInPlanningConfig && inequalityPredicatesCanBeHandleByHistogram(seekable)
+    val availableHists =
+      if (useHistogramsInPlanning && propKeyId.isDefined) {
+        if (maybeRelTypeId.nonEmpty) {
+          stats.getHistograms(maybeRelTypeId.flatten.get, propKeyId.get)
+        } else {
+          stats.getHistograms(labelIds.flatten, propKeyId.get)
         }
-        selectivities.headOption
+      } else
+        Set.empty
 
-      case _ => Some(Selectivity.ZERO)
+    if (useHistogramsInPlanning && availableHists.nonEmpty) {
+      // Choose one of the available histograms (for now, just take the first one)
+      // https://trello.com/c/2vsei82Z/2990-selection-which-histogram-to-use-when-multiple-are-applicable
+      val histogram = availableHists.head
+      // Use the histogram to estimate this range predicate
+      EstimateSelectivityUsingHistogram.sumBucketSelectivityEstimates(histogram, seekable.expr.inequalities)
+    } else {
+
+      val idTuples = labelIds.toIndexedSeq.map { labelId =>
+        (labelId, semanticTable.id(seekable.expr.property.propertyKey))
+      } ++ maybeRelTypeId.toIndexedSeq.map { typeId =>
+        (typeId, semanticTable.id(seekable.expr.property.propertyKey))
+      }
+
+      val indexRangeSelectivities: Seq[Selectivity] = idTuples.flatMap {
+        case (Some(labelOrRelTypeId), Some(propertyKeyId)) =>
+          val selectivities = for {
+            descriptor <- indexTypesToConsider.map(IndexDescriptor.forNameId(_, labelOrRelTypeId, Seq(propertyKeyId)))
+            propertyExistsSelectivity <- stats.indexPropertyIsNotNullSelectivity(descriptor)
+            propEqValueSelectivity <- stats.uniqueValueSelectivity(descriptor)
+          } yield {
+            val pRangeBounded: Selectivity = getPropertyPredicateRangeSelectivity(seekable, propEqValueSelectivity)
+            pRangeBounded * propertyExistsSelectivity
+          }
+          selectivities.headOption
+
+        case _ => Some(Selectivity.ZERO)
+      }
+
+      combiner.orTogetherSelectivities(indexRangeSelectivities).getOrElse(default)
     }
-
-    combiner.orTogetherSelectivities(indexRangeSelectivities).getOrElse(default)
   }
 
   private def calculateSelectivityForPointDistanceSeekable(
     seekable: PointDistanceSeekable,
     labelInfo: LabelInfo,
     relTypeInfo: RelTypeInfo
-  )(implicit semanticTable: SemanticTable): Selectivity = {
+  )(implicit tokenTable: TokenTable): Selectivity = {
     val indexPropertyExistsSelectivities =
       multipleIndexPropertyExistsSelectivitiesFor(
         seekable.ident,
@@ -607,7 +702,7 @@ case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: Sel
     seekable: PointBoundingBoxSeekable,
     labelInfo: LabelInfo,
     relTypeInfo: RelTypeInfo
-  )(implicit semanticTable: SemanticTable): Selectivity = {
+  )(implicit tokenTable: TokenTable): Selectivity = {
     // NOTE this equivalent to using two inequalities, like p1 <= n.prop <= p2
     def default = {
       val defaultRange = DEFAULT_RANGE_SELECTIVITY * Selectivity(0.5)
@@ -627,9 +722,9 @@ case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: Sel
     val relTypes = relTypeInfo.get(seekable.ident)
 
     val idTuples = labels.toIndexedSeq.map { name =>
-      (semanticTable.id(name), semanticTable.id(seekable.property.propertyKey))
+      (tokenTable.id(name), tokenTable.id(seekable.property.propertyKey))
     } ++ relTypes.toIndexedSeq.map { name =>
-      (semanticTable.id(name), semanticTable.id(seekable.property.propertyKey))
+      (tokenTable.id(name), tokenTable.id(seekable.property.propertyKey))
     }
 
     val indexRangeSelectivities: Seq[Selectivity] = idTuples.flatMap {
@@ -660,7 +755,7 @@ case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: Sel
     propertyKey: PropertyKeyName,
     stringExpression: Expression,
     prefix: Boolean = false
-  )(implicit semanticTable: SemanticTable): Selectivity = {
+  )(implicit tokenTable: TokenTable): Selectivity = {
     val stringLength = getStringLength(stringExpression)
 
     def default =
@@ -688,7 +783,7 @@ case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: Sel
   }
 
   private def calculateSelectivityForIdSeekable(seekable: IdSeekable)(implicit
-  semanticTable: SemanticTable): Selectivity = {
+    semanticTable: SemanticTable): Selectivity = {
     val lookups = seekable.args.sizeHint.map(Cardinality(_)).getOrElse(DEFAULT_NUMBER_OF_ID_LOOKUPS)
     if (semanticTable.typeFor(seekable.ident).is(CTNode)) {
       (lookups / stats.nodesAllCardinality()) getOrElse Selectivity.ONE
@@ -702,7 +797,7 @@ case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: Sel
     labelInfo: LabelInfo,
     relTypeInfo: RelTypeInfo,
     propertyKey: PropertyKeyName
-  )(implicit semanticTable: SemanticTable): Option[Selectivity] = {
+  )(implicit tokenTable: TokenTable): Option[Selectivity] = {
     calculateSelectivityForPropertyTypePredicateFromIndex(
       variable,
       labelInfo,
@@ -717,7 +812,7 @@ case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: Sel
     labelInfo: LabelInfo,
     relTypeInfo: RelTypeInfo,
     propertyKey: PropertyKeyName
-  )(implicit semanticTable: SemanticTable): Option[Selectivity] = {
+  )(implicit tokenTable: TokenTable): Option[Selectivity] = {
     calculateSelectivityForPropertyTypePredicateFromIndex(
       variable,
       labelInfo,
@@ -732,7 +827,7 @@ case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: Sel
     labelInfo: LabelInfo,
     relTypeInfo: RelTypeInfo,
     existenceConstraints: Set[(ElementTypeName, String)]
-  )(implicit semanticTable: SemanticTable): Selectivity = {
+  )(implicit tokenTable: TokenTable): Selectivity = {
     scannable.cypherType match {
       case CTString =>
         isStringPropertyNotNullSelectivityFromIndex(
@@ -765,8 +860,8 @@ case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: Sel
     typeName: CypherType,
     labelInfo: LabelInfo,
     relTypeInfo: RelTypeInfo,
-    typeConstraints: Map[ElementTypeName, Map[String, Seq[SchemaValueType]]]
-  )(implicit semanticTable: SemanticTable): Selectivity = {
+    typeConstraints: Map[ElementTypeName, Map[String, Seq[ConstrainableType]]]
+  )(implicit tokenTable: TokenTable): Selectivity = {
     val typeConstraintSelectivity: Option[Selectivity] =
       propertyTypeSelectivityFromTypeConstraints(
         variable,
@@ -792,7 +887,7 @@ case class ExpressionSelectivityCalculator(stats: GraphStatistics, combiner: Sel
     typeName: CypherType,
     labelInfo: LabelInfo,
     relTypeInfo: RelTypeInfo,
-    typeConstraints: Map[ElementTypeName, Map[String, Seq[SchemaValueType]]]
+    typeConstraints: Map[ElementTypeName, Map[String, Seq[ConstrainableType]]]
   ): Option[Selectivity] = {
     val labels = labelInfo.getOrElse(variable, Set.empty)
     val relTypes = relTypeInfo.get(variable)

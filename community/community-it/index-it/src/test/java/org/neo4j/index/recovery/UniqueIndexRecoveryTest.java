@@ -23,6 +23,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
 import static org.neo4j.graphdb.Label.label;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 
 import java.io.IOException;
@@ -39,16 +40,16 @@ import org.neo4j.graphdb.Transaction;
 import org.neo4j.graphdb.schema.ConstraintDefinition;
 import org.neo4j.io.fs.FileUtils;
 import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
-import org.neo4j.kernel.impl.transaction.log.LogAppendEvent;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointerImpl;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
+import org.neo4j.wal.LogAppendEvent;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.CheckPointerImpl;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
 
 @TestDirectoryExtension
 public class UniqueIndexRecoveryTest {
@@ -125,7 +126,7 @@ public class UniqueIndexRecoveryTest {
         return managementService.database(DEFAULT_DATABASE_NAME);
     }
 
-    private static Path snapshot(final Path path) throws IOException {
+    private static Path snapshot(Path path) throws IOException {
         Path snapshotDir = path.resolve("snapshot-" + new Random().nextInt());
         FileUtils.copyDirectory(path, snapshotDir, pathName -> {
             String subPath = pathName.toAbsolutePath()
@@ -203,6 +204,6 @@ public class UniqueIndexRecoveryTest {
     private void flushAll() throws IOException {
         db.getDependencyResolver()
                 .resolveDependency(CheckPointerImpl.ForceOperation.class)
-                .flushAndForce(DatabaseFlushEvent.NULL, NULL_CONTEXT);
+                .flushAndForce(DatabaseFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
     }
 }

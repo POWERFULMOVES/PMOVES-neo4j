@@ -28,16 +28,19 @@ import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RandomValuesTestSupport
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.graphdb.Label
+import org.neo4j.values.storable.ValueType
 import org.neo4j.values.storable.Values.stringValue
 
 import scala.jdk.CollectionConverters.IterableHasAsScala
+
+object ValueHashJoinTestBase
 
 abstract class ValueHashJoinTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
   sizeHint: Int
 ) extends RuntimeTestSuite[CONTEXT](edition, runtime)
-    with RandomValuesTestSupport {
+    with RandomValuesTestSupport[CONTEXT] {
 
   test("should support simple hash join between two identifiers") {
     // given
@@ -500,7 +503,16 @@ abstract class ValueHashJoinTestBase[CONTEXT <: RuntimeContext](
     val size = random.nextInt(50) + 50
     val props = Range(0, random.nextInt(8)).map(i => s"prop$i")
     def randomProps(): Map[String, Any] = {
-      Map("key" -> random.nextInt(4)) ++ props.map(p => p -> randomValues.nextValue().asObject())
+      Map("key" -> random.nextInt(4)) ++ props.map(p =>
+        p -> randomValues.nextValueOfTypes(
+          ValueType.BOOLEAN,
+          ValueType.STRING,
+          ValueType.DOUBLE,
+          ValueType.GEOGRAPHIC_POINT_3D,
+          ValueType.LONG_ARRAY,
+          ValueType.LOCAL_DATE_TIME
+        ).asObject()
+      )
     }
     def randomLabels(): Seq[String] = {
       randomAmong(Seq(Seq("LHS"), Seq("RHS"), Seq("LHS", "RHS")))
@@ -529,7 +541,8 @@ abstract class ValueHashJoinTestBase[CONTEXT <: RuntimeContext](
     val runtimeResult = execute(logicalQuery, runtime)
 
     // then
-    val lhsByKey = nodes.filter(_.hasLabel(Label.label("LHS"))).groupBy(_.getProperty("key"))
+    val lhsByKey =
+      nodes.filter(_.hasLabel(Label.label("LHS"))).groupBy(_.getProperty("key")).withDefaultValue(Seq.empty)
     val expected = for {
       rhsNode <- nodes.filter(_.hasLabel(Label.label("RHS")))
       lhsNode <- lhsByKey(rhsNode.getProperty("key"))
@@ -713,7 +726,7 @@ abstract class ValueHashJoinTestBase[CONTEXT <: RuntimeContext](
     val runtimeResult = execute(logicalQuery, runtime)
 
     // then
-    val expected = nodes.map(n => Array(n, n, 1))
+    val expected = nodes.map(n => Array[Any](n, n, 1))
     runtimeResult should beColumns("x", "y", "z").withRows(expected)
   }
 }

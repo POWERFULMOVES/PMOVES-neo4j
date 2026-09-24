@@ -26,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.neo4j.index.internal.gbptree.DataTree.W_BATCHED_SINGLE_THREADED;
 import static org.neo4j.index.internal.gbptree.GBPTreeTestUtil.consistencyCheckStrict;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.test.utils.PageCacheConfig.config;
 
@@ -52,11 +53,11 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.LongStream;
+import org.assertj.core.api.Assertions;
 import org.eclipse.collections.api.factory.Sets;
 import org.eclipse.collections.api.set.ImmutableSet;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.neo4j.io.IOUtils;
 import org.neo4j.io.fs.FileSystemAbstraction;
@@ -64,7 +65,7 @@ import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.extension.pagecache.PageCacheSupportExtension;
 import org.neo4j.test.extension.testdirectory.EphemeralTestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
@@ -84,7 +85,7 @@ import org.neo4j.test.utils.TestDirectory;
  * about what they should do next.
  */
 @EphemeralTestDirectoryExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 public abstract class GBPTreeConcurrencyITBase<KEY, VALUE> {
     @Inject
     private FileSystemAbstraction fileSystem;
@@ -203,6 +204,10 @@ public abstract class GBPTreeConcurrencyITBase<KEY, VALUE> {
                 testCoordinator, readerReadySignal, readerStartSignal, endSignal, failHalt, readerError);
         for (int i = 0; i < readers; i++) {
             threadPool.submit(readerTask);
+            if (random.nextBoolean()) {
+                threadPool.submit(new TraversingDownReader(
+                        testCoordinator, readerReadySignal, readerStartSignal, endSignal, failHalt, readerError));
+            }
         }
 
         // and starting the checkpointer
@@ -306,6 +311,7 @@ public abstract class GBPTreeConcurrencyITBase<KEY, VALUE> {
             updateRecentlyInsertedData(readersShouldSee, updatesForNextIteration);
             updatesForNextIteration = generateUpdatesForNextIteration();
             updateWithSoonToBeRemovedData(readersShouldSee, updatesForNextIteration);
+
             currentReaderInstruction.set(newReaderInstruction(minRange, maxRange, readersShouldSee));
         }
 
@@ -557,12 +563,65 @@ public abstract class GBPTreeConcurrencyITBase<KEY, VALUE> {
         }
     }
 
+    private class TraversingDownReader implements Runnable {
+        private final CountDownLatch readerReadySignal;
+        private final CountDownLatch readerStartSignal;
+        private final AtomicBoolean endSignal;
+        private final AtomicBoolean failHalt;
+        private final AtomicReference<Throwable> readerError;
+        private final TestCoordinator testCoordinator;
+
+        TraversingDownReader(
+                TestCoordinator testCoordinator,
+                CountDownLatch readerReadySignal,
+                CountDownLatch readerStartSignal,
+                AtomicBoolean endSignal,
+                AtomicBoolean failHalt,
+                AtomicReference<Throwable> readerError) {
+            this.readerReadySignal = readerReadySignal;
+            this.readerStartSignal = readerStartSignal;
+            this.endSignal = endSignal;
+            this.failHalt = failHalt;
+            this.readerError = readerError;
+            this.testCoordinator = testCoordinator;
+        }
+
+        @Override
+        public void run() {
+            try (Seeker<KEY, VALUE> reusableSeeker = index.allocateSeeker(NULL_CONTEXT)) {
+                readerReadySignal.countDown(); // Ready, set...
+                readerStartSignal.await(); // GO!
+
+                while (!endSignal.get() && !failHalt.get()) {
+                    doRead(reusableSeeker);
+                }
+            } catch (Throwable e) {
+                readerError.set(e);
+                failHalt.set(true);
+            }
+        }
+
+        private void doRead(Seeker<KEY, VALUE> reusableSeeker) throws IOException {
+            ReaderInstruction readerInstruction = testCoordinator.get();
+            long targetValue = random.nextLong(readerInstruction.start(), readerInstruction.end());
+            var seeker = index.seek(reusableSeeker, key(targetValue), key(targetValue));
+            if (seeker.next()) {
+                Assertions.assertThat(keySeed(seeker.key())).isEqualTo(valueSeed(seeker.value()));
+            }
+        }
+    }
+
     private Runnable checkpointThread(
             AtomicBoolean endSignal, AtomicReference<Throwable> readerError, AtomicBoolean failHalt) {
         return () -> {
             while (!endSignal.get()) {
                 try {
-                    index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+                    index.checkpoint(
+                            Header.CARRY_OVER_PREVIOUS_HEADER,
+                            FileFlushEvent.NULL,
+                            EMPTY_ASYNC_BLOCK_ACCESSOR,
+                            NULL_CONTEXT,
+                            true);
                     // Sleep a little in between checkpoints
                     MILLISECONDS.sleep(20L);
                 } catch (Throwable e) {

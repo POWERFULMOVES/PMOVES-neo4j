@@ -32,6 +32,7 @@ package org.neo4j.values.storable;
 public enum ValueGroup {
     UNKNOWN(ValueCategory.UNKNOWN),
     ANYTHING(ValueCategory.ANYTHING),
+    VECTOR_ARRAY(ValueCategory.VECTOR_ARRAY),
     GEOMETRY_ARRAY(ValueCategory.GEOMETRY_ARRAY),
     ZONED_DATE_TIME_ARRAY(ValueCategory.TEMPORAL_ARRAY),
     LOCAL_DATE_TIME_ARRAY(ValueCategory.TEMPORAL_ARRAY),
@@ -41,7 +42,16 @@ public enum ValueGroup {
     DURATION_ARRAY(ValueCategory.TEMPORAL_ARRAY),
     TEXT_ARRAY(ValueCategory.TEXT_ARRAY),
     BOOLEAN_ARRAY(ValueCategory.BOOLEAN_ARRAY),
+    UUID_ARRAY(ValueCategory.UUID_ARRAY),
     NUMBER_ARRAY(ValueCategory.NUMBER_ARRAY),
+    INT8_VECTOR(ValueCategory.VECTOR),
+    INT16_VECTOR(ValueCategory.VECTOR),
+    INT32_VECTOR(ValueCategory.VECTOR),
+    INT64_VECTOR(ValueCategory.VECTOR),
+    FLOAT16_VECTOR(ValueCategory.VECTOR),
+    BFLOAT16_VECTOR(ValueCategory.VECTOR),
+    FLOAT32_VECTOR(ValueCategory.VECTOR),
+    FLOAT64_VECTOR(ValueCategory.VECTOR),
     GEOMETRY(ValueCategory.GEOMETRY),
     ZONED_DATE_TIME(ValueCategory.TEMPORAL),
     LOCAL_DATE_TIME(ValueCategory.TEMPORAL),
@@ -51,6 +61,7 @@ public enum ValueGroup {
     DURATION(ValueCategory.TEMPORAL),
     TEXT(ValueCategory.TEXT),
     BOOLEAN(ValueCategory.BOOLEAN),
+    UUID(ValueCategory.UUID),
     NUMBER(ValueCategory.NUMBER),
     NO_VALUE(ValueCategory.NO_CATEGORY);
 

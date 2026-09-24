@@ -19,7 +19,11 @@
  */
 package org.neo4j.bolt.protocol.common.connector.connection;
 
+import io.netty.buffer.ByteBufAllocator;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelPipeline;
+import io.netty.channel.ChannelPromise;
 import java.net.SocketAddress;
 import java.util.Collections;
 import java.util.EnumSet;
@@ -32,21 +36,25 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
-import org.neo4j.bolt.fsm.StateMachine;
+import org.neo4j.bolt.fsm.StateMachineHandle;
 import org.neo4j.bolt.negotiation.message.ProtocolCapability;
 import org.neo4j.bolt.protocol.common.BoltProtocol;
 import org.neo4j.bolt.protocol.common.connector.Connector;
 import org.neo4j.bolt.protocol.common.connector.connection.authentication.AuthenticationFlag;
 import org.neo4j.bolt.protocol.common.connector.connection.listener.ConnectionListener;
+import org.neo4j.bolt.protocol.common.connector.notification.NotificationManager;
+import org.neo4j.bolt.protocol.common.fsm.response.JavaObjectdRecordHandler;
+import org.neo4j.bolt.protocol.common.fsm.response.NetworkRecordHandler;
 import org.neo4j.bolt.protocol.common.fsm.response.NetworkResponseHandler;
 import org.neo4j.bolt.protocol.common.fsm.response.ResponseHandler;
-import org.neo4j.bolt.protocol.common.message.notifications.NotificationsConfig;
-import org.neo4j.bolt.protocol.common.message.request.connection.RoutingContext;
 import org.neo4j.bolt.protocol.io.pipeline.PipelineContext;
 import org.neo4j.bolt.protocol.io.pipeline.WriterPipeline;
+import org.neo4j.bolt.protocol.io.reader.ConnectionPackstreamValueReader;
 import org.neo4j.bolt.security.error.AuthenticationException;
-import org.neo4j.dbms.admissioncontrol.AdmissionControlService;
+import org.neo4j.boltmessages.notifications.NotificationsConfig;
+import org.neo4j.boltmessages.request.connection.RoutingContext;
 import org.neo4j.internal.kernel.api.connectioninfo.ClientConnectionInfo;
 import org.neo4j.internal.kernel.api.security.LoginContext;
 import org.neo4j.kernel.impl.query.clientconnection.BoltConnectionInfo;
@@ -55,7 +63,6 @@ import org.neo4j.logging.Log;
 import org.neo4j.logging.internal.LogService;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.packstream.io.PackstreamBuf;
-import org.neo4j.packstream.io.value.PackstreamValueReader;
 import org.neo4j.packstream.struct.StructRegistry;
 import org.neo4j.values.storable.Value;
 
@@ -64,6 +71,7 @@ import org.neo4j.values.storable.Value;
  */
 public abstract class AbstractConnection implements ConnectionHandle {
     private final Connector connector;
+    private final NotificationManager notificationManager;
 
     protected final String id;
     protected final Channel channel;
@@ -80,8 +88,7 @@ public abstract class AbstractConnection implements ConnectionHandle {
     protected final AtomicReference<Set<ProtocolCapability>> selectedCapabilities =
             new AtomicReference<>(EnumSet.noneOf(ProtocolCapability.class));
     private final AtomicReference<Set<Feature>> features = new AtomicReference<>(null);
-    protected final AdmissionControlService admissionControl;
-    protected volatile StateMachine fsm;
+    protected volatile StateMachineHandle fsm;
     // TODO: Switch to immutable writer pipeline implementation?
     protected volatile WriterPipeline writerPipeline;
     protected final AtomicReference<StructRegistry<Connection, Value>> structRegistry = new AtomicReference<>();
@@ -99,20 +106,23 @@ public abstract class AbstractConnection implements ConnectionHandle {
     private String impersonatedDefaultDatabase;
     protected NotificationsConfig notificationsConfig;
 
+    // Proxy protocol support - stores real client address when behind a proxy
+    private volatile SocketAddress proxyClientAddress;
+
     public AbstractConnection(
             Connector connector,
             String id,
             Channel channel,
             long connectedAt,
             MemoryTracker memoryTracker,
-            LogService logService,
-            AdmissionControlService admissionControl) {
+            NotificationManager notificationManager,
+            LogService logService) {
         this.connector = connector;
         this.id = id;
         this.channel = channel;
         this.connectedAt = connectedAt;
         this.memoryTracker = memoryTracker;
-        this.admissionControl = admissionControl;
+        this.notificationManager = notificationManager;
 
         this.logService = logService;
         this.log = logService.getInternalLog(this.getClass());
@@ -130,8 +140,46 @@ public abstract class AbstractConnection implements ConnectionHandle {
     }
 
     @Override
-    public Channel channel() {
-        return this.channel;
+    public ByteBufAllocator allocator() {
+        return this.channel.alloc();
+    }
+
+    @Override
+    public void modifyPipeline(BiConsumer<Channel, ChannelPipeline> modifier) {
+        var ch = this.channel;
+        var eventLoop = ch.eventLoop();
+
+        if (eventLoop.inEventLoop()) {
+            modifier.accept(ch, ch.pipeline());
+            return;
+        }
+
+        ch.eventLoop().execute(() -> modifier.accept(ch, ch.pipeline()));
+    }
+
+    @Override
+    public ChannelFuture write(Object msg) {
+        return this.channel.write(msg);
+    }
+
+    @Override
+    public ChannelFuture write(Object msg, ChannelPromise promise) {
+        return this.channel.write(msg, promise);
+    }
+
+    @Override
+    public ChannelFuture writeAndFlush(Object msg) {
+        return this.channel.writeAndFlush(msg);
+    }
+
+    @Override
+    public ChannelFuture writeAndFlush(Object msg, ChannelPromise promise) {
+        return this.channel.writeAndFlush(msg, promise);
+    }
+
+    @Override
+    public void flush() {
+        this.channel.flush();
     }
 
     @Override
@@ -212,12 +260,12 @@ public abstract class AbstractConnection implements ConnectionHandle {
     }
 
     @Override
-    public Set<ProtocolCapability> selectedCapabilities() {
+    public Set<ProtocolCapability> selectedProtocolCapabilities() {
         return Collections.unmodifiableSet(this.selectedCapabilities.get());
     }
 
     @Override
-    public boolean hasSelectedCapability(ProtocolCapability capability) {
+    public boolean hasSelectedProtocolCapability(ProtocolCapability capability) {
         return this.selectedCapabilities.get().contains(capability);
     }
 
@@ -245,25 +293,25 @@ public abstract class AbstractConnection implements ConnectionHandle {
         this.writerPipeline = pipeline;
         this.structRegistry.set(structRegistry.build());
 
+        var recordHandlerFactory = this.connector.configuration().enableJavaObjectMessages()
+                ? new JavaObjectdRecordHandler.Factory(this)
+                : new NetworkRecordHandler.Factory(
+                        this,
+                        this.connector.configuration().streamingBufferSize(),
+                        this.connector.configuration().streamingFlushThreshold());
+
         // allocate a new response handler which shall take care of communicating operation results
         // to the client
-        this.responseHandler = new NetworkResponseHandler(
-                this,
-                protocol().metadataHandler(),
-                this.connector.configuration().streamingBufferSize(),
-                this.connector.configuration().streamingFlushThreshold(),
-                this.logService);
+        this.responseHandler =
+                new NetworkResponseHandler(this, protocol.metadataHandler(), recordHandlerFactory, this.logService);
 
         // also enable any implicitly enabled features within the protocol version as we do not want these to be enabled
         // again if negotiated through one of the later mechanisms
         this.features.set(Collections.unmodifiableSet(protocol.features()));
 
         // allocate a new state machine for the desired protocol version to prepare the connection for handling requests
-        var fsm = protocol.stateMachine().createInstance(this, this.logService, this.admissionControl);
+        var fsm = protocol.stateMachine().createInstance(this, this.logService);
         this.fsm = fsm;
-
-        // notify the protocol in order to register legacy compliance listeners
-        protocol.onConnectionNegotiated(this);
 
         // last notify any registered listeners to let them prepare the state machine if necessary
         this.notifyListeners(listener -> listener.onStateMachineInitialized(fsm));
@@ -362,17 +410,17 @@ public abstract class AbstractConnection implements ConnectionHandle {
     }
 
     @Override
-    public PackstreamValueReader<Connection> valueReader(PackstreamBuf buf) {
+    public ConnectionPackstreamValueReader valueReader(PackstreamBuf buf) {
         var structRegistry = this.structRegistry.get();
         if (structRegistry == null) {
             throw new IllegalStateException("Connection has yet to select a protocol version");
         }
 
-        return new PackstreamValueReader<>(this, buf, structRegistry);
+        return new ConnectionPackstreamValueReader(buf, this, structRegistry);
     }
 
     @Override
-    public StateMachine fsm() {
+    public StateMachineHandle fsm() {
         var fsm = this.fsm;
         if (fsm == null) {
             throw new IllegalStateException("Connection has yet to select a protocol version");
@@ -481,13 +529,20 @@ public abstract class AbstractConnection implements ConnectionHandle {
     }
 
     @Override
+    public void setProxyProtocolInfo(SocketAddress realClientAddress) {
+        this.proxyClientAddress = realClientAddress;
+    }
+
+    @Override
     public SocketAddress serverAddress() {
         return this.channel.localAddress();
     }
 
     @Override
     public SocketAddress clientAddress() {
-        return this.channel.remoteAddress();
+        // Return real client address if proxy protocol was used, otherwise channel remote address
+        var proxyClientAddress = this.proxyClientAddress;
+        return proxyClientAddress != null ? proxyClientAddress : this.channel.remoteAddress();
     }
 
     @Override
@@ -528,9 +583,9 @@ public abstract class AbstractConnection implements ConnectionHandle {
             throw new IllegalStateException("Cannot resolve default database: Connection has not been authenticated");
         }
 
-        var db = this.connector()
-                .defaultDatabaseResolver()
-                .defaultDatabase(this.loginContext().subject().executingUser());
+        var defaultDatabaseResolver = this.connector().defaultDatabaseResolver();
+        var db = defaultDatabaseResolver.defaultDatabase(
+                this.loginContext().subject().executingUser());
 
         String previousDatabase;
         if (loginContext.impersonating()) {
@@ -546,6 +601,11 @@ public abstract class AbstractConnection implements ConnectionHandle {
         if (!Objects.equals(previousDatabase, db)) {
             this.notifyListeners(listener -> listener.onDefaultDatabaseSelected(db));
         }
+    }
+
+    @Override
+    public NotificationManager notificationManager() {
+        return notificationManager;
     }
 
     @Override

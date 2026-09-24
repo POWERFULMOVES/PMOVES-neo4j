@@ -19,13 +19,39 @@
  */
 package org.neo4j.csv.reader;
 
-public class DataAfterQuoteException extends FormatException {
+import org.neo4j.exceptions.ObfuscatableException;
+import org.neo4j.gqlstatus.GqlHelper;
+import org.neo4j.gqlstatus.GqlRuntimeException;
+
+public class DataAfterQuoteException extends GqlRuntimeException implements ObfuscatableException {
+    private static final String messageTemplate =
+            "Characters after an ending quote in a CSV field are not supported. See '%s' at position %s. This is read as `%s`.";
+    private final SourceTraceability source;
+    private final String sourceDescription;
+    private final long position;
+    private final String readValue;
+
     public DataAfterQuoteException(SourceTraceability source, String readValue) {
         super(
-                source,
-                " there's a field starting with a quote and whereas it ends that quote there seems"
-                        + " to be characters in that field after that ending quote. That isn't supported."
-                        + " This is what I read: '"
-                        + readValue + "'");
+                GqlHelper.get22NAC(source.sourceDescription(), source.position(), readValue),
+                messageTemplate.formatted(source.sourceDescription(), source.position(), readValue));
+        this.source = source;
+        this.sourceDescription = source.sourceDescription();
+        this.position = source.position();
+        this.readValue = readValue;
+    }
+
+    public SourceTraceability source() {
+        return source;
+    }
+
+    @Override
+    public String getMessage() {
+        return messageTemplate.formatted(sourceDescription, position, readValue);
+    }
+
+    @Override
+    public String obfuscatedMessage(String obfuscatedValue) {
+        return messageTemplate.formatted(obfuscatedValue, position, obfuscatedValue);
     }
 }

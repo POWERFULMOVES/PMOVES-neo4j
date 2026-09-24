@@ -22,8 +22,8 @@ package org.neo4j.cypher.internal.javacompat;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.cypher.internal.CompilerFactory;
-import org.neo4j.cypher.internal.FullyParsedQuery;
 import org.neo4j.cypher.internal.cache.CypherQueryCaches;
+import org.neo4j.cypher.internal.preparser.FullyParsedQuery;
 import org.neo4j.cypher.internal.runtime.InputDataStream;
 import org.neo4j.graphdb.Result;
 import org.neo4j.io.pagecache.context.VersionContext;
@@ -123,8 +123,11 @@ public class SnapshotExecutionEngine extends ExecutionEngine {
         boolean dirtySnapshot;
         do {
             if (attempt == maxQueryExecutionAttempts) {
-                throw QueryExecutionKernelException.wrapError(new UnstableSnapshotException(
-                        "Unable to get clean data snapshot for query '%s' after %d attempts.", query, attempt));
+                throw QueryExecutionKernelException.wrapError(UnstableSnapshotException.internalError(
+                        this.getClass().getSimpleName(),
+                        String.format(
+                                "Unable to get clean data snapshot for query '%s' after %d attempts.",
+                                query, attempt)));
             }
 
             if (attempt > 0) {
@@ -149,8 +152,10 @@ public class SnapshotExecutionEngine extends ExecutionEngine {
             }
             dirtySnapshot = versionContext.isDirty();
             if (isUnstableSnapshot(materialisedResult, dirtySnapshot)) {
-                throw QueryExecutionKernelException.wrapError(new UnstableSnapshotException(
-                        "Unable to get clean data snapshot for query '%s' that performs updates.", query, attempt));
+                throw QueryExecutionKernelException.wrapError(UnstableSnapshotException.internalError(
+                        this.getClass().getSimpleName(),
+                        String.format(
+                                "Unable to get clean data snapshot for query '%s' that performs updates.", query)));
             }
         } while (dirtySnapshot);
 

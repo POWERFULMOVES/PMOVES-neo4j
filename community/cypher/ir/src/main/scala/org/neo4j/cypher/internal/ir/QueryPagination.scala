@@ -32,6 +32,7 @@ final case class QueryPagination(skip: Option[Expression] = None, limit: Option[
   def withLimitExpression(limit: Expression): QueryPagination = copy(limit = Some(limit))
 
   def isEmpty: Boolean = skip.isEmpty && limit.isEmpty
+  def nonEmpty: Boolean = skip.nonEmpty || limit.nonEmpty
 
   def ++(other: QueryPagination): QueryPagination =
     copy(
@@ -40,7 +41,11 @@ final case class QueryPagination(skip: Option[Expression] = None, limit: Option[
     )
 
   private def either[T](what: String, a: Option[T], b: Option[T]): Option[T] = (a, b) match {
-    case (Some(_), Some(_))  => throw new InternalException(s"Can't join two query pagination with different $what")
+    case (Some(_), Some(_)) =>
+      throw InternalException.internalError(
+        this.getClass.getSimpleName,
+        s"Can't join two query pagination with different $what"
+      )
     case (s @ Some(_), None) => s
     case (None, s)           => s
   }

@@ -20,14 +20,11 @@
 package org.neo4j.cypher.internal.procs
 
 import org.neo4j.cypher.internal.ExecutionPlan
-import org.neo4j.cypher.internal.RuntimeName
-import org.neo4j.cypher.internal.SystemCommandRuntimeName
+import org.neo4j.cypher.internal.notification.InternalNotification
 import org.neo4j.cypher.internal.plandescription.Argument
 import org.neo4j.cypher.internal.procs.PredicateExecutionPlan.AccessModeChanger
-import org.neo4j.cypher.internal.procs.PredicateExecutionPlan.NoAccessModeChange
 import org.neo4j.cypher.internal.runtime.ExecutionMode
 import org.neo4j.cypher.internal.runtime.QueryStatistics
-import org.neo4j.cypher.internal.util.InternalNotification
 import org.neo4j.cypher.result.EmptyQuerySubscription
 import org.neo4j.cypher.result.QueryProfile
 import org.neo4j.cypher.result.RuntimeResult
@@ -35,6 +32,7 @@ import org.neo4j.cypher.result.RuntimeResult.ConsumptionState
 import org.neo4j.internal.kernel.api.security.SecurityContext
 import org.neo4j.kernel.api.KernelTransaction
 import org.neo4j.kernel.api.KernelTransaction.Revertable
+import org.neo4j.kernel.api.query.RuntimeName
 import org.neo4j.kernel.impl.query.QuerySubscriber
 import org.neo4j.kernel.impl.query.TransactionalContext
 import org.neo4j.memory.HeapHighWaterMarkTracker
@@ -68,7 +66,7 @@ class PredicateExecutionPlan(
   predicate: Predicate,
   source: Option[ExecutionPlan] = None,
   onViolation: (MapValue, TransactionalContext, SecurityContext) => Exception,
-  changeAccessMode: AccessModeChanger = NoAccessModeChange
+  changeAccessMode: AccessModeChanger = PredicateExecutionPlan.NoAccessModeChange
 ) extends AdministrationChainedExecutionPlan(source) {
 
   override def runSpecific(
@@ -92,7 +90,7 @@ class PredicateExecutionPlan(
     }.get
   }
 
-  override def runtimeName: RuntimeName = SystemCommandRuntimeName
+  override def runtimeName: RuntimeName = RuntimeName.SYSTEM
 
   override def metadata: Seq[Argument] = Nil
 }

@@ -21,11 +21,14 @@ package org.neo4j.router.query;
 
 import java.util.Optional;
 import java.util.Set;
-import org.neo4j.cypher.internal.QueryOptions;
+import org.neo4j.cypher.internal.CypherVersion;
+import org.neo4j.cypher.internal.notification.InternalNotification;
+import org.neo4j.cypher.internal.preparser.PreParsedQuery;
+import org.neo4j.cypher.internal.preparser.QueryOptions;
 import org.neo4j.cypher.internal.util.CancellationChecker;
-import org.neo4j.cypher.internal.util.InternalNotification;
 import org.neo4j.cypher.internal.util.ObfuscationMetadata;
 import org.neo4j.dbms.database.DatabaseContextProvider;
+import org.neo4j.fabric.executor.QueryStatementLifecycles;
 import org.neo4j.kernel.database.DatabaseReference;
 import org.neo4j.router.impl.query.StatementType;
 import org.neo4j.router.location.LocationService;
@@ -46,12 +49,16 @@ public interface QueryProcessor {
             Set<InternalNotification> parsingNotifications,
             Set<InternalNotification> routingNotifications) {}
 
+    PreParsedQuery preParse(Query query, CypherVersion defaultLanguage);
+
     ProcessedQueryInfo processQuery(
             Query query,
+            PreParsedQuery preParsedQuery,
             TargetService targetService,
             LocationService locationService,
             CancellationChecker cancellationChecker,
-            DatabaseReference sessionDatabase);
+            DatabaseReference sessionDatabase,
+            QueryStatementLifecycles.StatementLifecycle statementLifecycle);
 
     long clearQueryCachesForDatabase(String databaseName);
 

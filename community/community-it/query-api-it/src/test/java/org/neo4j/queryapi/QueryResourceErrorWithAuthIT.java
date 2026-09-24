@@ -20,7 +20,6 @@
 package org.neo4j.queryapi;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.neo4j.queryapi.QueryApiTestUtil.setupLogging;
 
 import java.io.IOException;
 import java.net.URI;
@@ -29,49 +28,24 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.neo4j.configuration.GraphDatabaseSettings;
-import org.neo4j.configuration.connectors.BoltConnector;
-import org.neo4j.configuration.connectors.BoltConnectorInternalSettings;
-import org.neo4j.configuration.connectors.ConnectorPortRegister;
-import org.neo4j.configuration.connectors.ConnectorType;
-import org.neo4j.configuration.connectors.HttpConnector;
-import org.neo4j.configuration.helpers.SocketAddress;
-import org.neo4j.dbms.api.DatabaseManagementService;
-import org.neo4j.test.TestDatabaseManagementServiceBuilder;
+import org.neo4j.queryapi.test.annotation.QueryAPITestExtension;
+import org.neo4j.queryapi.test.testclient.QueryAPITestClient;
+import org.neo4j.test.extension.SkipOnSpd;
 
+@QueryAPITestExtension(authEnabled = true)
 class QueryResourceErrorWithAuthIT {
 
-    private static DatabaseManagementService dbms;
-    private static HttpClient client;
-    private static String queryEndpoint;
+    private final HttpClient client;
+    private final String queryEndpoint;
 
-    @BeforeAll
-    static void beforeAll() {
-        setupLogging();
-        dbms = new TestDatabaseManagementServiceBuilder()
-                .setConfig(HttpConnector.enabled, true)
-                .setConfig(HttpConnector.listen_address, new SocketAddress("localhost", 0))
-                .setConfig(
-                        BoltConnectorInternalSettings.local_channel_address,
-                        QueryResourceErrorWithAuthIT.class.getSimpleName())
-                .setConfig(BoltConnector.enabled, true)
-                .setConfig(GraphDatabaseSettings.auth_enabled, true)
-                .impermanent()
-                .build();
-        var portRegister = QueryApiTestUtil.resolveDependency(dbms, ConnectorPortRegister.class);
-        queryEndpoint = "http://" + portRegister.getLocalAddress(ConnectorType.HTTP) + "/db/{databaseName}/query/v2";
-        client = HttpClient.newBuilder().build();
-    }
-
-    @AfterAll
-    static void teardown() {
-        dbms.shutdown();
+    QueryResourceErrorWithAuthIT(QueryAPITestClient queryAPITestClient) {
+        this.queryEndpoint = queryAPITestClient.getEndpoint();
+        this.client = HttpClient.newBuilder().build();
     }
 
     @Test
+    @SkipOnSpd(reason = "SPD doesn't run community")
     void impersonationOnCommunityEditionAuthEnabled() throws IOException, InterruptedException {
 
         var body = """
@@ -88,12 +62,10 @@ class QueryResourceErrorWithAuthIT {
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
 
-        var response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        var response = QueryAPITestClient.send(client, request, HttpResponse.BodyHandlers.ofString());
 
         assertThat(response.statusCode()).isEqualTo(400);
-        assertThat(response.body())
-                .contains(
-                        """
+        assertThat(response.body()).contains("""
                         {"errors":[{"code":"Neo.ClientError.Statement.ArgumentError","message":"Impersonation is not supported in community edition."}]}""");
     }
 }

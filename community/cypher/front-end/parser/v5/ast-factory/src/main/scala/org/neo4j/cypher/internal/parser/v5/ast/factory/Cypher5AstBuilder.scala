@@ -19,10 +19,10 @@ package org.neo4j.cypher.internal.parser.v5.ast.factory
 import org.antlr.v4.runtime.ParserRuleContext
 import org.antlr.v4.runtime.tree.ErrorNode
 import org.antlr.v4.runtime.tree.TerminalNode
+import org.neo4j.cypher.internal.notification.InternalNotificationLogger
 import org.neo4j.cypher.internal.parser.v5.AbstractCypher5AstBuilder
 import org.neo4j.cypher.internal.parser.v5.Cypher5Parser
 import org.neo4j.cypher.internal.util.CypherExceptionFactory
-import org.neo4j.cypher.internal.util.InternalNotificationLogger
 
 /**
  * Antlr parser listener that builds Neo4j ASTs during parsing.
@@ -33,8 +33,9 @@ import org.neo4j.cypher.internal.util.InternalNotificationLogger
  */
 final class Cypher5AstBuilder(
   override val notificationLogger: Option[InternalNotificationLogger],
-  override val exceptionFactory: CypherExceptionFactory
-) extends AbstractCypher5AstBuilder
+  override val exceptionFactory: CypherExceptionFactory,
+  jsSemanticAnalysis: Boolean
+) extends AbstractCypher5AstBuilder(jsSemanticAnalysis)
     with LiteralBuilder
     with LabelExpressionBuilder
     with DdlBuilder

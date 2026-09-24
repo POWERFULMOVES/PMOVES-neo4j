@@ -22,7 +22,6 @@ package org.neo4j.kernel.impl.api.index;
 import static java.util.concurrent.Executors.newSingleThreadExecutor;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.doReturn;
@@ -64,7 +63,6 @@ import org.neo4j.graphdb.schema.Schema;
 import org.neo4j.internal.kernel.api.InternalIndexState;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexPrototype;
-import org.neo4j.internal.schema.SchemaDescriptors;
 import org.neo4j.io.fs.EphemeralFileSystemAbstraction;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.fs.UncloseableDelegatingFileSystemAbstraction;
@@ -72,7 +70,6 @@ import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.kernel.KernelVersion;
-import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.api.index.IndexAccessor;
 import org.neo4j.kernel.api.index.IndexPopulator;
 import org.neo4j.kernel.api.index.IndexProvider;
@@ -80,28 +77,31 @@ import org.neo4j.kernel.api.index.IndexSample;
 import org.neo4j.kernel.api.index.IndexUpdater;
 import org.neo4j.kernel.api.index.MinimalIndexAccessor;
 import org.neo4j.kernel.extension.ExtensionFactory;
-import org.neo4j.kernel.impl.coreapi.InternalTransaction;
 import org.neo4j.kernel.impl.coreapi.TransactionImpl;
 import org.neo4j.kernel.impl.index.schema.CollectingIndexUpdater;
-import org.neo4j.kernel.impl.transaction.log.LogAppendEvent;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.kernel.recovery.Recovery;
 import org.neo4j.kernel.recovery.RecoveryMode;
 import org.neo4j.kernel.recovery.RecoveryMonitor;
 import org.neo4j.monitoring.Monitors;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
+import org.neo4j.storageengine.api.LazyValueIndexEntryUpdate;
 import org.neo4j.storageengine.migration.StoreMigrationParticipant;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.EphemeralNeo4jLayoutExtension;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.test.utils.TestDirectory;
 import org.neo4j.values.ElementIdMapper;
 import org.neo4j.values.storable.Values;
+import org.neo4j.wal.LogAppendEvent;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
 
 @EphemeralNeo4jLayoutExtension
+@SkipOnSpd
 class IndexRecoveryIT {
     @Inject
     private TestDirectory testDirectory;
@@ -115,7 +115,7 @@ class IndexRecoveryIT {
     private GraphDatabaseAPI db;
     private final IndexProvider mockedIndexProvider = mock(IndexProvider.class);
     private final ExtensionFactory<?> mockedIndexProviderFactory =
-            singleInstanceIndexProviderFactory(PROVIDER_DESCRIPTOR.getKey(), mockedIndexProvider);
+            singleInstanceIndexProviderFactory(PROVIDER_DESCRIPTOR.key(), mockedIndexProvider);
     private final String key = "number_of_bananas_owned";
     private final Label myLabel = label("MyLabel");
     private final Monitors monitors = new Monitors();
@@ -351,11 +351,11 @@ class IndexRecoveryIT {
                         any(),
                         any()))
                 .thenReturn(mockedAccessor);
-        createIndexAndAwaitPopulation();
+        var index = createIndexAndAwaitPopulation();
         // rotate logs
         rotateLogsAndCheckPoint();
         // make updates
-        Set<IndexEntryUpdate<?>> expectedUpdates = createSomeBananas(myLabel);
+        EL expectedUpdates = createSomeBananas(myLabel, index);
 
         // And Given
         killDb();
@@ -400,7 +400,10 @@ class IndexRecoveryIT {
                         any(ElementIdMapper.class),
                         any(),
                         any());
-        assertEquals(expectedUpdates, writer.batchedUpdates);
+        assertThat(writer.batchedUpdates)
+                .satisfiesAnyOf(
+                        w -> assertThat(w).isEqualTo(expectedUpdates.eager()),
+                        w -> assertThat(w).isEqualTo(expectedUpdates.lazy()));
     }
 
     @Test
@@ -536,12 +539,13 @@ class IndexRecoveryIT {
         }
     }
 
-    private void createIndexAndAwaitPopulation() throws KernelException {
+    private IndexDescriptor createIndexAndAwaitPopulation() throws KernelException {
         IndexDescriptor index = createIndex();
         try (Transaction tx = db.beginTx()) {
             tx.schema().awaitIndexOnline(index.getName(), 1, MINUTES);
             tx.commit();
         }
+        return index;
     }
 
     private IndexDescriptor createIndex() throws KernelException {
@@ -553,34 +557,40 @@ class IndexRecoveryIT {
         }
     }
 
-    private Set<IndexEntryUpdate<?>> createSomeBananas(Label label) {
-        Set<IndexEntryUpdate<?>> updates = new HashSet<>();
-        try (Transaction tx = db.beginTx()) {
-            KernelTransaction ktx = ((InternalTransaction) tx).kernelTransaction();
+    private record EL(Set<EagerValueIndexEntryUpdate> eager, Set<LazyValueIndexEntryUpdate> lazy) {}
 
-            int labelId = ktx.tokenRead().nodeLabel(label.name());
-            int propertyKeyId = ktx.tokenRead().propertyKey(key);
-            var schemaDescriptor = SchemaDescriptors.forLabel(labelId, propertyKeyId);
+    private EL createSomeBananas(Label label, IndexDescriptor index) {
+        Set<EagerValueIndexEntryUpdate> eagerUpdates = new HashSet<>();
+        Set<LazyValueIndexEntryUpdate> lazyUpdates = new HashSet<>();
+        try (Transaction tx = db.beginTx()) {
             for (int number : new int[] {4, 10}) {
                 Node node = tx.createNode(label);
                 node.setProperty(key, number);
-                updates.add(IndexEntryUpdate.add(node.getId(), () -> schemaDescriptor, Values.of(number)));
+                eagerUpdates.add(EagerValueIndexEntryUpdate.add(node.getId(), index, Values.of(number)));
+                lazyUpdates.add(LazyValueIndexEntryUpdate.add(
+                        node.getId(), index, LazyValueIndexEntryUpdate.ValueSupplier.constant(Values.of(number))));
             }
             tx.commit();
-            return updates;
+            return new EL(eagerUpdates, lazyUpdates);
         }
     }
 
     public static class GatheringIndexWriter extends IndexAccessor.Adapter {
-        private final Set<IndexEntryUpdate<?>> regularUpdates = new HashSet<>();
-        private final Set<IndexEntryUpdate<?>> batchedUpdates = new HashSet<>();
+        private final Set<IndexEntryUpdate> regularUpdates = new HashSet<>();
+        private final Set<IndexEntryUpdate> batchedUpdates = new HashSet<>();
 
         @Override
         public IndexUpdater newUpdater(final IndexUpdateMode mode, CursorContext cursorContext, boolean parallel) {
-            return new CollectingIndexUpdater(updates -> {
+            return new CollectingIndexUpdater(CursorContext.NULL_CONTEXT, updates -> {
                 switch (mode) {
-                    case ONLINE -> regularUpdates.addAll(updates);
-                    case RECOVERY -> batchedUpdates.addAll(updates);
+                    case ONLINE ->
+                        regularUpdates.addAll(updates.stream()
+                                .map(CollectingIndexUpdater.VersionedUpdate::update)
+                                .toList());
+                    case RECOVERY ->
+                        batchedUpdates.addAll(updates.stream()
+                                .map(CollectingIndexUpdater.VersionedUpdate::update)
+                                .toList());
                     default -> throw new UnsupportedOperationException();
                 }
             });

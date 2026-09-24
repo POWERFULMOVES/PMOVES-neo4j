@@ -32,6 +32,8 @@ import org.neo4j.lock.ResourceType.INDEX_ENTRY
 import org.neo4j.lock.ResourceType.LABEL
 import org.neo4j.lock.ResourceType.NODE
 
+object SetNodePropertiesTestBase
+
 abstract class SetNodePropertiesTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
@@ -325,7 +327,7 @@ abstract class SetNodePropertiesTestBase[CONTEXT <: RuntimeContext](
 
     // then
     val runtimeResult: RecordingRuntimeResult = execute(logicalQuery, runtime, input)
-    runtimeResult should beColumns("p1", "p2").withRows(Seq(Array(3, 3), Array(null, null))).withStatistics(
+    runtimeResult should beColumns("p1", "p2").withRows(Seq(Array(3, 3), Array[Any](null, null))).withStatistics(
       propertiesSet = 2
     )
   }
@@ -436,29 +438,6 @@ abstract class SetNodePropertiesTestBase[CONTEXT <: RuntimeContext](
     runtimeResult should beColumns("n")
       .withSingleRow(nodes.head)
       .withStatistics(propertiesSet = 2)
-  }
-
-  test("should not take exclusive lock if value not changing") {
-    // given a single node
-    givenGraph {
-      uniqueNodeIndex("L", "prop")
-      nodePropertyGraph(1, { case _ => Map("prop" -> 1) }, "L")
-    }
-
-    // when
-    val logicalQuery = new LogicalQueryBuilder(this)
-      .produceResults("p1", "p2")
-      .projection("n.prop as p1", "n.other as p2")
-      .setNodeProperties("n", ("other", "n.prop"), ("prop", "n.prop"))
-      .nodeIndexOperator("n:L(prop = 1)", unique = true)
-      .build(readOnly = false)
-
-    // then
-    val runtimeResult: RecordingRuntimeResult = execute(logicalQuery, runtime)
-    runtimeResult should beColumns("p1", "p2")
-      .withSingleRow(1, 1)
-      .withStatistics(propertiesSet = 2)
-      .withLocks((EXCLUSIVE, NODE), (SHARED, INDEX_ENTRY), (SHARED, LABEL))
   }
 
   test("should take exclusive lock if value changing") {

@@ -36,7 +36,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.StreamSupport;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.consistency.ConsistencyCheckService;
@@ -55,8 +54,6 @@ import org.neo4j.kernel.database.Database;
 import org.neo4j.kernel.impl.coreapi.schema.IndexDefinitionImpl;
 import org.neo4j.kernel.impl.index.schema.IndexFiles;
 import org.neo4j.kernel.impl.store.format.aligned.PageAligned;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.logging.AssertableLogProvider;
 import org.neo4j.test.RandomSupport;
@@ -64,10 +61,12 @@ import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.DbmsExtension;
 import org.neo4j.test.extension.ExtensionCallback;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
 
 @DbmsExtension(configurationCallback = "configure")
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class AllNodesInStoreExistInLabelIndexTest {
     @Inject
     private FileSystemAbstraction fs;
@@ -117,7 +116,7 @@ class AllNodesInStoreExistInLabelIndexTest {
         DatabaseLayout databaseLayout = db.databaseLayout();
         someData();
         checkPointer.forceCheckPoint(new SimpleTriggerInfo("forcedCheckpoint"));
-        Path labelIndexFileCopy = databaseLayout.file("label_index_copy");
+        Path labelIndexFileCopy = databaseLayout.path("label_index_copy");
         Path labelTokenIndexFile = labelTokenIndexFile();
         copyFile(labelTokenIndexFile, labelIndexFileCopy);
 
@@ -142,7 +141,7 @@ class AllNodesInStoreExistInLabelIndexTest {
         DatabaseLayout databaseLayout = db.databaseLayout();
         someData();
         checkPointer.forceCheckPoint(new SimpleTriggerInfo("forcedCheckpoint"));
-        Path labelIndexFileCopy = databaseLayout.file("label_index_copy");
+        Path labelIndexFileCopy = databaseLayout.path("label_index_copy");
         Path labelTokenIndexFile = labelTokenIndexFile();
         copyFile(labelTokenIndexFile, labelIndexFileCopy);
 
@@ -180,7 +179,7 @@ class AllNodesInStoreExistInLabelIndexTest {
     @Test
     void mustReportMissingLabel() throws Exception {
         // given
-        List<Pair<Long, Label[]>> nodesInStore = someData();
+        List<Pair<String, Label[]>> nodesInStore = someData();
         Path labelIndexFileCopy = copyLabelIndexFile();
 
         // when
@@ -200,7 +199,7 @@ class AllNodesInStoreExistInLabelIndexTest {
     @Test
     void mustReportExtraLabelsOnExistingNode() throws Exception {
         // given
-        List<Pair<Long, Label[]>> nodesInStore = someData();
+        List<Pair<String, Label[]>> nodesInStore = someData();
         Path labelIndexFileCopy = copyLabelIndexFile();
 
         // when
@@ -220,7 +219,7 @@ class AllNodesInStoreExistInLabelIndexTest {
     @Test
     void mustReportExtraNode() throws Exception {
         // given
-        List<Pair<Long, Label[]>> nodesInStore = someData();
+        List<Pair<String, Label[]>> nodesInStore = someData();
         Path labelIndexFileCopy = copyLabelIndexFile();
 
         // when
@@ -263,32 +262,32 @@ class AllNodesInStoreExistInLabelIndexTest {
         return Files.readString(result.reportFile());
     }
 
-    private void removeExistingNode(Transaction transaction, List<Pair<Long, Label[]>> nodesInStore) {
+    private void removeExistingNode(Transaction transaction, List<Pair<String, Label[]>> nodesInStore) {
         Node node;
         Label[] labels;
         do {
             int targetIndex = random.nextInt(nodesInStore.size());
-            Pair<Long, Label[]> existingNode = nodesInStore.get(targetIndex);
-            node = transaction.getNodeById(existingNode.first());
+            Pair<String, Label[]> existingNode = nodesInStore.get(targetIndex);
+            node = transaction.getNodeByElementId(existingNode.first());
             labels = existingNode.other();
         } while (labels.length == 0);
         node.delete();
     }
 
-    private void addLabelToExistingNode(Transaction transaction, List<Pair<Long, Label[]>> nodesInStore) {
+    private void addLabelToExistingNode(Transaction transaction, List<Pair<String, Label[]>> nodesInStore) {
         int targetIndex = random.nextInt(nodesInStore.size());
-        Pair<Long, Label[]> existingNode = nodesInStore.get(targetIndex);
-        Node node = transaction.getNodeById(existingNode.first());
+        Pair<String, Label[]> existingNode = nodesInStore.get(targetIndex);
+        Node node = transaction.getNodeByElementId(existingNode.first());
         node.addLabel(EXTRA_LABEL);
     }
 
-    private void removeLabelFromExistingNode(Transaction transaction, List<Pair<Long, Label[]>> nodesInStore) {
-        Pair<Long, Label[]> existingNode;
+    private void removeLabelFromExistingNode(Transaction transaction, List<Pair<String, Label[]>> nodesInStore) {
+        Pair<String, Label[]> existingNode;
         Node node;
         do {
             int targetIndex = random.nextInt(nodesInStore.size());
             existingNode = nodesInStore.get(targetIndex);
-            node = transaction.getNodeById(existingNode.first());
+            node = transaction.getNodeByElementId(existingNode.first());
         } while (existingNode.other().length == 0);
         node.removeLabel(existingNode.other()[0]);
     }
@@ -303,7 +302,7 @@ class AllNodesInStoreExistInLabelIndexTest {
 
     private Path copyLabelIndexFile() throws IOException {
         DatabaseLayout databaseLayout = db.databaseLayout();
-        Path labelIndexFileCopy = databaseLayout.file("label_index_copy");
+        Path labelIndexFileCopy = databaseLayout.path("label_index_copy");
         Path labelTokenIndexFile = labelTokenIndexFile();
         database.stop();
         fs.copyFile(labelTokenIndexFile, labelIndexFileCopy);
@@ -311,12 +310,12 @@ class AllNodesInStoreExistInLabelIndexTest {
         return labelIndexFileCopy;
     }
 
-    List<Pair<Long, Label[]>> someData() {
+    List<Pair<String, Label[]>> someData() {
         return someData(50);
     }
 
-    private List<Pair<Long, Label[]>> someData(int numberOfModifications) {
-        List<Pair<Long, Label[]>> existingNodes;
+    private List<Pair<String, Label[]>> someData(int numberOfModifications) {
+        List<Pair<String, Label[]>> existingNodes;
         existingNodes = new ArrayList<>();
         try (Transaction tx = db.beginTx()) {
             randomModifications(tx, existingNodes, numberOfModifications);
@@ -326,7 +325,7 @@ class AllNodesInStoreExistInLabelIndexTest {
     }
 
     private void randomModifications(
-            Transaction tx, List<Pair<Long, Label[]>> existingNodes, int numberOfModifications) {
+            Transaction tx, List<Pair<String, Label[]>> existingNodes, int numberOfModifications) {
         for (int i = 0; i < numberOfModifications; i++) {
             double selectModification = random.nextDouble();
             if (existingNodes.size() < NODE_COUNT_BASELINE || selectModification >= DELETE_RATIO + UPDATE_RATIO) {
@@ -339,17 +338,17 @@ class AllNodesInStoreExistInLabelIndexTest {
         }
     }
 
-    private void createNewNode(Transaction tx, List<Pair<Long, Label[]>> existingNodes) {
+    private void createNewNode(Transaction tx, List<Pair<String, Label[]>> existingNodes) {
         Label[] labels = randomLabels();
         Node node = tx.createNode(labels);
-        existingNodes.add(Pair.of(node.getId(), labels));
+        existingNodes.add(Pair.of(node.getElementId(), labels));
     }
 
-    private void modifyLabelsOnExistingNode(Transaction transaction, List<Pair<Long, Label[]>> existingNodes) {
+    private void modifyLabelsOnExistingNode(Transaction transaction, List<Pair<String, Label[]>> existingNodes) {
         int targetIndex = random.nextInt(existingNodes.size());
-        Pair<Long, Label[]> existingPair = existingNodes.get(targetIndex);
-        long nodeId = existingPair.first();
-        Node node = transaction.getNodeById(nodeId);
+        Pair<String, Label[]> existingPair = existingNodes.get(targetIndex);
+        String nodeId = existingPair.first();
+        Node node = transaction.getNodeByElementId(nodeId);
         node.getLabels().forEach(node::removeLabel);
         Label[] newLabels = randomLabels();
         for (Label label : newLabels) {
@@ -359,10 +358,10 @@ class AllNodesInStoreExistInLabelIndexTest {
         existingNodes.add(Pair.of(nodeId, newLabels));
     }
 
-    private void deleteExistingNode(Transaction transaction, List<Pair<Long, Label[]>> existingNodes) {
+    private void deleteExistingNode(Transaction transaction, List<Pair<String, Label[]>> existingNodes) {
         int targetIndex = random.nextInt(existingNodes.size());
-        Pair<Long, Label[]> existingPair = existingNodes.get(targetIndex);
-        Node node = transaction.getNodeById(existingPair.first());
+        Pair<String, Label[]> existingPair = existingNodes.get(targetIndex);
+        Node node = transaction.getNodeByElementId(existingPair.first());
         node.delete();
         existingNodes.remove(targetIndex);
     }
@@ -407,7 +406,8 @@ class AllNodesInStoreExistInLabelIndexTest {
                         return indexFiles.getStoreFile();
                     })
                     .findAny()
-                    .get();
+                    .get()
+                    .baseSegment();
         }
     }
 }

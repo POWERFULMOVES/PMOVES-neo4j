@@ -21,6 +21,7 @@ package org.neo4j.kernel.impl.newapi;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -33,16 +34,23 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
 import org.neo4j.exceptions.KernelException;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
+import org.neo4j.internal.kernel.api.exceptions.LabelNotFoundKernelException;
+import org.neo4j.internal.kernel.api.exceptions.PropertyKeyIdNotFoundKernelException;
+import org.neo4j.internal.kernel.api.exceptions.RelationshipTypeIdNotFoundKernelException;
 import org.neo4j.internal.kernel.api.exceptions.schema.IllegalTokenNameException;
 import org.neo4j.internal.kernel.api.security.SecurityAuthorizationHandler;
 import org.neo4j.internal.kernel.api.security.SecurityContext;
 import org.neo4j.kernel.api.txstate.TransactionState;
 import org.neo4j.kernel.impl.api.KernelTransactionImplementation;
+import org.neo4j.logging.NullLogProvider;
 import org.neo4j.storageengine.api.CommandCreationContext;
 import org.neo4j.storageengine.api.StorageReader;
 import org.neo4j.token.TokenHolders;
 import org.neo4j.token.api.TokenConstants;
 import org.neo4j.token.api.TokenHolder;
+import org.neo4j.token.api.TokenNotFoundException;
 
 class KernelTokenTest {
     private KernelTransactionImplementation ktx;
@@ -68,7 +76,8 @@ class KernelTokenTest {
         when(ktx.securityAuthorizationHandler()).thenReturn(authorizationHandler);
         when(ktx.securityContext()).thenReturn(SecurityContext.AUTH_DISABLED);
         when(ktx.txState()).thenReturn(transactionState);
-        kernelToken = new KernelToken(storageReader, commandCreationContext, ktx, tokenHolders);
+        kernelToken = new KernelToken(
+                storageReader, commandCreationContext, ktx, tokenHolders, NullLogProvider.getInstance());
     }
 
     @Test
@@ -223,6 +232,10 @@ class KernelTokenTest {
 
     @Test
     void invalidTokenNamesAreNotAllowed() {
+        when(labelTokens.getIdByName(any())).thenReturn(TokenConstants.NO_TOKEN);
+        when(relationshipTypeTokens.getIdByName(any())).thenReturn(TokenConstants.NO_TOKEN);
+        when(propertyKeyTokens.getIdByName(any())).thenReturn(TokenConstants.NO_TOKEN);
+
         List<String> invalidNames = List.of("", "\0");
 
         assertThrows(
@@ -252,6 +265,21 @@ class KernelTokenTest {
                     () -> kernelToken.propertyKeyGetOrCreateForName(invalidName),
                     "property key name name should be invalid: '" + invalidName + "'");
         }
+
+        String[] interleavedInvalid = new String[] {"foo", "bar", "", "baz", "\0"};
+        int[] keys = new int[interleavedInvalid.length];
+        assertThrows(
+                IllegalTokenNameException.class,
+                () -> kernelToken.labelGetOrCreateForNames(interleavedInvalid, keys),
+                "label name should be invalid:");
+        assertThrows(
+                IllegalTokenNameException.class,
+                () -> kernelToken.relationshipTypeGetOrCreateForNames(interleavedInvalid, keys),
+                "relationship type name should be invalid:");
+        assertThrows(
+                IllegalTokenNameException.class,
+                () -> kernelToken.propertyKeyGetOrCreateForNames(interleavedInvalid, keys),
+                "property key name name should be invalid:");
     }
 
     @Test
@@ -312,5 +340,38 @@ class KernelTokenTest {
         when(commandCreationContext.reserveRelationshipTypeTokenId("poke")).thenReturn(13, 13, 14);
         int id = kernelToken.relationshipTypeCreateForName("poke", false);
         assertEquals(14, id);
+    }
+
+    @Test
+    void shouldThrowCorrectExceptionWhenLabelTokenNotFound() throws Exception {
+        when(labelTokens.getTokenById(0)).thenThrow(new TokenNotFoundException("nope"));
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> kernelToken.nodeLabelName(0))
+                .isInstanceOf(LabelNotFoundKernelException.class)
+                .hasMessage("Label with id=0 not found")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N59)
+                .hasStatusDescription(
+                        "error: data exception - token does not exist. The label token with id 0 does not exist.");
+    }
+
+    @Test
+    void shouldThrowCorrectExceptionWhenPropertyKeyTokenNotFound() throws Exception {
+        when(propertyKeyTokens.getTokenById(0)).thenThrow(new TokenNotFoundException("nope"));
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> kernelToken.propertyKeyName(0))
+                .isInstanceOf(PropertyKeyIdNotFoundKernelException.class)
+                .hasMessage("Property key with id=0 not found")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N59)
+                .hasStatusDescription(
+                        "error: data exception - token does not exist. The property key token with id 0 does not exist.");
+    }
+
+    @Test
+    void shouldThrowCorrectExceptionWhenRelationshipTypeTokenNotFound() throws Exception {
+        when(relationshipTypeTokens.getTokenById(0)).thenThrow(new TokenNotFoundException("nope"));
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> kernelToken.relationshipTypeName(0))
+                .isInstanceOf(RelationshipTypeIdNotFoundKernelException.class)
+                .hasMessage("Relationship type id '0' not found")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N59)
+                .hasStatusDescription(
+                        "error: data exception - token does not exist. The relationship type token with id 0 does not exist.");
     }
 }

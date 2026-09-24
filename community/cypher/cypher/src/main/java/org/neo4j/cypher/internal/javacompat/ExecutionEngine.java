@@ -19,6 +19,7 @@
  */
 package org.neo4j.cypher.internal.javacompat;
 
+import java.io.IOException;
 import java.time.Clock;
 import java.util.List;
 import java.util.Set;
@@ -26,21 +27,20 @@ import org.neo4j.common.DependencyResolver;
 import org.neo4j.configuration.Config;
 import org.neo4j.cypher.internal.CompilerFactory;
 import org.neo4j.cypher.internal.CompilerLibrary;
-import org.neo4j.cypher.internal.FullyParsedQuery;
-import org.neo4j.cypher.internal.PreParsedQuery;
 import org.neo4j.cypher.internal.cache.CypherQueryCaches;
 import org.neo4j.cypher.internal.config.CypherConfiguration;
 import org.neo4j.cypher.internal.frontend.phases.BaseState;
+import org.neo4j.cypher.internal.notification.InternalNotification;
+import org.neo4j.cypher.internal.preparser.FullyParsedQuery;
+import org.neo4j.cypher.internal.preparser.PreParsedQuery;
 import org.neo4j.cypher.internal.runtime.InputDataStream;
 import org.neo4j.cypher.internal.tracing.CompilationTracer;
 import org.neo4j.cypher.internal.tracing.TimingCompilationTracer;
-import org.neo4j.cypher.internal.util.InternalNotification;
 import org.neo4j.exceptions.Neo4jException;
 import org.neo4j.graphdb.Result;
 import org.neo4j.kernel.GraphDatabaseQueryService;
 import org.neo4j.kernel.impl.query.FunctionInformation;
 import org.neo4j.kernel.impl.query.QueryExecution;
-import org.neo4j.kernel.impl.query.QueryExecutionEngine;
 import org.neo4j.kernel.impl.query.QueryExecutionKernelException;
 import org.neo4j.kernel.impl.query.QueryExecutionMonitor;
 import org.neo4j.kernel.impl.query.QuerySubscriber;
@@ -58,7 +58,7 @@ import scala.jdk.javaapi.CollectionConverters;
  * operation so please make sure this will be constructed only once and properly reused.
  *
  */
-public class ExecutionEngine implements QueryExecutionEngine {
+public class ExecutionEngine implements InternalQueryExecutionEngine {
     protected org.neo4j.cypher.internal.ExecutionEngine cypherExecutionEngine;
 
     /**
@@ -78,6 +78,7 @@ public class ExecutionEngine implements QueryExecutionEngine {
 
     protected ExecutionEngine() {}
 
+    @Override
     public org.neo4j.cypher.internal.ExecutionEngine getCypherExecutionEngine() {
         return cypherExecutionEngine;
     }
@@ -153,6 +154,7 @@ public class ExecutionEngine implements QueryExecutionEngine {
         }
     }
 
+    @Override
     public QueryExecution executeQuery(
             FullyParsedQuery query,
             MapValue parameters,
@@ -199,6 +201,7 @@ public class ExecutionEngine implements QueryExecutionEngine {
         return cypherExecutionEngine.getCypherFunctions();
     }
 
+    @Override
     public void insertIntoCache(
             String queryText,
             PreParsedQuery preParsedQuery,
@@ -206,10 +209,14 @@ public class ExecutionEngine implements QueryExecutionEngine {
             BaseState parsedQuery,
             Set<InternalNotification> parsingNotifications) {
         cypherExecutionEngine.insertIntoCache(
-                queryText,
                 preParsedQuery,
                 params,
                 parsedQuery,
                 CollectionConverters.asScala(parsingNotifications).toSet());
+    }
+
+    @Override
+    public void close() throws IOException {
+        cypherExecutionEngine.close();
     }
 }

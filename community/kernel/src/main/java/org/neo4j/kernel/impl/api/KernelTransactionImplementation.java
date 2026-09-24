@@ -29,8 +29,10 @@ import static org.neo4j.configuration.GraphDatabaseSettings.memory_transaction_m
 import static org.neo4j.configuration.GraphDatabaseSettings.transaction_sampling_percentage;
 import static org.neo4j.configuration.GraphDatabaseSettings.transaction_tracing_level;
 import static org.neo4j.internal.helpers.VarHandleUtils.getVarHandle;
-import static org.neo4j.kernel.api.exceptions.Status.Transaction.TransactionCommitFailed;
+import static org.neo4j.io.pagecache.context.CursorContext.INITIALIZATION_SENTINEL_CONTEXT;
+import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.kernel.impl.api.LeaseService.NO_LEASE;
+import static org.neo4j.kernel.impl.api.TransactionIdSequence.TRANSACTION_SEQUENCE_INITIAL_VALUE;
 import static org.neo4j.kernel.impl.api.transaction.trace.TraceProviderFactory.getTraceProvider;
 import static org.neo4j.kernel.impl.api.transaction.trace.TransactionInitializationTrace.NONE;
 
@@ -51,23 +53,28 @@ import java.util.function.Supplier;
 import org.neo4j.collection.Dependencies;
 import org.neo4j.collection.factory.CollectionsFactory;
 import org.neo4j.collection.pool.Pool;
+import org.neo4j.common.DependencyResolver;
+import org.neo4j.common.ThreadSanitizer;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.configuration.LocalConfig;
+import org.neo4j.cypher.internal.DefaultQueryLanguageScope;
 import org.neo4j.dbms.DbmsRuntimeVersionProvider;
 import org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker;
 import org.neo4j.dbms.identity.ServerIdentity;
 import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.exceptions.UnspecifiedKernelException;
-import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
-import org.neo4j.gqlstatus.GqlStatusInfoCodes;
+import org.neo4j.graphdb.DatabaseShutdownException;
 import org.neo4j.graphdb.NotInTransactionException;
 import org.neo4j.graphdb.TransactionTerminatedException;
+import org.neo4j.graphdb.TransactionTerminatedHelper;
+import org.neo4j.graphdb.schema.Schema;
 import org.neo4j.internal.helpers.Exceptions;
 import org.neo4j.internal.kernel.api.CursorFactory;
 import org.neo4j.internal.kernel.api.EntityLocks;
 import org.neo4j.internal.kernel.api.ExecutionStatistics;
+import org.neo4j.internal.kernel.api.IndexMonitor;
 import org.neo4j.internal.kernel.api.Locks;
 import org.neo4j.internal.kernel.api.NodeCursor;
 import org.neo4j.internal.kernel.api.Procedures;
@@ -95,12 +102,15 @@ import org.neo4j.internal.kernel.api.security.SecurityContext;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexPrototype;
 import org.neo4j.internal.schema.SchemaState;
+import org.neo4j.internal.schema.StorageEngineIndexingBehaviour;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.KernelVersionProvider;
 import org.neo4j.kernel.api.AccessModeProvider;
+import org.neo4j.kernel.api.AssertOpen;
 import org.neo4j.kernel.api.ExecutionContext;
+import org.neo4j.kernel.api.InnerTransactionHandler;
 import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.api.ResourceMonitor;
 import org.neo4j.kernel.api.TerminationMark;
@@ -112,6 +122,7 @@ import org.neo4j.kernel.api.procedure.ProcedureView;
 import org.neo4j.kernel.api.query.ExecutingQuery;
 import org.neo4j.kernel.api.txstate.TransactionState;
 import org.neo4j.kernel.api.txstate.TxStateHolder;
+import org.neo4j.kernel.availability.AvailabilityGuard;
 import org.neo4j.kernel.database.DatabaseTracers;
 import org.neo4j.kernel.database.NamedDatabaseId;
 import org.neo4j.kernel.impl.api.chunk.ChunkSink;
@@ -123,6 +134,7 @@ import org.neo4j.kernel.impl.api.commit.TransactionCommitter;
 import org.neo4j.kernel.impl.api.index.IndexingService;
 import org.neo4j.kernel.impl.api.index.stats.IndexStatisticsStore;
 import org.neo4j.kernel.impl.api.parallel.ExecutionContextCursorTracer;
+import org.neo4j.kernel.impl.api.parallel.ExecutionContextProcedureKernelTransaction;
 import org.neo4j.kernel.impl.api.parallel.ParallelAccessCheck;
 import org.neo4j.kernel.impl.api.parallel.ThreadExecutionContext;
 import org.neo4j.kernel.impl.api.state.ConstraintIndexCreator;
@@ -135,6 +147,7 @@ import org.neo4j.kernel.impl.api.transaction.trace.TransactionInitializationTrac
 import org.neo4j.kernel.impl.api.txid.TransactionIdGenerator;
 import org.neo4j.kernel.impl.constraints.ConstraintSemantics;
 import org.neo4j.kernel.impl.coreapi.InternalTransaction;
+import org.neo4j.kernel.impl.coreapi.schema.SchemaImpl;
 import org.neo4j.kernel.impl.factory.AccessCapability;
 import org.neo4j.kernel.impl.factory.AccessCapabilityFactory;
 import org.neo4j.kernel.impl.locking.LockManager;
@@ -149,43 +162,51 @@ import org.neo4j.kernel.impl.newapi.KernelTokenRead;
 import org.neo4j.kernel.impl.newapi.Operations;
 import org.neo4j.kernel.impl.newapi.TransactionQueryContext;
 import org.neo4j.kernel.impl.query.TransactionExecutionMonitor;
-import org.neo4j.kernel.impl.transaction.log.TransactionCommitmentFactory;
 import org.neo4j.kernel.impl.transaction.tracing.TransactionEvent;
 import org.neo4j.kernel.impl.transaction.tracing.TransactionTracer;
 import org.neo4j.kernel.impl.transaction.tracing.TransactionWriteEvent;
-import org.neo4j.kernel.impl.util.collection.CollectionsFactorySupplier;
 import org.neo4j.kernel.internal.event.DatabaseTransactionEventListeners;
 import org.neo4j.kernel.internal.event.TransactionEventListeners;
 import org.neo4j.lock.ActiveLock;
 import org.neo4j.lock.LockTracer;
+import org.neo4j.logging.Log;
 import org.neo4j.logging.LogProvider;
+import org.neo4j.memory.HeapEstimatorCacheConfig;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.memory.ScopedMemoryPool;
 import org.neo4j.monitoring.DatabaseHealth;
+import org.neo4j.monitoring.ExceptionHandlerService;
 import org.neo4j.resources.CpuClock;
 import org.neo4j.resources.HeapAllocation;
 import org.neo4j.storageengine.api.CommandCreationContext;
 import org.neo4j.storageengine.api.StorageCommand;
 import org.neo4j.storageengine.api.StorageEngine;
-import org.neo4j.storageengine.api.StorageEngineCostCharacteristics;
+import org.neo4j.storageengine.api.StorageEngineCharacteristics;
 import org.neo4j.storageengine.api.StorageLocks;
 import org.neo4j.storageengine.api.StorageReader;
 import org.neo4j.storageengine.api.TransactionApplicationMode;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.storageengine.api.enrichment.ApplyEnrichmentStrategy;
 import org.neo4j.storageengine.api.enrichment.CaptureMode;
+import org.neo4j.storageengine.api.enrichment.EnrichmentCommandFactory;
 import org.neo4j.storageengine.api.enrichment.EnrichmentMode;
+import org.neo4j.storageengine.api.txstate.ReadableTransactionState;
 import org.neo4j.storageengine.api.txstate.TransactionStateBehaviour;
 import org.neo4j.storageengine.api.txstate.TxStateVisitor;
 import org.neo4j.storageengine.api.txstate.TxStateVisitor.Decorator;
+import org.neo4j.storageengine.api.txstate.memory.MultiVersionTxStateMemoryConsumer;
+import org.neo4j.storageengine.api.txstate.memory.TxStateMemoryConsumer;
 import org.neo4j.storageengine.api.txstate.validation.TransactionValidator;
 import org.neo4j.storageengine.api.txstate.validation.TransactionValidatorFactory;
 import org.neo4j.storageengine.api.txstate.validation.ValidationLockDumper;
 import org.neo4j.time.SystemNanoClock;
 import org.neo4j.token.TokenHolders;
+import org.neo4j.util.FeatureToggles;
 import org.neo4j.values.ElementIdMapper;
+import org.neo4j.wal.TransactionCommitmentFactory;
 
-public class KernelTransactionImplementation implements KernelTransaction, TxStateHolder, ExecutionStatistics {
+public class KernelTransactionImplementation
+        implements KernelTransaction, TxStateHolder, ExecutionStatistics, KernelTransactionResourceFactory {
     /*
      * IMPORTANT:
      * This class is pooled and re-used. If you add *any* state to it, you *must* make sure that:
@@ -198,13 +219,15 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
     private static final long NOT_COMMITTED_TRANSACTION_COMMIT_TIME = -1;
     private static final String TRANSACTION_TAG = "transaction";
     private static final VarHandle CURSOR_CONTEXT_HANDLE = getVarHandle(lookup(), "cursorContext");
+    private static final boolean SANITIZE_CONCURRENT_TXSTATE_ACCESS =
+            FeatureToggles.flag(KernelTransaction.class, "sanitizeConcurrentTxStateAccess", false);
 
     private final CollectionsFactory collectionsFactory;
 
     // Logic
     private final TransactionEventListeners transactionEventListeners;
     private final ConstraintIndexCreator constraintIndexCreator;
-    private final StorageEngine storageEngine;
+    protected final StorageEngine storageEngine;
     private final TransactionTracer transactionTracer;
     private final Pool<KernelTransactionImplementation> pool;
 
@@ -222,12 +245,12 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
     private final TransactionClockContext clocks;
     private final AccessCapabilityFactory accessCapabilityFactory;
     private final ConstraintSemantics constraintSemantics;
-    private final TransactionMemoryPool transactionMemoryPool;
-    private final LogProvider logProvider;
+    protected final TransactionMemoryPool transactionMemoryPool;
+    protected final LogProvider logProvider;
     private final CursorContextFactory contextFactory;
     private final EntityLocks entityLocks;
     private final KernelProcedures.ForTransactionScope procedures;
-    private final KernelSchemaRead schemaRead;
+    private final SchemaRead schemaRead;
     private final KernelRead kernelRead;
     // For concurrent access by monitoring, jobs, etc CURSOR_CONTEXT_HANDLE should be used
     @SuppressWarnings("FieldMayBeFinal")
@@ -242,14 +265,16 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
 
     // State that needs to be reset between uses. Most of these should be cleared or released in #release(),
     // whereas others, such as timestamp or txId when transaction starts, even locks, needs to be set in #initialize().
-    private TxState txState;
+    private TransactionState txState;
     private volatile TransactionWriteState writeState;
-    private AccessCapability accessCapability;
+    protected AccessCapability accessCapability;
     private final KernelStatement currentStatement;
     private OverridableSecurityContext overridableSecurityContext;
     private final LockManager.Client lockClient;
     private volatile long transactionSequenceNumber;
     private LeaseClient leaseClient;
+    // field to check lease id from another thread to perform transaction termination based on difference
+    private volatile int leaseId = NO_LEASE;
     private volatile boolean closing;
     private volatile boolean closed;
     private boolean commit;
@@ -268,17 +293,18 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
     private volatile Map<String, Object> userMetaData;
     private volatile String statusDetails;
     private final QueryContext queryContext;
-    private final Operations operations;
+    protected final Operations operations;
     private InternalTransaction internalTransaction;
     private volatile TraceProvider traceProvider;
     private volatile TransactionInitializationTrace initializationTrace;
     private final MemoryTracker memoryTracker;
-    private final LocalConfig config;
+    protected final LocalConfig config;
     private volatile long transactionHeapBytesLimit;
     private volatile long transactionLocalRetries;
     private final ExecutionContextFactory executionContextFactory;
     private ProcedureView procedureView;
     private boolean needsHighIdTracking;
+    private final DefaultQueryLanguageScope defaultQueryLanguageScope = DefaultQueryLanguageScope.create();
 
     /**
      * Lock prevents transaction {@link #markForTermination(Status)}  transaction termination} from interfering with
@@ -289,8 +315,11 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
      */
     private final Lock terminationReleaseLock = new ReentrantLock();
 
-    private KernelTransactionMonitor kernelTransactionMonitor;
+    private Monitor monitor;
+    private final ExceptionHandlerService exceptionHandlerService;
     private final StoreCursors transactionalCursors;
+
+    private final AvailabilityGuard availabilityGuard;
 
     private final KernelTransactions kernelTransactions;
     /**
@@ -304,6 +333,8 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
     private final ChunkedTransactionSink txStateWriter;
     private final DatabaseSerialGuard databaseSerialGuard;
     private final SerialExecutionGuard serialExecutionGuard;
+    private final RaftUpgradeBarrier raftUpgradeBarrier;
+    private final TxStateMemoryConsumer txStateMemoryConsumer;
     private boolean failedCleanup = false;
 
     public KernelTransactionImplementation(
@@ -320,7 +351,7 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
             StorageEngine storageEngine,
             AccessCapabilityFactory accessCapabilityFactory,
             CursorContextFactory contextFactory,
-            CollectionsFactorySupplier collectionsFactorySupplier,
+            CollectionsFactory collectionsFactory,
             ConstraintSemantics constraintSemantics,
             SchemaState schemaState,
             TokenHolders tokenHolders,
@@ -347,9 +378,14 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
             LogProvider logProvider,
             TransactionValidatorFactory transactionValidatorFactory,
             DatabaseSerialGuard databaseSerialGuard,
+            RaftUpgradeBarrier raftUpgradeBarrier,
             boolean multiVersioned,
-            TopologyGraphDbmsModel.HostedOnMode mode) {
+            ExceptionHandlerService exceptionHandlerService,
+            TopologyGraphDbmsModel.HostedOnMode mode,
+            AvailabilityGuard availabilityGuard) {
         this.logProvider = logProvider;
+        this.exceptionHandlerService = exceptionHandlerService;
+        this.availabilityGuard = availabilityGuard;
         this.closed = true;
         this.timeout = TransactionTimeout.NO_TIMEOUT;
         this.config = new LocalConfig(externalConfig);
@@ -359,7 +395,8 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
         this.readOnlyDatabaseChecker = readOnlyDatabaseChecker;
         this.transactionIdGenerator = transactionIdGenerator;
         this.databaseHealth = databaseHealth;
-        this.transactionMemoryPool = new TransactionMemoryPool(dbTransactionsPool, config, () -> !closed, logProvider);
+        this.transactionMemoryPool = new TransactionMemoryPool(
+                dbTransactionsPool, config, () -> !closed || (startTimeMillis != Long.MAX_VALUE), logProvider);
         this.memoryTracker = transactionMemoryPool.getTransactionTracker();
         this.constraintIndexCreator = constraintIndexCreator;
         this.commitProcess = commitProcess;
@@ -367,7 +404,7 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
         this.transactionMonitor = transactionMonitor;
         this.transactionExecutionMonitor = transactionExecutionMonitor;
         this.storageReader = storageEngine.newReader();
-        this.commandCreationContext = storageEngine.newCommandCreationContext(multiVersioned);
+        this.commandCreationContext = storageEngine.newCommandCreationContext(multiVersioned, memoryTracker);
         this.kernelVersionProvider = kernelVersionProvider;
         this.serverIdentity = serverIdentity;
         this.enrichmentStrategy = enrichmentStrategy;
@@ -390,43 +427,50 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
         this.transactionalCursors = storageEngine.createStorageCursors(CursorContext.NULL_CONTEXT);
         this.lockClient = ParallelAccessCheck.maybeWrapLockClient(lockManager.newClient());
         StorageLocks storageLocks = storageEngine.createStorageLocks(lockClient);
-        DefaultPooledCursors cursors = new DefaultPooledCursors(
-                storageReader, transactionalCursors, config, storageEngine.indexingBehaviour(), multiVersioned);
+        var kernelToken = new KernelToken(storageReader, commandCreationContext, this, tokenHolders, logProvider);
+        DefaultPooledCursors cursorFactory = createCursors(
+                storageReader, transactionalCursors, config, storageEngine.indexingBehaviour(), multiVersioned, false);
         this.securityAuthorizationHandler = new SecurityAuthorizationHandler(securityLog);
-        var kernelToken = new KernelToken(storageReader, commandCreationContext, this, tokenHolders);
+        TxStateHolder txStateHolder = this;
         this.queryContext = new TransactionQueryContext(
-                this::dataRead, cursors, this, this::cursorContext, memoryTracker, indexingService.getMonitor());
-        this.entityLocks = new EntityLocks(
-                storageLocks, currentStatement::lockTracer, lockClient, this::assertOpenWithParallelAccessCheck);
-        this.procedures =
-                new KernelProcedures.ForTransactionScope(this, dependencies, this::assertOpenWithParallelAccessCheck);
+                this::dataRead,
+                cursorFactory,
+                txStateHolder,
+                kernelVersionProvider,
+                this::cursorContext,
+                memoryTracker,
+                indexingService.getMonitor());
+        AssertOpen assertOpen = this::assertOpenWithParallelAccessCheck;
+        this.entityLocks = new EntityLocks(storageLocks, currentStatement::lockTracer, lockClient, assertOpen);
+        this.procedures = createProcedures(this, dependencies, assertOpen);
         AccessModeProvider accessModeProvider = () -> securityContext().mode();
-        this.schemaRead = new KernelSchemaRead(
+        this.schemaRead = createSchemaRead(
                 schemaState,
                 indexStatisticsStore,
                 storageReader,
                 entityLocks,
-                this,
+                txStateHolder,
                 indexingService,
-                this::assertOpenWithParallelAccessCheck,
-                accessModeProvider);
-        this.kernelRead = new KernelRead(
+                assertOpen,
+                accessModeProvider,
+                false);
+        this.kernelRead = createKernelRead(
                 storageReader,
                 kernelToken,
-                cursors,
+                cursorFactory,
                 transactionalCursors,
                 entityLocks,
                 queryContext,
-                this,
+                txStateHolder,
                 schemaRead,
                 indexingService,
                 memoryTracker,
                 multiVersioned,
-                this::assertOpenWithParallelAccessCheck,
+                assertOpen,
                 accessModeProvider,
-                false);
+                false,
+                logProvider);
         this.executionContextFactory = createExecutionContextFactory(
-                contextFactory,
                 storageEngine,
                 config,
                 lockManager,
@@ -439,11 +483,13 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
                 dependencies,
                 securityAuthorizationHandler,
                 elementIdMapper,
-                multiVersioned);
+                multiVersioned,
+                logProvider);
         this.operations = new Operations(
                 kernelRead,
                 storageReader,
-                new IndexTxStateUpdater(storageReader, indexingService, this, transactionStateBehaviour),
+                new IndexTxStateUpdater(
+                        storageReader, kernelRead, indexingService, txStateHolder, transactionStateBehaviour),
                 commandCreationContext,
                 dbmsRuntimeVersionProvider,
                 kernelVersionProvider,
@@ -451,7 +497,7 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
                 this,
                 schemaRead,
                 kernelToken,
-                cursors,
+                cursorFactory,
                 constraintIndexCreator,
                 constraintSemantics,
                 indexingService,
@@ -462,9 +508,10 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
         this.traceProvider = getTraceProvider(config);
         this.initializationTrace = NONE;
         this.transactionHeapBytesLimit = config.get(memory_transaction_max_size);
-        this.collectionsFactory = collectionsFactorySupplier.create();
+        this.collectionsFactory = collectionsFactory;
         this.kernelTransactions = kernelTransactions;
         this.databaseSerialGuard = databaseSerialGuard;
+        this.raftUpgradeBarrier = raftUpgradeBarrier;
         this.transactionValidator =
                 transactionValidatorFactory.createTransactionValidator(memoryTracker, transactionMonitor);
         this.validationLockDumper = transactionValidatorFactory.createValidationLockDumper();
@@ -472,7 +519,156 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
         this.committer = createCommitter(commitmentFactory, multiVersioned, mode);
         this.transactionEventListeners = new TransactionEventListeners(transactionEventListeners, this, storageReader);
         this.txStateWriter = createChunkWriter(multiVersioned);
+        this.txStateMemoryConsumer = createMemoryConsumer(multiVersioned, config);
         registerConfigChangeListeners(config);
+    }
+
+    @Override
+    public KernelProcedures.ForTransactionScope createProcedures(
+            KernelTransactionImplementation ktx, Dependencies databaseDependencies, AssertOpen assertOpen) {
+        return new KernelProcedures.ForTransactionScope(ktx, databaseDependencies, assertOpen);
+    }
+
+    @Override
+    public DefaultPooledCursors createCursors(
+            StorageReader storageReader,
+            StoreCursors transactionalCursors,
+            Config config,
+            StorageEngineIndexingBehaviour indexingBehaviour,
+            boolean multiVersioned,
+            boolean parallel) {
+        return new DefaultPooledCursors(storageReader, transactionalCursors, config, indexingBehaviour, multiVersioned);
+    }
+
+    @Override
+    public SchemaRead createSchemaRead(
+            SchemaState schemaState,
+            IndexStatisticsStore indexStatisticsStore,
+            StorageReader storageReader,
+            EntityLocks entityLocks,
+            TxStateHolder txStateHolder,
+            IndexingService indexingService,
+            AssertOpen assertOpen,
+            AccessModeProvider accessModeProvider,
+            boolean parallel) {
+        return new KernelSchemaRead(
+                schemaState,
+                indexStatisticsStore,
+                storageReader,
+                entityLocks,
+                txStateHolder,
+                indexingService,
+                assertOpen,
+                accessModeProvider);
+    }
+
+    @Override
+    public KernelRead createKernelRead(
+            StorageReader storageReader,
+            TokenRead tokenRead,
+            CursorFactory cursorFactory,
+            StoreCursors storeCursors,
+            EntityLocks entityLocks,
+            QueryContext queryContext,
+            TxStateHolder txStateHolder,
+            SchemaRead schemaRead,
+            IndexingService indexingService,
+            MemoryTracker memoryTracker,
+            boolean multiVersioned,
+            AssertOpen assertOpen,
+            AccessModeProvider accessModeProvider,
+            boolean parallel,
+            LogProvider logProvider) {
+        return new KernelRead(
+                storageReader,
+                tokenRead,
+                cursorFactory,
+                storeCursors,
+                entityLocks,
+                queryContext,
+                txStateHolder,
+                schemaRead,
+                indexingService,
+                memoryTracker,
+                multiVersioned,
+                assertOpen,
+                accessModeProvider,
+                parallel,
+                logProvider);
+    }
+
+    @Override
+    public KernelProcedures.ForThreadExecutionContextScope createProcedures(
+            ExecutionContext executionContext,
+            DependencyResolver databaseDependencies,
+            OverridableSecurityContext overridableSecurityContext,
+            ExecutionContextProcedureKernelTransaction kernelTransaction,
+            SecurityAuthorizationHandler securityAuthorizationHandler,
+            Supplier<ClockContext> clockContextSupplier,
+            ProcedureView procedureView) {
+        return new KernelProcedures.ForThreadExecutionContextScope(
+                executionContext,
+                databaseDependencies,
+                overridableSecurityContext,
+                kernelTransaction,
+                securityAuthorizationHandler,
+                clockContextSupplier,
+                procedureView);
+    }
+
+    @Override
+    public ExecutionContext createExecutionContext(
+            StorageEngine storageEngine,
+            CursorContext context,
+            OverridableSecurityContext overridableSecurityContext,
+            ExecutionContextCursorTracer cursorTracer,
+            CursorContext ktxContext,
+            TokenRead tokenRead,
+            IndexMonitor monitor,
+            MemoryTracker contextTracker,
+            SecurityAuthorizationHandler securityAuthorizationHandler,
+            StorageReader storageReader,
+            SchemaState schemaState,
+            IndexingService indexingService,
+            IndexStatisticsStore indexStatisticsStore,
+            Dependencies databaseDependencies,
+            LockManager.Client lockClient,
+            LockTracer lockTracer,
+            ElementIdMapper elementIdMapper,
+            KernelTransaction ktx,
+            Supplier<ClockContext> clockContextSupplier,
+            List<AutoCloseable> otherResources,
+            ProcedureView procedureView,
+            boolean multiVersioned,
+            LogProvider logProvider,
+            Config config) {
+        return new ThreadExecutionContext(
+                storageEngine,
+                context,
+                overridableSecurityContext,
+                cursorTracer,
+                ktxContext,
+                tokenRead,
+                monitor,
+                contextTracker,
+                securityAuthorizationHandler,
+                storageReader,
+                schemaState,
+                indexingService,
+                indexStatisticsStore,
+                databaseDependencies,
+                lockClient,
+                lockTracer,
+                elementIdMapper,
+                ktx,
+                kernelVersionProvider,
+                clockContextSupplier,
+                otherResources,
+                procedureView,
+                multiVersioned,
+                logProvider,
+                this,
+                config);
     }
 
     private void assertOpenWithParallelAccessCheck() {
@@ -492,21 +688,23 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
             TransactionTimeout transactionTimeout,
             long transactionSequenceNumber,
             ClientConnectionInfo clientInfo,
-            ProcedureView procedureView) {
+            ProcedureView procedureView,
+            long startTimeMillis) {
         assert transactionMemoryPool.usedHeap() == 0;
         assert transactionMemoryPool.usedNative() == 0;
         assert !failedCleanup : "This transaction should not be reused since it did not close properly";
-        CURSOR_CONTEXT_HANDLE.setRelease(this, contextFactory.create(TRANSACTION_TAG));
+        initializeCursorContext();
         this.transactionalCursors.reset(cursorContext);
         this.accessCapability = accessCapabilityFactory.newAccessCapability(readOnlyDatabaseChecker);
-        this.kernelTransactionMonitor = KernelTransaction.NO_MONITOR;
+        this.monitor = KernelTransaction.NO_MONITOR;
         this.type = type;
         this.leaseClient = leaseService.newClient();
+        this.leaseId = NO_LEASE;
         this.lockClient.initialize(leaseClient, transactionSequenceNumber, memoryTracker, config);
         this.terminationMark = null;
         this.commit = false;
         this.writeState = TransactionWriteState.NONE;
-        this.startTimeMillis = clocks.systemClock().millis();
+        this.startTimeMillis = startTimeMillis;
         this.startTimeNanos = clocks.systemClock().nanos();
         this.timeout = transactionTimeout;
         this.lastTransactionIdWhenStarted = lastCommittedTx;
@@ -515,7 +713,7 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
         this.transactionId = NOT_COMMITTED_TRANSACTION_ID;
         this.commitTime = NOT_COMMITTED_TRANSACTION_COMMIT_TIME;
         this.clientInfo = clientInfo;
-        this.statistics.init(currentThread().getId());
+        this.statistics.init(currentThread().threadId());
         this.commandCreationContext.initialize(
                 kernelVersionProvider,
                 cursorContext,
@@ -527,6 +725,7 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
         this.operations.initialize(cursorContext);
         this.initializationTrace = traceProvider.getTraceInfo();
         this.transactionMemoryPool.setLimit(transactionHeapBytesLimit);
+        this.txStateMemoryConsumer.initialize();
         this.innerTransactionHandler = new InnerTransactionHandlerImpl(kernelTransactions);
         this.procedureView = procedureView;
         this.procedures.initialize(procedureView);
@@ -538,8 +737,17 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
         return this;
     }
 
-    private static ExecutionContextFactory createExecutionContextFactory(
-            CursorContextFactory contextFactory,
+    private void initializeCursorContext() {
+        CURSOR_CONTEXT_HANDLE.setRelease(this, INITIALIZATION_SENTINEL_CONTEXT);
+        try {
+            CURSOR_CONTEXT_HANDLE.setRelease(this, contextFactory.create(TRANSACTION_TAG));
+        } catch (Throwable t) {
+            CURSOR_CONTEXT_HANDLE.setRelease(this, NULL_CONTEXT);
+            throw t;
+        }
+    }
+
+    private ExecutionContextFactory createExecutionContextFactory(
             StorageEngine storageEngine,
             Config config,
             LockManager lockManager,
@@ -552,26 +760,22 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
             Dependencies dependencies,
             SecurityAuthorizationHandler securityAuthorizationHandler,
             ElementIdMapper elementIdMapper,
-            boolean multiVersioned) {
+            boolean multiVersioned,
+            LogProvider logProvider) {
         return (securityContext,
                 transactionId,
                 transactionCursorContext,
                 clockContextSupplier,
                 kernelTransaction,
-                procedureView) -> {
+                procedureView,
+                heapEstimatorCacheConfig) -> {
             var executionContextCursorTracer = new ExecutionContextCursorTracer(
                     PageCacheTracer.NULL, ExecutionContextCursorTracer.TRANSACTION_EXECUTION_TAG);
             var executionContextCursorContext = contextFactory.create(executionContextCursorTracer);
             StorageReader executionContextStorageReader = storageEngine.newReader();
-            MemoryTracker executionContextMemoryTracker = kernelTransaction.createExecutionContextMemoryTracker();
-            StoreCursors executionContextStoreCursors =
-                    storageEngine.createStorageCursors(executionContextCursorContext);
-            DefaultPooledCursors executionContextPooledCursors = new DefaultPooledCursors(
-                    executionContextStorageReader,
-                    executionContextStoreCursors,
-                    config,
-                    storageEngine.indexingBehaviour(),
-                    multiVersioned);
+            MemoryTracker executionContextMemoryTracker =
+                    kernelTransaction.createExecutionContextMemoryTracker(heapEstimatorCacheConfig);
+
             LockManager.Client executionContextLockClient = lockManager.newClient();
             executionContextLockClient.initialize(
                     leaseService.newClient(), transactionId, executionContextMemoryTracker, config);
@@ -579,14 +783,13 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
             var executionContextTokenRead = new KernelTokenRead.ForThreadExecutionContextScope(
                     executionContextStorageReader, tokenHolders, overridableSecurityContext, kernelTransaction);
 
-            return new ThreadExecutionContext(
-                    executionContextPooledCursors,
+            return createExecutionContext(
+                    storageEngine,
                     executionContextCursorContext,
                     overridableSecurityContext,
                     executionContextCursorTracer,
                     transactionCursorContext,
                     executionContextTokenRead,
-                    executionContextStoreCursors,
                     indexingService.getMonitor(),
                     executionContextMemoryTracker,
                     securityAuthorizationHandler,
@@ -595,7 +798,6 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
                     indexingService,
                     indexStatisticsStore,
                     dependencies,
-                    storageEngine.createStorageLocks(executionContextLockClient),
                     executionContextLockClient,
                     tracers.getLockTracer(),
                     elementIdMapper,
@@ -603,7 +805,9 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
                     clockContextSupplier,
                     List.of(executionContextStorageReader, executionContextLockClient),
                     procedureView,
-                    multiVersioned);
+                    multiVersioned,
+                    logProvider,
+                    config);
         };
     }
 
@@ -693,7 +897,7 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
     }
 
     @Override
-    public ExecutionContext createExecutionContext() {
+    public ExecutionContext createExecutionContext(HeapEstimatorCacheConfig heapEstimatorCacheConfig) {
         if (hasTxStateWithChanges()) {
             throw new IllegalStateException(
                     "Execution context cannot be used for transactions with non-empty transaction state");
@@ -715,14 +919,16 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
                 cursorContext,
                 () -> statementClock,
                 this,
-                this.procedureView);
+                this.procedureView,
+                heapEstimatorCacheConfig);
     }
 
     @Override
-    public MemoryTracker createExecutionContextMemoryTracker() {
+    public MemoryTracker createExecutionContextMemoryTracker(HeapEstimatorCacheConfig heapEstimatorCacheConfig) {
         var grabSize = config.get(GraphDatabaseInternalSettings.initial_transaction_heap_grab_size_per_worker);
         var maxGrabSize = config.get(GraphDatabaseInternalSettings.max_transaction_heap_grab_size_per_worker);
-        return transactionMemoryPool.getExecutionContextPoolMemoryTracker(grabSize, maxGrabSize);
+        return transactionMemoryPool.getExecutionContextPoolMemoryTracker(
+                grabSize, maxGrabSize, heapEstimatorCacheConfig);
     }
 
     @Override
@@ -870,7 +1076,7 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
         writeState = writeState.upgradeToDataWrites();
     }
 
-    private void upgradeToSchemaWrites() throws InvalidTransactionTypeKernelException {
+    protected void upgradeToSchemaWrites() throws InvalidTransactionTypeKernelException {
         writeState = writeState.upgradeToSchemaWrites();
     }
 
@@ -886,6 +1092,7 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
     public TransactionState txState() {
         if (txState == null) {
             leaseClient.ensureValid();
+            leaseId = leaseClient.leaseId();
             readOnlyDatabaseChecker.check();
             transactionMonitor.upgradeToWriteTransaction();
             txStateWriter.initialize(
@@ -901,7 +1108,15 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
                     transactionStateBehaviour,
                     enrichmentStrategy,
                     txStateWriter,
+                    txStateMemoryConsumer,
                     transactionEvent);
+            if (SANITIZE_CONCURRENT_TXSTATE_ACCESS) {
+                Log log = logProvider.getLog(KernelTransactionImplementation.class);
+                txState = ThreadSanitizer.sanitize(
+                        txState,
+                        TransactionState.class,
+                        e -> log.error("Concurrent access of Transaction State is happening!", e));
+            }
         }
         return txState;
     }
@@ -953,15 +1168,15 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
     public void assertOpen() {
         var terminationMark = this.terminationMark;
         if (terminationMark != null) {
-            throw new TransactionTerminatedException(terminationMark.getReason());
+            throw TransactionTerminatedHelper.transactionTerminated(terminationMark.getReason());
         }
         assertTransactionOpen();
     }
 
     @Override
-    public long commit(KernelTransactionMonitor kernelTransactionMonitor) throws TransactionFailureException {
+    public long commit(Monitor monitor) throws TransactionFailureException {
         commit = true;
-        this.kernelTransactionMonitor = kernelTransactionMonitor;
+        this.monitor = monitor;
         return closeTransaction();
     }
 
@@ -997,7 +1212,7 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
         } catch (TransactionFailureException | RuntimeException | Error e) {
             exception = e;
         } catch (KernelException e) {
-            exception = new TransactionFailureException(e.status(), e, "Unexpected kernel exception");
+            exception = TransactionFailureException.wrapError(e);
         } finally {
             try {
                 closed();
@@ -1027,9 +1242,7 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
 
         Exceptions.throwIfInstanceOf(exception, TransactionFailureException.class);
         Exceptions.throwIfUnchecked(exception);
-        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_50N42)
-                .build();
-        throw new TransactionFailureException(gql, Status.General.UnknownError, exception);
+        throw TransactionFailureException.unknownError(exception);
     }
 
     private void closed() {
@@ -1078,14 +1291,15 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
     private void failOnNonExplicitRollbackIfNeeded() throws TransactionFailureException {
         if (commit) {
             if (isTerminated()) {
-                throw new TransactionTerminatedException(terminationMark.getReason());
+                throw TransactionTerminatedHelper.transactionTerminated(terminationMark.getReason());
             }
             // Commit was called, but also failed which means that the client code using this
             // transaction passed through a happy path, but the transaction was rolled back
             // for one or more reasons. Tell the user that although it looked happy it
             // wasn't committed, but was instead rolled back.
-            throw new TransactionFailureException(
+            throw TransactionFailureException.internalError(
                     Status.Transaction.TransactionMarkedAsFailed,
+                    this.getClass().getSimpleName(),
                     "Transaction rolled back even if marked as successful");
         }
     }
@@ -1108,7 +1322,7 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
                         leaseClient,
                         cursorContext,
                         memoryTracker,
-                        kernelTransactionMonitor,
+                        monitor,
                         lockTracer(),
                         timeCommitted,
                         startTimeMillis,
@@ -1119,7 +1333,7 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
             }
             success = true;
         } catch (ConstraintValidationException | CreateConstraintFailureException e) {
-            exception = new ConstraintViolationTransactionFailureException(e.getUserMessage(tokenRead()), e);
+            exception = ConstraintViolationTransactionFailureException.create(e.getUserMessage(tokenRead()), e);
         } catch (Throwable e) {
             exception = e;
         } finally {
@@ -1142,16 +1356,14 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
         }
         Exceptions.throwIfInstanceOf(exception, TransactionFailureException.class);
         Exceptions.throwIfUnchecked(exception);
-        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_50N42)
-                .build();
-        throw new TransactionFailureException(gql, Status.General.UnknownError, exception);
+        throw TransactionFailureException.unknownError(exception);
     }
 
     private TransactionApplicationMode transactionApplicationMode() {
         return needsHighIdTracking ? TransactionApplicationMode.EXTERNAL : TransactionApplicationMode.INTERNAL;
     }
 
-    public List<StorageCommand> extractCommands(MemoryTracker commandsTracker) throws KernelException {
+    public StorageCommands extractCommands(MemoryTracker commandsTracker) throws KernelException {
         final var commandDecorator = commandDecorator(commandsTracker);
         final var commands = storageEngine.createCommands(
                 txState,
@@ -1162,7 +1374,7 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
                 cursorContext,
                 transactionalCursors,
                 commandsTracker);
-        return commandDecorator.transform(commands);
+        return new StorageCommands(commandDecorator.transform(commands));
     }
 
     private CommandDecorator commandDecorator(MemoryTracker commandsTracker) {
@@ -1176,7 +1388,7 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
 
             @Override
             public TxStateVisitor apply(TxStateVisitor tx) {
-                enrichmentVisitor = new TxEnrichmentVisitor(
+                enrichmentVisitor = createTxStateEnrichmentVisitor(
                         enforceConstraints(tx, commandsTracker),
                         mode == EnrichmentMode.DIFF ? CaptureMode.DIFF : CaptureMode.FULL,
                         serverIdentity.serverId().shortName(),
@@ -1207,9 +1419,37 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
         };
     }
 
+    protected TxEnrichmentVisitor createTxStateEnrichmentVisitor(
+            TxStateVisitor parent,
+            CaptureMode captureMode,
+            String serverId,
+            KernelVersionProvider kernelVersionProvider,
+            EnrichmentCommandFactory enrichmentCommandFactory,
+            ReadableTransactionState txState,
+            Map<String, Object> userMetadata,
+            long lastTransactionIdWhenStarted,
+            StorageReader store,
+            CursorContext cursorContext,
+            StoreCursors storeCursors,
+            MemoryTracker memoryTracker) {
+        return new TxEnrichmentVisitor(
+                parent,
+                captureMode,
+                serverId,
+                kernelVersionProvider,
+                enrichmentCommandFactory,
+                txState,
+                userMetadata,
+                lastTransactionIdWhenStarted,
+                store,
+                cursorContext,
+                storeCursors,
+                memoryTracker);
+    }
+
     // Because of current constraint creation dance we need to refresh context version to be able
     // to read schema records that were created in inner transactions
-    private void schemaTransactionVersionReset() {
+    public void schemaTransactionVersionReset() {
         if (isSchemaTransaction()) {
             cursorContext.getVersionContext().initRead();
             transactionEvent.refreshVisibilityBoundary();
@@ -1218,6 +1458,9 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
 
     private void rollbackTransaction() throws KernelException {
         try {
+            if (availabilityGuard.isShutdown()) {
+                throw DatabaseShutdownException.databaseUnavailable(namedDatabaseId.name());
+            }
             if (hasTxStateWithChanges()) {
                 try (var rollbackEvent = transactionEvent.beginRollback()) {
                     committer.rollback(rollbackEvent);
@@ -1228,19 +1471,14 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
                     try {
                         dropCreatedConstraintIndexes();
                     } catch (IllegalStateException | SecurityException e) {
-                        throw new TransactionFailureException(
-                                Status.Transaction.TransactionRollbackFailed,
-                                e,
-                                "Could not drop created constraint indexes");
+                        throw TransactionFailureException.cannotRollbackCannotDropCreatedConstraintIndex(e);
                     }
                 }
             }
         } catch (KernelException | RuntimeException | Error e) {
             throw e;
         } catch (Throwable throwable) {
-            var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_40N01)
-                    .build();
-            throw new UnspecifiedKernelException(gql, Status.Transaction.TransactionRollbackFailed, throwable);
+            throw UnspecifiedKernelException.transactionRollbackFailed(throwable);
         } finally {
             afterRollback();
         }
@@ -1307,6 +1545,15 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
         return leaseClient;
     }
 
+    /**
+     * return lease id that was assigned to transaction in case it was switched to be a write transaction
+     * Method does not check if lease is still valid and should only be used for monitoring lease ids from
+     * other threads for example for monitoring.
+     */
+    public int getLeaseId() {
+        return leaseId;
+    }
+
     @Override
     public CursorFactory cursors() {
         return operations.cursors();
@@ -1323,8 +1570,8 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
     }
 
     @Override
-    public StorageEngineCostCharacteristics storageEngineCostCharacteristics() {
-        return storageEngine.costCharacteristics();
+    public StorageEngineCharacteristics storageEngineCharacteristics() {
+        return storageEngine.characteristics();
     }
 
     public LockTracer lockTracer() {
@@ -1335,7 +1582,7 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
         try {
             markAsClosed();
             transactionEventListeners.afterCommit();
-            kernelTransactionMonitor.afterCommit(this);
+            monitor.afterCommit(this);
         } finally {
             transactionMonitor.transactionFinished(true, hasTxState());
             transactionExecutionMonitor.commit(this);
@@ -1364,10 +1611,11 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
      * This method is guarded by {@link #terminationReleaseLock} to coordinate concurrent
      * {@link #markForTermination(Status)} calls.
      */
-    private void reset() {
+    protected void reset() {
         terminationReleaseLock.lock();
         Throwable error = null;
         try {
+            leaseId = NO_LEASE;
             try {
                 lockClient.close();
             } catch (RuntimeException | Error e) {
@@ -1398,7 +1646,7 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
             statusDetails = EMPTY;
             clientInfo = null;
             internalTransaction = null;
-            transactionSequenceNumber = 0;
+            transactionSequenceNumber = TRANSACTION_SEQUENCE_INITIAL_VALUE;
             try {
                 statistics.reset();
             } catch (RuntimeException | Error e) {
@@ -1453,6 +1701,7 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
                 error = Exceptions.chain(error, e);
             }
             innerTransactionHandler = null;
+            defaultQueryLanguageScope.reset();
         } finally {
             terminationReleaseLock.unlock();
         }
@@ -1462,6 +1711,7 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
         }
     }
 
+    @Override
     public void retryQuery() {
         transactionMonitor.transactionRetry();
         transactionLocalRetries++;
@@ -1481,6 +1731,11 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
     }
 
     private void releaseStorageEngineResources() {
+        if (availabilityGuard.isShutdown()) {
+            // Database is shutdown now and we can't do any writes anymore.
+            // Recovery will be triggered and should mark properly all the non released resources.
+            throw DatabaseShutdownException.databaseUnavailable(namedDatabaseId.name());
+        }
         if (txState != null) {
             storageEngine.release(txState, cursorContext, commandCreationContext, !commit);
         }
@@ -1551,15 +1806,12 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
 
     /**
      * This method will be invoked by concurrent threads for inspecting the locks held by this transaction.
-     * <p>
-     * The fact that {@link #lockClient} is a volatile fields, grants us enough of a read barrier to get a good
-     * enough snapshot of the lock state (as long as the underlying methods give us such guarantees).
      *
      * @return the locks held by this transaction.
      */
-    public Collection<ActiveLock> activeLocks() {
+    public Collection<ActiveLock> activeLocks(MemoryTracker memoryTracker) {
         LockManager.Client locks = this.lockClient;
-        return locks == null ? Collections.emptyList() : locks.activeLocks();
+        return locks == null ? Collections.emptyList() : locks.activeLocks(memoryTracker);
     }
 
     @Override
@@ -1613,7 +1865,11 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
     }
 
     @Override
-    public InnerTransactionHandlerImpl getInnerTransactionHandler() {
+    public InnerTransactionHandler getInnerTransactionHandler() {
+        return innerTransactionHandler();
+    }
+
+    private InnerTransactionHandlerImpl innerTransactionHandler() {
         var handle = innerTransactionHandler;
         if (handle != null) {
             return this.innerTransactionHandler;
@@ -1622,13 +1878,8 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
     }
 
     private void assertNoInnerTransactions() throws TransactionFailureException {
-        if (getInnerTransactionHandler().hasInnerTransaction()) {
-            var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_2DN07)
-                    .build();
-            throw new TransactionFailureException(
-                    gql,
-                    TransactionCommitFailed,
-                    "The transaction cannot be committed when it has open inner transactions.");
+        if (innerTransactionHandler().hasInnerTransaction()) {
+            throw TransactionFailureException.innerTransactionsStillOpen();
         }
     }
 
@@ -1638,10 +1889,29 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
                 : SerialExecutionGuard.EMPTY_GUARD;
     }
 
+    private TxStateMemoryConsumer createMemoryConsumer(boolean multiVersioned, LocalConfig config) {
+        return multiVersioned ? new MultiVersionTxStateMemoryConsumer(config) : TxStateMemoryConsumer.EMPTY_CONSUMER;
+    }
+
     private ChunkedTransactionSink createChunkWriter(boolean multiVersioned) {
         return multiVersioned
-                ? new ChunkSink(committer, transactionEventListeners, clocks, config)
+                ? new ChunkSink(
+                        committer,
+                        transactionEventListeners,
+                        clocks,
+                        config,
+                        logProvider,
+                        exceptionHandlerService,
+                        transactionMonitor)
                 : ChunkedTransactionSink.EMPTY;
+    }
+
+    /**
+     * Taken by the committer just before it captures the {@code KernelVersion} to stamp on this transaction's
+     * command batch(es) See {@link RaftUpgradeBarrier}.
+     */
+    public org.neo4j.lock.Lock enterRaftUpgradeBarrier() {
+        return raftUpgradeBarrier.enter();
     }
 
     private TransactionCommitter createCommitter(
@@ -1789,8 +2059,24 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
         return operations.propertyCursor();
     }
 
+    @Override
+    public DefaultQueryLanguageScope defaultQueryLanguageScope() {
+        return defaultQueryLanguageScope;
+    }
+
+    @Override
+    public ExceptionHandlerService exceptionHandlerService() {
+        return exceptionHandlerService;
+    }
+
+    @Override
+    public Schema schema() {
+        return new SchemaImpl(this);
+    }
+
     public void ensureValid() throws LeaseException {
         leaseClient.ensureValid();
+        this.leaseId = leaseClient.leaseId();
     }
 
     private void registerConfigChangeListeners(LocalConfig config) {
@@ -1817,14 +2103,14 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
         DATA {
             @Override
             TransactionWriteState upgradeToSchemaWrites() throws InvalidTransactionTypeKernelException {
-                throw new InvalidTransactionTypeKernelException(
+                throw InvalidTransactionTypeKernelException.invalidTransactionType(
                         "Cannot perform schema updates in a transaction that has performed data updates.");
             }
         },
         SCHEMA {
             @Override
             TransactionWriteState upgradeToDataWrites() throws InvalidTransactionTypeKernelException {
-                throw new InvalidTransactionTypeKernelException(
+                throw InvalidTransactionTypeKernelException.invalidTransactionType(
                         "Cannot perform data updates in a transaction that has performed schema updates.");
             }
         };
@@ -1847,10 +2133,11 @@ public class KernelTransactionImplementation implements KernelTransaction, TxSta
                 CursorContext transactionCursorContext,
                 Supplier<ClockContext> clockContextSupplier,
                 KernelTransaction ktx,
-                ProcedureView procedureView);
+                ProcedureView procedureView,
+                HeapEstimatorCacheConfig heapEstimatorCacheConfig);
     }
 
-    private interface CommandDecorator extends Decorator {
+    protected interface CommandDecorator extends Decorator {
         default List<StorageCommand> transform(List<StorageCommand> storageCommands) {
             // no enrichment is occurring
             return storageCommands;

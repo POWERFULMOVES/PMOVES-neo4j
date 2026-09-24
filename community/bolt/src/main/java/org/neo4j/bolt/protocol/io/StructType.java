@@ -39,8 +39,11 @@ public enum StructType {
     DATE_TIME_ZONE_ID_LEGACY('f', 3),
     LOCAL_DATE_TIME('d', 2),
     DURATION('E', 4),
+    ENCRYPTED('e', 1), // not used, reserved for encrypted type
     POINT_2D('X', 3),
-    POINT_3D('Y', 4);
+    POINT_3D('Y', 4),
+    VECTOR('V', 2),
+    UNSUPPORTED('?', 4);
 
     private final short tag;
     private final short defaultSize;
@@ -56,6 +59,10 @@ public enum StructType {
 
     StructType(char tag, int defaultSize) {
         this(tag, defaultSize, defaultSize);
+    }
+
+    StructType(int tag, int defaultSize) {
+        this((char) tag, defaultSize);
     }
 
     public short getTag() {

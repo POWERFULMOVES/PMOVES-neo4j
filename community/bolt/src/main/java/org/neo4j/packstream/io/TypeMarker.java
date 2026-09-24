@@ -52,6 +52,7 @@ public enum TypeMarker {
     INT32(0xCA, Type.INT, NONE),
     INT64(0xCB, Type.INT, NONE),
 
+    FLOAT32(0xC6, Type.FLOAT, NONE),
     FLOAT64(0xC1, Type.FLOAT, NONE),
 
     // Prefixed Types
@@ -72,6 +73,8 @@ public enum TypeMarker {
     MAP16(0xD9, Type.MAP, UINT16),
     MAP32(0xDA, Type.MAP, UINT32),
     // FIXME: MAP_STREAM 0xDB
+
+    UUID(0xE0, Type.UUID, NONE),
 
     @Deprecated // Not documented
     STRUCT8(0xDC, Type.STRUCT, UINT8),

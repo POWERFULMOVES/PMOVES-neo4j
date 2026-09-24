@@ -19,8 +19,8 @@ package org.neo4j.cypher.internal.label_expressions
 import org.neo4j.cypher.internal.expressions.BooleanExpression
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.HasMappableExpressions
+import org.neo4j.cypher.internal.expressions.Part2OperatorExpression
 import org.neo4j.cypher.internal.expressions.RelTypeName
-import org.neo4j.cypher.internal.expressions.SymbolicName
 import org.neo4j.cypher.internal.label_expressions.LabelExpression.ColonConjunction
 import org.neo4j.cypher.internal.label_expressions.LabelExpression.ColonDisjunction
 import org.neo4j.cypher.internal.label_expressions.LabelExpression.Conjunctions
@@ -32,22 +32,33 @@ import org.neo4j.cypher.internal.label_expressions.LabelExpression.Wildcard
 import org.neo4j.cypher.internal.util.ASTNode
 import org.neo4j.cypher.internal.util.DeprecatedFeature
 import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.cypher.internal.util.SymbolicName
 import org.neo4j.cypher.internal.util.bottomUp
 
 import scala.annotation.tailrec
 
 /**
- * @param entity          expression to evaluate to the entity we want to check
- * @param isParenthesized indicator if the label expression predicate was parenthesized, e.g. (n:L)
- *                        Note that isParenthesized may be false, even if the predicate was parenthesized.
- *                        Currently, isParenthesized is only set to true for parenthesized
- *                        label expression predicate in the Cypher5 parser.
+ * @param entity             expression to evaluate to the entity we want to check
+ * @param isParenthesized    indicator if the label expression predicate was parenthesized, e.g. (n:L)
+ *                           Note that isParenthesized may be false, even if the predicate was parenthesized.
+ *                           Currently, isParenthesized is only set to true for parenthesized
+ *                           label expression predicate in the Cypher5 parser.
+ * @param hasLabeledKeyword  true when the LABELED keyword was in the original input (e.g. n IS LABELED A)
+ * @param hasNotKeyword      true when IS NOT was used (e.g. n IS NOT A, n IS NOT LABELED A),
+ *                           as opposed to IS !(A) where negation is inside the label expression
  */
 case class LabelExpressionPredicate(
   entity: Expression,
   labelExpression: LabelExpression
-)(val position: InputPosition, val isParenthesized: Boolean)
-    extends BooleanExpression {
+)(
+  val position: InputPosition,
+  val isParenthesized: Boolean,
+  val isPostfix: Boolean = LabelExpressionPredicate.isPostfixDefault,
+  val hasLabeledKeyword: Boolean = LabelExpressionPredicate.hasLabeledKeywordDefault,
+  val hasNotKeyword: Boolean = LabelExpressionPredicate.hasNotKeywordDefault
+) extends BooleanExpression with Part2OperatorExpression {
+  override def lhs: Expression = entity
+
   override def isConstantForQuery: Boolean = false
 
   override def dup(children: Seq[AnyRef]): this.type =
@@ -56,14 +67,17 @@ case class LabelExpressionPredicate(
         LabelExpressionPredicate(
           children.head.asInstanceOf[Expression],
           children(1).asInstanceOf[LabelExpression]
-        )(position, isParenthesized).asInstanceOf[this.type]
+        )(position, isParenthesized, isPostfix, hasLabeledKeyword, hasNotKeyword).asInstanceOf[this.type]
       case 3 =>
         LabelExpressionPredicate(
           children.head.asInstanceOf[Expression],
           children(1).asInstanceOf[LabelExpression]
         )(
           children(2).asInstanceOf[InputPosition],
-          isParenthesized
+          isParenthesized,
+          isPostfix,
+          hasLabeledKeyword,
+          hasNotKeyword
         ).asInstanceOf[this.type]
       case 4 =>
         LabelExpressionPredicate(
@@ -71,15 +85,54 @@ case class LabelExpressionPredicate(
           children(1).asInstanceOf[LabelExpression]
         )(
           children(2).asInstanceOf[InputPosition],
-          children(3).asInstanceOf[Boolean]
+          children(3).asInstanceOf[Boolean],
+          isPostfix,
+          hasLabeledKeyword,
+          hasNotKeyword
         ).asInstanceOf[this.type]
-      case _ => throw new IllegalStateException("LabelExpressionPredicate has at least 2 and at most 4 children.")
+      case 5 =>
+        LabelExpressionPredicate(
+          children.head.asInstanceOf[Expression],
+          children(1).asInstanceOf[LabelExpression]
+        )(
+          children(2).asInstanceOf[InputPosition],
+          children(3).asInstanceOf[Boolean],
+          children(4).asInstanceOf[Boolean],
+          hasLabeledKeyword,
+          hasNotKeyword
+        ).asInstanceOf[this.type]
+      case 6 =>
+        LabelExpressionPredicate(
+          children.head.asInstanceOf[Expression],
+          children(1).asInstanceOf[LabelExpression]
+        )(
+          children(2).asInstanceOf[InputPosition],
+          children(3).asInstanceOf[Boolean],
+          children(4).asInstanceOf[Boolean],
+          children(5).asInstanceOf[Boolean],
+          hasNotKeyword
+        ).asInstanceOf[this.type]
+      case 7 =>
+        LabelExpressionPredicate(
+          children.head.asInstanceOf[Expression],
+          children(1).asInstanceOf[LabelExpression]
+        )(
+          children(2).asInstanceOf[InputPosition],
+          children(3).asInstanceOf[Boolean],
+          children(4).asInstanceOf[Boolean],
+          children(5).asInstanceOf[Boolean],
+          children(6).asInstanceOf[Boolean]
+        ).asInstanceOf[this.type]
+      case _ => throw new IllegalStateException("LabelExpressionPredicate has at least 2 and at most 7 children.")
     }
 }
 
 object LabelExpressionPredicate {
 
   val isParenthesizedDefault: Boolean = false
+  val isPostfixDefault: Boolean = false
+  val hasLabeledKeywordDefault: Boolean = false
+  val hasNotKeywordDefault: Boolean = false
 
   // ... + n:P
   //       ^
@@ -96,7 +149,7 @@ sealed trait LabelExpression extends ASTNode with HasMappableExpressions[LabelEx
   /**
    * Whether this label expression was permitted in Cypher before the introduction of GPM label expressions.
    */
-  def containsGpmSpecificLabelExpression: Boolean = this match {
+  final def containsGpmSpecificLabelExpression: Boolean = this match {
     case conj: ColonConjunction =>
       conj.lhs.containsGpmSpecificLabelExpression || conj.rhs.containsGpmSpecificLabelExpression
     case _: Leaf        => false
@@ -104,7 +157,7 @@ sealed trait LabelExpression extends ASTNode with HasMappableExpressions[LabelEx
     case _              => true
   }
 
-  def containsGpmSpecificRelTypeExpression: Boolean = this match {
+  final def containsGpmSpecificRelTypeExpression: Boolean = this match {
     case Disjunctions(children, _) =>
       children.exists(_.containsGpmSpecificRelTypeExpression)
     case ColonDisjunction(lhs, rhs, _) =>
@@ -122,7 +175,7 @@ sealed trait LabelExpression extends ASTNode with HasMappableExpressions[LabelEx
    * conjunction(:A&B)
    * dynamicLabels (:$(A))
    */
-  def containsMatchSpecificLabelExpression: Boolean = this match {
+  final def containsMatchSpecificLabelExpression: Boolean = this match {
     case conj: ColonConjunction =>
       conj.lhs.containsMatchSpecificLabelExpression || conj.rhs.containsMatchSpecificLabelExpression
     case conj: Conjunctions =>
@@ -136,7 +189,7 @@ sealed trait LabelExpression extends ASTNode with HasMappableExpressions[LabelEx
    * Dynamic Label Expressions are only allowed in:
    * CREATE, MATCH, MERGE, SET and REMOVE clauses at this time.
    */
-  def containsDynamicLabelOrTypeExpression: Boolean = this match {
+  final def containsDynamicLabelOrTypeExpression: Boolean = this match {
     case conj: BinaryLabelExpression =>
       conj.lhs.containsDynamicLabelOrTypeExpression || conj.rhs.containsDynamicLabelOrTypeExpression
     case conj: MultiOperatorLabelExpression => conj.children.exists(expr => expr.containsDynamicLabelOrTypeExpression)
@@ -146,7 +199,7 @@ sealed trait LabelExpression extends ASTNode with HasMappableExpressions[LabelEx
     case _: DynamicLeaf                     => true
   }
 
-  def replaceColonSyntax: LabelExpression = this.endoRewrite(bottomUp({
+  final def replaceColonSyntax: LabelExpression = this.endoRewrite(bottomUp({
     case disj @ ColonDisjunction(lhs, rhs, _) => Disjunctions.flat(lhs, rhs, disj.position, disj.containsIs)
     case conj @ ColonConjunction(lhs, rhs, _) => Conjunctions.flat(lhs, rhs, conj.position, conj.containsIs)
     case disj: Disjunctions                   => disj.unnestDisjunctions
@@ -157,7 +210,9 @@ sealed trait LabelExpression extends ASTNode with HasMappableExpressions[LabelEx
   def flatten: Seq[LabelExpressionLeafName]
 }
 
-trait LabelExpressionLeafName extends SymbolicName
+trait LabelExpressionLeafName extends SymbolicName {
+  def name: String
+}
 
 trait LabelExpressionDynamicLeafExpression extends ASTNode
     with HasMappableExpressions[LabelExpressionDynamicLeafExpression] {
@@ -203,7 +258,12 @@ object LabelExpression {
 
   object Disjunctions {
 
-    def flat(lhs: LabelExpression, rhs: LabelExpression, position: InputPosition, containsIs: Boolean): Disjunctions = {
+    def flat(
+      lhs: LabelExpression,
+      rhs: LabelExpression,
+      position: InputPosition,
+      containsIs: Boolean = false
+    ): Disjunctions = {
       Disjunctions(Vector(lhs, rhs), containsIs)(position).unnestDisjunctions
     }
   }
@@ -231,7 +291,12 @@ object LabelExpression {
 
   object Conjunctions {
 
-    def flat(lhs: LabelExpression, rhs: LabelExpression, position: InputPosition, containsIs: Boolean): Conjunctions = {
+    def flat(
+      lhs: LabelExpression,
+      rhs: LabelExpression,
+      position: InputPosition,
+      containsIs: Boolean = false
+    ): Conjunctions = {
       Conjunctions(Vector(lhs, rhs), containsIs)(position).unnestConjunctions
     }
   }
@@ -266,12 +331,15 @@ object LabelExpression {
   case class Negation(e: LabelExpression, override val containsIs: Boolean = false)(val position: InputPosition)
       extends LabelExpression {
 
-    @tailrec
     final override def flatten: Seq[LabelExpressionLeafName] = {
-      e match {
-        case e: Negation => e.flatten
-        case e           => e.flatten
+      @tailrec
+      def stripNegations(e: LabelExpression): LabelExpression = {
+        e match {
+          case e: Negation => stripNegations(e.e)
+          case e           => e
+        }
       }
+      stripNegations(e).flatten
     }
 
     override def mapExpressions(f: Expression => Expression): LabelExpression = copy(
@@ -309,8 +377,8 @@ object LabelExpression {
     // We are breaking the implicit assumption that every ASTNode has a position as second parameter list.
     // That is why, we need to adjust the dup method's behaviour
     override def dup(children: Seq[AnyRef]): DynamicLeaf.this.type = children match {
-      case Seq(name, containsIs, _: InputPosition) => super.dup(Seq(name, containsIs))
-      case _                                       => super.dup(children)
+      case Seq(name, sContainsIs, _: InputPosition) => super.dup(Seq(name, sContainsIs))
+      case _                                        => super.dup(children)
     }
 
     override def mapExpressions(f: Expression => Expression): DynamicLeaf = copy(

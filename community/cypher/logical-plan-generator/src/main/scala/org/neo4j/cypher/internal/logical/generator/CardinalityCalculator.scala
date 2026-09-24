@@ -25,6 +25,7 @@ import org.neo4j.cypher.internal.compiler.planner.logical.StatisticsBackedCardin
 import org.neo4j.cypher.internal.compiler.planner.logical.cardinality.IndependenceCombiner
 import org.neo4j.cypher.internal.compiler.planner.logical.cardinality.assumeIndependence.AssumeIndependenceQueryGraphCardinalityModel
 import org.neo4j.cypher.internal.compiler.planner.logical.cardinality.assumeIndependence.LabelInferenceStrategy
+import org.neo4j.cypher.internal.compiler.planner.logical.schema.GraphSchemaOptimizations
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.IndexCompatiblePredicatesProviderContext
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.IntegerLiteral
@@ -63,7 +64,6 @@ import org.neo4j.cypher.internal.planner.spi.PlanContext
 import org.neo4j.cypher.internal.util.Cardinality
 import org.neo4j.cypher.internal.util.LabelId
 import org.neo4j.cypher.internal.util.Multiplier
-import org.scalatest.Assertions.fail
 
 trait CardinalityCalculator[-T <: LogicalPlan] {
 
@@ -119,7 +119,9 @@ object CardinalityCalculator {
 
   implicit val expandCardinality: CardinalityCalculator[Expand] = {
     (plan, state, planContext, _) =>
-      val Expand(source, from, dir, relTypes, to, relName, _) = plan
+      val (source, from, dir, relTypes, to, relName) =
+        (plan.source, plan.from, plan.dir, plan.types, plan.to, plan.relName)
+
       val inboundCardinality = state.cardinalities.get(source.id)
       val qg = QueryGraph(
         patternNodes = Set(from, to),
@@ -140,7 +142,8 @@ object CardinalityCalculator {
           state.relTypeInfo,
           state.semanticTable,
           IndexCompatiblePredicatesProviderContext.default,
-          cardinalityModel = null // We don't have SubqueryExpressions
+          cardinalityModel = null, // We don't have SubqueryExpressions
+          GraphSchemaOptimizations.Disabled
         )
       expandCardinality * inboundCardinality
   }
@@ -240,7 +243,7 @@ object CardinalityCalculator {
   private def toIntegerLiteral(count: Expression): IntegerLiteral = {
     count match {
       case x: IntegerLiteral => x
-      case x                 => fail(s"Expected IntegerLiteral but got ${x.getClass}")
+      case x                 => throw new IllegalArgumentException(s"Expected IntegerLiteral but got ${x.getClass}")
     }
   }
 }

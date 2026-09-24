@@ -21,7 +21,6 @@ package org.neo4j.kernel.impl.storemigration;
 
 import java.io.IOException;
 import org.neo4j.configuration.Config;
-import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
@@ -89,13 +88,13 @@ public class AcrossEngineVersionCheck implements MigrationStoreVersionCheck {
                     MigrationOutcome.UNSUPPORTED_TARGET_VERSION, currentVersion, targetVersion, null);
         }
 
-        Boolean includeFormatsUnderDevelopment =
-                config.get(GraphDatabaseInternalSettings.include_versions_under_development);
-        StoreFormatLimits srcFormatLimits =
-                srcStorageEngineFactory.limitsForFormat(currentVersion.getFormatName(), includeFormatsUnderDevelopment);
+        if (srcStorageEngineFactory.name().equals("block") && "standard".equals(formatToMigrateTo)) {
+            return new MigrationCheckResult(
+                    MigrationOutcome.UNSUPPORTED_MIGRATION_PATH, currentVersion, targetVersion, null);
+        }
 
-        StoreFormatLimits targetFormatLimits =
-                targetStorageEngineFactory.limitsForFormat(formatToMigrateTo, includeFormatsUnderDevelopment);
+        StoreFormatLimits srcFormatLimits = srcStorageEngineFactory.limitsForFormat(currentVersion.getFormatName());
+        StoreFormatLimits targetFormatLimits = targetStorageEngineFactory.limitsForFormat(formatToMigrateTo);
 
         if (goingToLowerLimits(srcFormatLimits, targetFormatLimits)) {
             try {

@@ -32,6 +32,13 @@ trait ExternalCSVResource {
     bufferSize: Int,
     headers: Boolean = false
   ): LoadCsvIterator
+
+  /**
+   * Get a snapshot of the total number of lines read so far from the CSV files in this resource.
+   * This needs to be thread-safe as it can be called from a different thread than the one that
+   * is actually reading the CSV files, e.g. a SHOW TRANSACTIONS command.
+   */
+  def getFileLinesRead: Long
 }
 
 trait LoadCsvIterator extends ClosingIterator[Array[Value]] {

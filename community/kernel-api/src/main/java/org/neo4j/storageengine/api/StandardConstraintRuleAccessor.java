@@ -19,6 +19,7 @@
  */
 package org.neo4j.storageengine.api;
 
+import org.neo4j.common.TokenNameLookup;
 import org.neo4j.internal.kernel.api.exceptions.schema.CreateConstraintFailureException;
 import org.neo4j.internal.schema.ConstraintDescriptor;
 import org.neo4j.internal.schema.constraints.KeyConstraintDescriptor;
@@ -35,36 +36,40 @@ public class StandardConstraintRuleAccessor implements ConstraintRuleAccessor {
 
     @Override
     public ConstraintDescriptor createUniquenessConstraintRule(
-            long ruleId, UniquenessConstraintDescriptor constraint, long indexId) {
-        return constraint.withId(ruleId).withOwnedIndexId(indexId);
+            UniquenessConstraintDescriptor constraint, long indexId) {
+        return constraint.withOwnedIndexId(indexId);
     }
 
     @Override
-    public ConstraintDescriptor createKeyConstraintRule(long ruleId, KeyConstraintDescriptor constraint, long indexId) {
-        return constraint.withId(ruleId).withOwnedIndexId(indexId);
+    public ConstraintDescriptor createKeyConstraintRule(
+            KeyConstraintDescriptor constraint, long indexId, TokenNameLookup tokenNameLookup) {
+        return constraint.withOwnedIndexId(indexId);
     }
 
     @Override
-    public ConstraintDescriptor createExistenceConstraint(long ruleId, ConstraintDescriptor constraint) {
-        return constraint.withId(ruleId);
+    public ConstraintDescriptor createExistenceConstraint(
+            ConstraintDescriptor constraint, TokenNameLookup tokenNameLookup) {
+        return constraint;
     }
 
     @Override
-    public ConstraintDescriptor createPropertyTypeConstraint(long ruleId, TypeConstraintDescriptor constraint)
+    public ConstraintDescriptor createPropertyTypeConstraint(
+            TypeConstraintDescriptor constraint, TokenNameLookup tokenNameLookup)
             throws CreateConstraintFailureException {
-        return constraint.withId(ruleId);
+        return constraint;
     }
 
     @Override
     public ConstraintDescriptor createRelationshipEndpointLabelConstraint(
-            long ruleId, RelationshipEndpointLabelConstraintDescriptor constraint)
+            RelationshipEndpointLabelConstraintDescriptor constraint, TokenNameLookup tokenNameLookup)
             throws CreateConstraintFailureException {
-        return constraint.withId(ruleId);
+        return constraint;
     }
 
     @Override
     public ConstraintDescriptor createNodeLabelExistenceConstraint(
-            long ruleId, NodeLabelExistenceConstraintDescriptor constraint) throws CreateConstraintFailureException {
-        return constraint.withId(ruleId);
+            NodeLabelExistenceConstraintDescriptor constraint, TokenNameLookup tokenNameLookup)
+            throws CreateConstraintFailureException {
+        return constraint;
     }
 }

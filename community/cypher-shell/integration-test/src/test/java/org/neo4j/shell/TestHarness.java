@@ -19,7 +19,8 @@
  */
 package org.neo4j.shell;
 
-import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.neo4j.shell.ShellRunner.shouldBeInteractive;
 import static org.neo4j.shell.terminal.CypherShellTerminalBuilder.terminalBuilder;
@@ -28,9 +29,12 @@ import static org.neo4j.shell.test.Util.testConnectionConfig;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.io.PrintWriter;
+import java.util.Collections;
+import java.util.Optional;
 import net.sourceforge.argparse4j.inf.ArgumentParserException;
 import org.neo4j.function.ThrowingConsumer;
 import org.neo4j.function.ThrowingFunction;
+import org.neo4j.shell.TransactionHandler.TransactionType;
 import org.neo4j.shell.cli.AccessMode;
 import org.neo4j.shell.cli.Format;
 import org.neo4j.shell.completions.CompletionEngine;
@@ -41,6 +45,7 @@ import org.neo4j.shell.parameter.ParameterService;
 import org.neo4j.shell.prettyprint.PrettyConfig;
 import org.neo4j.shell.prettyprint.PrettyPrinter;
 import org.neo4j.shell.printer.AnsiPrinter;
+import org.neo4j.shell.state.BoltResult;
 import org.neo4j.shell.state.BoltStateHandler;
 import org.neo4j.shell.terminal.CypherShellTerminal;
 import org.neo4j.shell.terminal.TestSimplePrompt;
@@ -52,8 +57,17 @@ public class TestHarness {
     public static final String USER = "neo4j";
     public static final String PASSWORD = "neo";
 
-    protected final Version serverVersion = Versions.version(runInDbAndReturn("", CypherShell::getServerVersion));
-    protected final Version protocolVersion = Versions.version(runInDbAndReturn("", CypherShell::getProtocolVersion));
+    protected final Version serverVersion;
+    protected final Version protocolVersion;
+
+    TestHarness() {
+        try {
+            serverVersion = Versions.version(runInDbAndReturn("", CypherShell::getServerVersion));
+            protocolVersion = Versions.version(runInDbAndReturn("", CypherShell::getProtocolVersion));
+        } catch (Versions.FailedToParseException e) {
+            throw new RuntimeException(e);
+        }
+    }
 
     AssertableMain.AssertableMainBuilder buildTest() {
         return new TestBuilder().outputInteractive(true);
@@ -93,15 +107,15 @@ public class TestHarness {
 
         @Override
         public AssertableMain run(boolean closeMain) throws ArgumentParserException, IOException {
-            assertNull(runnerFactory);
-            assertNull(shell);
+            assertThat(runnerFactory).isNull();
+            assertThat(shell).isNull();
             var args = parseArgs();
             var outPrintStream = new PrintStream(out);
             var errPrintStream = new PrintStream(err);
-            var logger = new AnsiPrinter(Format.VERBOSE, outPrintStream, errPrintStream);
+            var logger = new AnsiPrinter(Format.VERBOSE, args.getErrorFormat(), outPrintStream, errPrintStream);
             if (this.boltStateHandler == null) {
-                this.boltStateHandler =
-                        new BoltStateHandler(shouldBeInteractive(args, isOutputInteractive), args.getAccessMode());
+                this.boltStateHandler = new BoltStateHandler(
+                        shouldBeInteractive(args, isOutputInteractive), args.getAccessMode(), args.getTxTimeout());
             }
             if (this.parameters == null) {
                 this.parameters = ParameterService.create(boltStateHandler);
@@ -110,7 +124,7 @@ public class TestHarness {
             if (this.dbInfo == null) {
                 this.dbInfo = new DbInfoImpl(parameters, boltStateHandler, completionsEnabledByConfig);
             }
-            var completionEngine = new CompletionEngine(dbInfo);
+            var completionEngine = new CompletionEngine(dbInfo, boltStateHandler);
 
             var terminalBuilder = terminalBuilder()
                     .dumb()
@@ -142,11 +156,47 @@ public class TestHarness {
     }
 
     protected void assumeAtLeastVersion(String version) {
-        assumeTrue(serverVersion.compareTo(Versions.version(version)) > 0);
+        assumeTrue(isAtLeastVersion(version));
+    }
+
+    protected boolean isAtLeastVersion(String version) {
+        try {
+            return serverVersion.compareTo(Versions.version(version)) >= 0;
+        } catch (Versions.FailedToParseException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     protected void assumeVersionBefore(String version) {
-        assumeTrue(serverVersion.compareTo(Versions.version(version)) < 0);
+        try {
+            assumeTrue(serverVersion.compareTo(Versions.version(version)) < 0);
+        } catch (Versions.FailedToParseException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    protected void assumeIsEnterpriseEdition() {
+        assumeFalse(isCommunityEdition());
+    }
+
+    protected void assumeIsCommunityEdition() {
+        assumeTrue(isCommunityEdition());
+    }
+
+    protected boolean isCommunityEdition() {
+        var query = """
+            CALL dbms.components()
+            YIELD name, edition
+            WHERE name = 'Neo4j Kernel'
+            RETURN edition
+        """;
+        return runInDbAndReturn("", shell -> {
+            Optional<BoltResult> result = shell.runCypher(query, Collections.emptyMap(), TransactionType.USER_ACTION);
+            return result.map(boltResult -> boltResult.getRecords().stream()
+                            .anyMatch(record -> "community"
+                                    .equalsIgnoreCase(record.get("edition").asString())))
+                    .orElse(false);
+        });
     }
 
     protected void runInSystemDb(ThrowingConsumer<CypherShell, Exception> systemDbConsumer) {
@@ -166,7 +216,7 @@ public class TestHarness {
     protected <T> T runInDbAndReturn(String database, ThrowingFunction<CypherShell, T, Exception> systemDbConsumer) {
         CypherShell shell = null;
         try {
-            var boltHandler = new BoltStateHandler(false, AccessMode.WRITE);
+            var boltHandler = new BoltStateHandler(false, AccessMode.WRITE, Optional.empty());
             var printer = new PrettyPrinter(new PrettyConfig(Format.PLAIN, false, 100, false));
             var parameters = ParameterService.create(boltHandler);
             var dbInfo = new DbInfoImpl(parameters, boltHandler, true);

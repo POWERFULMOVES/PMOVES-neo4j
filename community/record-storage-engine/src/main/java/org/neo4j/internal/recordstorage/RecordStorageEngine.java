@@ -20,11 +20,13 @@
 package org.neo4j.internal.recordstorage;
 
 import static java.util.Collections.emptyList;
-import static org.neo4j.configuration.GraphDatabaseInternalSettings.multiversion_index_commands_enabled;
+import static org.neo4j.configuration.GraphDatabaseInternalSettings.counts_store_max_cached_entries;
 import static org.neo4j.function.ThrowingAction.executeAll;
+import static org.neo4j.internal.recordstorage.RecordStorageCommandHandling.handleRecordStorageCommands;
 import static org.neo4j.internal.recordstorage.RecordStorageEngineFactory.ID;
 import static org.neo4j.internal.recordstorage.RecordStorageEngineFactory.NAME;
 import static org.neo4j.lock.LockService.NO_LOCK_SERVICE;
+import static org.neo4j.storageengine.api.TransactionApplicationMode.MVCC_INCOMPLETE_REVERSE_RECOVERY;
 import static org.neo4j.storageengine.api.TransactionApplicationMode.RECOVERY;
 import static org.neo4j.util.Preconditions.checkState;
 
@@ -49,17 +51,20 @@ import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.counts.CountsStore;
 import org.neo4j.counts.CountsUpdater;
 import org.neo4j.exceptions.KernelException;
+import org.neo4j.exceptions.UnderlyingStorageException;
 import org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector;
+import org.neo4j.internal.batchimport.cache.NumberArrayFactories;
+import org.neo4j.internal.batchimport.cache.NumberArrayFactory;
 import org.neo4j.internal.counts.CountsBuilder;
 import org.neo4j.internal.counts.CountsStoreProvider;
-import org.neo4j.internal.counts.DegreeStoreProvider;
 import org.neo4j.internal.counts.DegreesRebuildFromStore;
+import org.neo4j.internal.counts.GBPTreeGenericCountsStore;
+import org.neo4j.internal.counts.GBPTreeRelationshipGroupDegreesStore;
 import org.neo4j.internal.counts.RelationshipGroupDegreesStore;
 import org.neo4j.internal.diagnostics.DiagnosticsLogger;
 import org.neo4j.internal.diagnostics.DiagnosticsManager;
 import org.neo4j.internal.id.IdGeneratorFactory;
 import org.neo4j.internal.id.IdType;
-import org.neo4j.internal.id.SchemaIdType;
 import org.neo4j.internal.kernel.api.exceptions.TransactionApplyKernelException;
 import org.neo4j.internal.kernel.api.exceptions.TransactionFailureException;
 import org.neo4j.internal.kernel.api.exceptions.schema.ConstraintValidationException;
@@ -67,27 +72,26 @@ import org.neo4j.internal.kernel.api.exceptions.schema.CreateConstraintFailureEx
 import org.neo4j.internal.recordstorage.Command.RecordEnrichmentCommand;
 import org.neo4j.internal.recordstorage.NeoStoresDiagnostics.NeoStoreIdUsage;
 import org.neo4j.internal.recordstorage.NeoStoresDiagnostics.NeoStoreRecords;
-import org.neo4j.internal.recordstorage.indexcommand.IndexRecordState;
-import org.neo4j.internal.recordstorage.indexcommand.TransactionToIndexUpdateVisitor;
-import org.neo4j.internal.recordstorage.validation.TransactionCommandValidatorFactory;
+import org.neo4j.internal.recordstorage.TransactionAppliersDispatcherFactory.IdUpdateListenerFactory;
 import org.neo4j.internal.schema.IndexConfigCompleter;
 import org.neo4j.internal.schema.SchemaCache;
+import org.neo4j.internal.schema.SchemaRule;
 import org.neo4j.internal.schema.SchemaState;
 import org.neo4j.internal.schema.StorageEngineIndexingBehaviour;
+import org.neo4j.io.async.AsyncBlockAccessor;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.recordstorage.RecordDatabaseFile;
 import org.neo4j.io.layout.recordstorage.RecordDatabaseLayout;
 import org.neo4j.io.pagecache.OutOfDiskSpaceException;
 import org.neo4j.io.pagecache.PageCache;
-import org.neo4j.io.pagecache.PageCacheOpenOptions;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.impl.muninn.VersionStorage;
 import org.neo4j.io.pagecache.prefetch.PagePrefetcher;
 import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.KernelVersion;
-import org.neo4j.kernel.KernelVersionRepository;
 import org.neo4j.kernel.impl.store.CountsComputer;
 import org.neo4j.kernel.impl.store.MetaDataStore;
 import org.neo4j.kernel.impl.store.NeoStores;
@@ -98,10 +102,9 @@ import org.neo4j.kernel.impl.store.cursor.CachedStoreCursors;
 import org.neo4j.kernel.impl.store.record.AbstractBaseRecord;
 import org.neo4j.kernel.impl.store.stats.RecordDatabaseEntityCounters;
 import org.neo4j.kernel.impl.store.stats.StoreEntityCounters;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
 import org.neo4j.kernel.lifecycle.Lifecycle;
 import org.neo4j.kernel.lifecycle.LifecycleAdapter;
-import org.neo4j.lock.LockGroup;
+import org.neo4j.kernel.recovery.RecoveryStartupChecker;
 import org.neo4j.lock.LockService;
 import org.neo4j.lock.LockTracer;
 import org.neo4j.lock.ResourceLocker;
@@ -111,19 +114,18 @@ import org.neo4j.memory.MemoryTracker;
 import org.neo4j.monitoring.DatabaseHealth;
 import org.neo4j.storageengine.api.CommandBatch;
 import org.neo4j.storageengine.api.CommandCreationContext;
+import org.neo4j.storageengine.api.CommandReaderFactory;
 import org.neo4j.storageengine.api.ConstraintRuleAccessor;
 import org.neo4j.storageengine.api.IndexUpdateListener;
-import org.neo4j.storageengine.api.InternalErrorTracer;
+import org.neo4j.storageengine.api.LogMetadataProvider;
 import org.neo4j.storageengine.api.StorageCommand;
 import org.neo4j.storageengine.api.StorageEngine;
-import org.neo4j.storageengine.api.StorageEngineCostCharacteristics;
+import org.neo4j.storageengine.api.StorageEngineCharacteristics;
 import org.neo4j.storageengine.api.StorageEngineTransaction;
+import org.neo4j.storageengine.api.StorageFileSelection;
 import org.neo4j.storageengine.api.StorageLocks;
 import org.neo4j.storageengine.api.StorageReader;
-import org.neo4j.storageengine.api.StoreFileMetadata;
-import org.neo4j.storageengine.api.StoreId;
 import org.neo4j.storageengine.api.TransactionApplicationMode;
-import org.neo4j.storageengine.api.TransactionIdStore;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.storageengine.api.enrichment.Enrichment;
 import org.neo4j.storageengine.api.enrichment.EnrichmentCommand;
@@ -137,7 +139,9 @@ import org.neo4j.storageengine.util.IdGeneratorUpdatesWorkSync;
 import org.neo4j.storageengine.util.IdUpdateListener;
 import org.neo4j.storageengine.util.IndexUpdatesWorkSync;
 import org.neo4j.token.TokenHolders;
+import org.neo4j.token.api.TokensLoader;
 import org.neo4j.util.VisibleForTesting;
+import org.neo4j.wal.entry.LogFormat;
 
 public class RecordStorageEngine implements StorageEngine, Lifecycle {
     private static final String STORAGE_ENGINE_START_TAG = "storageEngineStart";
@@ -160,22 +164,22 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
     private final boolean parallelIndexUpdatesApply;
     private final InternalLog log;
     private final PagePrefetcher pagePrefetcher;
+    private final String format;
     private IndexUpdatesWorkSync indexUpdatesSync;
     private final IdGeneratorFactory idGeneratorFactory;
+    private final LogMetadataProvider logMetadataProvider;
     private final CursorContextFactory contextFactory;
     private final MemoryTracker otherMemoryTracker;
-    final KernelVersionRepository kernelVersionRepository;
     private final LockVerificationFactory lockVerificationFactory;
     private final CountsStore countsStore;
     private final RelationshipGroupDegreesStore groupDegreesStore;
     private final int denseNodeThreshold;
     private final IdGeneratorUpdatesWorkSync idGeneratorWorkSyncs;
-    private final Map<TransactionApplicationMode, TransactionApplierFactoryChain> applierChains =
+    private final Map<TransactionApplicationMode, TransactionAppliersDispatcherFactory> applierDispatchers =
             new EnumMap<>(TransactionApplicationMode.class);
     private final RecordDatabaseEntityCounters storeEntityCounters;
     private final RecordStorageIndexingBehaviour indexingBehaviour;
-    private final RecordStorageCostCharacteristics costCharacteristics;
-    private final boolean multiVersion;
+    private final RecordStorageCharacteristics characteristics;
     private final TransactionStateBehaviour txStateBehaviour;
 
     // installed later
@@ -198,13 +202,12 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
             IdGeneratorFactory idGeneratorFactory,
             RecoveryCleanupWorkCollector recoveryCleanupWorkCollector,
             MemoryTracker otherMemoryTracker,
-            LogTailMetadata logTailMetadata,
-            KernelVersionRepository kernelVersionRepository,
-            LockVerificationFactory lockVerificationFactory,
+            LogMetadataProvider logMetadataProvider,
             CursorContextFactory contextFactory,
             PageCacheTracer pageCacheTracer,
             VersionStorage versionStorage,
-            PagePrefetcher pagePrefetcher) {
+            PagePrefetcher pagePrefetcher,
+            DatabaseCreationOptions databaseCreationOptions) {
         this.databaseLayout = databaseLayout;
         this.config = config;
         this.internalLogProvider = internalLogProvider;
@@ -215,10 +218,9 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
         this.databaseHealth = databaseHealth;
         this.constraintSemantics = constraintSemantics;
         this.idGeneratorFactory = idGeneratorFactory;
+        this.logMetadataProvider = logMetadataProvider;
         this.contextFactory = contextFactory;
         this.otherMemoryTracker = otherMemoryTracker;
-        this.kernelVersionRepository = kernelVersionRepository;
-        this.lockVerificationFactory = lockVerificationFactory;
         this.pagePrefetcher = pagePrefetcher;
         this.neoStores = new StoreFactory(
                         databaseLayout,
@@ -230,18 +232,18 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
                         internalLogProvider,
                         contextFactory,
                         false,
-                        logTailMetadata)
+                        databaseCreationOptions)
                 .openAllNeoStores();
+        this.format = this.neoStores.getRecordFormats().name();
+        this.lockVerificationFactory = LockVerificationFactory.select(config);
         this.idGeneratorWorkSyncs = new IdGeneratorUpdatesWorkSync(false);
         Stream.of(RecordIdType.values()).forEach(idType -> idGeneratorWorkSyncs.add(idGeneratorFactory.get(idType)));
-        Stream.of(SchemaIdType.values()).forEach(idType -> idGeneratorWorkSyncs.add(idGeneratorFactory.get(idType)));
 
         this.indexingBehaviour = new RecordStorageIndexingBehaviour(
                 neoStores.getNodeStore().getRecordsPerPage(),
                 neoStores.getRelationshipStore().getRecordsPerPage());
-        this.costCharacteristics = new RecordStorageCostCharacteristics();
-        this.multiVersion = neoStores.getOpenOptions().contains(PageCacheOpenOptions.MULTI_VERSIONED);
-        txStateBehaviour = new RecordTransactionStateBehaviour(useIndexCommands());
+        this.characteristics = new RecordStorageCharacteristics();
+        txStateBehaviour = new RecordTransactionStateBehaviour();
         try {
             schemaRuleAccess = SchemaRuleAccess.getSchemaRuleAccess(neoStores.getSchemaStore(), tokenHolders);
             schemaCache = new SchemaCache(constraintSemantics, indexConfigCompleter, indexingBehaviour);
@@ -271,11 +273,10 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
                     recoveryCleanupWorkCollector,
                     config,
                     contextFactory,
-                    pageCacheTracer,
-                    versionStorage);
+                    pageCacheTracer);
 
             consistencyCheckApply = config.get(GraphDatabaseInternalSettings.consistency_check_on_apply);
-            storeEntityCounters = new RecordDatabaseEntityCounters(idGeneratorFactory, countsStore);
+            storeEntityCounters = new RecordDatabaseEntityCounters(idGeneratorFactory, countsStore, schemaCache);
             parallelIndexUpdatesApply = config.get(GraphDatabaseInternalSettings.parallel_index_updates_apply);
         } catch (Throwable failure) {
             neoStores.close();
@@ -283,55 +284,30 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
         }
     }
 
-    private void buildApplierChains() {
-        var kernelVersionApplierFactory = new KernelVersionTransactionApplierFactory(kernelVersionRepository);
-        for (TransactionApplicationMode mode : TransactionApplicationMode.values()) {
-            applierChains.put(mode, buildApplierFacadeChain(mode, kernelVersionApplierFactory));
-        }
-    }
-
-    private TransactionApplierFactoryChain buildApplierFacadeChain(
+    private TransactionAppliersDispatcherFactory buildRegularAppliersDispatcherFactory(
             TransactionApplicationMode mode, KernelVersionTransactionApplierFactory kernelVersionApplierFactory) {
-        TransactionApplierFactoryChain.IdUpdateListenerFactory idUpdateListenerFunction =
-                mode.isReverseStep() ? (w, c) -> IdUpdateListener.IGNORE : IdGeneratorUpdatesWorkSync::newBatch;
-        List<TransactionApplierFactory> appliers = new ArrayList<>();
-        // Graph store application. The order of the decorated store appliers is irrelevant
+        var appliers = new ArrayList<TransactionApplierFactory>();
         if (consistencyCheckApply && mode.needsAuxiliaryStores()) {
             appliers.add(new ConsistencyCheckingApplierFactory(neoStores));
         }
         appliers.add(kernelVersionApplierFactory);
-        if (isMultiVersionedFormat()) {
-            appliers.add(new NeoStoreTransactionApplierFactory(mode, neoStores, cacheAccess));
-        } else {
-            appliers.add(
-                    new LockGuardedNeoStoreTransactionApplierFactory(mode, neoStores, cacheAccess, lockService(mode)));
-        }
-        if (mode.rollbackIdProcessing()) {
-            appliers.add((transaction, batchContext) ->
-                    new IdRollbackTransactionApplier(idGeneratorFactory, transaction.cursorContext()));
-        }
+        appliers.add(new LockGuardedNeoStoreTransactionApplierFactory(mode, neoStores, cacheAccess, lockService(mode)));
         if (mode.needsHighIdTracking()) {
             appliers.add(new HighIdTransactionApplierFactory(neoStores));
         }
-        if (isMultiVersionedFormat()) {
-            // in mvcc all modes apply count stores
-            appliers.add(new MultiversionCountStoreTransactionApplierFactory(mode, countsStore));
-            appliers.add(new MultiversionDegreeStoreTransactionApplierFactory(mode, groupDegreesStore));
-        } else if (mode.needsAuxiliaryStores()) {
-            // Counts store application
-            appliers.add(new CountsStoreTransactionApplierFactory(countsStore, groupDegreesStore));
-        }
         if (mode.needsAuxiliaryStores()) {
-            // Schema index application
-            if (useIndexCommands()) {
-                appliers.add(new IndexCommandTransactionApplierFactory(
-                        indexUpdateListener, indexUpdatesSync, schemaCache, mode));
-            } else {
-                appliers.add(new IndexTransactionApplierFactory(mode, indexUpdateListener));
-            }
+            appliers.add(new CountsStoreTransactionApplierFactory(countsStore, groupDegreesStore));
+            appliers.add(new IndexTransactionApplierFactory(mode, indexUpdateListener));
         }
-        return new TransactionApplierFactoryChain(
-                idUpdateListenerFunction, appliers.toArray(TransactionApplierFactory[]::new));
+        return new TransactionAppliersDispatcherFactory(
+                idUpdateListenerFunction(mode), appliers.toArray(TransactionApplierFactory[]::new));
+    }
+
+    private static IdUpdateListenerFactory idUpdateListenerFunction(TransactionApplicationMode mode) {
+        return mode.isReverseStep()
+                ? (w, c) -> IdUpdateListener.IGNORE
+                : (workSync, cursorContext) ->
+                        workSync.newBatch(cursorContext, mode == MVCC_INCOMPLETE_REVERSE_RECOVERY);
     }
 
     private CountsStore openCountsStore(
@@ -356,7 +332,7 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
                         contextFactory,
                         pageCacheTracer,
                         getOpenOptions(),
-                        new RecordCountsBuilder(internalLogProvider, pageCache, contextFactory, layout),
+                        new RecordCountsBuilder(internalLogProvider, fs, contextFactory, layout, logMetadataProvider),
                         false,
                         versionStorage);
     }
@@ -370,28 +346,32 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
             RecoveryCleanupWorkCollector recoveryCleanupWorkCollector,
             Config config,
             CursorContextFactory contextFactory,
-            PageCacheTracer pageCacheTracer,
-            VersionStorage versionStorage) {
-        return DegreeStoreProvider.getInstance()
-                .openDegreesStore(
-                        pageCache,
-                        fs,
-                        layout,
-                        userLogProvider,
-                        recoveryCleanupWorkCollector,
-                        config,
-                        contextFactory,
-                        pageCacheTracer,
-                        new DegreesRebuildFromStore(
-                                pageCache,
-                                neoStores,
-                                databaseLayout,
-                                contextFactory,
-                                internalLogProvider,
-                                Configuration.DEFAULT),
-                        getOpenOptions(),
-                        false,
-                        versionStorage);
+            PageCacheTracer pageCacheTracer) {
+        try {
+            return new GBPTreeRelationshipGroupDegreesStore(
+                    pageCache,
+                    layout.relationshipGroupDegreesStore(),
+                    fs,
+                    recoveryCleanupWorkCollector,
+                    new DegreesRebuildFromStore(
+                            neoStores,
+                            databaseLayout,
+                            logMetadataProvider,
+                            contextFactory,
+                            internalLogProvider,
+                            Configuration.DEFAULT),
+                    false,
+                    GBPTreeGenericCountsStore.NO_MONITOR,
+                    layout.getDatabaseName(),
+                    config.get(counts_store_max_cached_entries),
+                    userLogProvider,
+                    contextFactory,
+                    pageCacheTracer,
+                    getOpenOptions(),
+                    RecoveryStartupChecker.EMPTY_CHECKER);
+        } catch (IOException e) {
+            throw new UnderlyingStorageException(e);
+        }
     }
 
     @Override
@@ -410,26 +390,15 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
     }
 
     @Override
-    public RecordStorageCommandCreationContext newCommandCreationContext(boolean multiVersioned) {
+    public RecordStorageCommandCreationContext newCommandCreationContext(
+            boolean multiVersioned, MemoryTracker memoryTracker) {
         return new RecordStorageCommandCreationContext(
-                neoStores, tokenHolders, internalLogProvider, denseNodeThreshold, config, multiVersioned);
+                neoStores, tokenHolders, internalLogProvider, denseNodeThreshold, config, format);
     }
 
     @Override
     public TransactionValidatorFactory createTransactionValidatorFactory(Config config) {
-        if (!isMultiVersionedFormat()) {
-            return TransactionValidatorFactory.EMPTY_VALIDATOR_FACTORY;
-        }
-        return new TransactionCommandValidatorFactory(neoStores, config, internalLogProvider);
-    }
-
-    private boolean isMultiVersionedFormat() {
-        return multiVersion;
-    }
-
-    private boolean useIndexCommands() {
-        var multiVersion = isMultiVersionedFormat();
-        return multiVersion && config.get(multiversion_index_commands_enabled);
+        return TransactionValidatorFactory.EMPTY_VALIDATOR_FACTORY;
     }
 
     @Override
@@ -496,19 +465,12 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
                 schemaState,
                 schemaRuleAccess,
                 constraintSemantics,
-                cursorContext,
                 storeCursors,
-                multiVersion,
-                memoryTracker);
+                memoryTracker,
+                tokenHolders.lookupWithIds(),
+                format);
         CountsRecordState countsRecordState = new CountsRecordState(serialization);
         txStateVisitor = additionalTxStateVisitor.apply(txStateVisitor);
-        RecordState indexRecordState = RecordState.EMPTY_RECORD_STATE;
-        if (useIndexCommands()) {
-            var commandState = new IndexRecordState(serialization);
-            txStateVisitor = new TransactionToIndexUpdateVisitor(
-                    txStateVisitor, commandState, storageReader, txState, cursorContext, storeCursors, memoryTracker);
-            indexRecordState = commandState;
-        }
         txStateVisitor = new TransactionCountingStateVisitor(
                 txStateVisitor, storageReader, txState, countsRecordState, cursorContext, storeCursors, memoryTracker);
         try (TxStateVisitor visitor = txStateVisitor) {
@@ -517,7 +479,6 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
 
         // Convert record state into commands
         recordState.extractCommands(commands, memoryTracker);
-        indexRecordState.extractCommands(commands, memoryTracker);
         countsRecordState.extractCommands(commands, memoryTracker);
 
         // Verify sufficient locks
@@ -529,34 +490,54 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
     }
 
     @Override
+    public StorageCommand.VersionUpgradeCommand createUpgradeCommand(
+            KernelVersion from, KernelVersion to, LogFormat logFormatTo) {
+        return Command.MetaDataCommand.upgradeCommand(
+                RecordStorageCommandReaderFactory.INSTANCE.get(from), from, to, logFormatTo);
+    }
+
+    @Override
     public EnrichmentCommand createEnrichmentCommand(KernelVersion kernelVersion, Enrichment enrichment) {
         return new RecordEnrichmentCommand(RecordStorageCommandReaderFactory.INSTANCE.get(kernelVersion), enrichment);
     }
 
     @Override
     public void lockRecoveryCommands(
-            CommandBatch commands, LockService lockService, LockGroup lockGroup, TransactionApplicationMode mode) {
-        for (StorageCommand command : commands) {
-            ((Command) command).lockForRecovery(lockService, lockGroup, mode);
-        }
+            CommandBatch commands, LockService.Client lockService, TransactionApplicationMode mode) throws IOException {
+        handleRecordStorageCommands(commands, c -> c.lockForRecovery(lockService, mode));
     }
 
     @Override
-    public void apply(StorageEngineTransaction batch, TransactionApplicationMode mode) throws Exception {
-        TransactionApplierFactoryChain batchApplier = applierChain(mode);
+    public void apply(StorageEngineTransaction batch, TransactionApplicationMode mode, MemoryTracker memoryTracker)
+            throws Exception {
+        TransactionAppliersDispatcherFactory batchApplier = applierDispatcherFactory(mode);
         StorageEngineTransaction initialBatch = batch;
-        try (BatchContext context = createBatchContext(batchApplier, batch)) {
+        try (BatchContext context = createBatchContext(batchApplier, batch, memoryTracker)) {
             while (batch != null) {
-                try (TransactionApplier txApplier = batchApplier.startTx(batch, context)) {
-                    batch.commandBatch().accept(txApplier);
+                if (batch.commandBatch().isEmptyTransaction()) {
+                    applyEmptyTransaction(batch, mode);
+                } else {
+                    try (var txApplier = batchApplier.startTx(batch, context)) {
+                        batch.commandBatch().accept(txApplier);
+                    }
                 }
                 batch = batch.next();
             }
         } catch (Throwable cause) {
-            TransactionApplyKernelException kernelException = new TransactionApplyKernelException(
-                    cause, "Failed to apply transaction: %s", batch == null ? initialBatch : batch);
+            TransactionApplyKernelException kernelException = TransactionApplyKernelException.internalError(
+                    cause,
+                    this.getClass().getSimpleName(),
+                    "Failed to apply transaction: %s",
+                    batch == null ? initialBatch : batch);
             databaseHealth.panic(kernelException);
             throw kernelException;
+        }
+    }
+
+    private void applyEmptyTransaction(StorageEngineTransaction batch, TransactionApplicationMode mode) {
+        if (!mode.isReverseStep()) {
+            countsStore.noCountUpdate(batch.transactionId(), batch.cursorContext());
+            groupDegreesStore.noCountUpdate(batch.transactionId(), batch.cursorContext());
         }
     }
 
@@ -595,14 +576,9 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
     }
 
     private BatchContext createBatchContext(
-            TransactionApplierFactoryChain batchApplier, StorageEngineTransaction initialBatch) {
-        if (useIndexCommands()) {
-            return new IndexlessBatchContext(
-                    indexUpdateListener,
-                    batchApplier.getIdUpdateListener(idGeneratorWorkSyncs, initialBatch.cursorContext()),
-                    otherMemoryTracker);
-        }
-
+            TransactionAppliersDispatcherFactory batchApplier,
+            StorageEngineTransaction initialBatch,
+            MemoryTracker memoryTracker) {
         return new BatchContextImpl(
                 indexUpdateListener,
                 indexUpdatesSync,
@@ -617,12 +593,12 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
     }
 
     /**
-     * Provides a {@link TransactionApplierFactoryChain} that is to be used for all transactions
-     * in a batch. Each transaction is handled by a {@link TransactionApplierFacade} which wraps the
+     * Provides a {@link TransactionAppliersDispatcherFactory} that is to be used for all transactions
+     * in a batch. Each transaction is handled by a {@link TransactionAppliersDispatcher} which wraps the
      * individual {@link TransactionApplier}s returned by the wrapped {@link TransactionApplierFactory}s.
      */
-    protected TransactionApplierFactoryChain applierChain(TransactionApplicationMode mode) {
-        return applierChains.get(mode);
+    protected TransactionAppliersDispatcherFactory applierDispatcherFactory(TransactionApplicationMode mode) {
+        return applierDispatchers.get(mode);
     }
 
     private LockService lockService(TransactionApplicationMode mode) {
@@ -631,7 +607,11 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
 
     @Override
     public void init() {
-        buildApplierChains();
+        var kernelVersionApplierFactory =
+                new KernelVersionTransactionApplierFactory(logMetadataProvider, internalLogProvider);
+        for (TransactionApplicationMode mode : TransactionApplicationMode.values()) {
+            applierDispatchers.put(mode, buildRegularAppliersDispatcherFactory(mode, kernelVersionApplierFactory));
+        }
     }
 
     @Override
@@ -644,10 +624,13 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
     }
 
     @VisibleForTesting
-    public void loadSchemaCache() {
+    public void loadSchemaCache(boolean ignoreUnreadable) {
         try (var cursorContext = contextFactory.create(SCHEMA_CACHE_START_TAG);
                 var storeCursors = new CachedStoreCursors(neoStores, cursorContext)) {
-            schemaCache.load(schemaRuleAccess.getAll(storeCursors, otherMemoryTracker));
+            Iterable<SchemaRule> schemaRules = ignoreUnreadable
+                    ? schemaRuleAccess.getAllIgnoreMalformed(storeCursors, otherMemoryTracker)
+                    : schemaRuleAccess.getAll(storeCursors, otherMemoryTracker);
+            schemaCache.load(schemaRules);
         }
     }
 
@@ -668,17 +651,14 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
     }
 
     @Override
-    public void checkpoint(DatabaseFlushEvent flushEvent, CursorContext cursorContext) throws IOException {
-
+    public void checkpoint(
+            DatabaseFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext)
+            throws IOException {
         log.debug("Checkpointing %s", RecordDatabaseFile.COUNTS_STORE.getName());
-        try (var fileFlushEvent = flushEvent.beginFileFlush()) {
-            countsStore.checkpoint(fileFlushEvent, cursorContext);
-        }
+        countsStore.checkpoint(flushEvent, asyncBlockAccessor, cursorContext);
         log.debug("Checkpointing %s", RecordDatabaseFile.RELATIONSHIP_GROUP_DEGREES_STORE.getName());
-        try (var fileFlushEvent = flushEvent.beginFileFlush()) {
-            groupDegreesStore.checkpoint(fileFlushEvent, cursorContext);
-        }
-        neoStores.checkpoint(flushEvent, cursorContext);
+        groupDegreesStore.checkpoint(flushEvent, asyncBlockAccessor, cursorContext);
+        neoStores.checkpoint(flushEvent, asyncBlockAccessor, cursorContext);
     }
 
     @Override
@@ -688,21 +668,24 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
     }
 
     @Override
-    public void listStorageFiles(Collection<StoreFileMetadata> atomic, Collection<StoreFileMetadata> replayable) {
-        atomic.add(new StoreFileMetadata(databaseLayout.countStore()));
-        atomic.add(new StoreFileMetadata(databaseLayout.relationshipGroupDegreesStore()));
-        for (StoreType type : StoreType.STORE_TYPES) {
-            final RecordStore<AbstractBaseRecord> recordStore = neoStores.getRecordStore(type);
-            StoreFileMetadata metadata = new StoreFileMetadata(recordStore.getStorageFile());
-            replayable.add(metadata);
+    public Collection<Path> listStorageFiles(StorageFileSelection selection) {
+        List<Path> files = new ArrayList<>();
+        if (selection.includeAtomicStoreFiles() && selection.includeRecoverableFiles()) {
+            files.addAll(databaseLayout.countStore().allSegments(neoStores.getFileSystem()));
+            files.addAll(databaseLayout.relationshipGroupDegreesStore().allSegments(neoStores.getFileSystem()));
         }
-    }
-
-    @Override
-    public void listIdFiles(Collection<StoreFileMetadata> target) {
-        for (Path idFile : databaseLayout.idFiles()) {
-            target.add(new StoreFileMetadata(idFile));
+        if (selection.includeReplayableStoreFiles()) {
+            for (StoreType type : StoreType.STORE_TYPES) {
+                final RecordStore<AbstractBaseRecord> recordStore = neoStores.getRecordStore(type);
+                files.addAll(recordStore.getStoreFile().allSegments(neoStores.getFileSystem()));
+            }
         }
+        if (selection.includeIdFiles()) {
+            for (var file : RecordDatabaseFile.values()) {
+                databaseLayout.idFile(file).ifPresent(sp -> files.addAll(sp.allSegments(neoStores.getFileSystem())));
+            }
+        }
+        return files;
     }
 
     /**
@@ -722,20 +705,18 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
     }
 
     @Override
-    public StoreId retrieveStoreId() {
-        return metadataProvider().getStoreId();
-    }
-
-    @Override
-    public Lifecycle schemaAndTokensLifecycle() {
+    public Lifecycle schemaAndTokensLifecycle(boolean ignoreUnreadable) {
         return new LifecycleAdapter() {
             @Override
             public void init() {
                 try (var cursorContext = contextFactory.create(TOKENS_INIT_TAG);
                         var storeCursors = new CachedStoreCursors(neoStores, cursorContext)) {
-                    tokenHolders.setInitialTokens(StoreTokens.allTokens(neoStores), storeCursors, otherMemoryTracker);
+                    TokensLoader tokensLoader = ignoreUnreadable
+                            ? StoreTokens.allReadableTokens(neoStores)
+                            : StoreTokens.allTokens(neoStores);
+                    tokenHolders.setInitialTokens(tokensLoader, storeCursors, otherMemoryTracker);
                 }
-                loadSchemaCache();
+                loadSchemaCache(ignoreUnreadable);
             }
         };
     }
@@ -756,13 +737,13 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
     }
 
     @Override
-    public StoreEntityCounters storeEntityCounters() {
-        return storeEntityCounters;
+    public LogMetadataProvider logMetadataProvider() {
+        return logMetadataProvider;
     }
 
     @Override
-    public InternalErrorTracer internalErrorTracer() {
-        return InternalErrorTracer.NO_TRACER;
+    public StoreEntityCounters storeEntityCounters() {
+        return storeEntityCounters;
     }
 
     @Override
@@ -781,8 +762,8 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
     }
 
     @Override
-    public StorageEngineCostCharacteristics costCharacteristics() {
-        return costCharacteristics;
+    public StorageEngineCharacteristics characteristics() {
+        return characteristics;
     }
 
     @Override
@@ -794,7 +775,7 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
     public void preAllocateStoreFilesForCommands(StorageEngineTransaction batch, TransactionApplicationMode mode)
             throws IOException {
         if (!mode.isReverseStep() && batch != null) {
-            try (PreAllocationTransactionApplier txApplier = new PreAllocationTransactionApplier(neoStores)) {
+            try (var txApplier = new SingleApplierDispatcher(new PreAllocationTransactionApplier(neoStores))) {
                 while (batch != null) {
                     batch.commandBatch().accept(txApplier);
                     batch = batch.next();
@@ -802,6 +783,8 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
             } catch (OutOfDiskSpaceException e) {
                 databaseHealth.outOfDiskSpace(e);
                 throw e;
+            } catch (Exception e) {
+                throw new RuntimeException(e);
             }
         }
     }
@@ -809,52 +792,75 @@ public class RecordStorageEngine implements StorageEngine, Lifecycle {
     @Override
     public void prefetchPagesForCommands(StorageEngineTransaction batch, TransactionApplicationMode mode) {
         if (!mode.isReverseStep() && batch != null) {
-            try (var txApplier = new PrefetchingTransactionApplier(neoStores, pagePrefetcher)) {
+            try (var txApplier =
+                    new SingleApplierDispatcher(new PrefetchingTransactionApplier(neoStores, pagePrefetcher))) {
                 while (batch != null) {
                     batch.commandBatch().accept(txApplier);
                     batch = batch.next();
                 }
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
             }
         }
     }
 
+    @Override
+    public CommandReaderFactory commandReaderFactory() {
+        return RecordStorageCommandReaderFactory.INSTANCE;
+    }
+
     private class RecordCountsBuilder implements CountsBuilder {
         private final InternalLog log;
-        private final PageCache pageCache;
+        private final LogMetadataProvider logMetadataProvider;
+        private final FileSystemAbstraction fs;
         private final CursorContextFactory contextFactory;
         private final RecordDatabaseLayout layout;
 
         public RecordCountsBuilder(
                 InternalLogProvider internalLogProvider,
-                PageCache pageCache,
+                FileSystemAbstraction fs,
                 CursorContextFactory contextFactory,
-                RecordDatabaseLayout layout) {
-            this.pageCache = pageCache;
+                RecordDatabaseLayout layout,
+                LogMetadataProvider logMetadataProvider) {
+            this.fs = fs;
             this.contextFactory = contextFactory;
             this.layout = layout;
             log = internalLogProvider.getLog(MetaDataStore.class);
+            this.logMetadataProvider = logMetadataProvider;
         }
 
         @Override
         public void initialize(CountsUpdater updater, CursorContext cursorContext, MemoryTracker memoryTracker) {
             log.warn("Missing counts store, rebuilding it.");
-            new CountsComputer(neoStores, pageCache, contextFactory, layout, memoryTracker, log)
-                    .initialize(updater, cursorContext, memoryTracker);
+            try (NumberArrayFactory numberArrayFactory =
+                    NumberArrayFactories.auto(fs, layout.databaseDirectory(), log)) {
+                new CountsComputer(
+                                neoStores,
+                                logMetadataProvider.getLastCommittedTransactionId(),
+                                contextFactory,
+                                memoryTracker,
+                                numberArrayFactory)
+                        .initialize(updater, cursorContext, memoryTracker);
+            }
             log.warn("Counts store rebuild completed.");
         }
 
         @Override
         public long lastCommittedTxId() {
-            TransactionIdStore txIdStore = metadataProvider();
-            return txIdStore.getLastCommittedTransactionId();
+            return logMetadataProvider.getLastCommittedTransactionId();
         }
     }
 
-    private record RecordTransactionStateBehaviour(boolean useIndexCommands) implements TransactionStateBehaviour {
+    private record RecordTransactionStateBehaviour() implements TransactionStateBehaviour {
         @Override
         public boolean keepMetaDataForDeletedRelationship() {
+            return false;
+        }
+
+        @Override
+        public boolean useIndexCommands() {
             return false;
         }
     }

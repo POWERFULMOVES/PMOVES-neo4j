@@ -35,26 +35,25 @@ import org.neo4j.internal.schema.SchemaNameUtil;
 import org.neo4j.internal.schema.SchemaUserDescription;
 import org.neo4j.string.Mask;
 
-final class RelationshipEndpointLabelConstraintDescriptorImplementation
+final class RelationshipEndpointLabelConstraintDescriptorImplementation extends ConstraintDescriptorAdaptor
         implements RelationshipEndpointLabelConstraintDescriptor {
-    private final long id;
     private final int endpointLabelId;
     private final String name;
     private final RelationshipEndpointLabelSchemaDescriptor schema;
     private final EndpointType endpointType;
 
-    RelationshipEndpointLabelConstraintDescriptorImplementation(
+    private RelationshipEndpointLabelConstraintDescriptorImplementation(
             RelationshipEndpointLabelSchemaDescriptor schema,
             long id,
             int endpointLabelId,
             String name,
             EndpointType endpointType) {
+        super(id);
         if (endpointLabelId < 0) {
             throw new IllegalArgumentException("endpointLabelId cannot be negative");
         }
         this.schema = requireNonNull(schema, "SchemaDescriptor cannot be null");
         this.endpointType = requireNonNull(endpointType, "EndpointType cannot be null");
-        this.id = id;
         this.endpointLabelId = endpointLabelId;
         this.name = name;
     }
@@ -81,118 +80,8 @@ final class RelationshipEndpointLabelConstraintDescriptorImplementation
     }
 
     @Override
-    public boolean enforcesUniqueness() {
-        return false;
-    }
-
-    @Override
-    public boolean enforcesPropertyExistence() {
-        return false;
-    }
-
-    @Override
-    public boolean enforcesPropertyType() {
-        return false;
-    }
-
-    @Override
-    public boolean isPropertyTypeConstraint() {
-        return false;
-    }
-
-    @Override
     public boolean isRelationshipEndpointLabelConstraint() {
         return true;
-    }
-
-    @Override
-    public boolean isNodeLabelExistenceConstraint() {
-        return false;
-    }
-
-    @Override
-    public boolean isNodePropertyTypeConstraint() {
-        return false;
-    }
-
-    @Override
-    public boolean isRelationshipPropertyTypeConstraint() {
-        return false;
-    }
-
-    @Override
-    public TypeConstraintDescriptor asPropertyTypeConstraint() {
-        throw conversionException(TypeConstraintDescriptor.class);
-    }
-
-    @Override
-    public boolean isPropertyExistenceConstraint() {
-        return false;
-    }
-
-    @Override
-    public boolean isRelationshipPropertyExistenceConstraint() {
-        return false;
-    }
-
-    @Override
-    public boolean isNodePropertyExistenceConstraint() {
-        return false;
-    }
-
-    @Override
-    public ExistenceConstraintDescriptor asPropertyExistenceConstraint() {
-        throw conversionException(ExistenceConstraintDescriptor.class);
-    }
-
-    @Override
-    public boolean isUniquenessConstraint() {
-        return false;
-    }
-
-    @Override
-    public boolean isNodeUniquenessConstraint() {
-        return false;
-    }
-
-    @Override
-    public boolean isRelationshipUniquenessConstraint() {
-        return false;
-    }
-
-    @Override
-    public UniquenessConstraintDescriptor asUniquenessConstraint() {
-        throw conversionException(UniquenessConstraintDescriptor.class);
-    }
-
-    @Override
-    public boolean isNodeKeyConstraint() {
-        return false;
-    }
-
-    @Override
-    public boolean isRelationshipKeyConstraint() {
-        return false;
-    }
-
-    @Override
-    public boolean isIndexBackedConstraint() {
-        return false;
-    }
-
-    @Override
-    public IndexBackedConstraintDescriptor asIndexBackedConstraint() {
-        throw conversionException(IndexBackedConstraintDescriptor.class);
-    }
-
-    @Override
-    public boolean isKeyConstraint() {
-        return false;
-    }
-
-    @Override
-    public KeyConstraintDescriptor asKeyConstraint() {
-        throw conversionException(KeyConstraintDescriptor.class);
     }
 
     @Override
@@ -222,16 +111,20 @@ final class RelationshipEndpointLabelConstraintDescriptorImplementation
     }
 
     @Override
-    public NodeLabelExistenceConstraintDescriptor asNodeLabelExistenceConstraint() {
-        throw conversionException(NodeLabelExistenceConstraintDescriptor.class);
-    }
-
-    @Override
     public boolean equals(Object o) {
         if (!(o instanceof RelationshipEndpointLabelConstraintDescriptor that)) {
             return false;
         }
+        return equalsIgnoreName(that) && Objects.equals(this.name, that.getName());
+    }
 
+    @Override
+    public boolean equalsIgnoreName(ConstraintDescriptor other) {
+        // ugly, needed since equalsIgnoreName might be called from something else than equals
+        if (!other.isRelationshipEndpointLabelConstraint()) {
+            return false;
+        }
+        RelationshipEndpointLabelConstraintDescriptor that = other.asRelationshipEndpointLabelConstraint();
         if (this.endpointType != that.endpointType()) {
             return false;
         }
@@ -240,24 +133,24 @@ final class RelationshipEndpointLabelConstraintDescriptorImplementation
             return false;
         }
 
-        if (!this.schema().equals(that.schema())) {
-            return false;
-        }
+        return this.schema().equals(that.schema());
+    }
 
-        return true;
+    // For RelationshipEndpointConstraints we are allowed to have at most one constraint per EndpointType and RelType
+    // There is no limitation on the other metadata fields.
+    // Therefore, we only check for conflicts on EndpointType.
+    @Override
+    public boolean conflictsWith(ConstraintDescriptor other) {
+        if (other.isRelationshipEndpointLabelConstraint()) {
+            RelationshipEndpointLabelConstraintDescriptor that = other.asRelationshipEndpointLabelConstraint();
+            return this.endpointType == that.endpointType() && this.schema().equals(that.schema());
+        }
+        return false;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(schema);
-    }
-
-    @Override
-    public long getId() {
-        if (id == NO_ID) {
-            throw new IllegalStateException("This constraint descriptor have no id assigned: " + this);
-        }
-        return id;
+        return Objects.hash(schema, endpointType, endpointLabelId, name);
     }
 
     @Override
@@ -281,14 +174,25 @@ final class RelationshipEndpointLabelConstraintDescriptorImplementation
         return userDescription(TOKEN_ID_NAME_LOOKUP, mask);
     }
 
-    private String userDescription(TokenNameLookup tokenNameLookup, Mask mask) {
-        return SchemaUserDescription.forConstraint(
-                tokenNameLookup, id, name, ConstraintType.RELATIONSHIP_ENDPOINT_LABEL, schema, null, null, null, mask);
+    @Override
+    public String userDescription(TokenNameLookup tokenNameLookup) {
+        return userDescription(tokenNameLookup, Mask.NO);
     }
 
-    private IllegalStateException conversionException(Class<? extends ConstraintDescriptor> targetType) {
-        return new IllegalStateException("Cannot cast this schema to a " + targetType
-                + " because it does not match that structure: " + this + ".");
+    private String userDescription(TokenNameLookup tokenNameLookup, Mask mask) {
+        return SchemaUserDescription.forConstraint(
+                tokenNameLookup,
+                id,
+                name,
+                ConstraintType.RELATIONSHIP_ENDPOINT_LABEL,
+                schema,
+                graphTypeDependence(),
+                null,
+                null,
+                tokenNameLookup.labelGetName(endpointLabelId),
+                endpointType,
+                null,
+                mask);
     }
 
     @Override

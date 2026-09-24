@@ -48,30 +48,30 @@ import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
 import java.util.Set;
-import java.util.TreeMap;
+import java.util.function.Consumer;
 import java.util.stream.Stream;
 import org.apache.commons.lang3.mutable.MutableBoolean;
 import org.eclipse.collections.api.IntIterable;
+import org.eclipse.collections.api.set.primitive.IntSet;
 import org.eclipse.collections.api.set.primitive.LongSet;
 import org.eclipse.collections.api.set.primitive.MutableIntSet;
+import org.eclipse.collections.api.set.primitive.MutableLongSet;
 import org.eclipse.collections.impl.UnmodifiableMap;
 import org.eclipse.collections.impl.factory.primitive.IntSets;
-import org.eclipse.collections.impl.factory.primitive.LongSets;
+import org.eclipse.collections.impl.set.mutable.primitive.IntHashSet;
 import org.eclipse.collections.impl.set.mutable.primitive.LongHashSet;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.neo4j.collection.diffset.DiffSets;
-import org.neo4j.collection.diffset.LongDiffSets;
 import org.neo4j.collection.diffset.MutableLongDiffSets;
-import org.neo4j.collection.diffset.MutableLongDiffSetsImpl;
 import org.neo4j.collection.factory.CollectionsFactory;
+import org.neo4j.collection.factory.OnHeapCollectionsFactory;
 import org.neo4j.common.EntityType;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.function.Predicates;
@@ -82,6 +82,7 @@ import org.neo4j.internal.kernel.api.exceptions.DeletedNodeStillHasRelationships
 import org.neo4j.internal.schema.ConstraintDescriptor;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexPrototype;
+import org.neo4j.internal.schema.IndexRemovalSnapshot;
 import org.neo4j.internal.schema.LabelSchemaDescriptor;
 import org.neo4j.internal.schema.SchemaDescriptor;
 import org.neo4j.internal.schema.SchemaDescriptors;
@@ -91,7 +92,6 @@ import org.neo4j.internal.schema.constraints.UniquenessConstraintDescriptor;
 import org.neo4j.kernel.api.schema.index.TestIndexDescriptorFactory;
 import org.neo4j.kernel.impl.api.chunk.ChunkedTransactionSink;
 import org.neo4j.kernel.impl.transaction.tracing.TransactionEvent;
-import org.neo4j.kernel.impl.util.collection.CollectionsFactorySupplier;
 import org.neo4j.memory.LocalMemoryTracker;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.storageengine.api.PropertyKeyValue;
@@ -101,15 +101,16 @@ import org.neo4j.storageengine.api.enrichment.ApplyEnrichmentStrategy;
 import org.neo4j.storageengine.api.txstate.RelationshipModifications;
 import org.neo4j.storageengine.api.txstate.TransactionStateBehaviour;
 import org.neo4j.storageengine.api.txstate.TxStateVisitor;
+import org.neo4j.storageengine.api.txstate.memory.TxStateMemoryConsumer;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.ValueTuple;
 import org.neo4j.values.storable.Values;
 
-@ExtendWith(RandomExtension.class)
-abstract class TxStateTest {
+@RandomSupportExtension
+class TxStateTest {
     @Inject
     private RandomSupport random;
 
@@ -117,25 +118,21 @@ abstract class TxStateTest {
     private final IndexDescriptor indexOn_2_1 = TestIndexDescriptorFactory.forLabel(2, 1);
     private final IndexDescriptor indexOnRels =
             TestIndexDescriptorFactory.forSchema(SchemaDescriptors.forRelType(3, 1));
-    private final CollectionsFactorySupplier collectionsFactorySupplier;
     private CollectionsFactory collectionsFactory;
     private TxState state;
     MemoryTracker memoryTracker;
 
-    TxStateTest(CollectionsFactorySupplier collectionsFactorySupplier) {
-        this.collectionsFactorySupplier = collectionsFactorySupplier;
-    }
-
     @BeforeEach
     void before() {
         memoryTracker = new LocalMemoryTracker();
-        collectionsFactory = spy(collectionsFactorySupplier.create());
+        collectionsFactory = spy(OnHeapCollectionsFactory.INSTANCE);
         state = new TxState(
                 collectionsFactory,
                 memoryTracker,
                 TransactionStateBehaviour.DEFAULT_BEHAVIOUR,
                 ApplyEnrichmentStrategy.NO_ENRICHMENT,
                 ChunkedTransactionSink.EMPTY,
+                TxStateMemoryConsumer.EMPTY_CONSUMER,
                 TransactionEvent.NULL);
     }
 
@@ -145,7 +142,9 @@ abstract class TxStateTest {
         assertEquals(0L, memoryTracker.usedNativeMemory(), "Seems like native memory is leaking");
     }
 
-    abstract long usedMemory();
+    long usedMemory() {
+        return memoryTracker.estimatedHeapMemory();
+    }
 
     @Test
     void shouldGetAddedLabels() {
@@ -155,10 +154,10 @@ abstract class TxStateTest {
         state.nodeDoAddLabel(2, 1);
 
         // WHEN
-        LongSet addedLabels = state.nodeStateLabelDiffSets(1).getAdded();
+        IntSet addedLabels = state.nodeStateLabelDiffSets(1).getAdded();
 
         // THEN
-        assertEquals(newSetWith(1, 2), addedLabels);
+        assertEquals(IntHashSet.newSetWith(1, 2), addedLabels);
     }
 
     @Test
@@ -169,10 +168,10 @@ abstract class TxStateTest {
         state.nodeDoRemoveLabel(2, 1);
 
         // WHEN
-        LongSet removedLabels = state.nodeStateLabelDiffSets(1).getRemoved();
+        IntSet removedLabels = state.nodeStateLabelDiffSets(1).getRemoved();
 
         // THEN
-        assertEquals(newSetWith(1, 2), removedLabels);
+        assertEquals(IntHashSet.newSetWith(1, 2), removedLabels);
     }
 
     @Test
@@ -186,7 +185,7 @@ abstract class TxStateTest {
         state.nodeDoRemoveLabel(1, 1);
 
         // THEN
-        assertEquals(newSetWith(2), state.nodeStateLabelDiffSets(1).getAdded());
+        assertEquals(IntHashSet.newSetWith(2), state.nodeStateLabelDiffSets(1).getAdded());
     }
 
     @Test
@@ -200,7 +199,7 @@ abstract class TxStateTest {
         state.nodeDoAddLabel(1, 1);
 
         // THEN
-        assertEquals(newSetWith(2), state.nodeStateLabelDiffSets(1).getRemoved());
+        assertEquals(IntHashSet.newSetWith(2), state.nodeStateLabelDiffSets(1).getRemoved());
     }
 
     @Test
@@ -300,19 +299,28 @@ abstract class TxStateTest {
     @Test
     void shouldComputeIndexUpdatesOnUninitializedTxState() {
         // WHEN
-        UnmodifiableMap<ValueTuple, ? extends LongDiffSets> diffSets = state.getIndexUpdates(indexOn_1_1);
+        UnmodifiableMap<ValueTuple, MutableLongSet> added = state.getAddedIndexUpdates(indexOn_1_1);
 
         // THEN
-        assertNull(diffSets);
+        assertNull(added);
     }
 
     @Test
     void shouldComputeSortedIndexUpdatesOnUninitializedTxState() {
         // WHEN
-        NavigableMap<ValueTuple, ? extends LongDiffSets> diffSets = state.getSortedIndexUpdates(indexOn_1_1);
+        NavigableMap<ValueTuple, MutableLongSet> added = state.getSortedAddedIndexUpdates(indexOn_1_1);
 
         // THEN
-        assertNull(diffSets);
+        assertNull(added);
+    }
+
+    @Test
+    void shouldComputeIndexRemovedIdsOnUninitializedTxState() {
+        // WHEN
+        IndexRemovalSnapshot removed = state.getRemovedFromIndex(indexOn_1_1);
+
+        // THEN
+        assertNull(removed);
     }
 
     @Test
@@ -321,10 +329,10 @@ abstract class TxStateTest {
         addNodesToIndex(indexOn_2_1).withDefaultStringProperties(42L);
 
         // WHEN
-        UnmodifiableMap<ValueTuple, ? extends LongDiffSets> diffSets = state.getIndexUpdates(indexOn_1_1);
+        UnmodifiableMap<ValueTuple, MutableLongSet> added = state.getAddedIndexUpdates(indexOn_1_1);
 
         // THEN
-        assertNull(diffSets);
+        assertNull(added);
     }
 
     @Test
@@ -333,10 +341,22 @@ abstract class TxStateTest {
         addNodesToIndex(indexOn_2_1).withDefaultStringProperties(42L);
 
         // WHEN
-        NavigableMap<ValueTuple, ? extends LongDiffSets> diffSets = state.getSortedIndexUpdates(indexOn_1_1);
+        NavigableMap<ValueTuple, MutableLongSet> added = state.getSortedAddedIndexUpdates(indexOn_1_1);
 
         // THEN
-        assertNull(diffSets);
+        assertNull(added);
+    }
+
+    @Test
+    void shouldComputeIndexRemovedIdsOnEmptyTxState() {
+        // GIVEN
+        addNodesToIndex(indexOn_2_1).withDefaultStringProperties(42L);
+
+        // WHEN
+        IndexRemovalSnapshot removed = state.getRemovedFromIndex(indexOn_1_1);
+
+        // THEN
+        assertNull(removed);
     }
 
     @Test
@@ -347,13 +367,23 @@ abstract class TxStateTest {
         addNodesToIndex(indexOn_1_1).withDefaultStringProperties(41L);
 
         // WHEN
-        UnmodifiableMap<ValueTuple, ? extends LongDiffSets> diffSets = state.getIndexUpdates(indexOn_1_1);
+        UnmodifiableMap<ValueTuple, MutableLongSet> added = state.getAddedIndexUpdates(indexOn_1_1);
+        IndexRemovalSnapshot removedIds = state.getRemovedFromIndex(indexOn_1_1);
 
         // THEN
-        assertNotNull(diffSets);
-        assertEqualDiffSets(addedNodes(42L), diffSets.get(ValueTuple.of(stringValue("value42"))));
-        assertEqualDiffSets(addedNodes(43L), diffSets.get(ValueTuple.of(stringValue("value43"))));
-        assertEqualDiffSets(addedNodes(41L), diffSets.get(ValueTuple.of(stringValue("value41"))));
+        assertNotNull(added);
+        assertThat(added.size()).isEqualTo(3);
+        assertThat(added.keySet())
+                .containsExactlyInAnyOrder(
+                        ValueTuple.of(stringValue("value41")),
+                        ValueTuple.of(stringValue("value43")),
+                        ValueTuple.of(stringValue("value42")));
+        assertThat(added.get(ValueTuple.of(stringValue("value41"))).toArray()).containsExactly(41L);
+        assertThat(added.get(ValueTuple.of(stringValue("value42"))).toArray()).containsExactly(42L);
+        assertThat(added.get(ValueTuple.of(stringValue("value43"))).toArray()).containsExactly(43L);
+
+        assertNotNull(removedIds);
+        assertTrue(removedIds.isEmpty());
     }
 
     @Test
@@ -364,15 +394,98 @@ abstract class TxStateTest {
         addNodesToIndex(indexOn_1_1).withDefaultStringProperties(41L);
 
         // WHEN
-        NavigableMap<ValueTuple, ? extends LongDiffSets> diffSets = state.getSortedIndexUpdates(indexOn_1_1);
-
-        TreeMap<ValueTuple, LongDiffSets> expected = sortedAddedNodesDiffSets(42, 41, 43);
+        NavigableMap<ValueTuple, MutableLongSet> added = state.getSortedAddedIndexUpdates(indexOn_1_1);
         // THEN
-        assertNotNull(diffSets);
-        assertEquals(expected.keySet(), diffSets.keySet());
-        for (final ValueTuple key : expected.keySet()) {
-            assertEqualDiffSets(expected.get(key), diffSets.get(key));
-        }
+        assertNotNull(added);
+        assertThat(added.keySet())
+                .containsExactly(
+                        ValueTuple.of(stringValue("value41")),
+                        ValueTuple.of(stringValue("value42")),
+                        ValueTuple.of(stringValue("value43")));
+        assertThat(added.get(ValueTuple.of(stringValue("value41"))).toArray()).containsExactly(41L);
+        assertThat(added.get(ValueTuple.of(stringValue("value42"))).toArray()).containsExactly(42L);
+        assertThat(added.get(ValueTuple.of(stringValue("value43"))).toArray()).containsExactly(43L);
+    }
+
+    @Test
+    void shouldComputeIndexUpdatesOnTxStateWithAddedAndRemovedNodes() {
+        // GIVEN
+        addNodesToIndex(indexOn_1_1).withDefaultStringProperties(42L);
+        addNodesToIndex(indexOn_1_1).withDefaultStringProperties(43L);
+
+        state.indexDoUpdateEntry(indexOn_1_1, 40L, ValueTuple.of(stringValue("value40")), null);
+        state.indexDoUpdateEntry(indexOn_1_1, 41L, ValueTuple.of(stringValue("value41")), null);
+
+        // WHEN
+        UnmodifiableMap<ValueTuple, MutableLongSet> added = state.getAddedIndexUpdates(indexOn_1_1);
+        IndexRemovalSnapshot removedIds = state.getRemovedFromIndex(indexOn_1_1);
+
+        // THEN
+        assertNotNull(added);
+        assertThat(added.size()).isEqualTo(2);
+        assertThat(added.keySet())
+                .containsExactlyInAnyOrder(
+                        ValueTuple.of(stringValue("value43")), ValueTuple.of(stringValue("value42")));
+        assertThat(added.get(ValueTuple.of(stringValue("value42"))).toArray()).containsExactly(42L);
+        assertThat(added.get(ValueTuple.of(stringValue("value43"))).toArray()).containsExactly(43L);
+
+        assertNotNull(removedIds);
+        assertTrue(removedIds.isRemoved().test(40L));
+        assertTrue(removedIds.isRemoved().test(41L));
+    }
+
+    @Test
+    void shouldUpdateRemovalVersionOfIndex() {
+        // WHEN
+        state.indexDoUpdateEntry(indexOn_1_1, 40L, ValueTuple.of(stringValue("value40")), null);
+        IndexRemovalSnapshot r1 = state.getRemovedFromIndex(indexOn_1_1);
+        state.indexDoUpdateEntry(indexOn_1_1, 41L, ValueTuple.of(stringValue("value41")), null);
+        IndexRemovalSnapshot r2 = state.getRemovedFromIndex(indexOn_1_1);
+
+        // THEN
+        assertNotNull(r1);
+        assertNotNull(r2);
+        assertFalse(r1.isEmpty());
+        assertTrue(r1.isRemoved().test(40L));
+        assertFalse(r1.isRemoved().test(41L));
+        assertThat(r1.version()).isEqualTo(0);
+
+        assertFalse(r2.isEmpty());
+        assertTrue(r2.isRemoved().test(40L));
+        assertTrue(r2.isRemoved().test(41L));
+        assertThat(r2.version()).isEqualTo(1);
+    }
+
+    @Test
+    void shouldUpdateIndexRemovalForEachIndexSeparately() {
+        // WHEN
+        state.indexDoUpdateEntry(indexOn_1_1, 40L, ValueTuple.of(stringValue("value40")), null);
+        IndexRemovalSnapshot r1 = state.getRemovedFromIndex(indexOn_1_1);
+        state.indexDoUpdateEntry(indexOn_2_1, 39L, ValueTuple.of(stringValue("value40")), null);
+        IndexRemovalSnapshot rIndex2 = state.getRemovedFromIndex(indexOn_2_1);
+        state.indexDoUpdateEntry(indexOn_1_1, 41L, ValueTuple.of(stringValue("value41")), null);
+        IndexRemovalSnapshot r2 = state.getRemovedFromIndex(indexOn_1_1);
+
+        // THEN
+        assertNotNull(r1);
+        assertFalse(r1.isEmpty());
+        assertFalse(r1.isRemoved().test(39L));
+        assertTrue(r1.isRemoved().test(40L));
+        assertFalse(r1.isRemoved().test(41L));
+        assertThat(r1.version()).isEqualTo(0);
+
+        assertNotNull(r2);
+        assertFalse(r2.isEmpty());
+        assertTrue(r2.isRemoved().test(40L));
+        assertTrue(r2.isRemoved().test(41L));
+        assertThat(r2.version()).isEqualTo(1);
+
+        assertNotNull(rIndex2);
+        assertFalse(rIndex2.isEmpty());
+        assertTrue(rIndex2.isRemoved().test(39L));
+        assertFalse(rIndex2.isRemoved().test(40L));
+        assertFalse(rIndex2.isRemoved().test(41L));
+        assertThat(rIndex2.version()).isEqualTo(0);
     }
 
     @Test
@@ -483,7 +596,8 @@ abstract class TxStateTest {
     @Test
     void shouldAddRelationshipPropertyExistenceConstraint() {
         // Given
-        ConstraintDescriptor constraint = ConstraintDescriptorFactory.existsForRelType(false, 1, 42);
+        ConstraintDescriptor constraint =
+                ConstraintDescriptorFactory.existsForRelType(false, 1, 42).withId(123);
 
         // When
         state.constraintDoAdd(constraint);
@@ -497,8 +611,10 @@ abstract class TxStateTest {
     @Test
     void addingRelationshipPropertyExistenceConstraintConstraintShouldBeIdempotent() {
         // Given
-        ConstraintDescriptor constraint1 = ConstraintDescriptorFactory.existsForRelType(false, 1, 42);
-        ConstraintDescriptor constraint2 = ConstraintDescriptorFactory.existsForRelType(false, 1, 42);
+        ConstraintDescriptor constraint1 =
+                ConstraintDescriptorFactory.existsForRelType(false, 1, 42).withId(99);
+        ConstraintDescriptor constraint2 =
+                ConstraintDescriptorFactory.existsForRelType(false, 1, 42).withId(999);
 
         // When
         state.constraintDoAdd(constraint1);
@@ -514,7 +630,8 @@ abstract class TxStateTest {
     @Test
     void shouldDropRelationshipPropertyExistenceConstraint() {
         // Given
-        ConstraintDescriptor constraint = ConstraintDescriptorFactory.existsForRelType(false, 1, 42);
+        ConstraintDescriptor constraint =
+                ConstraintDescriptorFactory.existsForRelType(false, 1, 42).withId(11);
         state.constraintDoAdd(constraint);
 
         // When
@@ -527,9 +644,12 @@ abstract class TxStateTest {
     @Test
     void shouldDifferentiateRelationshipPropertyExistenceConstraints() {
         // Given
-        ConstraintDescriptor constraint1 = ConstraintDescriptorFactory.existsForRelType(false, 1, 11);
-        ConstraintDescriptor constraint2 = ConstraintDescriptorFactory.existsForRelType(false, 1, 22);
-        ConstraintDescriptor constraint3 = ConstraintDescriptorFactory.existsForRelType(false, 3, 33);
+        ConstraintDescriptor constraint1 =
+                ConstraintDescriptorFactory.existsForRelType(false, 1, 11).withId(1);
+        ConstraintDescriptor constraint2 =
+                ConstraintDescriptorFactory.existsForRelType(false, 1, 22).withId(2);
+        ConstraintDescriptor constraint3 =
+                ConstraintDescriptorFactory.existsForRelType(false, 3, 33).withId(3);
 
         // When
         state.constraintDoAdd(constraint1);
@@ -563,6 +683,15 @@ abstract class TxStateTest {
         // Then
         assertTrue(state.hasChanges());
         assertTrue(state.relationshipIsAddedInThisBatch(relId));
+    }
+
+    @ParameterizedTest
+    @MethodSource("relationshipIsModifiedTests")
+    void testRelationshipIsModifiedInThisBatch(RelationshipIsModifiedTest test) {
+        var txState = new TxState();
+        test.txStateConsumer.accept(txState);
+        assertThat(txState.relationshipsIsModifiedInThisBatch(RelationshipIsModifiedTest.REL_ID))
+                .isEqualTo(test.expected());
     }
 
     @Test
@@ -647,11 +776,11 @@ abstract class TxStateTest {
             public void visitRelationshipModifications(RelationshipModifications modifications) {
                 modifications
                         .creations()
-                        .forEach((id, type, startNode, endNode, addedProps, changedProperties, removedProperties) ->
+                        .forEach((id, type, startNode, endNode, addedProps, removedProperties) ->
                                 assertEquals(1, id, "Should not create any other relationship than 1"));
                 modifications
                         .deletions()
-                        .forEach((id, type, startNode, endNode, noProps, changedProperties, removedProperties) ->
+                        .forEach((id, type, startNode, endNode, noProps, removedProperties) ->
                                 fail("Should not delete any relationship"));
             }
         });
@@ -663,7 +792,7 @@ abstract class TxStateTest {
         MutableBoolean labelsChecked = new MutableBoolean();
         state.accept(new TxStateVisitor.Adapter() {
             @Override
-            public void visitNodeLabelChanges(long id, LongSet added, LongSet removed) {
+            public void visitNodeLabelChanges(long id, IntSet added, IntSet removed) {
                 labelsChecked.setTrue();
                 assertEquals(1, id);
                 assertEquals(1, added.size());
@@ -672,8 +801,7 @@ abstract class TxStateTest {
             }
 
             @Override
-            public void visitNodePropertyChanges(
-                    long id, Iterable<StorageProperty> added, Iterable<StorageProperty> changed, IntIterable removed) {
+            public void visitNodePropertyChanges(long id, Iterable<StorageProperty> added, IntIterable removed) {
                 fail("Properties were not changed.");
             }
         });
@@ -686,16 +814,14 @@ abstract class TxStateTest {
         MutableBoolean propertiesChecked = new MutableBoolean();
         state.accept(new TxStateVisitor.Adapter() {
             @Override
-            public void visitNodeLabelChanges(long id, LongSet added, LongSet removed) {
+            public void visitNodeLabelChanges(long id, IntSet added, IntSet removed) {
                 fail("Labels were not changed.");
             }
 
             @Override
-            public void visitNodePropertyChanges(
-                    long id, Iterable<StorageProperty> added, Iterable<StorageProperty> changed, IntIterable removed) {
+            public void visitNodePropertyChanges(long id, Iterable<StorageProperty> added, IntIterable removed) {
                 propertiesChecked.setTrue();
                 assertEquals(1, id);
-                assertFalse(changed.iterator().hasNext());
                 assertTrue(removed.isEmpty());
                 assertEquals(1, Iterators.count(added.iterator(), Predicates.alwaysTrue()));
             }
@@ -715,7 +841,7 @@ abstract class TxStateTest {
                 // Then
                 assertThat(ids.deletions().size()).isEqualTo(1);
                 ids.deletions()
-                        .forEach((id, type, start, end, noProps, changedProperties, removedProperties) ->
+                        .forEach((id, type, start, end, noProps, removedProperties) ->
                                 assertEquals(42, id, "Wrong deleted relationship id"));
             }
         });
@@ -912,11 +1038,11 @@ abstract class TxStateTest {
         assertTrue(observedRevisions.add(state.getDataRevision()));
         assertTrue(state.hasDataChanges());
 
-        state.nodeDoChangeProperty(0, 0, Values.booleanValue(false));
+        state.nodeDoAddProperty(0, 0, Values.booleanValue(false));
         assertTrue(observedRevisions.add(state.getDataRevision()));
         assertTrue(state.hasDataChanges());
 
-        state.nodeDoRemoveProperty(0, 0);
+        state.nodeDoRemoveProperty(0, 0, Predicates.ALWAYS_TRUE_INT);
         assertTrue(observedRevisions.add(state.getDataRevision()));
         assertTrue(state.hasDataChanges());
 
@@ -928,15 +1054,15 @@ abstract class TxStateTest {
         assertTrue(observedRevisions.add(state.getDataRevision()));
         assertTrue(state.hasDataChanges());
 
-        state.relationshipDoReplaceProperty(0, 0, 0, 0, 0, Values.NO_VALUE, Values.booleanValue(true));
+        state.relationshipDoAddProperty(0, 0, 0, 0, 0, Values.booleanValue(true));
         assertTrue(observedRevisions.add(state.getDataRevision()));
         assertTrue(state.hasDataChanges());
 
-        state.relationshipDoReplaceProperty(0, 0, 0, 0, 0, Values.booleanValue(true), Values.booleanValue(false));
+        state.relationshipDoAddProperty(0, 0, 0, 0, 0, Values.booleanValue(false));
         assertTrue(observedRevisions.add(state.getDataRevision()));
         assertTrue(state.hasDataChanges());
 
-        state.relationshipDoRemoveProperty(0, 0, 0, 0, 0);
+        state.relationshipDoRemoveProperty(0, 0, 0, 0, 0, Predicates.ALWAYS_TRUE_INT);
         assertTrue(observedRevisions.add(state.getDataRevision()));
         assertTrue(state.hasDataChanges());
 
@@ -962,7 +1088,8 @@ abstract class TxStateTest {
         assertThat(state.getDataRevision()).isEqualTo(0L);
         assertFalse(state.hasDataChanges());
 
-        UniquenessConstraintDescriptor constraint1 = ConstraintDescriptorFactory.uniqueForLabel(1, 17);
+        UniquenessConstraintDescriptor constraint1 =
+                ConstraintDescriptorFactory.uniqueForLabel(1, 17).withId(12);
         state.constraintDoAdd(constraint1);
         assertThat(state.getDataRevision()).isEqualTo(0L);
         assertFalse(state.hasDataChanges());
@@ -1008,10 +1135,10 @@ abstract class TxStateTest {
         long memoryBefore = usedMemory();
 
         nodeState.addProperty(2, stringValue("foo"));
-        nodeState.removeProperty(3);
-        nodeState.changeProperty(4, stringValue("bar"));
+        nodeState.removePropertyFromStore(3);
+        nodeState.addProperty(4, stringValue("bar"));
 
-        verify(collectionsFactory, times(2)).newObjectMap(any());
+        verify(collectionsFactory, times(1)).newObjectMap(any());
         verify(collectionsFactory).newLongSet(any());
         assertThat(usedMemory()).isGreaterThan(memoryBefore);
         verifyNoMoreInteractions(collectionsFactory);
@@ -1044,17 +1171,10 @@ abstract class TxStateTest {
     }
 
     @Test
-    void getOrCreateIndexUpdatesForSeek_useCollectionsFactory() {
-        final MutableLongDiffSets diffSets =
-                state.getOrCreateIndexUpdatesForSeek(new HashMap<>(), ValueTuple.of(stringValue("test")));
+    void creatingIndexUpdateShouldBeMemoryTacked() {
         long memoryBefore = usedMemory();
-
-        diffSets.add(1);
-        diffSets.remove(2);
-
-        verify(collectionsFactory, times(2)).newLongSet(any());
+        state.indexDoUpdateEntry(indexOn_1_1, 0, ValueTuple.of(Values.intValue(1)), ValueTuple.of(Values.intValue(2)));
         assertThat(usedMemory()).isGreaterThan(memoryBefore);
-        verifyNoMoreInteractions(collectionsFactory);
     }
 
     @Test
@@ -1103,6 +1223,7 @@ abstract class TxStateTest {
                 },
                 ApplyEnrichmentStrategy.NO_ENRICHMENT,
                 ChunkedTransactionSink.EMPTY,
+                TxStateMemoryConsumer.EMPTY_CONSUMER,
                 TransactionEvent.NULL);
         long id = 9;
         int type = 10;
@@ -1115,7 +1236,7 @@ abstract class TxStateTest {
         state.accept(new TxStateVisitor.Adapter() {
             @Override
             public void visitRelationshipModifications(RelationshipModifications modifications) {
-                modifications.deletions().forEach((rId, typeId, start, end, aP, cP, rP) -> {
+                modifications.deletions().forEach((rId, typeId, start, end, aP, rP) -> {
                     assertThat(found.booleanValue()).isFalse();
                     found.setTrue();
 
@@ -1210,7 +1331,7 @@ abstract class TxStateTest {
     void shouldGetChangedRelationshipPropertiesOnExistingRel() throws Exception {
         RelTxStateMirror state = new RelTxStateMirror();
         state.addProp(1, 1);
-        state.changeProp(2, 1);
+        state.addProp(2, 1);
 
         assertThat(state.hasStateChanges()).isTrue();
         assertRelModificationsMatch(state);
@@ -1221,7 +1342,7 @@ abstract class TxStateTest {
         RelTxStateMirror state = new RelTxStateMirror();
         state.create(1);
         state.addProp(1, 1);
-        state.changeProp(2, 1);
+        state.addProp(2, 1);
 
         assertThat(state.hasStateChanges()).isTrue();
         assertRelModificationsMatch(state);
@@ -1290,7 +1411,7 @@ abstract class TxStateTest {
             for (int key = 0; key < 10; key++) {
                 switch (random.nextInt(3)) {
                     case 0 -> state.addProp(id, key);
-                    case 1 -> state.changeProp(id, key);
+                    case 1 -> state.addProp(id, key);
                     case 2 -> state.removeProp(id, key);
                 }
             }
@@ -1317,14 +1438,10 @@ abstract class TxStateTest {
         }
 
         void addProp(long id, int key) {
-            setProp(id, key, true);
+            setProp(id, key);
         }
 
-        void changeProp(long id, int key) {
-            setProp(id, key, false);
-        }
-
-        private void setProp(long id, int key, boolean added) {
+        private void setProp(long id, int key) {
             assertThat(deleted).doesNotContainKey(id);
 
             RelData data = created.get(id);
@@ -1336,20 +1453,10 @@ abstract class TxStateTest {
                 }
             }
             PropertyKeyValue prop = new PropertyKeyValue(key, Values.intValue(1));
-            if (added) {
-                data.addedProperties.add(prop);
-            } else {
-                data.changedProperties.add(prop);
-            }
+            data.addedProperties.add(prop);
 
-            state.relationshipDoReplaceProperty(
-                    data.id,
-                    data.type,
-                    data.startNode,
-                    data.endNode,
-                    prop.propertyKeyId(),
-                    added ? Values.NO_VALUE : Values.stringValue("prev"),
-                    prop.value());
+            state.relationshipDoAddProperty(
+                    data.id, data.type, data.startNode, data.endNode, prop.propertyKeyId(), prop.value());
         }
 
         void removeProp(long id, int key) {
@@ -1363,18 +1470,15 @@ abstract class TxStateTest {
                 data = new RelData(id, random);
                 updated.put(id, data);
             }
-            boolean removed = data.addedProperties.removeIf(storageProperty -> storageProperty.propertyKeyId() == key)
-                    || data.changedProperties.removeIf(storageProperty -> storageProperty.propertyKeyId() == key);
+            boolean removed = data.addedProperties.removeIf(storageProperty -> storageProperty.propertyKeyId() == key);
             if (!removed) {
                 data.removedProperties.add(key);
             } else {
-                if (data.changedProperties.isEmpty()
-                        && data.addedProperties.isEmpty()
-                        && data.removedProperties.isEmpty()) {
+                if (data.addedProperties.isEmpty() && data.removedProperties.isEmpty()) {
                     updated.remove(id);
                 }
             }
-            state.relationshipDoRemoveProperty(data.id, data.type, data.startNode, data.endNode, key);
+            state.relationshipDoRemoveProperty(data.id, data.type, data.startNode, data.endNode, key, k -> !removed);
         }
 
         void delete(long id) {
@@ -1385,7 +1489,7 @@ abstract class TxStateTest {
             } else {
                 data = updated.remove(id);
                 // Deletions are visited without data, only ID
-                deleted.put(id, new RelData(id, -1, -1, -1, new HashSet<>(), new HashSet<>(), IntSets.mutable.empty()));
+                deleted.put(id, new RelData(id, -1, -1, -1, new HashSet<>(), IntSets.mutable.empty()));
             }
 
             state.relationshipDoDelete(data.id, data.type, data.startNode, data.endNode);
@@ -1458,7 +1562,6 @@ abstract class TxStateTest {
             long startNode,
             long endNode,
             Set<StorageProperty> addedProperties,
-            Set<StorageProperty> changedProperties,
             MutableIntSet removedProperties) {
         RelData(long id, RandomSupport random) {
             this(
@@ -1467,36 +1570,14 @@ abstract class TxStateTest {
                     random.nextInt(10),
                     random.nextInt(10),
                     new HashSet<>(),
-                    new HashSet<>(),
                     IntSets.mutable.empty());
         }
     }
 
     RelationshipVisitorWithProperties<RuntimeException> collector(Set<RelData> into) {
-        return (id, type, start, end, addedProps, changedProperties, removedProperties) -> assertThat(
-                        into.add(new RelData(
-                                id,
-                                type,
-                                start,
-                                end,
-                                Iterables.asSet(addedProps),
-                                Iterables.asSet(changedProperties),
-                                IntSets.mutable.ofAll(removedProperties))))
+        return (id, type, start, end, addedProps, removedProperties) -> assertThat(into.add(new RelData(
+                        id, type, start, end, Iterables.asSet(addedProps), IntSets.mutable.ofAll(removedProperties))))
                 .isTrue();
-    }
-
-    private LongDiffSets addedNodes(long... added) {
-        return new MutableLongDiffSetsImpl(
-                LongSets.mutable.of(added), LongSets.mutable.empty(), collectionsFactory, memoryTracker);
-    }
-
-    private TreeMap<ValueTuple, LongDiffSets> sortedAddedNodesDiffSets(long... added) {
-        TreeMap<ValueTuple, LongDiffSets> map = new TreeMap<>(ValueTuple.COMPARATOR);
-        for (long node : added) {
-
-            map.put(ValueTuple.of(stringValue("value" + node)), addedNodes(node));
-        }
-        return map;
     }
 
     abstract class VisitationOrder extends TxStateVisitor.Adapter {
@@ -1580,11 +1661,6 @@ abstract class TxStateTest {
         };
     }
 
-    private static void assertEqualDiffSets(LongDiffSets expected, LongDiffSets actual) {
-        assertEquals(expected.getRemoved(), actual.getRemoved());
-        assertEquals(expected.getAdded(), actual.getAdded());
-    }
-
     @FunctionalInterface
     private interface NodeStateModifier {
         void tweak(TxState state, long nodeId);
@@ -1597,10 +1673,13 @@ abstract class TxStateTest {
                                 (state, nodeId) -> state.nodeDoAddProperty(nodeId, 42, Values.stringValue("changed")),
                         true),
                 Arguments.of(
-                        (NodeStateModifier) (state, nodeId) ->
-                                state.nodeDoChangeProperty(nodeId, 42, Values.stringValue("changed")),
+                        (NodeStateModifier)
+                                (state, nodeId) -> state.nodeDoAddProperty(nodeId, 42, Values.stringValue("changed")),
                         true),
-                Arguments.of((NodeStateModifier) (state, nodeId) -> state.nodeDoRemoveProperty(nodeId, 42), true),
+                Arguments.of(
+                        (NodeStateModifier)
+                                (state, nodeId) -> state.nodeDoRemoveProperty(nodeId, 42, Predicates.ALWAYS_TRUE_INT),
+                        true),
                 Arguments.of((NodeStateModifier) (state, nodeId) -> state.nodeDoAddLabel(42, nodeId), true),
                 Arguments.of((NodeStateModifier) (state, nodeId) -> state.nodeDoRemoveLabel(42, nodeId), true),
                 Arguments.of(
@@ -1611,8 +1690,84 @@ abstract class TxStateTest {
                         false),
                 Arguments.of(
                         (NodeStateModifier) (state, nodeId) -> {
-                            state.nodeDoChangeProperty(nodeId, 42, Values.stringValue("changed"));
+                            state.nodeDoAddProperty(nodeId, 42, Values.stringValue("changed"));
                             state.nodeDoDelete(nodeId);
+                        },
+                        false));
+    }
+
+    private record RelationshipIsModifiedTest(String description, Consumer<TxState> txStateConsumer, boolean expected) {
+
+        static final long REL_ID = 0;
+
+        @Override
+        public String toString() {
+            return description;
+        }
+    }
+
+    private static Stream<RelationshipIsModifiedTest> relationshipIsModifiedTests() {
+        return Stream.of(
+                new RelationshipIsModifiedTest(
+                        "Created relationship isn't modified",
+                        state -> {
+                            state.relationshipDoCreate(RelationshipIsModifiedTest.REL_ID, 1, 2, 3);
+                        },
+                        false),
+                new RelationshipIsModifiedTest(
+                        "Deleted relationship isn't modified",
+                        state -> {
+                            state.relationshipDoDelete(RelationshipIsModifiedTest.REL_ID, 1, 2, 3);
+                        },
+                        false),
+                new RelationshipIsModifiedTest(
+                        "Deleted relationship in this batch isn't modified",
+                        state -> {
+                            state.relationshipDoCreate(RelationshipIsModifiedTest.REL_ID, 1, 2, 3);
+                            state.relationshipDoDeleteAddedInThisBatch(RelationshipIsModifiedTest.REL_ID);
+                        },
+                        false),
+                new RelationshipIsModifiedTest(
+                        "Relationship with new property is modified",
+                        state -> {
+                            state.relationshipDoAddProperty(
+                                    RelationshipIsModifiedTest.REL_ID, 1, 2, 3, 4, Values.stringValue("someValue"));
+                        },
+                        true),
+                new RelationshipIsModifiedTest(
+                        "Relationship with replaced property is modified",
+                        state -> {
+                            state.relationshipDoAddProperty(
+                                    RelationshipIsModifiedTest.REL_ID, 1, 2, 3, 4, Values.stringValue("someValue"));
+                        },
+                        true),
+                new RelationshipIsModifiedTest(
+                        "Relationship with removed property is modified",
+                        state -> {
+                            state.relationshipDoRemoveProperty(
+                                    RelationshipIsModifiedTest.REL_ID, 1, 2, 3, 4, Predicates.ALWAYS_TRUE_INT);
+                        },
+                        true),
+                new RelationshipIsModifiedTest(
+                        "Relationship isn't modified after reset",
+                        state -> {
+                            state.relationshipDoRemoveProperty(
+                                    RelationshipIsModifiedTest.REL_ID, 1, 2, 3, 4, Predicates.ALWAYS_TRUE_INT);
+                            state.reset();
+                        },
+                        false),
+                new RelationshipIsModifiedTest(
+                        "Relationship with removed property is modified",
+                        state -> {
+                            state.relationshipDoRemoveProperty(
+                                    RelationshipIsModifiedTest.REL_ID, 1, 2, 3, 4, Predicates.ALWAYS_TRUE_INT);
+                        },
+                        true),
+                new RelationshipIsModifiedTest("Unknown relationship to tx state isn't modified", state -> {}, false),
+                new RelationshipIsModifiedTest(
+                        "Unknown relationship to tx state isn't modified (with other relationships created)",
+                        state -> {
+                            state.relationshipDoCreate(10, 1, 2, 3);
                         },
                         false));
     }

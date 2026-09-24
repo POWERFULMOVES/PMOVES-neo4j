@@ -21,7 +21,6 @@ package org.neo4j.memory;
 
 import static java.lang.Math.max;
 import static java.util.Objects.requireNonNull;
-import static org.neo4j.kernel.api.exceptions.Status.General.TransactionOutOfMemoryError;
 import static org.neo4j.memory.MemoryPools.NO_TRACKING;
 import static org.neo4j.util.Preconditions.requireNonNegative;
 import static org.neo4j.util.Preconditions.requirePositive;
@@ -89,6 +88,11 @@ public class LocalMemoryTracker implements LimitedMemoryTracker {
      */
     private long heapHighWaterMark;
 
+    /**
+     * Flag for the tracking only mode when memory is tracked, but no OOM exceptions are thrown
+     */
+    private boolean trackingOnly;
+
     public LocalMemoryTracker() {
         this(NO_TRACKING);
     }
@@ -126,14 +130,15 @@ public class LocalMemoryTracker implements LimitedMemoryTracker {
 
         this.allocatedBytesNative += bytes;
 
-        if (allocatedBytesHeap + allocatedBytesNative > localBytesLimit) {
+        if (!trackingOnly && allocatedBytesHeap + allocatedBytesNative > localBytesLimit) {
             allocatedBytesNative -= bytes;
-            throw new MemoryLimitExceededException(
-                    bytes,
-                    localBytesLimit,
-                    allocatedBytesHeap + allocatedBytesNative,
-                    TransactionOutOfMemoryError,
-                    limitSettingName);
+            throw MemoryLimitExceededException.transactionMemoryLimitExceeded(
+                    bytes, localBytesLimit, allocatedBytesHeap + allocatedBytesNative, limitSettingName);
+        }
+
+        if (trackingOnly) {
+            memoryPool.reserveNativeNoThrow(bytes);
+            return;
         }
 
         try {
@@ -163,14 +168,10 @@ public class LocalMemoryTracker implements LimitedMemoryTracker {
 
         allocatedBytesHeap += bytes;
 
-        if (allocatedBytesHeap + allocatedBytesNative > localBytesLimit) {
+        if (!trackingOnly && allocatedBytesHeap + allocatedBytesNative > localBytesLimit) {
             allocatedBytesHeap -= bytes;
-            throw new MemoryLimitExceededException(
-                    bytes,
-                    localBytesLimit,
-                    allocatedBytesHeap + allocatedBytesNative,
-                    TransactionOutOfMemoryError,
-                    limitSettingName);
+            throw MemoryLimitExceededException.transactionMemoryLimitExceeded(
+                    bytes, localBytesLimit, allocatedBytesHeap + allocatedBytesNative, limitSettingName);
         }
 
         if (allocatedBytesHeap > heapHighWaterMark) {
@@ -179,11 +180,16 @@ public class LocalMemoryTracker implements LimitedMemoryTracker {
 
         if (allocatedBytesHeap > localHeapPool) {
             long grab = max(bytes, grabSize);
-            try {
-                reserveHeapFromPool(grab);
-            } catch (MemoryLimitExceededException t) {
-                allocatedBytesHeap -= bytes;
-                throw t;
+            if (trackingOnly) {
+                memoryPool.reserveHeapNoThrow(grab);
+                localHeapPool += grab;
+            } else {
+                try {
+                    reserveHeapFromPool(grab);
+                } catch (MemoryLimitExceededException t) {
+                    allocatedBytesHeap -= bytes;
+                    throw t;
+                }
             }
         }
     }
@@ -232,7 +238,13 @@ public class LocalMemoryTracker implements LimitedMemoryTracker {
             allocatedBytesHeap = 0;
             allocatedBytesNative = 0;
             heapHighWaterMark = 0;
+            trackingOnly = false;
         }
+    }
+
+    @Override
+    public void setTrackingOnly(boolean trackingOnly) {
+        this.trackingOnly = trackingOnly;
     }
 
     public void checkAllocatedNativeBytes() {
@@ -246,7 +258,7 @@ public class LocalMemoryTracker implements LimitedMemoryTracker {
 
     @Override
     public MemoryTracker getScopedMemoryTracker() {
-        return new DefaultScopedMemoryTracker(this);
+        return new DefaultScopedMemoryTracker(this, getHeapEstimatorCache());
     }
 
     @Override

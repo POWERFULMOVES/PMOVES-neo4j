@@ -41,6 +41,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.NotInTransactionException;
 import org.neo4j.graphdb.RelationshipType;
@@ -60,6 +62,7 @@ import org.neo4j.kernel.impl.store.format.standard.NodeRecordFormat;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.test.extension.DbmsExtension;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.time.Clocks;
 import org.neo4j.util.concurrent.Futures;
 
@@ -82,11 +85,23 @@ public class ExecutionContextIT {
         executors.shutdown();
     }
 
+    @SkipOnSpd(reason = "Memory values are different in SPD")
     @RepeatedTest(10)
     void contextMemoryTracking() throws ExecutionException {
         try (Transaction transaction = databaseAPI.beginTx()) {
             var ktx = (KernelTransactionImplementation) ((InternalTransaction) transaction).kernelTransaction();
             try (Statement statement = ktx.acquireStatement()) {
+                KernelTransactions kernelTransactions =
+                        databaseAPI.getDependencyResolver().resolveDependency(KernelTransactions.class);
+
+                var transactionHandle = kernelTransactions.activeTransactions().stream()
+                        .filter(tx -> tx.isUnderlyingTransaction(ktx))
+                        .findFirst()
+                        .orElseThrow();
+
+                var baselineHeap = transactionHandle.transactionStatistic().getEstimatedUsedHeapMemory();
+                var baselineNative = transactionHandle.transactionStatistic().getNativeAllocatedBytes();
+
                 var futures = new ArrayList<Future<?>>(NUMBER_OF_WORKERS);
                 var contexts = new ArrayList<ExecutionContext>(NUMBER_OF_WORKERS);
                 for (int i = 0; i < NUMBER_OF_WORKERS; i++) {
@@ -101,24 +116,19 @@ public class ExecutionContextIT {
                 }
                 Futures.getAll(futures);
 
-                KernelTransactions kernelTransactions =
-                        databaseAPI.getDependencyResolver().resolveDependency(KernelTransactions.class);
-
-                var transactionHandle = kernelTransactions.activeTransactions().stream()
-                        .filter(tx -> tx.isUnderlyingTransaction(ktx))
-                        .findFirst()
-                        .orElseThrow();
                 assertEquals(
-                        kibiBytes(128 * NUMBER_OF_WORKERS),
+                        baselineHeap + kibiBytes(128 * NUMBER_OF_WORKERS),
                         transactionHandle.transactionStatistic().getEstimatedUsedHeapMemory());
-                assertEquals(0, transactionHandle.transactionStatistic().getNativeAllocatedBytes());
+                assertEquals(
+                        baselineNative, transactionHandle.transactionStatistic().getNativeAllocatedBytes());
 
                 closeAllUnchecked(contexts);
 
                 assertEquals(
-                        bytes(5 * 10 * NUMBER_OF_WORKERS),
+                        baselineHeap + bytes(5 * 10 * NUMBER_OF_WORKERS),
                         transactionHandle.transactionStatistic().getEstimatedUsedHeapMemory());
-                assertEquals(0, transactionHandle.transactionStatistic().getNativeAllocatedBytes());
+                assertEquals(
+                        baselineNative, transactionHandle.transactionStatistic().getNativeAllocatedBytes());
 
                 transaction.close();
 
@@ -197,6 +207,7 @@ public class ExecutionContextIT {
         }
     }
 
+    @SkipOnSpd(reason = "Page cache tracing is different in SPD")
     @RepeatedTest(10)
     void contextPeriodicReport() throws ExecutionException {
         int numberOfNodes = 32768;
@@ -266,9 +277,14 @@ public class ExecutionContextIT {
                 try {
                     var read = executionContext.dataRead();
                     ktx.markForTermination(Status.Transaction.Terminated);
-                    assertThatThrownBy(() -> read.nodeExists(1))
+                    ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> read.nodeExists(1))
                             .isInstanceOf(TransactionTerminatedException.class)
-                            .hasMessageContaining("The transaction has been terminated.");
+                            .hasMessageContaining("The transaction has been terminated.")
+                            .hasGqlStatus(GqlStatusInfoCodes.STATUS_25N14)
+                            .hasStatusDescription(
+                                    "error: invalid transaction state - transaction termination client error. "
+                                            + "The transaction has been terminated. Retry your operation in a new transaction, "
+                                            + "and you should see a successful result. Reason: Explicitly terminated by the user.");
                 } finally {
                     executionContext.complete();
                 }
@@ -396,9 +412,14 @@ public class ExecutionContextIT {
                 transaction.terminate();
 
                 assertThat(executionContext.isTransactionOpen()).isFalse();
-                assertThatThrownBy(executionContext::performCheckBeforeOperation)
+                ErrorGqlStatusObjectAssertions.assertThatThrownBy(executionContext::performCheckBeforeOperation)
                         .isInstanceOf(TransactionTerminatedException.class)
-                        .hasMessageContaining("The transaction has been terminated");
+                        .hasMessageContaining("The transaction has been terminated")
+                        .hasGqlStatus(GqlStatusInfoCodes.STATUS_25N14)
+                        .hasStatusDescription(
+                                "error: invalid transaction state - transaction termination client error. "
+                                        + "The transaction has been terminated. Retry your operation in a new transaction, "
+                                        + "and you should see a successful result. Reason: Explicitly terminated by the user.");
             }
         }
     }

@@ -27,12 +27,13 @@ import org.neo4j.graphdb.Resource;
 import org.neo4j.io.IOUtils;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.kernel.database.Database;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
 import org.neo4j.logging.InternalLog;
-import org.neo4j.storageengine.api.StoreFileMetadata;
 import org.neo4j.storageengine.api.StoreResource;
 import org.neo4j.storageengine.api.StoreSnapshot;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
+import org.neo4j.wal.entry.LogFormat;
 
 public class DefaultStoreSnapshotFactory implements StoreSnapshot.Factory {
     private final Database database;
@@ -47,6 +48,7 @@ public class DefaultStoreSnapshotFactory implements StoreSnapshot.Factory {
 
     @Override
     public Optional<StoreSnapshot> createStoreSnapshot() throws IOException {
+        log.debug("Starting creating store snapshot");
         if (!database.getDatabaseAvailabilityGuard().isAvailable()) {
             log.warn("Unable to prepare a store snapshot because database '"
                     + database.getNamedDatabaseId().name() + "' is unavailable");
@@ -62,18 +64,27 @@ public class DefaultStoreSnapshotFactory implements StoreSnapshot.Factory {
         Stream<StoreResource> unrecoverableFiles = null;
         try {
             var latestCheckpointInfo = checkPointer.latestCheckPointInfo();
+            var kernelVersion = latestCheckpointInfo.kernelVersion();
             var lastCommittedTransactionId = latestCheckpointInfo.highestObservedClosedTransactionId();
             long appendIndex = latestCheckpointInfo.appendIndex();
+
+            LogFiles logFiles = database.getDependencyResolver().resolveDependency(LogFiles.class);
+            LogFormat logFormatAtCheckpoint = logFiles.getLogFile()
+                    .extractHeader(
+                            latestCheckpointInfo.checkpointedLogPosition().getLogVersion())
+                    .getLogFormatVersion();
 
             unrecoverableFiles = unrecoverableFiles(database);
             var recoverableFiles = recoverableFiles(database);
             var snapshot = new StoreSnapshot(
                     unrecoverableFiles,
                     recoverableFiles,
+                    kernelVersion,
                     lastCommittedTransactionId,
                     appendIndex,
                     database.getStoreId(),
-                    checkpointMutex);
+                    checkpointMutex,
+                    logFormatAtCheckpoint);
             var result = Optional.of(snapshot);
             success = true;
             return result;
@@ -81,6 +92,7 @@ public class DefaultStoreSnapshotFactory implements StoreSnapshot.Factory {
             if (!success) {
                 IOUtils.closeAll(unrecoverableFiles, checkpointMutex);
             }
+            log.debug("Creating store snapshot complete, success=%s", success);
         }
     }
 
@@ -91,7 +103,7 @@ public class DefaultStoreSnapshotFactory implements StoreSnapshot.Factory {
      * We intentionally return an *un-closed* {@code Stream<StoreResource>}, which is then closed
      * as part of the wrapping StoreSnapshot when a caller is finished with it.
      */
-    private Stream<StoreResource> unrecoverableFiles(Database database) throws IOException {
+    protected Stream<StoreResource> unrecoverableFiles(Database database) throws IOException {
         var databaseDirectory = database.getDatabaseLayout().databaseDirectory();
         return database
                 .getStoreFileListing()
@@ -119,7 +131,7 @@ public class DefaultStoreSnapshotFactory implements StoreSnapshot.Factory {
                 .excludeAll()
                 .includeReplayableStorageFiles()
                 .build()) {
-            return recoverableFiles.stream().map(StoreFileMetadata::path).toArray(Path[]::new);
+            return recoverableFiles.stream().toArray(Path[]::new);
         }
     }
 
@@ -128,13 +140,13 @@ public class DefaultStoreSnapshotFactory implements StoreSnapshot.Factory {
      * occurring until we have streamed all the *unrecoverable* files.
      */
     private Resource tryCheckpointAndAcquireMutex(CheckPointer checkPointer) throws IOException {
-        return database.getStoreCopyCheckPointMutex()
-                .storeCopy(() -> checkPointer.tryCheckPoint(new SimpleTriggerInfo("Store copy")));
+        return database.getStoreCopyCheckPointMutex().storeCopy(() -> {
+            checkPointer.tryCheckPoint(new SimpleTriggerInfo("Store copy"));
+        });
     }
 
-    private StoreResource toStoreResource(Path databaseDirectory, StoreFileMetadata storeFileMetadata) {
-        var file = storeFileMetadata.path();
-        var relativePath = databaseDirectory.relativize(file).toString();
-        return new StoreResource(file, relativePath, fs);
+    private StoreResource toStoreResource(Path databaseDirectory, Path storeFile) {
+        var relativePath = databaseDirectory.relativize(storeFile).toString();
+        return new StoreResource(storeFile, relativePath, fs);
     }
 }

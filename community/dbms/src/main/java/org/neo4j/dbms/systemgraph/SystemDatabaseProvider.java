@@ -19,13 +19,19 @@
  */
 package org.neo4j.dbms.systemgraph;
 
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static org.neo4j.configuration.GraphDatabaseInternalSettings.system_snapshot_query_retries;
+import static org.neo4j.configuration.GraphDatabaseSettings.transaction_timeout;
+import static org.neo4j.kernel.impl.transaction.TransactionConflictRetries.retry;
+
 import java.util.Optional;
 import java.util.function.Consumer;
 import java.util.function.Function;
-import org.neo4j.common.DependencyResolver;
+import org.neo4j.configuration.Config;
 import org.neo4j.graphdb.Transaction;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.monitoring.DatabaseHealth;
+import org.neo4j.time.SystemNanoClock;
 
 @FunctionalInterface
 public interface SystemDatabaseProvider {
@@ -33,58 +39,75 @@ public interface SystemDatabaseProvider {
 
     class SystemDatabasePanickedException extends SystemDatabaseUnavailableException {}
 
-    GraphDatabaseAPI database() throws SystemDatabaseUnavailableException;
+    default GraphDatabaseAPI database() throws SystemDatabaseUnavailableException {
+        return optionalDatabaseContext()
+                .orElseThrow(SystemDatabaseUnavailableException::new)
+                .databaseAPI();
+    }
+
+    Optional<SystemDatabaseContext> optionalDatabaseContext();
 
     default void execute(Consumer<Transaction> consumer) throws SystemDatabaseUnavailableException {
-        var facade = database();
-        if (!facade.isAvailable(1000)) {
-            throw new SystemDatabaseUnavailableException();
-        }
-        try (var tx = facade.beginTx()) {
+        query(tx -> {
             consumer.accept(tx);
-            tx.commit();
-        }
+            return this; // cannot return null
+        });
     }
 
     default <T> T query(Function<Transaction, T> function) throws SystemDatabaseUnavailableException {
-        return query(database(), function, true).orElseThrow();
+        return query(optionalDatabaseContext(), function, true).orElseThrow();
     }
 
     default <T> Optional<T> queryIfAvailable(Function<Transaction, T> function) {
-        return query(database(), function, false);
+        return query(optionalDatabaseContext(), function, false);
     }
 
-    default <T> Optional<T> dependency(Class<T> type) throws SystemDatabaseUnavailableException {
-        return dependency(database().getDependencyResolver(), type);
-    }
-
-    static <T> Optional<T> dependency(DependencyResolver dependencies, Class<T> type)
-            throws SystemDatabaseUnavailableException {
-        if (dependencies.containsDependency(type)) {
-            return Optional.of(dependencies.resolveDependency(type));
-        }
-        return Optional.empty();
+    default <T> Optional<T> dependency(Class<T> type) {
+        return optionalDatabaseContext()
+                .flatMap(systemDb ->
+                        systemDb.databaseAPI().getDependencyResolver().resolveOptionalDependency(type));
     }
 
     private static <T> Optional<T> query(
-            GraphDatabaseAPI facade, Function<Transaction, T> function, boolean waitForAvailablity)
+            @SuppressWarnings("OptionalUsedAsFieldOrParameterType") Optional<SystemDatabaseContext> databaseContext,
+            Function<Transaction, T> function,
+            boolean failOnUnavailable)
             throws SystemDatabaseUnavailableException {
-        if (waitForAvailablity) {
-            if (!facade.isAvailable(1000)) {
-                if (dependency(facade.getDependencyResolver(), DatabaseHealth.class)
-                        .map(DatabaseHealth::hasNoPanic)
-                        .orElse(true)) {
-                    throw new SystemDatabaseUnavailableException();
-                }
-                throw new SystemDatabasePanickedException();
+        if (databaseContext.isEmpty()) {
+            if (failOnUnavailable) {
+                throw new SystemDatabaseUnavailableException();
             }
-        } else if (!facade.isAvailable()) {
             return Optional.empty();
         }
-        try (var tx = facade.beginTx()) {
-            var result = function.apply(tx);
-            tx.commit();
-            return Optional.of(result);
+        var systemDbContext = databaseContext.get();
+        var systemDatabaseApi = systemDbContext.databaseAPI();
+        if (failOnUnavailable) {
+            if (!systemDatabaseApi.isAvailable(1000)) {
+                if (!systemDatabaseApi
+                        .getDependencyResolver()
+                        .resolveOptionalDependency(DatabaseHealth.class)
+                        .map(DatabaseHealth::hasNoPanic)
+                        .orElse(true)) {
+                    throw new SystemDatabasePanickedException();
+                }
+                throw new SystemDatabaseUnavailableException();
+            }
+        } else if (!systemDatabaseApi.isAvailable(0)) {
+            return Optional.empty();
         }
+        var config = systemDbContext.config();
+        return Optional.of(retry(
+                systemDbContext.clock(),
+                config.get(system_snapshot_query_retries),
+                config.get(transaction_timeout),
+                timeoutMillis -> {
+                    try (var tx = systemDatabaseApi.beginTx(timeoutMillis, MILLISECONDS)) {
+                        var result = function.apply(tx);
+                        tx.commit();
+                        return result;
+                    }
+                }));
     }
+
+    record SystemDatabaseContext(GraphDatabaseAPI databaseAPI, Config config, SystemNanoClock clock) {}
 }

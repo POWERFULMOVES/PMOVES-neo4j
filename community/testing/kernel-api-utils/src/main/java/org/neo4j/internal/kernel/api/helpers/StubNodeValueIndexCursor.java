@@ -19,73 +19,106 @@
  */
 package org.neo4j.internal.kernel.api.helpers;
 
-import static org.neo4j.values.storable.Values.NO_VALUE;
-
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import org.apache.commons.lang3.ArrayUtils;
-import org.neo4j.internal.kernel.api.DefaultCloseListenable;
-import org.neo4j.internal.kernel.api.KernelReadTracer;
 import org.neo4j.internal.kernel.api.NodeCursor;
 import org.neo4j.internal.kernel.api.NodeValueIndexCursor;
-import org.neo4j.values.storable.Value;
+import org.neo4j.internal.kernel.api.PropertyCursor;
+import org.neo4j.internal.kernel.api.RelationshipTraversalCursor;
+import org.neo4j.internal.kernel.api.TokenSet;
+import org.neo4j.storageengine.api.Degrees;
+import org.neo4j.storageengine.api.PropertySelection;
+import org.neo4j.storageengine.api.Reference;
+import org.neo4j.storageengine.api.RelationshipSelection;
 
-public class StubNodeValueIndexCursor extends DefaultCloseListenable implements NodeValueIndexCursor {
-    private int position = -1;
-    private final List<NodeData> nodes = new ArrayList<>();
-    private final List<Value[]> values = new ArrayList<>();
-
-    public StubNodeValueIndexCursor withNode(long id, Value... vs) {
-        nodes.add(new NodeData(id, ArrayUtils.EMPTY_INT_ARRAY, Collections.emptyMap()));
-        values.add(vs);
-        return this;
-    }
+public class StubNodeValueIndexCursor extends StubEntityValueIndexCursor implements NodeValueIndexCursor {
 
     @Override
     public void node(NodeCursor cursor) {}
 
     @Override
     public long nodeReference() {
-        return position >= 0 && position < nodes.size() ? nodes.get(position).id : -1;
+        return reference();
     }
 
     @Override
-    public float score() {
-        return Float.NaN;
+    public TokenSet labels() {
+        throw unsupportedOperation();
     }
 
     @Override
-    public boolean next() {
-        return ++position < nodes.size();
+    public TokenSet labelsIgnoringTxStateSetRemove() {
+        throw unsupportedOperation();
     }
 
     @Override
-    public void closeInternal() {}
+    public boolean hasLabel(int label) {
+        throw unsupportedOperation();
+    }
 
     @Override
-    public boolean isClosed() {
+    public boolean hasLabel() {
+        throw unsupportedOperation();
+    }
+
+    @Override
+    public void relationships(RelationshipTraversalCursor relationships, RelationshipSelection selection) {}
+
+    @Override
+    public boolean supportsFastRelationshipsTo() {
+        throw unsupportedOperation();
+    }
+
+    @Override
+    public void relationshipsTo(
+            RelationshipTraversalCursor relationships, RelationshipSelection selection, long neighbourNodeReference) {
+        throw unsupportedOperation();
+    }
+
+    @Override
+    public long relationshipsReference() {
+        throw unsupportedOperation();
+    }
+
+    @Override
+    public boolean supportsFastDegreeLookup() {
         return false;
     }
 
     @Override
-    public void setTracer(KernelReadTracer tracer) {}
-
-    @Override
-    public void removeTracer() {}
-
-    @Override
-    public int numberOfProperties() {
-        return position >= 0 && position < values.size() ? values.get(position).length : 0;
+    public int[] relationshipTypes() {
+        throw unsupportedOperation();
     }
 
     @Override
-    public boolean hasValue() {
-        return values != null;
+    public Degrees degrees(RelationshipSelection selection) {
+        throw unsupportedOperation();
     }
 
     @Override
-    public Value propertyValue(int offset) {
-        return position >= 0 && position < values.size() ? values.get(position)[offset] : NO_VALUE;
+    public long degree(RelationshipSelection selection) {
+        throw unsupportedOperation();
+    }
+
+    @Override
+    public long degreeWithMax(long maxDegree, RelationshipSelection selection) {
+        throw unsupportedOperation();
+    }
+
+    @Override
+    public boolean readFromStore() {
+        throw unsupportedOperation();
+    }
+
+    @Override
+    public void properties(PropertyCursor cursor, PropertySelection selection) {
+        throw unsupportedOperation();
+    }
+
+    @Override
+    public Reference propertiesReference() {
+        throw unsupportedOperation();
+    }
+
+    private UnsupportedOperationException unsupportedOperation() {
+        return new UnsupportedOperationException("StubNodeValueIndexCursor does not support NodeCursorOperations");
     }
 }

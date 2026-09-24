@@ -32,6 +32,7 @@ import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.kernel.KernelVersionProvider;
 import org.neo4j.kernel.api.procedure.GlobalProcedures;
 import org.neo4j.kernel.availability.AvailabilityGuard;
+import org.neo4j.kernel.database.DatabaseMonitors;
 import org.neo4j.kernel.database.DatabaseTracers;
 import org.neo4j.kernel.database.NamedDatabaseId;
 import org.neo4j.kernel.impl.api.chunk.TransactionRollbackProcess;
@@ -44,12 +45,11 @@ import org.neo4j.kernel.impl.factory.AccessCapabilityFactory;
 import org.neo4j.kernel.impl.locking.LockManager;
 import org.neo4j.kernel.impl.monitoring.TransactionMonitor;
 import org.neo4j.kernel.impl.query.TransactionExecutionMonitor;
-import org.neo4j.kernel.impl.transaction.log.TransactionCommitmentFactory;
-import org.neo4j.kernel.impl.util.collection.CollectionsFactorySupplier;
 import org.neo4j.kernel.internal.event.DatabaseTransactionEventListeners;
 import org.neo4j.logging.LogProvider;
-import org.neo4j.memory.GlobalMemoryGroupTracker;
+import org.neo4j.memory.ScopedMemoryPool;
 import org.neo4j.monitoring.DatabaseHealth;
+import org.neo4j.monitoring.ExceptionHandlerService;
 import org.neo4j.resources.CpuClock;
 import org.neo4j.storageengine.api.StorageEngine;
 import org.neo4j.storageengine.api.TransactionIdStore;
@@ -57,6 +57,7 @@ import org.neo4j.storageengine.api.txstate.validation.TransactionValidatorFactor
 import org.neo4j.time.SystemNanoClock;
 import org.neo4j.token.TokenHolders;
 import org.neo4j.values.ElementIdMapper;
+import org.neo4j.wal.TransactionCommitmentFactory;
 
 public interface KernelTransactionsFactory {
     KernelTransactions create(
@@ -78,7 +79,6 @@ public interface KernelTransactionsFactory {
             AtomicReference<CpuClock> cpuClockRef,
             AccessCapabilityFactory accessCapabilityFactory,
             CursorContextFactory contextFactory,
-            CollectionsFactorySupplier collectionsFactorySupplier,
             ConstraintSemantics constraintSemantics,
             SchemaState schemaState,
             TokenHolders tokenHolders,
@@ -89,7 +89,7 @@ public interface KernelTransactionsFactory {
             Dependencies databaseDependencies,
             DatabaseTracers tracers,
             LeaseService leaseService,
-            GlobalMemoryGroupTracker transactionsMemoryPool,
+            ScopedMemoryPool transactionMemoryPool,
             DatabaseReadOnlyChecker readOnlyDatabaseChecker,
             TransactionExecutionMonitor transactionExecutionMonitor,
             IdController.IdFreeCondition externalIdReuseCondition,
@@ -98,6 +98,9 @@ public interface KernelTransactionsFactory {
             TransactionIdGenerator transactionIdGenerator,
             DatabaseHealth databaseHealth,
             TransactionValidatorFactory transactionValidatorFactory,
+            ExceptionHandlerService exceptionHandlerService,
             LogProvider internalLogProvider,
-            TopologyGraphDbmsModel.HostedOnMode mode);
+            TopologyGraphDbmsModel.HostedOnMode mode,
+            DatabaseMonitors databaseMonitors,
+            RaftUpgradeBarrier raftUpgradeBarrier);
 }

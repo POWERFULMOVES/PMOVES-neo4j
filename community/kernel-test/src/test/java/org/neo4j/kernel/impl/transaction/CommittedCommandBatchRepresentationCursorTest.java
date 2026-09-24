@@ -29,27 +29,27 @@ import static org.mockito.Mockito.RETURNS_MOCKS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-import static org.neo4j.kernel.impl.transaction.log.LogIndexEncoding.encodeLogIndex;
-import static org.neo4j.kernel.impl.transaction.log.entry.LogEntryFactory.newCommitEntry;
-import static org.neo4j.kernel.impl.transaction.log.entry.LogEntryFactory.newStartEntry;
 import static org.neo4j.storageengine.AppendIndexProvider.UNKNOWN_APPEND_INDEX;
 import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_CHECKSUM;
+import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_TX_SEQUENCE_NUMBER;
 import static org.neo4j.test.LatestVersions.LATEST_KERNEL_VERSION;
+import static org.neo4j.wal.LogIndexEncoding.encodeLogIndex;
+import static org.neo4j.wal.entry.LogEntryFactory.newCommitEntry;
+import static org.neo4j.wal.entry.LogEntryFactory.newStartEntry;
 
 import java.io.IOException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.neo4j.kernel.impl.api.TestCommand;
-import org.neo4j.kernel.impl.transaction.log.CommittedCommandBatchCursor;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
-import org.neo4j.kernel.impl.transaction.log.ReadableLogChannel;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntry;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntryCommand;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntryCommit;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntryReader;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntryStart;
-import org.neo4j.kernel.impl.transaction.log.entry.v57.LogEntryChunkEnd;
-import org.neo4j.kernel.impl.transaction.log.entry.v57.LogEntryChunkStart;
+import org.neo4j.wal.CommittedCommandBatchCursor;
+import org.neo4j.wal.ReadableLogChannel;
+import org.neo4j.wal.entry.LogEntry;
+import org.neo4j.wal.entry.LogEntryCommand;
+import org.neo4j.wal.entry.LogEntryCommit;
+import org.neo4j.wal.entry.LogEntryReader;
+import org.neo4j.wal.entry.LogEntryStart;
+import org.neo4j.wal.entry.v520.LogEntryChunkEnd;
+import org.neo4j.wal.entry.v520.LogEntryChunkStart;
 
 class CommittedCommandBatchRepresentationCursorTest {
     private final ReadableLogChannel channel = mock(ReadableLogChannel.class, RETURNS_MOCKS);
@@ -57,11 +57,18 @@ class CommittedCommandBatchRepresentationCursorTest {
 
     private static final LogEntry NULL_ENTRY = null;
     private static final LogEntryStart START_ENTRY =
-            newStartEntry(LATEST_KERNEL_VERSION, 0L, 0L, 0, 5, encodeLogIndex(2), LogPosition.UNSPECIFIED);
-    private static final LogEntryCommit COMMIT_ENTRY = newCommitEntry(LATEST_KERNEL_VERSION, 42, 0, BASE_TX_CHECKSUM);
+            newStartEntry(LATEST_KERNEL_VERSION, 0L, 0L, 0, UNKNOWN_TX_SEQUENCE_NUMBER, 5, encodeLogIndex(2));
+    private static final LogEntryCommit COMMIT_ENTRY =
+            newCommitEntry(LATEST_KERNEL_VERSION, 42, 0, BASE_TX_CHECKSUM + 1);
     private static final LogEntryCommand COMMAND_ENTRY = new LogEntryCommand(new TestCommand());
-    private static final LogEntryChunkStart CHUNK_START =
-            new LogEntryChunkStart(LATEST_KERNEL_VERSION, 12, 2, UNKNOWN_APPEND_INDEX);
+    private static final LogEntryChunkStart CHUNK_START = new LogEntryChunkStart(
+            LATEST_KERNEL_VERSION,
+            12,
+            2,
+            UNKNOWN_APPEND_INDEX,
+            UNKNOWN_APPEND_INDEX,
+            UNKNOWN_TX_SEQUENCE_NUMBER,
+            encodeLogIndex(42));
     private static final LogEntryChunkEnd CHUNK_END =
             new LogEntryChunkEnd(LATEST_KERNEL_VERSION, 12, 2, BASE_TX_CHECKSUM);
     private CommittedCommandBatchCursor cursor;
@@ -122,13 +129,15 @@ class CommittedCommandBatchRepresentationCursorTest {
     void shouldCallTheVisitorWithTheFoundTransaction() throws IOException {
         // given
         when(entryReader.readLogEntry(channel)).thenReturn(START_ENTRY, COMMAND_ENTRY, COMMIT_ENTRY);
+        when(channel.getChecksum()).thenReturn(BASE_TX_CHECKSUM);
 
         // when
         cursor.next();
 
         // then
         assertEquals(
-                new CompleteBatchRepresentation(START_ENTRY, singletonList(COMMAND_ENTRY.getCommand()), COMMIT_ENTRY),
+                new CompleteBatchRepresentation(
+                        START_ENTRY, singletonList(COMMAND_ENTRY.getCommand()), COMMIT_ENTRY, BASE_TX_CHECKSUM),
                 cursor.get());
     }
 }

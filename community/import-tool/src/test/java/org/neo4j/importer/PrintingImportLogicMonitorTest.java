@@ -19,7 +19,7 @@
  */
 package org.neo4j.importer;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.neo4j.io.ByteUnit.bytesToString;
 import static org.neo4j.io.ByteUnit.gibiBytes;
 
@@ -37,7 +37,7 @@ class PrintingImportLogicMonitorTest {
     private final PrintStream out = new PrintStream(outBuffer);
     private final ByteArrayOutputStream errBuffer = new ByteArrayOutputStream();
     private final PrintStream err = new PrintStream(errBuffer);
-    private final Monitor monitor = new PrintingImportLogicMonitor(out, err);
+    private final Monitor monitor = new PrintingImportLogicMonitor(out, err, Monitor.NO_MONITOR);
 
     @Test
     void mayExceedNodeIdCapacity() {
@@ -50,10 +50,11 @@ class PrintingImportLogicMonitorTest {
 
         // then
         String text = errBuffer.toString();
-        assertTrue(text.contains("WARNING"));
-        assertTrue(text.contains("exceed"));
-        assertTrue(text.contains(String.valueOf(capacity)));
-        assertTrue(text.contains(String.valueOf(estimatedCount)));
+        assertThat(text)
+                .contains("WARNING")
+                .contains("exceed")
+                .contains(String.valueOf(capacity))
+                .contains(String.valueOf(estimatedCount));
     }
 
     @Test
@@ -67,10 +68,11 @@ class PrintingImportLogicMonitorTest {
 
         // then
         String text = errBuffer.toString();
-        assertTrue(text.contains("WARNING"));
-        assertTrue(text.contains("exceed"));
-        assertTrue(text.contains(String.valueOf(capacity)));
-        assertTrue(text.contains(String.valueOf(estimatedCount)));
+        assertThat(text)
+                .contains("WARNING")
+                .contains("exceed")
+                .contains(String.valueOf(capacity))
+                .contains(String.valueOf(estimatedCount));
     }
 
     @Test
@@ -84,10 +86,11 @@ class PrintingImportLogicMonitorTest {
 
         // then
         String text = errBuffer.toString();
-        assertTrue(text.contains("WARNING"));
-        assertTrue(text.contains("too small"));
-        assertTrue(text.contains(bytesToString(heapSize)));
-        assertTrue(text.contains(bytesToString(optimalHeapSize)));
+        assertThat(text)
+                .contains("WARNING")
+                .contains("too small")
+                .contains(bytesToString(heapSize))
+                .contains(bytesToString(optimalHeapSize));
     }
 
     @Test
@@ -101,10 +104,11 @@ class PrintingImportLogicMonitorTest {
 
         // then
         String text = errBuffer.toString();
-        assertTrue(text.contains("WARNING"));
-        assertTrue(text.contains("unnecessarily large"));
-        assertTrue(text.contains(bytesToString(heapSize)));
-        assertTrue(text.contains(bytesToString(optimalHeapSize)));
+        assertThat(text)
+                .contains("WARNING")
+                .contains("unnecessarily large")
+                .contains(bytesToString(heapSize))
+                .contains(bytesToString(optimalHeapSize));
     }
 
     @Test
@@ -119,10 +123,11 @@ class PrintingImportLogicMonitorTest {
 
         // then
         String text = errBuffer.toString();
-        assertTrue(text.contains("WARNING"));
-        assertTrue(text.contains("may not be sufficient"));
-        assertTrue(text.contains(bytesToString(estimatedCacheSize)));
-        assertTrue(text.contains(bytesToString(optimalHeapSize)));
-        assertTrue(text.contains(bytesToString(availableMemory)));
+        assertThat(text)
+                .contains("WARNING")
+                .contains("may not be sufficient")
+                .contains(bytesToString(estimatedCacheSize))
+                .contains(bytesToString(optimalHeapSize))
+                .contains(bytesToString(availableMemory));
     }
 }

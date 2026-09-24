@@ -22,9 +22,10 @@ package org.neo4j.dbms.archive;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import org.neo4j.dbms.archive.Dumper.DumpFormat;
 
-public class DumpZstdFormatV1 implements CompressionFormat {
-    static final String MAGIC_HEADER = ArchiveFormat.DUMP_PREFIX + "ZV1";
+public class DumpZstdFormatV1 implements DumpFormat {
+    static final MagicSignature MAGIC_HEADER = MagicSignature.of(ArchiveFormat.DUMP_PREFIX + "ZV1");
 
     @Override
     public OutputStream compress(OutputStream stream) throws IOException {
@@ -35,5 +36,10 @@ public class DumpZstdFormatV1 implements CompressionFormat {
     @Override
     public InputStream decompress(InputStream stream) throws IOException {
         return StandardCompressionFormat.ZSTD.decompress(stream);
+    }
+
+    @Override
+    public String toString() {
+        return "DumpZstdFormatV1";
     }
 }

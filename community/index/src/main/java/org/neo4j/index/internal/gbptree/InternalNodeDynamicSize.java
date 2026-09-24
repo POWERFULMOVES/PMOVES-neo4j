@@ -29,7 +29,7 @@ import static org.neo4j.index.internal.gbptree.DynamicSizeUtil.extractValueSize;
 import static org.neo4j.index.internal.gbptree.DynamicSizeUtil.getAllocSpace;
 import static org.neo4j.index.internal.gbptree.DynamicSizeUtil.getDeadSpace;
 import static org.neo4j.index.internal.gbptree.DynamicSizeUtil.getOverhead;
-import static org.neo4j.index.internal.gbptree.DynamicSizeUtil.inlineKeyValueSizeCap;
+import static org.neo4j.index.internal.gbptree.DynamicSizeUtil.inlineKeyValueSizeCapInternalNode;
 import static org.neo4j.index.internal.gbptree.DynamicSizeUtil.keyValueSizeCapFromPageSize;
 import static org.neo4j.index.internal.gbptree.DynamicSizeUtil.putKeyValueSize;
 import static org.neo4j.index.internal.gbptree.DynamicSizeUtil.putOffloadMarker;
@@ -40,7 +40,6 @@ import static org.neo4j.index.internal.gbptree.DynamicSizeUtil.recordAliveBlocks
 import static org.neo4j.index.internal.gbptree.DynamicSizeUtil.setAllocOffset;
 import static org.neo4j.index.internal.gbptree.DynamicSizeUtil.setDeadSpace;
 import static org.neo4j.index.internal.gbptree.DynamicSizeUtil.validateInlineCap;
-import static org.neo4j.index.internal.gbptree.GBPTreeGenerationTarget.NO_GENERATION_TARGET;
 import static org.neo4j.index.internal.gbptree.GenerationSafePointerPair.read;
 import static org.neo4j.index.internal.gbptree.TreeNodeUtil.SIZE_PAGE_REFERENCE;
 import static org.neo4j.index.internal.gbptree.TreeNodeUtil.insertSlotsAt;
@@ -108,7 +107,7 @@ public final class InternalNodeDynamicSize<KEY> implements InternalNodeBehaviour
         this.maxKeyCount = totalSpace / (DynamicSizeUtil.OFFSET_SIZE + MIN_SIZE_KEY_VALUE_SIZE);
         this.offloadStore = offloadStore;
 
-        this.inlineKeySizeCap = inlineKeyValueSizeCap(payloadSize);
+        this.inlineKeySizeCap = inlineKeyValueSizeCapInternalNode(payloadSize);
         this.keySizeCap = keyValueSizeCapFromPageSize(payloadSize);
 
         validateInlineCap(inlineKeySizeCap, payloadSize);
@@ -332,7 +331,8 @@ public final class InternalNodeDynamicSize<KEY> implements InternalNodeBehaviour
         // collect alive offsets and sizes
         recordAliveBlocks(cursor, keyCount, offsets, sizes, payloadSize);
 
-        compactToRight(cursor, keyCount, offsets, sizes, payloadSize, InternalNodeDynamicSize::keyPosOffsetInternal);
+        compactToRight(
+                cursor, keyCount, keyCount, offsets, sizes, payloadSize, InternalNodeDynamicSize::keyPosOffsetInternal);
         // Update dead space
         setDeadSpace(cursor, 0);
     }
@@ -524,7 +524,7 @@ public final class InternalNodeDynamicSize<KEY> implements InternalNodeBehaviour
                 includedNew = true;
                 currentPos--;
             } else {
-                space = totalSpaceOfKeyChild(cursor, currentPos);
+                space = totalSpaceOfKeyChildAt(cursor, currentPos);
             }
             accumulatedLeftSpace += space;
             prevDelta = currentDelta;
@@ -557,12 +557,25 @@ public final class InternalNodeDynamicSize<KEY> implements InternalNodeBehaviour
         }
     }
 
-    private int totalSpaceOfKeyChild(PageCursor cursor, int pos) {
+    @Override
+    public int totalSpaceOfKeyChildAt(PageCursor cursor, int pos) {
         placeCursorAtActualKey(cursor, pos);
         long keyValueSize = readKeyValueSize(cursor);
         int keySize = extractKeySize(keyValueSize);
         boolean offload = extractOffload(keyValueSize);
         return DynamicSizeUtil.OFFSET_SIZE + getOverhead(keySize, 0, offload) + SIZE_PAGE_REFERENCE + keySize;
+    }
+
+    @Override
+    public int maxEntrySizeBound(CursorCreator cursorCreator, long treeNodeId, int keyCount) throws IOException {
+        try (PageCursor levelCursor = cursorCreator.create()) {
+            TreeNodeUtil.goTo(levelCursor, "escalation split size bound", treeNodeId);
+            int max = 0;
+            for (int pos = 0; pos < keyCount; pos++) {
+                max = Math.max(max, totalSpaceOfKeyChildAt(levelCursor, pos));
+            }
+            return max;
+        }
     }
 
     private void placeCursorAtActualKey(PageCursor cursor, int pos) {
@@ -801,18 +814,21 @@ public final class InternalNodeDynamicSize<KEY> implements InternalNodeBehaviour
 
     @Override
     public long childAt(PageCursor cursor, int pos, long stableGeneration, long unstableGeneration) {
-        return childAt(cursor, pos, stableGeneration, unstableGeneration, NO_GENERATION_TARGET);
+        return childWithGenerationAt(cursor, pos, stableGeneration, unstableGeneration)
+                .pointer();
     }
 
     @Override
-    public long childAt(
-            PageCursor cursor,
-            int pos,
-            long stableGeneration,
-            long unstableGeneration,
-            GBPTreeGenerationTarget generationTarget) {
+    public PointerWithGeneration childWithGenerationAt(
+            PageCursor cursor, int pos, long stableGeneration, long unstableGeneration) {
         cursor.setOffset(childOffset(pos));
-        return read(cursor, stableGeneration, unstableGeneration, generationTarget);
+        return read(cursor, stableGeneration, unstableGeneration);
+    }
+
+    private PointerWithGeneration readChild(
+            PageCursor cursor, int pos, long stableGeneration, long unstableGeneration) {
+        cursor.setOffset(childOffset(pos));
+        return read(cursor, stableGeneration, unstableGeneration);
     }
 
     private boolean canInline(int entrySize) {

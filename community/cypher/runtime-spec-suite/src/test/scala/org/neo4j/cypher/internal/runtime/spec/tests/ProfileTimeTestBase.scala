@@ -38,6 +38,8 @@ import org.neo4j.kernel.api.procedure.Context
 import org.neo4j.procedure.Mode
 import org.neo4j.values.AnyValue
 
+object ProfileTimeTestBase
+
 abstract class ProfileTimeTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
@@ -544,6 +546,8 @@ trait NonParallelProfileTimeTestBase[CONTEXT <: RuntimeContext] {
         ResourceRawIterator.empty[Array[AnyValue], ProcedureException]()
       }
     })
+    // Refresh the transaction so its ProcedureView snapshot includes the procedure we just registered.
+    restartTx()
 
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
@@ -575,7 +579,7 @@ trait NonParallelProfileTimeTestBase[CONTEXT <: RuntimeContext] {
 
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
-      .orderedDistinct(Seq("x"), "x AS x", "y AS y")
+      .orderedDistinct(Seq("x"), "x AS x", "y AS y").withLeveragedOrder()
       .input(nodes = Seq("x", "y"))
       .build()
 

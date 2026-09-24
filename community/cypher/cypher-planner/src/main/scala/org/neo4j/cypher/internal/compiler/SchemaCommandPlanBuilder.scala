@@ -20,17 +20,18 @@
 package org.neo4j.cypher.internal.compiler
 
 import org.neo4j.common.EntityType
+import org.neo4j.cypher.internal.ast.AlterCurrentGraphType
 import org.neo4j.cypher.internal.ast.CreateConstraint
 import org.neo4j.cypher.internal.ast.CreateFulltextIndex
 import org.neo4j.cypher.internal.ast.CreateLookupIndex
 import org.neo4j.cypher.internal.ast.CreateSingleLabelPropertyIndex
+import org.neo4j.cypher.internal.ast.CreateVectorIndex
 import org.neo4j.cypher.internal.ast.DropConstraintOnName
 import org.neo4j.cypher.internal.ast.DropIndexOnName
 import org.neo4j.cypher.internal.ast.IfExistsDoNothing
 import org.neo4j.cypher.internal.ast.PointCreateIndex
 import org.neo4j.cypher.internal.ast.RangeCreateIndex
 import org.neo4j.cypher.internal.ast.TextCreateIndex
-import org.neo4j.cypher.internal.ast.VectorCreateIndex
 import org.neo4j.cypher.internal.compiler.phases.LogicalPlanState
 import org.neo4j.cypher.internal.compiler.phases.PlannerContext
 import org.neo4j.cypher.internal.frontend.phases.BaseState
@@ -42,6 +43,7 @@ import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 import org.neo4j.cypher.internal.planner.spi.AdministrationPlannerName
 import org.neo4j.cypher.internal.util.StepSequencer
 import org.neo4j.cypher.internal.util.attribution.SequentialIdGen
+import org.neo4j.exceptions.InternalException
 import org.neo4j.graphdb.schema.IndexType
 
 /**
@@ -78,16 +80,17 @@ case object SchemaCommandPlanBuilder extends Phase[PlannerContext, BaseState, Lo
       case DropConstraintOnName(name, ifExists, _) =>
         Some(plans.DropConstraintOnName(name, ifExists))
 
-      // CREATE [POINT| RANGE | TEXT | VECTOR] INDEX ...
+      // CREATE [POINT| RANGE | TEXT] INDEX ...
       case CreateSingleLabelPropertyIndex(_, entityName, props, name, astIndexType, ifExistsDo, options) =>
         val indexType = astIndexType match {
           case PointCreateIndex    => IndexType.POINT
           case _: RangeCreateIndex => IndexType.RANGE
           case TextCreateIndex     => IndexType.TEXT
-          case VectorCreateIndex   => IndexType.VECTOR
           case it =>
-            throw new IllegalStateException(
-              s"Did not expect index type ${it.command} here: only point, range, text or vector indexes."
+            throw InternalException.internalError(
+              this.getClass.getSimpleName,
+              s"Unexpected index type, expected point, range or text. Got: $it.",
+              s"Did not expect index type ${it.command} here: only point, range or text indexes."
             )
         }
         val propKeys = props.map(_.propertyKey)
@@ -118,11 +121,27 @@ case object SchemaCommandPlanBuilder extends Phase[PlannerContext, BaseState, Lo
         }
         Some(plans.CreateFulltextIndex(source, entityNames, propKeys, name, options))
 
+      // CREATE VECTOR INDEX ...
+      case CreateVectorIndex(_, entityNames, props, additionalProps, name, _, ifExistsDo, options) =>
+        val propKeys = props.map(_.propertyKey)
+        val additionalPropsKeys = additionalProps.map(_.propertyKey)
+        val source = ifExistsDo match {
+          case IfExistsDoNothing =>
+            Some(plans.DoNothingIfExistsForVectorIndex(entityNames, propKeys, additionalPropsKeys, name, options))
+          case _ => None
+        }
+        Some(plans.CreateVectorIndex(source, entityNames, propKeys, additionalPropsKeys, name, options))
+
       // DROP INDEX name [IF EXISTS]
       case DropIndexOnName(name, ifExists, _) =>
         Some(plans.DropIndexOnName(name, ifExists))
 
-      case _ => None
+      // ALTER CURRENT GRAPH TYPE SET {...}
+      // ALTER CURRENT GRAPH TYPE ADD {...}
+      // ALTER CURRENT GRAPH TYPE ALTER {...}
+      // ALTER CURRENT GRAPH TYPE DROP {...}
+      case AlterCurrentGraphType(graphType, operation, _) => Some(plans.AlterCurrentGraphType(graphType, operation))
+      case _                                              => None
     }
 
     val planState = LogicalPlanState(from)

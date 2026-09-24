@@ -36,6 +36,8 @@ import org.neo4j.graphdb.RelationshipType
 
 import scala.jdk.CollectionConverters.IterableHasAsScala
 
+object OptionalExpandIntoTestBase
+
 abstract class OptionalExpandIntoTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
@@ -1143,5 +1145,75 @@ abstract class OptionalExpandIntoTestBase[CONTEXT <: RuntimeContext](
 
     // then
     runtimeResult should beColumns("x").withRows(singleColumn(nodes.flatMap(n => Seq.fill(20)(n))))
+  }
+
+  test("should handle start node being deleted midstream") {
+    // given
+    val (x1, y1, x2, y2) = givenGraph {
+      val x1 = tx.createNode(Label.label("L"))
+      val x2 = tx.createNode(Label.label("L"))
+      x1.setProperty("prop", "this is the value")
+      x2.setProperty("prop", "I am not long for this world")
+      val y1 = tx.createNode(Label.label("L"))
+      val y2 = tx.createNode(Label.label("L"))
+      x1.createRelationshipTo(y1, RelationshipType.withName("R"))
+      x2.createRelationshipTo(y1, RelationshipType.withName("R"))
+      (x1, y1, x2, y2)
+    }
+
+    // this to simulate that x2 was deleted after being read from the leaf operator
+    givenGraph {
+      Int.box(tx.kernelTransaction().dataWrite().nodeDetachDelete(x2.getId))
+    }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("y", "p")
+      .nonFuseable()
+      .projection("x.prop AS p")
+      .optionalExpandInto("(x)-[r]->(y)")
+      .nonFuseable()
+      .input(nodes = Seq("x", "y"))
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime, inputValues(Array(x1, y1), Array(x2, y2)))
+
+    // then
+    runtimeResult should beColumns("y", "p").withRows(Seq(Array[Any](y1, "this is the value"), Array(y2, null)))
+  }
+
+  test("should handle end node being deleted midstream") {
+    // given
+    val (x1, y1, x2, y2) = givenGraph {
+      val x1 = tx.createNode(Label.label("L"))
+      val x2 = tx.createNode(Label.label("L"))
+      val y1 = tx.createNode(Label.label("L"))
+      val y2 = tx.createNode(Label.label("L"))
+      y1.setProperty("prop", "this is the value")
+      y2.setProperty("prop", "I am not long for this world")
+      x1.createRelationshipTo(y1, RelationshipType.withName("R"))
+      x2.createRelationshipTo(y1, RelationshipType.withName("R"))
+      (x1, y1, x2, y2)
+    }
+
+    // this to simulate that x2 was deleted after being read from the leaf operator
+    givenGraph {
+      Int.box(tx.kernelTransaction().dataWrite().nodeDetachDelete(y2.getId))
+    }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("x", "p")
+      .nonFuseable()
+      .projection("y.prop AS p")
+      .optionalExpandInto("(x)-[r]->(y)")
+      .nonFuseable()
+      .input(nodes = Seq("x", "y"))
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime, inputValues(Array(x1, y1), Array(x2, y2)))
+
+    // then
+    runtimeResult should beColumns("x", "p").withRows(Seq(Array[Any](x1, "this is the value"), Array(x2, null)))
   }
 }

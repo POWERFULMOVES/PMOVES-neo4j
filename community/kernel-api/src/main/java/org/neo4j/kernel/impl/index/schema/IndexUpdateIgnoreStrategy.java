@@ -19,8 +19,7 @@
  */
 package org.neo4j.kernel.impl.index.schema;
 
-import org.neo4j.internal.schema.SchemaDescriptorSupplier;
-import org.neo4j.storageengine.api.IndexEntryUpdate;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.storageengine.api.UpdateMode;
 import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
 import org.neo4j.values.storable.Value;
@@ -38,7 +37,7 @@ public interface IndexUpdateIgnoreStrategy {
      * @param update the update to process
      * @return true if update should be ignored by updater
      */
-    default <INDEX_KEY extends SchemaDescriptorSupplier> boolean ignore(ValueIndexEntryUpdate<INDEX_KEY> update) {
+    default boolean ignore(ValueIndexEntryUpdate update) {
         if (update.updateMode() == UpdateMode.CHANGED) {
             return ignore(update.beforeValues()) && ignore(update.values());
         }
@@ -46,15 +45,14 @@ public interface IndexUpdateIgnoreStrategy {
     }
 
     /**
-     * Some {@link ValueIndexEntryUpdate}s may be better represented by another in some indexes; especially those that do not support all value types.
+     * Some {@link EagerValueIndexEntryUpdate}s may be better represented by another in some indexes; especially those that do not support all value types.
      * Default: {@link UpdateMode#CHANGED} updates, for Indexes that do not support all values; are better represented as an {@link UpdateMode#REMOVED} or
      * {@link UpdateMode#ADDED} update.
      *
-     * @param update a {@link ValueIndexEntryUpdate} to convert
-     * @return an equivalent {@link ValueIndexEntryUpdate}
+     * @param update a {@link EagerValueIndexEntryUpdate} to convert
+     * @return an equivalent {@link EagerValueIndexEntryUpdate}
      */
-    default <INDEX_KEY extends SchemaDescriptorSupplier> ValueIndexEntryUpdate<INDEX_KEY> toEquivalentUpdate(
-            ValueIndexEntryUpdate<INDEX_KEY> update) {
+    default ValueIndexEntryUpdate toEquivalentUpdate(ValueIndexEntryUpdate update) {
         // Only CHANGED may need replacing
         if (update.updateMode() != UpdateMode.CHANGED) {
             return update;
@@ -74,11 +72,11 @@ public interface IndexUpdateIgnoreStrategy {
         final var entityId = update.getEntityId();
 
         if (shouldRemove) {
-            return IndexEntryUpdate.remove(entityId, key, beforeValues);
+            return EagerValueIndexEntryUpdate.remove(entityId, key, beforeValues);
         }
 
         if (shouldAdd) {
-            return IndexEntryUpdate.add(entityId, key, afterValues);
+            return EagerValueIndexEntryUpdate.add(entityId, key, afterValues);
         }
 
         throw new IllegalStateException(
@@ -95,13 +93,12 @@ public interface IndexUpdateIgnoreStrategy {
         }
 
         @Override
-        public <INDEX_KEY extends SchemaDescriptorSupplier> boolean ignore(ValueIndexEntryUpdate<INDEX_KEY> update) {
+        public boolean ignore(ValueIndexEntryUpdate update) {
             return false;
         }
 
         @Override
-        public <INDEX_KEY extends SchemaDescriptorSupplier> ValueIndexEntryUpdate<INDEX_KEY> toEquivalentUpdate(
-                ValueIndexEntryUpdate<INDEX_KEY> update) {
+        public ValueIndexEntryUpdate toEquivalentUpdate(ValueIndexEntryUpdate update) {
             return update;
         }
     };

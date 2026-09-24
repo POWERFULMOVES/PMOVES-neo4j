@@ -21,8 +21,12 @@ package org.neo4j.kernel.impl.util;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.neo4j.io.fs.FileSystemAbstraction.PatternStyle.GLOB;
+import static org.neo4j.io.fs.FileSystemAbstraction.PatternStyle.NONE;
+import static org.neo4j.io.fs.FileSystemAbstraction.PatternStyle.REGEX;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -30,6 +34,7 @@ import org.apache.commons.text.StringEscapeUtils;
 import org.junit.jupiter.api.Test;
 import org.neo4j.cloud.storage.SchemeFileSystemAbstraction;
 import org.neo4j.io.fs.FileSystemAbstraction;
+import org.neo4j.io.fs.FileSystemAbstraction.PatternStyle;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
@@ -53,19 +58,19 @@ class ValidatorsTest {
         final var qwer10 = existenceOfFile("qwer.10");
 
         // WHEN/THEN
-        assertValid("abc", abc);
-        assertValid("bcd", bcd);
-        assertValid("ab.", abc);
-        assertValid(".*bc", abc);
-        assertValid(".*bc.*", abc, bcd);
-        assertValid("qwer\\.\\d", qwer0, qwer1, qwer2);
-        assertValid("qwer\\.\\p{Digit}", qwer0, qwer1, qwer2);
-        assertValid("qwer\\.\\d+", qwer0, qwer1, qwer2, qwer10);
-        assertValid("qwer\\.\\d{1,2}", qwer0, qwer1, qwer2, qwer10);
+        assertValid("abc", REGEX, abc);
+        assertValid("bcd", REGEX, bcd);
+        assertValid("ab.", REGEX, abc);
+        assertValid(".*bc", REGEX, abc);
+        assertValid(".*bc.*", REGEX, abc, bcd);
+        assertValid("qwer\\.\\d", REGEX, qwer0, qwer1, qwer2);
+        assertValid("qwer\\.\\p{Digit}", REGEX, qwer0, qwer1, qwer2);
+        assertValid("qwer\\.\\d+", REGEX, qwer0, qwer1, qwer2, qwer10);
+        assertValid("qwer\\.\\d{1,2}", REGEX, qwer0, qwer1, qwer2, qwer10);
 
-        assertNotValid("abcd");
-        assertNotValid(".*de.*");
-        assertNotValid("qwer\\.\\d{3,}");
+        assertNotValid(REGEX, "abcd");
+        assertNotValid(REGEX, ".*de.*");
+        assertNotValid(REGEX, "qwer\\.\\d{3,}");
     }
 
     @Test
@@ -85,19 +90,47 @@ class ValidatorsTest {
         final var schemeFilesystem = new SchemeFileSystemAbstraction(filesystem);
 
         // WHEN/THEN
-        assertValid(schemeFilesystem, base + "abc", abc);
-        assertValid(schemeFilesystem, base + "bcd", bcd);
-        assertValid(schemeFilesystem, base + "ab.", abc);
-        assertValid(schemeFilesystem, base + ".*bc", abc);
-        assertValid(schemeFilesystem, base + ".*bc.*", abc, bcd);
-        assertValid(schemeFilesystem, base + "qwer\\.\\d", qwer0, qwer1, qwer2);
-        assertValid(schemeFilesystem, base + "qwer\\.\\p{Digit}", qwer0, qwer1, qwer2);
-        assertValid(schemeFilesystem, base + "qwer\\.\\d+", qwer0, qwer1, qwer2, qwer10);
-        assertValid(schemeFilesystem, base + "qwer\\.\\d{1,2}", qwer0, qwer1, qwer2, qwer10);
+        assertValid(schemeFilesystem, REGEX, base + "abc", abc);
+        assertValid(schemeFilesystem, REGEX, base + "bcd", bcd);
+        assertValid(schemeFilesystem, REGEX, base + "ab.", abc);
+        assertValid(schemeFilesystem, REGEX, base + ".*bc", abc);
+        assertValid(schemeFilesystem, REGEX, base + ".*bc.*", abc, bcd);
+        assertValid(schemeFilesystem, REGEX, base + "qwer\\.\\d", qwer0, qwer1, qwer2);
+        assertValid(schemeFilesystem, REGEX, base + "qwer\\.\\p{Digit}", qwer0, qwer1, qwer2);
+        assertValid(schemeFilesystem, REGEX, base + "qwer\\.\\d+", qwer0, qwer1, qwer2, qwer10);
+        assertValid(schemeFilesystem, REGEX, base + "qwer\\.\\d{1,2}", qwer0, qwer1, qwer2, qwer10);
 
-        assertNotValid(schemeFilesystem, base + "abcd");
-        assertNotValid(schemeFilesystem, base + ".*de.*");
-        assertNotValid(schemeFilesystem, base + "qwer\\.\\d{3,}");
+        assertNotValid(schemeFilesystem, REGEX, base + "abcd");
+        assertNotValid(schemeFilesystem, REGEX, base + ".*de.*");
+        assertNotValid(schemeFilesystem, REGEX, base + "qwer\\.\\d{3,}");
+    }
+
+    @Test
+    void shouldFindPathsWithGlobbingPattern() throws IOException {
+        // given
+        var abc = existenceOfFile("abc");
+        var bcd = existenceOfFile("bcd");
+        var qwer0 = existenceOfFile(new String[] {"sub1"}, "qwer.0");
+        var qwer1 = existenceOfFile(new String[] {"sub1", "sub2"}, "qwer.1");
+        var qwer10 = existenceOfFile(new String[] {"sub1"}, "qwer.10");
+        var qwer2 = existenceOfFile(new String[] {"sub2"}, "qwer.2");
+        var qwer3 = existenceOfFile(new String[] {"sub1", "sub2", "sub3a", "sub3b"}, "qwer.3");
+        var qwer4 = existenceOfFile(new String[] {"sub1", "sub2", "sub3a", "sub4"}, "qwer.4");
+        var qwer5 = existenceOfFile(new String[] {"sub1", "sub2", "sub3", "sub4"}, "qwer.5");
+
+        // then
+        assertValid("*c*", GLOB, abc, bcd);
+        assertValid("**/qw*", GLOB, qwer0, qwer1, qwer2, qwer3, qwer4, qwer5, qwer10);
+
+        assertValid("sub1/**/qw*", GLOB, qwer1, qwer3, qwer4, qwer5);
+        assertValid("sub1/**/sub4/qw*", GLOB, qwer4, qwer5);
+        assertValid("**/sub3a/**/qw*", GLOB, qwer3, qwer4);
+    }
+
+    @Test
+    void shouldFindPathWithNonePattern() throws IOException {
+        var abc = existenceOfFile("abc");
+        assertValid(filesystem, NONE, abc.toAbsolutePath().toString(), abc);
     }
 
     private String escapeForWindows(String input) {
@@ -108,28 +141,38 @@ class ValidatorsTest {
         return home + sep + regex;
     }
 
-    private void assertValid(String fileByName, Path... expected) {
-        assertValid(filesystem, escapeForWindows(fileByName), expected);
+    private void assertValid(String fileByName, PatternStyle patternStyle, Path... expected) {
+        assertValid(filesystem, patternStyle, escapeForWindows(fileByName), expected);
     }
 
-    private static void assertValid(FileSystemAbstraction fs, String fileByName, Path... expected) {
-        final var matching = validate(fs, fileByName);
+    private static void assertValid(
+            FileSystemAbstraction fs, PatternStyle patternStyle, String fileByName, Path... expected) {
+        final var matching = validate(fs, patternStyle, fileByName);
         assertThat(matching).containsExactlyInAnyOrder(expected);
     }
 
-    private void assertNotValid(String string) {
-        assertNotValid(filesystem, escapeForWindows(string));
+    private void assertNotValid(PatternStyle patternStyle, String string) {
+        assertNotValid(filesystem, patternStyle, escapeForWindows(string));
     }
 
-    private static void assertNotValid(FileSystemAbstraction fs, String string) {
-        assertThatThrownBy(() -> validate(fs, string)).isInstanceOf(IllegalArgumentException.class);
+    private static void assertNotValid(FileSystemAbstraction fs, PatternStyle patternStyle, String fileByName) {
+        assertThatThrownBy(() -> validate(fs, patternStyle, fileByName)).isInstanceOf(UncheckedIOException.class);
     }
 
-    private static List<Path> validate(FileSystemAbstraction fs, String fileByName) {
-        return Validators.matchingFiles(fs, fileByName);
+    private static List<Path> validate(FileSystemAbstraction fs, PatternStyle patternStyle, String fileByName) {
+        return Validators.matchingFiles(fs, patternStyle, fileByName);
     }
 
     private Path existenceOfFile(String name) throws IOException {
-        return Files.createFile(directory.file(name));
+        return existenceOfFile(new String[0], name);
+    }
+
+    private Path existenceOfFile(String[] subDirs, String name) throws IOException {
+        Path base = directory.homePath();
+        for (String subDir : subDirs) {
+            base = base.resolve(subDir);
+            filesystem.mkdir(base);
+        }
+        return Files.createFile(base.resolve(name));
     }
 }

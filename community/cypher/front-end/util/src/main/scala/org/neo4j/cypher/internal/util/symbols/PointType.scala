@@ -20,12 +20,12 @@ import org.neo4j.cypher.internal.util.InputPosition
 
 case class PointType(isNullable: Boolean)(val position: InputPosition) extends CypherType {
   override val parentType: CypherType = CTAny
-  override val toString = if (isNullable) "Point" else "Point!"
+  override val toClassString = "Point"
   override val toCypherTypeString = "POINT"
 
   override def sortOrder: Int = CypherTypeOrder.POINT.id
 
-  override def hasValueRepresentation: Boolean = true
+  override def couldBeStoredInProperty: Boolean = true
 
   override def withIsNullable(isNullable: Boolean): PointType = this.copy(isNullable = isNullable)(position)
 

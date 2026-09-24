@@ -24,6 +24,7 @@ import static java.util.concurrent.TimeUnit.MINUTES;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
+import static org.neo4j.logging.log4j.LogConfig.DEBUG_JSON_LOG;
 import static org.neo4j.logging.log4j.LogConfig.DEBUG_LOG;
 import static org.neo4j.logging.log4j.LogConfig.SERVER_LOGS_XML;
 import static org.neo4j.test.assertion.Assert.assertEventually;
@@ -33,21 +34,32 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.RandomAccessFile;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.stream.Stream;
+import org.apache.logging.log4j.status.StatusData;
+import org.apache.logging.log4j.status.StatusLogger;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.api.parallel.Resources;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.dbms.api.DatabaseManagementService;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.logging.InternalLog;
+import org.neo4j.logging.Neo4jInternalErrorLogMessage;
 import org.neo4j.logging.internal.LogService;
+import org.neo4j.logging.log4j.Neo4jLogMarkers;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.SuppressOutput;
@@ -65,10 +77,19 @@ class GraphDatabaseInternalLogIT {
     @Inject
     private SuppressOutput suppressOutput;
 
+    private DatabaseManagementService managementService;
+
+    @AfterEach
+    void tearDown() {
+        if (managementService != null) {
+            managementService.shutdown();
+        }
+    }
+
     @Test
     void shouldWriteToInternalDiagnosticsLog() throws Exception {
         // Given
-        DatabaseManagementService managementService = new TestDatabaseManagementServiceBuilder(testDir.homePath())
+        managementService = new TestDatabaseManagementServiceBuilder(testDir.homePath())
                 .setConfig(
                         GraphDatabaseSettings.logs_directory,
                         testDir.directory("logs").toAbsolutePath())
@@ -89,7 +110,7 @@ class GraphDatabaseInternalLogIT {
     @Test
     void shouldNotWriteDebugToInternalDiagnosticsLogByDefault() throws Exception {
         // Given
-        DatabaseManagementService managementService = new TestDatabaseManagementServiceBuilder(testDir.homePath())
+        managementService = new TestDatabaseManagementServiceBuilder(testDir.homePath())
                 .setConfig(
                         GraphDatabaseSettings.logs_directory,
                         testDir.directory("logs").toAbsolutePath())
@@ -115,7 +136,7 @@ class GraphDatabaseInternalLogIT {
         // Given
         Path log4jXmlConfig = testDir.homePath().resolve(SERVER_LOGS_XML);
         writeResourceToFile("testConfig.xml", log4jXmlConfig);
-        DatabaseManagementService managementService = new TestDatabaseManagementServiceBuilder(testDir.homePath())
+        managementService = new TestDatabaseManagementServiceBuilder(testDir.homePath())
                 .setConfig(GraphDatabaseSettings.server_logging_config_path, log4jXmlConfig)
                 .build();
         GraphDatabaseService db = managementService.database(DEFAULT_DATABASE_NAME);
@@ -147,7 +168,7 @@ class GraphDatabaseInternalLogIT {
         Path log4jXmlConfig = testDir.homePath().resolve(SERVER_LOGS_XML);
         Files.createDirectories(log4jXmlConfig.getParent());
         writeResourceToFile("testConfig2.xml", log4jXmlConfig);
-        DatabaseManagementService managementService = new TestDatabaseManagementServiceBuilder(testDir.homePath())
+        managementService = new TestDatabaseManagementServiceBuilder(testDir.homePath())
                 .setConfig(GraphDatabaseSettings.server_logging_config_path, log4jXmlConfig)
                 .build();
         GraphDatabaseService db = managementService.database(DEFAULT_DATABASE_NAME);
@@ -193,7 +214,7 @@ class GraphDatabaseInternalLogIT {
 
         Files.createDirectories(log4jXmlConfig.getParent());
         writeResourceToFile("testConfigSpecialChars.xml", log4jXmlConfig);
-        DatabaseManagementService managementService = new TestDatabaseManagementServiceBuilder(testDir.homePath())
+        managementService = new TestDatabaseManagementServiceBuilder(testDir.homePath())
                 .setConfig(GraphDatabaseSettings.server_logging_config_path, log4jXmlConfig)
                 .setConfig(GraphDatabaseSettings.logs_directory, logsDirectory)
                 .build();
@@ -218,6 +239,66 @@ class GraphDatabaseInternalLogIT {
         assertThat(rollingLogFile).isRegularFile();
         assertThat(suppressOutput.getOutputVoice().isEmpty()).isTrue();
         assertThat(suppressOutput.getErrorVoice().isEmpty()).isTrue();
+    }
+
+    @Test
+    void shouldHandleDebugLogRotationTriggeredDirectlyAtStartUp() throws IOException {
+        Path log4jXmlConfig = testDir.homePath().resolve(SERVER_LOGS_XML);
+        Files.createDirectories(log4jXmlConfig.getParent());
+        writeResourceToFile("testConfigSmallRotation.xml", log4jXmlConfig);
+
+        // Create debug log slightly larger than the log file rotation size to force rotation during
+        // setup of the log service (before the diagnostics manager is up).
+        Path logs = testDir.homePath().resolve("logs/debug.log");
+        testDir.getFileSystem().mkdir(logs.getParent());
+        try (var file = new RandomAccessFile(logs.toFile(), "rw")) {
+            file.setLength(210);
+        }
+        assertThat(testDir.getFileSystem().getFileSize(logs)).isGreaterThan(200);
+
+        managementService = new TestDatabaseManagementServiceBuilder(testDir.homePath())
+                .setConfig(GraphDatabaseSettings.server_logging_config_path, log4jXmlConfig)
+                .build();
+
+        // Should not have gotten errors because of the diagnostics manager not being setup at
+        // the time of writing the header for the rotated log
+        List<StatusData> statusData = StatusLogger.getLogger().getStatusData();
+        for (StatusData statusDatum : statusData) {
+            assertThat(statusDatum.getFormattedStatus()).doesNotContain("ERROR");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void shouldIncludeInternalErrorMarkerWhenSettingEnabled(boolean enabled) throws Exception {
+        // Given
+        managementService = new TestDatabaseManagementServiceBuilder(testDir.homePath())
+                .setConfig(Map.of(
+                        GraphDatabaseSettings.logs_directory,
+                        testDir.directory("logs").toAbsolutePath(),
+                        GraphDatabaseInternalSettings.log_markers_enabled,
+                        enabled))
+                .build();
+        GraphDatabaseService db = managementService.database(DEFAULT_DATABASE_NAME);
+        InternalLog log = ((GraphDatabaseAPI) db)
+                .getDependencyResolver()
+                .resolveDependency(LogService.class)
+                .getInternalLog(getClass());
+        log.info(new Neo4jInternalErrorLogMessage(
+                Neo4jLogMarkers.KERNEL,
+                "KABOOM!!!! SOMETHING WENT HORRIBLY WRONG!!!",
+                new RuntimeException("ComicRaysFlippedMyBitException")));
+
+        managementService.shutdown();
+        Path internalJsonLog = testDir.directory("logs").resolve(DEBUG_JSON_LOG);
+
+        // Then
+        assertThat(Files.isRegularFile(internalJsonLog)).isEqualTo(true);
+        assertThat(Files.size(internalJsonLog)).isGreaterThan(0L);
+
+        assertEquals(
+                enabled ? 1 : 0,
+                countOccurrences(internalJsonLog, "\"marker\":{\"parents\":[\"INTERNAL_ERROR\"],\"name\":\"KERNEL\"}"));
     }
 
     private static void assertEventuallyContains(Callable<Long> instances) {

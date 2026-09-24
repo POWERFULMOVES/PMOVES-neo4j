@@ -21,9 +21,10 @@ package org.neo4j.cypher.internal.runtime.slotted
 
 import org.mockito.Mockito
 import org.mockito.Mockito.when
+import org.neo4j.cypher.internal.CypherVersion
+import org.neo4j.cypher.internal.ast.AstConstructionTestSupport
 import org.neo4j.cypher.internal.ast.semantics.CachableSemanticTable
 import org.neo4j.cypher.internal.ast.semantics.SemanticTable
-import org.neo4j.cypher.internal.compiler.planner.LogicalPlanningTestSupport2
 import org.neo4j.cypher.internal.expressions.CachedProperty
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.LabelName
@@ -34,6 +35,7 @@ import org.neo4j.cypher.internal.expressions.PropertyKeyName
 import org.neo4j.cypher.internal.expressions.SemanticDirection
 import org.neo4j.cypher.internal.ir.CreateNode
 import org.neo4j.cypher.internal.ir.VarPatternLength
+import org.neo4j.cypher.internal.logical.builder.IndexSeek.nodeIndexSeek
 import org.neo4j.cypher.internal.logical.plans
 import org.neo4j.cypher.internal.logical.plans.Aggregation
 import org.neo4j.cypher.internal.logical.plans.AllNodesScan
@@ -47,7 +49,6 @@ import org.neo4j.cypher.internal.logical.plans.Expand.ExpandAll
 import org.neo4j.cypher.internal.logical.plans.Expand.ExpandInto
 import org.neo4j.cypher.internal.logical.plans.ForeachApply
 import org.neo4j.cypher.internal.logical.plans.IndexOrderNone
-import org.neo4j.cypher.internal.logical.plans.IndexSeek.nodeIndexSeek
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 import org.neo4j.cypher.internal.logical.plans.NodeByLabelScan
 import org.neo4j.cypher.internal.logical.plans.NodeHashJoin
@@ -58,16 +59,17 @@ import org.neo4j.cypher.internal.logical.plans.Projection
 import org.neo4j.cypher.internal.logical.plans.Selection
 import org.neo4j.cypher.internal.logical.plans.SingleQueryExpression
 import org.neo4j.cypher.internal.logical.plans.Sort
-import org.neo4j.cypher.internal.logical.plans.TraversalMatchMode
+import org.neo4j.cypher.internal.logical.plans.TraversalPathMode
 import org.neo4j.cypher.internal.logical.plans.UnwindCollection
 import org.neo4j.cypher.internal.logical.plans.VarExpand
-import org.neo4j.cypher.internal.options.CypherVersion
 import org.neo4j.cypher.internal.physicalplanning.LongSlot
 import org.neo4j.cypher.internal.physicalplanning.PhysicalPlanner
 import org.neo4j.cypher.internal.physicalplanning.RefSlot
 import org.neo4j.cypher.internal.physicalplanning.SlotConfiguration.Size
 import org.neo4j.cypher.internal.physicalplanning.SlotConfigurationBuilder
 import org.neo4j.cypher.internal.physicalplanning.SlottedIndexedProperty
+import org.neo4j.cypher.internal.planner.spi.LeafStability
+import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.StableLeafPlans
 import org.neo4j.cypher.internal.planner.spi.ReadTokenContext
 import org.neo4j.cypher.internal.runtime.CypherRuntimeConfiguration
 import org.neo4j.cypher.internal.runtime.ParameterMapping
@@ -121,6 +123,10 @@ import org.neo4j.cypher.internal.runtime.slotted.pipes.VarLengthExpandSlottedPip
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.cypher.internal.util.CancellationChecker
 import org.neo4j.cypher.internal.util.LabelId
+import org.neo4j.cypher.internal.util.attribution.Id
+import org.neo4j.cypher.internal.util.attribution.IdGen
+import org.neo4j.cypher.internal.util.attribution.SameId
+import org.neo4j.cypher.internal.util.attribution.SequentialIdGen
 import org.neo4j.cypher.internal.util.symbols.CTAny
 import org.neo4j.cypher.internal.util.symbols.CTList
 import org.neo4j.cypher.internal.util.symbols.CTNode
@@ -132,11 +138,13 @@ import org.neo4j.values.storable.Values.longValue
 import org.neo4j.values.virtual.VirtualValues
 
 //noinspection NameBooleanParameters
-class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSupport2 with FakeEntityTestSupport {
-
+class SlottedPipeMapperTest extends CypherFunSuite with AstConstructionTestSupport with FakeEntityTestSupport {
+  implicit val idGen: IdGen = new SequentialIdGen()
   implicit private val table: CachableSemanticTable = CachableSemanticTable(SemanticTable())
 
-  private def build(beforeRewrite: LogicalPlan): Pipe = {
+  private def build(beforeRewrite: LogicalPlan): Pipe = buildWith(new StableLeafPlans)(beforeRewrite)
+
+  private def buildWith(stableLeafPlans: StableLeafPlans)(beforeRewrite: LogicalPlan): Pipe = {
     val tokenContext = mock[ReadTokenContext]
     when(tokenContext.getOptPropertyKeyId("propertyKey")).thenReturn(Some(0))
     val anonymousVariableNameGenerator = new AnonymousVariableNameGenerator()
@@ -156,23 +164,37 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
         ReadTokenContext.EMPTY,
         anonymousVariableNameGenerator,
         new SelectivityTrackerRegistrator(),
-        CypherRuntimeConfiguration.defaultConfiguration
+        CypherRuntimeConfiguration.defaultConfiguration,
+        CypherVersion.Legacy.legacyVersion(),
+        mock[QueryIndexRegistrator]
       )
     )
 
     val fallback = InterpretedPipeMapper(
-      CypherVersion.default.actualVersion,
+      CypherVersion.Legacy.legacyVersion(),
       true,
       converters,
       tokenContext,
       mock[QueryIndexRegistrator],
       new AnonymousVariableNameGenerator(),
       isCommunity = true,
-      ParameterMapping.empty
+      ParameterMapping.empty,
+      stableLeafPlans
     )(table)
     val pipeBuilder =
-      new SlottedPipeMapper(fallback, converters, physicalPlan, true, mock[QueryIndexRegistrator])(table)
-    PipeTreeBuilder(pipeBuilder).build(physicalPlan.logicalPlan, CancellationChecker.neverCancelled())
+      new SlottedPipeMapper(
+        fallback,
+        converters,
+        physicalPlan,
+        true,
+        mock[QueryIndexRegistrator],
+        stableLeafPlans
+      )(table)
+    PipeTreeBuilder(pipeBuilder).build(
+      physicalPlan.logicalPlan,
+      CancellationChecker.neverCancelled(),
+      isNestedPlan = false
+    )
   }
 
   private val label = labelName("label")
@@ -187,8 +209,34 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
 
     // then
     pipe should equal(
-      AllNodesScanSlottedPipe("x", X_NODE_SLOTS)()
+      AllNodesScanSlottedPipe("x", X_NODE_SLOTS, includeChangesFromThisTransaction = true)()
     )
+  }
+
+  test("all nodes scan marked MvccEmptyTx excludes transaction state") {
+    val plan = AllNodesScan(varFor("x"), Set.empty)(SameId(Id(0)))
+
+    val pipe = buildWith(markedAt(Id(0), LeafStability.MvccEmptyTx))(plan)
+
+    pipe should equal(
+      AllNodesScanSlottedPipe("x", X_NODE_SLOTS, includeChangesFromThisTransaction = false)()
+    )
+  }
+
+  test("all nodes scan marked MvccNonEmptyTx includes transaction state") {
+    val plan = AllNodesScan(varFor("x"), Set.empty)(SameId(Id(0)))
+
+    val pipe = buildWith(markedAt(Id(0), LeafStability.MvccNonEmptyTx))(plan)
+
+    pipe should equal(
+      AllNodesScanSlottedPipe("x", X_NODE_SLOTS, includeChangesFromThisTransaction = true)()
+    )
+  }
+
+  private def markedAt(id: Id, stability: LeafStability): StableLeafPlans = {
+    val stableLeafPlans = new StableLeafPlans
+    stableLeafPlans.set(id, stability)
+    stableLeafPlans
   }
 
   test("single all nodes scan with limit") {
@@ -201,7 +249,7 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
     // then
     pipe should equal(
       LimitPipe(
-        AllNodesScanSlottedPipe("x", X_NODE_SLOTS)(),
+        AllNodesScanSlottedPipe("x", X_NODE_SLOTS, includeChangesFromThisTransaction = true)(),
         LiteralHelper.literal(1)
       )()
     )
@@ -228,7 +276,7 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
     pipe should equal(
       CreateSlottedPipe(
         EagerSlottedPipe(
-          AllNodesScanSlottedPipe("x", beforeEagerSlots)(),
+          AllNodesScanSlottedPipe("x", beforeEagerSlots, includeChangesFromThisTransaction = true)(),
           afterEagerSlots
         )(),
         Array(CreateNodeSlottedCommand(afterEagerSlots.longOffset("z"), Seq(LazyLabel(label)), Seq.empty, None))
@@ -261,7 +309,13 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
 
     // then
     pipe should equal(
-      NodesByLabelScanSlottedPipe("x", LazyLabel(label), X_NODE_SLOTS, IndexOrderNone)()
+      NodesByLabelScanSlottedPipe(
+        "x",
+        LazyLabel(label),
+        X_NODE_SLOTS,
+        IndexOrderNone,
+        includeChangesFromThisTransaction = true
+      )()
     )
   }
 
@@ -275,7 +329,13 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
     // then
     pipe should equal(
       FilterPipe(
-        NodesByLabelScanSlottedPipe("x", LazyLabel(label), X_NODE_SLOTS, IndexOrderNone)(),
+        NodesByLabelScanSlottedPipe(
+          "x",
+          LazyLabel(label),
+          X_NODE_SLOTS,
+          IndexOrderNone,
+          includeChangesFromThisTransaction = true
+        )(),
         predicates.True()
       )()
     )
@@ -295,10 +355,10 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
     val rRelSlot = LongSlot(1, nullable = false, CTRelationship)
     val zNodeSlot = LongSlot(2, nullable = false, CTNode)
     pipe should equal(ExpandAllSlottedPipe(
-      AllNodesScanSlottedPipe("x", X_NODE_SLOTS)(),
+      AllNodesScanSlottedPipe("x", X_NODE_SLOTS, includeChangesFromThisTransaction = true)(),
       xNodeSlot,
-      rRelSlot.offset,
-      zNodeSlot.offset,
+      Some(rRelSlot.offset),
+      Some(zNodeSlot.offset),
       SemanticDirection.INCOMING,
       RelationshipTypes.empty,
       SlotConfigurationBuilder.empty
@@ -322,9 +382,9 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
     val nodeSlot = LongSlot(0, nullable = false, CTNode)
     val relSlot = LongSlot(1, nullable = false, CTRelationship)
     pipe should equal(ExpandIntoSlottedPipe(
-      AllNodesScanSlottedPipe("x", X_NODE_SLOTS)(),
+      AllNodesScanSlottedPipe("x", X_NODE_SLOTS, includeChangesFromThisTransaction = true)(),
       nodeSlot,
-      relSlot.offset,
+      Some(relSlot.offset),
       nodeSlot,
       SemanticDirection.INCOMING,
       RelationshipTypes.empty,
@@ -360,12 +420,12 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
     pipe should equal(
       ExpandAllSlottedPipe(
         OptionalSlottedPipe(
-          AllNodesScanSlottedPipe("x", allNodeScanSlots)(),
+          AllNodesScanSlottedPipe("x", allNodeScanSlots, includeChangesFromThisTransaction = true)(),
           Array(xNodeSlot)
         )(),
         xNodeSlot,
-        rRelSlot.offset,
-        zNodeSlot.offset,
+        Some(rRelSlot.offset),
+        Some(zNodeSlot.offset),
         SemanticDirection.INCOMING,
         RelationshipTypes.empty,
         expandSlots
@@ -396,11 +456,11 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
     pipe should equal(
       ExpandIntoSlottedPipe(
         OptionalSlottedPipe(
-          AllNodesScanSlottedPipe("x", allNodeScanSlots)(),
+          AllNodesScanSlottedPipe("x", allNodeScanSlots, includeChangesFromThisTransaction = true)(),
           Array(nodeSlot)
         )(),
         nodeSlot,
-        relSlot.offset,
+        Some(relSlot.offset),
         nodeSlot,
         SemanticDirection.INCOMING,
         RelationshipTypes.empty,
@@ -423,7 +483,7 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
       .newLong("x", nodeSlot.nullable, nodeSlot.typ)
       .build()
     pipe should equal(OptionalSlottedPipe(
-      AllNodesScanSlottedPipe("x", expectedSlots)(),
+      AllNodesScanSlottedPipe("x", expectedSlots, includeChangesFromThisTransaction = true)(),
       Array(nodeSlot)
     )())
   }
@@ -458,7 +518,8 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
       Seq.empty,
       varFor("z"),
       varFor("r"),
-      ExpandAll
+      ExpandAll,
+      None
     )
 
     // when
@@ -466,10 +527,10 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
 
     // then
     pipe should equal(OptionalExpandAllSlottedPipe(
-      AllNodesScanSlottedPipe("x", X_NODE_SLOTS)(),
+      AllNodesScanSlottedPipe("x", X_NODE_SLOTS, includeChangesFromThisTransaction = true)(),
       X_NODE_SLOTS("x").slot,
-      1,
-      2,
+      Some(1),
+      Some(2),
       SemanticDirection.INCOMING,
       RelationshipTypes.empty,
       SlotConfigurationBuilder.empty
@@ -491,7 +552,8 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
       Seq.empty,
       varFor("x"),
       varFor("r"),
-      ExpandInto
+      ExpandInto,
+      None
     )
 
     // when
@@ -499,9 +561,9 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
 
     // then
     pipe should equal(OptionalExpandIntoSlottedPipe(
-      AllNodesScanSlottedPipe("x", X_NODE_SLOTS)(),
+      AllNodesScanSlottedPipe("x", X_NODE_SLOTS, includeChangesFromThisTransaction = true)(),
       X_NODE_SLOTS("x").slot,
-      1,
+      Some(1),
       X_NODE_SLOTS("x").slot,
       SemanticDirection.INCOMING,
       RelationshipTypes.empty,
@@ -523,8 +585,8 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
       SemanticDirection.INCOMING,
       SemanticDirection.INCOMING,
       Seq.empty,
-      varFor("z"),
-      varFor("r"),
+      Some(varFor("z")),
+      Some(varFor("r")),
       varLength,
       ExpandAll
     )
@@ -548,10 +610,10 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
       .build()
 
     pipe should equal(VarLengthExpandSlottedPipe(
-      AllNodesScanSlottedPipe("x", allNodeScanSlots)(),
+      AllNodesScanSlottedPipe("x", allNodeScanSlots, includeChangesFromThisTransaction = true)(),
       xNodeSlot,
-      rRelSlot.offset,
-      zNodeSlot,
+      Some(rRelSlot.offset),
+      Some(zNodeSlot),
       SemanticDirection.INCOMING,
       SemanticDirection.INCOMING,
       RelationshipTypes.empty,
@@ -561,7 +623,7 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
       varExpandSlots,
       TraversalPredicates.NONE,
       Size(1, 0),
-      TraversalMatchMode.Trail
+      TraversalPathMode.Trail
     )())
   }
 
@@ -577,8 +639,8 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
       SemanticDirection.INCOMING,
       SemanticDirection.INCOMING,
       Seq.empty,
-      varFor("z"),
-      varFor("r2"),
+      Some(varFor("z")),
+      Some(varFor("r2")),
       varLength,
       ExpandInto
     )
@@ -612,17 +674,17 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
     pipe should equal(
       VarLengthExpandSlottedPipe(
         ExpandAllSlottedPipe(
-          AllNodesScanSlottedPipe("x", allNodeScanSlots)(),
+          AllNodesScanSlottedPipe("x", allNodeScanSlots, includeChangesFromThisTransaction = true)(),
           xNodeSlot,
-          rRelSlot.offset,
-          zNodeSlot.offset,
+          Some(rRelSlot.offset),
+          Some(zNodeSlot.offset),
           SemanticDirection.OUTGOING,
           RelationshipTypes.empty,
           expandSlots
         )(),
         xNodeSlot,
-        r2RelSlot.offset,
-        zNodeSlot,
+        Some(r2RelSlot.offset),
+        Some(zNodeSlot),
         SemanticDirection.INCOMING,
         SemanticDirection.INCOMING,
         RelationshipTypes.empty,
@@ -632,7 +694,7 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
         varExpandSlots,
         TraversalPredicates.NONE,
         Size(3, 0),
-        TraversalMatchMode.Trail
+        TraversalPathMode.Trail
       )()
     )
   }
@@ -647,7 +709,7 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
 
     // then
     pipe should equal(SkipPipe(
-      AllNodesScanSlottedPipe("x", X_NODE_SLOTS)(),
+      AllNodesScanSlottedPipe("x", X_NODE_SLOTS, includeChangesFromThisTransaction = true)(),
       LiteralHelper.literal(42)
     )())
   }
@@ -664,7 +726,13 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
 
     // then
     pipe should equal(ApplySlottedPipe(
-      NodesByLabelScanSlottedPipe("x", LazyLabel("label"), X_NODE_SLOTS, IndexOrderNone)(),
+      NodesByLabelScanSlottedPipe(
+        "x",
+        LazyLabel("label"),
+        X_NODE_SLOTS,
+        IndexOrderNone,
+        includeChangesFromThisTransaction = true
+      )(),
       NodeIndexSeekSlottedPipe(
         "z",
         labelToken,
@@ -676,7 +744,8 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
         SlotConfigurationBuilder.empty
           .newLong("x", false, CTNode)
           .newLong("z", false, CTNode)
-          .build()
+          .build(),
+        includeChangesFromThisTransaction = true
       )()
     )())
   }
@@ -697,7 +766,13 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
       .build()
 
     pipe should equal(ProjectionPipe(
-      NodesByLabelScanSlottedPipe("x", LazyLabel("label"), slots, IndexOrderNone)(),
+      NodesByLabelScanSlottedPipe(
+        "x",
+        LazyLabel("label"),
+        slots,
+        IndexOrderNone,
+        includeChangesFromThisTransaction = true
+      )(),
       SlottedCommandProjection(Map(0 -> NodeProperty(slots("x.propertyKey").offset, 0)))
     )())
   }
@@ -719,7 +794,13 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
       .build()
 
     pipe should equal(ProjectionPipe(
-      NodesByLabelScanSlottedPipe("x", LazyLabel("label"), slots, IndexOrderNone)(),
+      NodesByLabelScanSlottedPipe(
+        "x",
+        LazyLabel("label"),
+        slots,
+        IndexOrderNone,
+        includeChangesFromThisTransaction = true
+      )(),
       SlottedCommandProjection(Map(0 -> NodeProperty(slots("x.propertyKey").offset, 0)))
     )())
   }
@@ -742,8 +823,20 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
 
     // then
     pipe should equal(CartesianProductSlottedPipe(
-      NodesByLabelScanSlottedPipe("x", LazyLabel("label1"), lhsSlots, IndexOrderNone)(),
-      NodesByLabelScanSlottedPipe("y", LazyLabel("label2"), rhsSlots, IndexOrderNone)(),
+      NodesByLabelScanSlottedPipe(
+        "x",
+        LazyLabel("label1"),
+        lhsSlots,
+        IndexOrderNone,
+        includeChangesFromThisTransaction = true
+      )(),
+      NodesByLabelScanSlottedPipe(
+        "y",
+        LazyLabel("label2"),
+        rhsSlots,
+        IndexOrderNone,
+        includeChangesFromThisTransaction = true
+      )(),
       lhsLongCount = 1,
       lhsRefCount = 0,
       xProdSlots,
@@ -779,8 +872,20 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
       .build()
 
     pipe should equal(ForeachSlottedApplyPipe(
-      NodesByLabelScanSlottedPipe("x", LazyLabel("label1"), lhsSlots, IndexOrderNone)(),
-      NodesByLabelScanSlottedPipe("y", LazyLabel("label2"), rhsSlots, IndexOrderNone)(),
+      NodesByLabelScanSlottedPipe(
+        "x",
+        LazyLabel("label1"),
+        lhsSlots,
+        IndexOrderNone,
+        includeChangesFromThisTransaction = true
+      )(),
+      NodesByLabelScanSlottedPipe(
+        "y",
+        LazyLabel("label2"),
+        rhsSlots,
+        IndexOrderNone,
+        includeChangesFromThisTransaction = true
+      )(),
       lhsSlots("z").slot,
       commands.expressions.ListLiteral(LiteralHelper.literal(1), LiteralHelper.literal(2))
     )())
@@ -807,12 +912,18 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
       .build()
 
     pipe should equal(ApplySlottedPipe(
-      NodesByLabelScanSlottedPipe("x", LazyLabel(labelName("label1")), lhsSlots, IndexOrderNone)(),
+      NodesByLabelScanSlottedPipe(
+        "x",
+        LazyLabel(labelName("label1")),
+        lhsSlots,
+        IndexOrderNone,
+        includeChangesFromThisTransaction = true
+      )(),
       ExpandAllSlottedPipe(
         ArgumentSlottedPipe()(),
         rhsSlots("x").slot,
-        1,
-        2,
+        Some(1),
+        Some(2),
         SemanticDirection.INCOMING,
         RelationshipTypes.empty,
         rhsSlots
@@ -836,7 +947,8 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
         Seq(SlottedIndexedProperty(0, None)),
         0,
         IndexOrderNone,
-        SlotConfigurationBuilder.empty.newLong("n", false, CTNode).build()
+        SlotConfigurationBuilder.empty.newLong("n", false, CTNode).build(),
+        includeChangesFromThisTransaction = true
       )()
     )
   }
@@ -869,7 +981,8 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
         SingleQueryExpression(LiteralHelper.literal(42)),
         NonLockingSeek,
         IndexOrderNone,
-        SlotConfigurationBuilder.empty.newLong("z", false, CTNode).build()
+        SlotConfigurationBuilder.empty.newLong("z", false, CTNode).build(),
+        includeChangesFromThisTransaction = true
       )()
     )
   }
@@ -897,15 +1010,15 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
           UnwindSlottedPipe(
             ArgumentSlottedPipe(),
             commands.expressions.ListLiteral(
-              commands.expressions.Literal(a),
-              commands.expressions.Literal(b),
-              commands.expressions.Literal(c)
+              commands.expressions.Literal(aLit),
+              commands.expressions.Literal(bLit),
+              commands.expressions.Literal(cLit)
             ),
-            0,
+            Some(0),
             `expectedSlots2`
           ),
           _
-        ) if a == longValue(1) && b == longValue(2) && c == longValue(3) =>
+        ) if aLit == longValue(1) && bLit == longValue(2) && cLit == longValue(3) =>
 
     }
   }
@@ -920,8 +1033,8 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
       SemanticDirection.INCOMING,
       SemanticDirection.INCOMING,
       Seq.empty,
-      varFor("z"),
-      varFor("r"),
+      Some(varFor("z")),
+      Some(varFor("r")),
       varLength,
       ExpandAll
     )
@@ -959,25 +1072,42 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
 
     def commonSubTree = {
       val leaf = NodeByLabelScan(varFor("node1"), LabelName("label")(pos), Set.empty, IndexOrderNone)
-      val expand1 = Expand(leaf, varFor("node1"), SemanticDirection.INCOMING, Seq.empty, varFor("node2"), varFor("r"))
+      val expand1 =
+        Expand(leaf, varFor("node1"), SemanticDirection.INCOMING, Seq.empty, varFor("node2"), varFor("r"), ExpandAll)
       val expand2 =
-        Expand(expand1, varFor("node2"), SemanticDirection.INCOMING, Seq.empty, varFor("node3"), varFor("r"))
-      Expand(expand2, varFor("node3"), SemanticDirection.INCOMING, Seq.empty, varFor("node4"), varFor("r"))
+        Expand(expand1, varFor("node2"), SemanticDirection.INCOMING, Seq.empty, varFor("node3"), varFor("r"), ExpandAll)
+      Expand(expand2, varFor("node3"), SemanticDirection.INCOMING, Seq.empty, varFor("node4"), varFor("r"), ExpandAll)
     }
 
     val expand4a =
-      Expand(commonSubTree, varFor("node3"), SemanticDirection.INCOMING, Seq.empty, varFor("node7"), varFor("r"))
+      Expand(
+        commonSubTree,
+        varFor("node3"),
+        SemanticDirection.INCOMING,
+        Seq.empty,
+        varFor("node7"),
+        varFor("r"),
+        ExpandAll
+      )
     val expand5a =
-      Expand(expand4a, varFor("node4"), SemanticDirection.INCOMING, Seq.empty, varFor("node5"), varFor("r"))
+      Expand(expand4a, varFor("node4"), SemanticDirection.INCOMING, Seq.empty, varFor("node5"), varFor("r"), ExpandAll)
     val expand6a =
-      Expand(expand5a, varFor("node5"), SemanticDirection.INCOMING, Seq.empty, varFor("node6"), varFor("r"))
+      Expand(expand5a, varFor("node5"), SemanticDirection.INCOMING, Seq.empty, varFor("node6"), varFor("r"), ExpandAll)
 
     val expand4b =
-      Expand(commonSubTree, varFor("node4"), SemanticDirection.OUTGOING, Seq.empty, varFor("node6"), varFor("r"))
+      Expand(
+        commonSubTree,
+        varFor("node4"),
+        SemanticDirection.OUTGOING,
+        Seq.empty,
+        varFor("node6"),
+        varFor("r"),
+        ExpandAll
+      )
     val expand5b =
-      Expand(expand4b, varFor("node6"), SemanticDirection.OUTGOING, Seq.empty, varFor("node5"), varFor("r"))
+      Expand(expand4b, varFor("node6"), SemanticDirection.OUTGOING, Seq.empty, varFor("node5"), varFor("r"), ExpandAll)
     val expand6b =
-      Expand(expand5b, varFor("node6"), SemanticDirection.OUTGOING, Seq.empty, varFor("node8"), varFor("r"))
+      Expand(expand5b, varFor("node6"), SemanticDirection.OUTGOING, Seq.empty, varFor("node8"), varFor("r"), ExpandAll)
 
     val nodes = Set("node1", "node2", "node3", "node4", "node5", "node6")
     val plan = NodeHashJoin(nodes.map(varFor), expand6a, expand6b)
@@ -1124,7 +1254,7 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
         SlotMapping(fromOffset = 0, toOffset = 1, fromIsLongSlot = false, toIsLongSlot = true)
       )
     )
-    mappings.cachedPropertyMappings shouldBe Array.empty
+    mappings.cachedPropertyMappings shouldBe Array.empty[(Int, Int)]
 
     val reversedMapping = SlottedPipeMapper.computeSlotMappings(to, Size.apply(1, 0), from)
     reversedMapping.slotMapping shouldBe (
@@ -1132,7 +1262,7 @@ class SlottedPipeMapperTest extends CypherFunSuite with LogicalPlanningTestSuppo
         SlotMapping(fromOffset = 1, toOffset = 0, fromIsLongSlot = true, toIsLongSlot = false)
       )
     )
-    reversedMapping.cachedPropertyMappings shouldBe Array.empty
+    reversedMapping.cachedPropertyMappings shouldBe Array.empty[(Int, Int)]
   }
 
   test("should map between long and ref slots") {

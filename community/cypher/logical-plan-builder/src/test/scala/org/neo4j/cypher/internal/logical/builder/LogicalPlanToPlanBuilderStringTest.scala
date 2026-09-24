@@ -19,10 +19,14 @@
  */
 package org.neo4j.cypher.internal.logical.builder
 
+import dotty.tools.repl.ReplDriver
 import org.neo4j.cypher.internal.ast.AstConstructionTestSupport
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorBreak
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorContinue
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorFail
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorRetryThenBreak
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorRetryThenContinue
+import org.neo4j.cypher.internal.compiler.helpers.QueryExpressionConstructionTestSupport
 import org.neo4j.cypher.internal.expressions.DynamicRelTypeExpression
 import org.neo4j.cypher.internal.expressions.LabelName
 import org.neo4j.cypher.internal.expressions.PropertyKeyName
@@ -30,10 +34,14 @@ import org.neo4j.cypher.internal.expressions.RelTypeName
 import org.neo4j.cypher.internal.expressions.SemanticDirection.BOTH
 import org.neo4j.cypher.internal.expressions.SemanticDirection.INCOMING
 import org.neo4j.cypher.internal.expressions.SemanticDirection.OUTGOING
+import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.ir.EagernessReason
 import org.neo4j.cypher.internal.ir.HasHeaders
 import org.neo4j.cypher.internal.ir.NoHeaders
+import org.neo4j.cypher.internal.ir.SelectivePathPattern.CountInteger
+import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.AcyclicParameters
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.Predicate
+import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.PushdownOperators
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.TrailParameters
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.WalkParameters
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.column
@@ -45,7 +53,6 @@ import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.crea
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createRelationshipExpression
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createRelationshipFull
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createRelationshipWithDynamicType
-import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.delete
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.removeDynamicLabel
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.removeLabel
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setDynamicLabel
@@ -60,6 +67,7 @@ import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setR
 import org.neo4j.cypher.internal.logical.plans.Ascending
 import org.neo4j.cypher.internal.logical.plans.Descending
 import org.neo4j.cypher.internal.logical.plans.DoNotGetValue
+import org.neo4j.cypher.internal.logical.plans.DynamicElement.All
 import org.neo4j.cypher.internal.logical.plans.Expand.ExpandAll
 import org.neo4j.cypher.internal.logical.plans.Expand.ExpandInto
 import org.neo4j.cypher.internal.logical.plans.Expand.VariablePredicate
@@ -72,27 +80,34 @@ import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 import org.neo4j.cypher.internal.logical.plans.LogicalPlanToPlanBuilderString
 import org.neo4j.cypher.internal.logical.plans.Prober
 import org.neo4j.cypher.internal.logical.plans.StatefulShortestPath
-import org.neo4j.cypher.internal.logical.plans.StatefulShortestPath.Selector
-import org.neo4j.cypher.internal.logical.plans.TraversalMatchMode
+import org.neo4j.cypher.internal.logical.plans.TraversalPathMode
 import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.UpperBound.Limited
 import org.neo4j.cypher.internal.util.attribution.Id
 import org.neo4j.cypher.internal.util.collection.immutable.ListSet
+import org.neo4j.cypher.internal.util.symbols.CTInteger
+import org.neo4j.cypher.internal.util.symbols.CTString
 import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 import org.neo4j.cypher.internal.util.test_helpers.TestName
+import org.neo4j.cypher.internal.util.topDown
 import org.neo4j.graphdb.schema.IndexType
 
 import java.lang.reflect.Modifier
 
 import scala.collection.mutable
-import scala.tools.nsc.Settings
-import scala.tools.nsc.interpreter.IMain
-import scala.tools.nsc.interpreter.shell.ReplReporterImpl
+import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.duration.MILLISECONDS
+import scala.util.DynamicVariable
 
 /**
  * If you reference something new and a type was not found an import needs to be added to [[interpretPlanBuilder]]
  */
-class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName with AstConstructionTestSupport {
+class LogicalPlanToPlanBuilderStringTest
+    extends CypherFunSuite
+    with TestName
+    with AstConstructionTestSupport
+    with QueryExpressionConstructionTestSupport {
 
   private val testedOperators = mutable.Set[String]()
 
@@ -109,7 +124,7 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
         Set.empty,
         Set("b_expr" -> "b"),
         Set("r_expr" -> "r"),
-        StatefulShortestPath.Selector.Shortest(1),
+        StatefulShortestPath.Selector.Shortest(CountInteger(1)),
         new TestNFABuilder(0, "a")
           .addTransition(0, 1, "(a)-[r_expr]->(b_expr)")
           .setFinalState(1)
@@ -134,7 +149,7 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
         Set(("r2", "r2_group")),
         Set("b_expr" -> "b", "c_expr" -> "c", "d_expr" -> "d"),
         Set("r1_expr" -> "r1", "r3_expr" -> "r3"),
-        StatefulShortestPath.Selector.ShortestGroups(5),
+        StatefulShortestPath.Selector.ShortestGroups(CountInteger(5)),
         new TestNFABuilder(0, "a")
           .addTransition(0, 1, "(a)-[r1_expr WHERE r1_expr.prop > 5]->(b_expr:A&B WHERE b_expr.prop = 10)")
           .addTransition(1, 2, "(b_expr) (b_in WHERE b_in.prop = 10)")
@@ -149,63 +164,6 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
         false
       )
       .allNodeScan("a")
-      .build()
-  )
-
-  testPlan(
-    "statefulShortestPath with multi-relationship expansion",
-    new TestPlanBuilder()
-      .produceResults("a", "b")
-      .statefulShortestPath(
-        "s",
-        "t",
-        "(s) (n1)-[r2]->(n2 WHERE n2.p=1)-[r2]->(n3) (t)",
-        None,
-        Set.empty,
-        Set.empty,
-        Set("n1_inner" -> "n1", "n2_inner" -> "n2", "n3_inner" -> "n3", "t_inner" -> "t"),
-        Set("r1_inner" -> "r1", "r2_inner" -> "r2"),
-        Selector.Shortest(Int.MaxValue),
-        new TestNFABuilder(0, "s")
-          .addTransition(0, 1, "(s) (n1_inner)")
-          .addTransition(1, 2, "(n1_inner)-[r1_inner]->(n2_inner WHERE n2_inner.p = 1)-[r2_inner]->(n3_inner)")
-          .addTransition(2, 3, "(n3_inner) (t_inner)")
-          .setFinalState(3)
-          .build(),
-        ExpandAll
-      )
-      .allNodeScan("s")
-      .build()
-  )
-
-  testPlan(
-    "statefulShortestPath with multi-relationship expansion with compound predicate",
-    new TestPlanBuilder()
-      .produceResults("a", "b")
-      .statefulShortestPath(
-        "s",
-        "t",
-        "(s) (n1)-[r2]->(n2 WHERE n2.p=1)-[r2]->(n3) (t)",
-        None,
-        Set.empty,
-        Set.empty,
-        Set("n1_inner" -> "n1", "n2_inner" -> "n2", "n3_inner" -> "n3", "t_inner" -> "t"),
-        Set("r1_inner" -> "r1", "r2_inner" -> "r2"),
-        Selector.Shortest(Int.MaxValue),
-        new TestNFABuilder(0, "s")
-          .addTransition(0, 1, "(s) (n1_inner)")
-          .addTransition(
-            1,
-            2,
-            "(n1_inner)-[r1_inner]->(n2_inner WHERE n2_inner.p = 1)-[r2_inner]->(n3_inner)",
-            compoundPredicate = "n1_inner.foo = n3_inner.foo AND n1_inner.bar = n3_inner.bar"
-          )
-          .addTransition(2, 3, "(n3_inner) (t_inner)")
-          .setFinalState(3)
-          .build(),
-        ExpandAll
-      )
-      .allNodeScan("s")
       .build()
   )
 
@@ -228,7 +186,7 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
         Set(("r2", "r2_group")),
         Set("b_expr" -> "b", "c_expr" -> "c", "d_expr" -> "d"),
         Set("r1_expr" -> "r1", "r3_expr" -> "r3"),
-        StatefulShortestPath.Selector.ShortestGroups(5),
+        StatefulShortestPath.Selector.ShortestGroups(CountInteger(5)),
         new TestNFABuilder(0, "a")
           .addTransition(0, 1, "(a)-[r1_expr WHERE r1_expr.prop > 5]->(b_expr:A&B WHERE b_expr.prop = 10)")
           .addTransition(1, 2, "(b_expr) (b_in WHERE b_in.prop = 10)")
@@ -259,14 +217,14 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
         Set.empty,
         Set("b_expr" -> "b"),
         Set("r_expr" -> "r"),
-        StatefulShortestPath.Selector.Shortest(1),
+        StatefulShortestPath.Selector.Shortest(CountInteger(1)),
         new TestNFABuilder(0, "a")
           .addTransition(0, 1, "(a)-[r_expr]->(b_expr)")
           .setFinalState(1)
           .build(),
         ExpandAll,
         false,
-        matchMode = TraversalMatchMode.Walk
+        pathMode = TraversalPathMode.Walk
       )
       .allNodeScan("a")
       .build()
@@ -387,6 +345,16 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
   )
 
   testPlan(
+    "dynamicLabelNodeLookup",
+    new TestPlanBuilder()
+      .produceResults("x")
+      .apply()
+      .|.dynamicLabelNodeLookup("y", "['A', 'B']", All, "x")
+      .dynamicLabelNodeLookup("x", "['A', 'B']", All, Map("foo" -> "1"))
+      .build()
+  )
+
+  testPlan(
     "partitionedNodeByLabelScan",
     new TestPlanBuilder()
       .produceResults("x")
@@ -494,7 +462,7 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
     "expand",
     new TestPlanBuilder()
       .produceResults("x")
-      .expand("(x)-[r*0..0]->(y)", expandMode = ExpandAll, projectedDir = OUTGOING, matchMode = TraversalMatchMode.Walk)
+      .expand("(x)-[r*0..0]->(y)", expandMode = ExpandAll, projectedDir = OUTGOING, pathMode = TraversalPathMode.Walk)
       .expand("(x)<-[r*0..1]-(y)", expandMode = ExpandAll, projectedDir = OUTGOING)
       .expand("(x)-[r*2..5]-(y)", expandMode = ExpandAll, projectedDir = OUTGOING)
       .expand("(x)-[r:REL*1..2]-(y)", expandMode = ExpandAll, projectedDir = OUTGOING)
@@ -540,7 +508,7 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
         projectedDir = OUTGOING,
         nodePredicates = Seq(),
         relationshipPredicates = Seq(VariablePredicate(varFor("r"), isNotNull(prop(endNode("r"), "foo")))),
-        matchMode = TraversalMatchMode.Walk
+        pathMode = TraversalPathMode.Walk
       )
       .nodeByLabelScan("start", "A", IndexOrderNone)
       .build()
@@ -620,6 +588,46 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
       .bfsPruningVarExpand(
         "(x)-[*1..3]->(y)",
         depthName = Some("depth")
+      )
+      .argument()
+      .build()
+  )
+
+  testPlan(
+    "bfsPruningVarExpand - walk mode",
+    new TestPlanBuilder()
+      .produceResults("x")
+      .bfsPruningVarExpand("(x)-[*0..0]->(y)", pathMode = TraversalPathMode.Walk)
+      .bfsPruningVarExpand("(x)<-[*0..1]-(y)", pathMode = TraversalPathMode.Walk)
+      .bfsPruningVarExpand("(x)-[*1..5]->(y)", pathMode = TraversalPathMode.Walk)
+      .bfsPruningVarExpand("(x)-[:REL*1..2]->(y)", pathMode = TraversalPathMode.Walk)
+      .bfsPruningVarExpand("(x)<-[:REL|LER*1..2]-(y)", pathMode = TraversalPathMode.Walk)
+      .bfsPruningVarExpand("(x)-[*1..2]->(y)", pathMode = TraversalPathMode.Walk)
+      .bfsPruningVarExpand("(x)-[*1..2]->(y)", pathMode = TraversalPathMode.Walk)
+      .bfsPruningVarExpand(
+        "(x)-[*1..2]->(y)",
+        nodePredicates = Seq(Predicate("n", "id(n) <> 5")),
+        pathMode = TraversalPathMode.Walk
+      )
+      .bfsPruningVarExpand(
+        "(x)-[*1..3]->(y)",
+        relationshipPredicates = Seq(Predicate("r", "id(r) <> 5")),
+        pathMode = TraversalPathMode.Walk
+      )
+      .bfsPruningVarExpand(
+        "(x)-[*1..2]->(y)",
+        nodePredicates = Seq(Predicate("n", "id(n) <> 5"), Predicate("n2", "id(n2) > 5")),
+        pathMode = TraversalPathMode.Walk
+      )
+      .bfsPruningVarExpand(
+        "(x)-[*1..3]->(y)",
+        relationshipPredicates = Seq(Predicate("r", "id(r) <> 5"), Predicate("r2", "id(r2) > 5")),
+        pathMode = TraversalPathMode.Walk
+      )
+      .bfsPruningVarExpand(
+        "(x)-[*1..3]->(y)",
+        depthName = Some("depth"),
+        pathMode = TraversalPathMode.Walk
       )
       .argument()
       .build()
@@ -896,7 +904,7 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
           createPattern(nodes = Seq(createNode("n"))),
           removeLabel("x", "L"),
           removeDynamicLabel("x", "'M'"),
-          delete("x", forced = true),
+          AbstractLogicalPlanBuilder.delete("x", forced = true),
           setNodeProperty("n", "prop", "i"),
           setDynamicProperty("n", "'foo'", "i")
         )
@@ -969,6 +977,108 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
   )
 
   testPlan(
+    "fusedMerge",
+    new TestPlanBuilder()
+      .produceResults("x")
+      .fusedMerge(
+        Seq(createNode("x"), createNode("y")),
+        Seq(createRelationship("r", "x", "R", "y")),
+        Seq(setNodeProperty("x", "prop", "42"), setNodePropertiesFromMap("x", "{prop: 42}")),
+        Seq(
+          setLabel("x", "L", "M"),
+          setDynamicLabel("x", "'N'", "$p"),
+          setRelationshipProperty("r", "prop", "42"),
+          setRelationshipPropertiesFromMap("r", "{prop: 42}")
+        )
+      )
+      .expand("(x)-[r:R]->(y)")
+      .allNodeScan("x")
+      .build()
+  )
+
+  testPlan(
+    "mergeUniqueNode",
+    new TestPlanBuilder()
+      .produceResults("x")
+      .apply()
+      .|.mergeUniqueNode(
+        "x",
+        "L",
+        Seq("p1" -> "i", "p2" -> "true"),
+        onMatch = Seq("created" -> "false"),
+        onCreate = Seq("created" -> "true"),
+        args = Set("i"),
+        indexType = IndexType.POINT
+      )
+      .unwind("[1, 2, 3] AS i")
+      .argument()
+      .build()
+  )
+
+  testPlan(
+    "mergeUniqueNodeExpression",
+    new TestPlanBuilder()
+      .produceResults("x")
+      .apply()
+      .|.mergeUniqueNodeExpression(
+        "x",
+        "L",
+        Seq("p1" -> "i", "p2" -> "true"),
+        onMatch = Seq("created" -> literalBoolean(false)),
+        onCreate = Seq("created" -> literalBoolean(true)),
+        args = Set("i"),
+        indexType = IndexType.POINT
+      )
+      .unwind("[1, 2, 3] AS i")
+      .argument()
+      .build()
+  )
+
+  testPlan(
+    "mergeInto",
+    new TestPlanBuilder()
+      .produceResults("x")
+      .mergeInto(
+        "(x)-[r:R]->(y)",
+        onCreate = Seq("p1" -> "42", "p2" -> "false")
+      )
+      .cartesianProduct()
+      .|.allNodeScan("y")
+      .allNodeScan("x")
+      .build()
+  )
+
+  testPlan(
+    "mergeIntoExpression",
+    new TestPlanBuilder()
+      .produceResults("x")
+      .mergeIntoExpression(
+        "(x)-[r:R]->(y)",
+        onCreate = Seq("p1" -> literalInt(42), "p2" -> literalBoolean(false))
+      )
+      .cartesianProduct()
+      .|.allNodeScan("y")
+      .allNodeScan("x")
+      .build()
+  )
+
+  testPlan(
+    "lockNodes",
+    new TestPlanBuilder()
+      .produceResults("x")
+      .apply()
+      .|.merge(
+        relationships = Seq(createRelationship("r", "x", "R", "y")),
+        lockNodes = Set("x", "y")
+      )
+      .|.expand("(x)-[r:R]->(y)")
+      .|.lockNodes("x")
+      .|.argument("x")
+      .allNodeScan("x")
+      .build()
+  )
+
+  testPlan(
     "anti",
     new TestPlanBuilder()
       .produceResults("x")
@@ -1012,6 +1122,48 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
       .produceResults("x", "y")
       .remoteBatchPropertiesWithFilter("n.prop", "m.prop", "r.prop")("n.prop = 5", "r.prop = 5")
       .argument()
+      .build()
+  )
+
+  testPlan(
+    "remoteBatchPropertiesWithFilterExpression",
+    new TestPlanBuilder()
+      .produceResults("x", "y")
+      .remoteBatchPropertiesWithFilter("n.prop", "m.prop", "r.prop")(
+        equals(prop("n", "prop"), literalInt(5)),
+        equals(prop("r", "prop"), literalInt(5))
+      )
+      .argument()
+      .build()
+  )
+
+  testPlan(
+    "remoteBatchPropertiesWithPushdownOperatorsOnNode",
+    new TestPlanBuilder()
+      .produceResults("x")
+      .remoteBatchPropertiesWithPushdownOperatorsOnNode("x", "prop1", "prop2")(PushdownOperators()
+        .limit("10")
+        .orderBy("x.prop3")
+        .distinct("x")
+        .filter("x.prop1=foo", "x.prop2=anon_0")
+        .importedConstantValues("foo")
+        .importedPerRowValues(Map("anon_0" -> "cacheN[y.prop]", "perRowVar" -> "perRowVar")))
+      .argument("y", "foo")
+      .build()
+  )
+
+  testPlan(
+    "remoteBatchPropertiesWithPushdownOperatorsOnRelationship",
+    new TestPlanBuilder()
+      .produceResults("x")
+      .remoteBatchPropertiesWithPushdownOperatorsOnRelationship("x", "prop1", "prop2")(PushdownOperators()
+        .limit("10")
+        .orderBy("x.prop3", "x.prop2 ASC", "x.prop1 DESC")
+        .distinct("x")
+        .filter("x.prop1=foo", "x.prop2=anon_0")
+        .importedConstantValues("foo")
+        .importedPerRowValues(Map("anon_0" -> "cacheR[y.prop]", "perRowVar" -> "perRowVar")))
+      .argument("y", "foo")
       .build()
   )
 
@@ -1148,6 +1300,16 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
       .leftOuterHashJoin("x", "y")
       .|.leftOuterHashJoin("x")
       .|.|.argument()
+      .|.argument()
+      .argument()
+      .build()
+  )
+
+  testPlan(
+    "valueMergeJoin",
+    new TestPlanBuilder()
+      .produceResults("x", "y")
+      .valueMergeJoin("x.bar = y.foo")
       .|.argument()
       .argument()
       .build()
@@ -1491,7 +1653,7 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
     "setPropertiesExpression",
     new TestPlanBuilder()
       .produceResults("x", "y")
-      .setPropertiesExpression(varFor("x"), ("p1", varFor("42")), ("p1", varFor("42")))
+      .setProperties(varFor("x"), ("p1", varFor("42")), ("p1", varFor("42")))
       .argument()
       .build()
   )
@@ -1509,7 +1671,7 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
     "setNodePropertiesExpression",
     new TestPlanBuilder()
       .produceResults("x", "y")
-      .setNodePropertiesExpression("x", ("p1", varFor("42")), ("p1", varFor("42")))
+      .setNodeProperties("x", ("p1", varFor("42")), ("p1", varFor("42")))
       .argument()
       .build()
   )
@@ -1527,7 +1689,7 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
     "setRelationshipPropertiesExpression",
     new TestPlanBuilder()
       .produceResults("x", "y")
-      .setRelationshipPropertiesExpression("x", ("p1", varFor("42")), ("p1", varFor("42")))
+      .setRelationshipProperties("x", ("p1", varFor("42")), ("p1", varFor("42")))
       .argument()
       .build()
   )
@@ -1650,8 +1812,8 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
     new TestPlanBuilder()
       .produceResults("x", "y")
       .apply()
-      .|.undirectedRelationshipByIdSeek("r2", "x", "y", Set("x"), 25)
-      .undirectedRelationshipByIdSeek("r1", "x", "y", Set(), 23, 22.0, -1)
+      .|.relationshipByIdSeek("(x)-[r2]-(y)", Set("x"), 25)
+      .relationshipByIdSeek("(x)-[r1]-(y)", Set(), 23, 22.0, -1)
       .build()
   )
 
@@ -1660,8 +1822,8 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
     new TestPlanBuilder()
       .produceResults("x", "y")
       .apply()
-      .|.undirectedRelationshipByElementIdSeek("r2", "x", "y", Set("x"), 25)
-      .undirectedRelationshipByElementIdSeek("r1", "x", "y", Set(), 23, 22.0, -1)
+      .|.relationshipByElementIdSeek("(x)-[r2]-(y)", Set("x"), 25)
+      .relationshipByElementIdSeek("(x)-[r1]-(y)", Set(), 23, 22.0, -1)
       .build()
   )
 
@@ -1686,6 +1848,185 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
         "{x: 0.0, y: 1.0, crs: 'cartesian'}",
         100,
         indexOrder = IndexOrderDescending
+      )
+      .build()
+  )
+
+  testPlan(
+    "cachedPropertyPointDistanceNodeIndexSeek",
+    new TestPlanBuilder()
+      .produceResults("x", "y")
+      .apply()
+      .|.cachedPropertyPointDistanceNodeIndexSeek(
+        "y",
+        "L",
+        "prop",
+        cachedNodePropFromStore("x", "prop"),
+        literalInt(10),
+        argumentIds = Set("x"),
+        getValue = GetValue
+      )
+      .nodeByLabelScan("x", "X")
+      .build()
+  )
+
+  testPlan(
+    "nodeVectorIndexSearch",
+    new TestPlanBuilder()
+      .produceResults("x", "y")
+      .apply()
+      .|.nodeVectorIndexSearch(
+        "y",
+        Seq("L"),
+        Seq("prop", "prop2"),
+        "'rhsIndex'",
+        "[1, 2, 3]",
+        "10",
+        score = "score",
+        argumentIds = Set("x"),
+        getValueFromIndex = Map("prop" -> GetValue, "prop2" -> DoNotGetValue),
+        propertyFilter = Some(rangeExpression(gte(5)))
+      )
+      .apply()
+      .|.nodeVectorIndexSearch(
+        "y",
+        Seq("L"),
+        Seq("prop", "prop2"),
+        "'rhsIndex'",
+        "[1, 2, 3]",
+        "10",
+        score = "score",
+        argumentIds = Set("x"),
+        getValueFromIndex = Map("prop" -> GetValue, "prop2" -> DoNotGetValue),
+        propertyFilter = Some(single(5))
+      )
+      .apply()
+      .|.nodeVectorIndexSearch(
+        "y",
+        Seq("L"),
+        Seq("prop", "prop2"),
+        "'rhsIndex'",
+        "[1, 2, 3]",
+        "10",
+        score = "score",
+        argumentIds = Set("x"),
+        getValueFromIndex = Map("prop" -> GetValue, "prop2" -> DoNotGetValue),
+        propertyFilter = Some(between(gte(5), lt(10)))
+      )
+      .apply()
+      .|.nodeVectorIndexSearch(
+        "y",
+        Seq("L"),
+        Seq("prop"),
+        "'rhsIndex'",
+        "[1, 2, 3]",
+        "10",
+        score = "score",
+        argumentIds = Set("x"),
+        getValueFromIndex = Map("prop" -> GetValue)
+      )
+      .nodeVectorIndexSearch(
+        "x",
+        Seq("L"),
+        Seq("prop"),
+        "'lhsIndex'",
+        "[1, 2, 3]",
+        "10",
+        getValueFromIndex = Map("prop" -> GetValue)
+      )
+      .build()
+  )
+
+  testPlan(
+    "relationshipVectorIndexSearch",
+    new TestPlanBuilder()
+      .produceResults("r1", "r2")
+      .apply()
+      .|.relationshipVectorIndexSearch(
+        "(x1)-[r1]->()",
+        Seq("L"),
+        Seq("prop"),
+        "'rhsIndex'",
+        "[1, 2, 3]",
+        "10",
+        score = "score",
+        argumentIds = Set("x1", "r1", "y1"),
+        propertyFilter = Some(rangeExpression(gte(5)))
+      )
+      .apply()
+      .|.relationshipVectorIndexSearch(
+        "(x1)-[r1]->()",
+        Seq("L"),
+        Seq("prop"),
+        "'rhsIndex'",
+        "[1, 2, 3]",
+        "10",
+        score = "score",
+        argumentIds = Set("x1", "r1", "y1")
+      )
+      .relationshipVectorIndexSearch(
+        "(x1)-[r1]-(y1)",
+        Seq("R1", "R2"),
+        Seq("prop", "prop2"),
+        "'lhsIndex'",
+        "[1, 2, 3]",
+        "10"
+      )
+      .build()
+  )
+
+  testPlan(
+    "nodeFulltextIndexSearch",
+    new TestPlanBuilder()
+      .produceResults("x", "y")
+      .apply()
+      .|.nodeFulltextIndexSearch(
+        "y",
+        Seq("L"),
+        Seq("prop", "prop2"),
+        "'rhsIndex'",
+        "'hello'",
+        limit = "10",
+        analyzer = Some("'standard'"),
+        skip = Some("5"),
+        score = "score",
+        argumentIds = Set("x"),
+        getValueFromIndex = Map("prop" -> GetValue, "prop2" -> DoNotGetValue)
+      )
+      .nodeFulltextIndexSearch(
+        "x",
+        Seq("L"),
+        Seq("prop"),
+        "'lhsIndex'",
+        "'world'",
+        getValueFromIndex = Map("prop" -> GetValue)
+      )
+      .build()
+  )
+
+  testPlan(
+    "relationshipFulltextIndexSearch",
+    new TestPlanBuilder()
+      .produceResults("r1", "r2")
+      .apply()
+      .|.relationshipFulltextIndexSearch(
+        "(x1)-[r1]->()",
+        Seq("L"),
+        Seq("prop"),
+        "'rhsIndex'",
+        "'hello'",
+        limit = "10",
+        analyzer = Some("'standard'"),
+        skip = Some("5"),
+        score = "score",
+        argumentIds = Set("x1", "r1", "y1")
+      )
+      .relationshipFulltextIndexSearch(
+        "(x1)-[r1]-(y1)",
+        Seq("R1", "R2"),
+        Seq("prop", "prop2"),
+        "'lhsIndex'",
+        "'world'"
       )
       .build()
   )
@@ -1721,11 +2062,7 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
       .produceResults("x", "y")
       .apply()
       .|.pointDistanceRelationshipIndexSeek(
-        "r2",
-        "x",
-        "y",
-        "OTHER_REL",
-        "prop2",
+        "(x)-[r:OTHER_REL(prop2)]->(y)",
         "{x: 1.0, y: 2.0, crs: 'cartesian'}",
         10,
         argumentIds = Set("r1"),
@@ -1733,15 +2070,10 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
         indexType = IndexType.POINT
       )
       .pointDistanceRelationshipIndexSeek(
-        "r1",
-        "a",
-        "b",
-        "REL",
-        "prop1",
+        "(a)-[r1:REL(prop1)]-(b)",
         "{x: 0.0, y: 1.0, crs: 'cartesian'}",
         100,
         indexOrder = IndexOrderDescending,
-        directed = false,
         inclusive = true
       )
       .build()
@@ -1753,47 +2085,38 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
       .produceResults("x", "y")
       .apply()
       .|.pointBoundingBoxRelationshipIndexSeek(
-        "y",
-        "y1",
-        "y2",
-        "L",
-        "prop",
+        "(y1)-[y:L(prop)]->(y2)",
         "{x: 1.0, y: 2.0, crs: 'cartesian'}",
         "{x: 10.0, y: 20.0, crs: 'cartesian'}",
         argumentIds = Set("x"),
         getValue = GetValue
       )
       .pointBoundingBoxRelationshipIndexSeek(
-        "x",
-        "x1",
-        "y1",
-        "L",
-        "prop",
+        "(x1)-[x:L(prop)]-(y1)",
         "{x: 0.0, y: 1.0, crs: 'cartesian'}",
         "{x: 100.0, y: 100.0, crs: 'cartesian'}",
-        directed = false,
         indexOrder = IndexOrderDescending
       )
       .build()
   )
 
   testPlan(
-    "directedRelationshipByIdSeek",
+    "relationshipByIdSeek",
     new TestPlanBuilder()
       .produceResults("x", "y")
       .apply()
-      .|.directedRelationshipByIdSeek("r2", "x", "y", Set("x"), 25)
-      .directedRelationshipByIdSeek("r1", "x", "y", Set(), 23, 22.0, -1)
+      .|.relationshipByIdSeek("(x2)-[r2]->(y)", Set("x"), 25)
+      .relationshipByIdSeek("(x)-[r1]->(y)", Set(), 23, 22.0, -1)
       .build()
   )
 
   testPlan(
-    "directedRelationshipByElementIdSeek",
+    "relationshipByElementIdSeek",
     new TestPlanBuilder()
       .produceResults("x", "y")
       .apply()
-      .|.directedRelationshipByElementIdSeek("r2", "x", "y", Set("x"), 25)
-      .directedRelationshipByElementIdSeek("r1", "x", "y", Set(), 23, 22.0, -1)
+      .|.relationshipByElementIdSeek("(x)-[r2]->(y)", Set("x"), 25)
+      .relationshipByElementIdSeek("(x)-[r1]->(y)", Set(), 23, 22.0, -1)
       .build()
   )
 
@@ -1804,6 +2127,26 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
       .apply()
       .|.allRelationshipsScan("(x2)-[r2]-(y2)", "x1", "r1", "y1")
       .allRelationshipsScan("(x1)-[r1]->(y1)")
+      .build()
+  )
+
+  testPlan(
+    "allRelationshipsScan without end-nodes",
+    new TestPlanBuilder()
+      .produceResults("r1", "r21")
+      .apply()
+      .|.allRelationshipsScan("()-[r2]-()", "x1", "r1", "y1")
+      .allRelationshipsScan("(x1)-[r1]->()")
+      .build()
+  )
+
+  testPlan(
+    "allRelationshipsScan without relationships",
+    new TestPlanBuilder()
+      .produceResults("y")
+      .apply()
+      .|.allRelationshipsScan("()-[]-()", "x1", "r", "y")
+      .allRelationshipsScan("()-[]->(y)")
       .build()
   )
 
@@ -1828,6 +2171,16 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
   )
 
   testPlan(
+    "dynamicRelationshipTypeLookup",
+    new TestPlanBuilder()
+      .produceResults("x", "y")
+      .apply()
+      .|.dynamicRelationshipTypeLookup("(x)-[r]-(y)", "$all('R')", IndexOrderAscending, argumentIds = Set("x", "y"))
+      .dynamicRelationshipTypeLookup("(x)-[r]->(y)", "$any('R')", propertyPredicates = Map("prop" -> "123"))
+      .build()
+  )
+
+  testPlan(
     "partitionedRelationshipTypeScan",
     new TestPlanBuilder()
       .produceResults("x", "y")
@@ -1847,7 +2200,7 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
       .build()
   )
 
-  // Formatting paramExpr and customQueryExpression is currently not supported.
+  // Formatting paramExpr for complex expressions and customQueryExpression is currently not supported.
   // These cases will need manual fixup.
   testPlan(
     "nodeIndexOperator", {
@@ -1897,6 +2250,42 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
         .apply()
         .|.nodeIndexOperator("x:Honey(prop2 = 10, prop)", indexType = IndexType.RANGE)
         .nodeIndexOperator("x:Honey(prop = variable)", argumentIds = Set("variable"), indexType = IndexType.RANGE)
+        .build()
+    }
+  )
+
+  testPlan(
+    "remoteNodeIndexOperator", {
+      val builder = new TestPlanBuilder().produceResults("x", "y")
+
+      builder
+        .apply()
+        .|.remoteNodeIndexOperator("x:Honey(prop = 20)", indexType = IndexType.RANGE)
+        .remoteNodeIndexOperator("x:Honey(prop = variable)", argumentIds = Set("variable"), indexType = IndexType.RANGE)
+        .build()
+    }
+  )
+
+  testPlan(
+    "remoteRelationshipIndexOperator", {
+      val builder = new TestPlanBuilder().produceResults("x", "y")
+
+      builder
+        .apply()
+        .|.remoteRelationshipIndexOperator("(x)-[r:Honey(prop = 20)]->(y)", indexType = IndexType.RANGE)
+        .apply()
+        .|.remoteRelationshipIndexOperator("(x)-[r:Honey(prop = 20)]-(y)", indexType = IndexType.RANGE)
+        .apply()
+        .|.remoteRelationshipIndexOperator(
+          "(x)-[r:Honey(prop = variable)]->(y)",
+          argumentIds = Set("variable"),
+          indexType = IndexType.RANGE
+        )
+        .remoteRelationshipIndexOperator(
+          "(x)-[r:Honey(prop = variable)]-(y)",
+          argumentIds = Set("variable"),
+          indexType = IndexType.RANGE
+        )
         .build()
     }
   )
@@ -1999,6 +2388,14 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
         )
         .apply()
         .|.nodeIndexOperator(
+          "x:Comb(poo = ???)",
+          paramExpr = Some(parameter("parameter", CTString)),
+          getValue = _ => GetValue,
+          unique = true,
+          indexType = IndexType.RANGE
+        )
+        .apply()
+        .|.nodeIndexOperator(
           "x:Honey(prop = 10, prop2 = '20')",
           indexOrder = IndexOrderDescending,
           unique = true,
@@ -2011,9 +2408,41 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
           unique = true,
           indexType = IndexType.RANGE
         )
-        .nodeIndexOperator(
+        .apply()
+        .|.nodeIndexOperator(
           "x:Label(text STARTS WITH 'as')",
           indexOrder = IndexOrderAscending,
+          unique = true,
+          indexType = IndexType.RANGE
+        )
+        .apply()
+        .|.nodeIndexOperator(
+          "x:Label(text STARTS WITH ???)",
+          indexOrder = IndexOrderAscending,
+          paramExpr = Some(parameter("parameter", CTString)),
+          unique = true,
+          indexType = IndexType.RANGE
+        )
+        .apply()
+        .|.nodeIndexOperator(
+          "x:Label(text ENDS WITH ???)",
+          indexOrder = IndexOrderAscending,
+          paramExpr = Some(parameter("parameter", CTString)),
+          unique = true,
+          indexType = IndexType.RANGE
+        )
+        .apply()
+        .|.nodeIndexOperator(
+          "x:Label(prop < ???)",
+          indexOrder = IndexOrderAscending,
+          paramExpr = Some(parameter("parameter", CTString)),
+          unique = true,
+          indexType = IndexType.RANGE
+        )
+        .nodeIndexOperator(
+          "x:Label(??? < prop >= ???)",
+          indexOrder = IndexOrderAscending,
+          paramExpr = Seq(parameter("exclusiveBound", CTInteger), parameter("inclusiveBound", CTInteger)),
           unique = true,
           indexType = IndexType.RANGE
         )
@@ -2093,7 +2522,7 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
     }
   )
 
-  // Formatting paramExpr and customQueryExpression is currently not supported.
+  // Formatting paramExpr for complex expressions and customQueryExpression is currently not supported.
   // These cases will need manual fixup.
   testPlan(
     "relationshipIndexOperator", {
@@ -2142,6 +2571,13 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
         .apply()
         .|.relationshipIndexOperator(
           "(x)-[r:Honey(prop = 10 OR 20, prop2 = '10' OR '30')->(y)",
+          argumentIds = Set("a", "b"),
+          indexType = IndexType.RANGE
+        )
+        .apply()
+        .|.relationshipIndexOperator(
+          "(x)-[r:Honey(prop = ???, prop2 = '10' OR '30')->(y)",
+          paramExpr = Some(parameter("parameter", CTInteger)),
           argumentIds = Set("a", "b"),
           indexType = IndexType.RANGE
         )
@@ -2740,7 +3176,7 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
     "setDynamicLabelsWithExpression",
     new TestPlanBuilder()
       .produceResults("n")
-      .setDynamicLabelsWithExpression("n", Set(literalString("OtherLabel")))
+      .setDynamicLabels("n", literalString("OtherLabel"))
       .argument("n")
       .build()
   )
@@ -2772,6 +3208,18 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
     new TestPlanBuilder()
       .produceResults("x")
       .transactionForeach(10)
+      .|.emptyResult()
+      .|.create(createNode("y"))
+      .|.argument("x")
+      .allNodeScan("x")
+      .build()
+  )
+
+  testPlan(
+    "transactionForeach with disjointBy",
+    new TestPlanBuilder()
+      .produceResults("x", "y")
+      .transactionForeach(effectiveDisjointBy = Seq("x"))
       .|.emptyResult()
       .|.create(createNode("y"))
       .|.argument("x")
@@ -2816,6 +3264,36 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
   )
 
   testPlan(
+    "transactionForeachWithRetry",
+    new TestPlanBuilder()
+      .produceResults("x")
+      .transactionForeachWithRetry(
+        onErrorBehaviour = OnErrorRetryThenContinue,
+        maybeRetryTimeout = Some(FiniteDuration(250, MILLISECONDS))
+      )
+      .|.emptyResult()
+      .|.create(createNode("y"))
+      .|.argument("x")
+      .allNodeScan("x")
+      .build()
+  )
+
+  testPlan(
+    "transactionApplyWithRetry",
+    new TestPlanBuilder()
+      .produceResults("x")
+      .transactionApplyWithRetry(
+        onErrorBehaviour = OnErrorRetryThenBreak,
+        maybeRetryTimeout = Some(FiniteDuration(1500, MILLISECONDS))
+      )
+      .|.emptyResult()
+      .|.create(createNode("y"))
+      .|.argument("x")
+      .allNodeScan("x")
+      .build()
+  )
+
+  testPlan(
     "transactionApply",
     new TestPlanBuilder()
       .produceResults("x", "y")
@@ -2831,6 +3309,62 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
     new TestPlanBuilder()
       .produceResults("x", "y")
       .transactionApply(42)
+      .|.create(createNode("y"))
+      .|.argument("x")
+      .allNodeScan("x")
+      .build()
+  )
+
+  testPlan(
+    "transactionApply with disjointBy",
+    new TestPlanBuilder()
+      .produceResults("x", "y")
+      .transactionApply(effectiveDisjointBy = Seq("x"))
+      .|.create(createNode("y"))
+      .|.argument("x")
+      .allNodeScan("x")
+      .build()
+  )
+
+  testPlan(
+    "transactionApply with DISJOINT BY AUTO",
+    new TestPlanBuilder()
+      .produceResults("x", "y")
+      .transactionApply(maybeDisjointByParameters = Some("auto"))
+      .|.create(createNode("y"))
+      .|.argument("x")
+      .allNodeScan("x")
+      .build()
+  )
+
+  testPlan(
+    "transactionApply with DISJOINT BY NONE",
+    new TestPlanBuilder()
+      .produceResults("x", "y")
+      .transactionApply(maybeDisjointByParameters = Some("none"))
+      .|.create(createNode("y"))
+      .|.argument("x")
+      .allNodeScan("x")
+      .build()
+  )
+
+  testPlan(
+    "transactionApply with DISJOINT BY expressions",
+    new TestPlanBuilder()
+      .produceResults("x", "y")
+      .transactionApply(maybeDisjointByParameters = Some("(a.id, b.id)"))
+      .|.create(createNode("y"))
+      .|.argument("x")
+      .allNodeScan("x")
+      .build()
+  )
+
+  testPlan(
+    "transactionForeach with DISJOINT BY expressions",
+    new TestPlanBuilder()
+      .produceResults("x", "y")
+      .transactionForeach(maybeDisjointByParameters = Some("(a.id, b.id)"))
+      .|.emptyResult()
       .|.create(createNode("y"))
       .|.argument("x")
       .allNodeScan("x")
@@ -2862,7 +3396,9 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
         innerRelationships = Set("r_inner"),
         previouslyBoundRelationships = Set.empty,
         previouslyBoundRelationshipGroups = Set("r_group"),
-        reverseGroupVariableProjections = true
+        reverseGroupVariableProjections = true,
+        expansionMode = ExpandAll,
+        accumulators = Set(("1", "b", "c"))
       ))
       .|.expandAll("(a_inner)-[r_inner]->(b_inner)")
       .|.argument("me", "a_inner")
@@ -2886,7 +3422,9 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
         innerRelationships = Set("r_inner"),
         previouslyBoundRelationships = Set.empty,
         previouslyBoundRelationshipGroups = Set("r_group"),
-        reverseGroupVariableProjections = true
+        reverseGroupVariableProjections = true,
+        expansionMode = ExpandAll,
+        accumulators = Set.empty
       ))
       .|.repeatOptions()
       .|.|.expandAll("(b_inner)<-[r_inner]-(a_inner)")
@@ -2912,7 +3450,39 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
         innerEnd = "b",
         groupNodes = Set(("a_inner", "a"), ("b_inner", "b")),
         groupRelationships = Set(("r_inner", "r")),
-        reverseGroupVariableProjections = true
+        reverseGroupVariableProjections = true,
+        innerRelationships = Set("r_inner"),
+        expansionMode = ExpandAll,
+        accumulators = Set(("a", "b", "c"))
+      ))
+      .|.expandAll("(a_inner)-[r_inner]->(b_inner)")
+      .|.argument("me", "a_inner")
+      .nodeByLabelScan("me", "START", IndexOrderNone)
+      .build()
+  )
+
+  testPlan(
+    "repeatAcyclic",
+    new TestPlanBuilder()
+      .produceResults("me", "you", "a", "b", "r")
+      .repeatAcyclic(AcyclicParameters(
+        min = 0,
+        max = Limited(2),
+        start = "me",
+        end = "you",
+        innerStart = "a",
+        innerEnd = "b",
+        groupNodes = Set(("a_inner", "a"), ("b_inner", "b")),
+        innerNodes = Set("a_inner", "b_inner"),
+        previouslyBoundNodes = Set(),
+        previouslyBoundNodeGroups = Set(),
+        groupRelationships = Set(("r_inner", "r")),
+        innerRelationships = Set("r_inner"),
+        previouslyBoundRelationships = Set(),
+        previouslyBoundRelationshipGroups = Set(),
+        reverseGroupVariableProjections = true,
+        expansionMode = ExpandAll,
+        accumulators = Set(("a", "b", "c"))
       ))
       .|.expandAll("(a_inner)-[r_inner]->(b_inner)")
       .|.argument("me", "a_inner")
@@ -2984,85 +3554,94 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
       .build()
   )
 
+  testPlan(
+    "pipelineBreaker",
+    new TestPlanBuilder()
+      .produceResults()
+      .pipelineBreaker()
+      .argument()
+      .build()
+  )
+
+  private def imports: String = {
+    """import org.neo4j.cypher.internal.util.collection.immutable.ListSet
+      |import org.neo4j.cypher.internal.ast.AstConstructionTestSupport.cachedNodePropFromStore
+      |import org.neo4j.cypher.internal.ast.AstConstructionTestSupport.labelName
+      |import org.neo4j.cypher.internal.ast.AstConstructionTestSupport.literalInt
+      |import org.neo4j.cypher.internal.ast.AstConstructionTestSupport.literalFloat
+      |import org.neo4j.cypher.internal.ast.AstConstructionTestSupport.parameter
+      |import org.neo4j.cypher.internal.ast.AstConstructionTestSupport.propName
+      |import org.neo4j.cypher.internal.ast.AstConstructionTestSupport.relTypeName
+      |import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorFail
+      |import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorContinue
+      |import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorBreak
+      |import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorRetryThenContinue
+      |import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorRetryThenBreak
+      |import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsRetryParameters
+      |import org.neo4j.cypher.internal.compiler.helpers.QueryExpressionConstructionTestSupport.between
+      |import org.neo4j.cypher.internal.compiler.helpers.QueryExpressionConstructionTestSupport.gt
+      |import org.neo4j.cypher.internal.compiler.helpers.QueryExpressionConstructionTestSupport.gte
+      |import org.neo4j.cypher.internal.compiler.helpers.QueryExpressionConstructionTestSupport.lte
+      |import org.neo4j.cypher.internal.compiler.helpers.QueryExpressionConstructionTestSupport.lt
+      |import org.neo4j.cypher.internal.compiler.helpers.QueryExpressionConstructionTestSupport.matchAll
+      |import org.neo4j.cypher.internal.compiler.helpers.QueryExpressionConstructionTestSupport.matchEntities
+      |import org.neo4j.cypher.internal.compiler.helpers.QueryExpressionConstructionTestSupport.rangeExpression
+      |import org.neo4j.cypher.internal.compiler.helpers.QueryExpressionConstructionTestSupport.single
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.column
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createPattern
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createNode
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createNodeFull
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createNodeWithProperties
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createRelationship
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createRelationshipWithDynamicType
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.delete
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setLabel
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setDynamicProperty
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setNodeProperty
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setNodePropertiesFromMap
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setRelationshipProperty
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setRelationshipPropertiesFromMap
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setProperty
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setProperties
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setNodeProperties
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setRelationshipProperties
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setPropertyFromMap
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.Predicate
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.removeLabel
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.TrailParameters
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.AcyclicParameters
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.WalkParameters
+      |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.PushdownOperators
+      |import org.neo4j.cypher.internal.logical.builder.TestNFABuilder
+      |import org.neo4j.cypher.internal.expressions.DecimalDoubleLiteral
+      |import org.neo4j.cypher.internal.expressions.SemanticDirection.{INCOMING, OUTGOING, BOTH}
+      |import org.neo4j.cypher.internal.expressions.LabelName
+      |import org.neo4j.cypher.internal.expressions.RelTypeName
+      |import org.neo4j.cypher.internal.expressions.PropertyKeyName
+      |import org.neo4j.cypher.internal.logical.plans.*
+      |import org.neo4j.cypher.internal.logical.plans.Expand.*
+      |import org.neo4j.cypher.internal.logical.plans.TransactionConcurrency.Concurrent
+      |import org.neo4j.cypher.internal.logical.plans.TransactionConcurrency.Serial
+      |import org.neo4j.cypher.internal.logical.builder.TestException
+      |import org.neo4j.cypher.internal.ir.HasHeaders
+      |import org.neo4j.cypher.internal.ir.NoHeaders
+      |import org.neo4j.cypher.internal.ir.EagernessReason
+      |import org.neo4j.cypher.internal.ir.SelectivePathPattern.CountInteger
+      |import org.neo4j.cypher.internal.util.attribution.Id
+      |import org.neo4j.cypher.internal.util.InputPosition
+      |import org.neo4j.cypher.internal.util.UpperBound.Limited
+      |import org.neo4j.cypher.internal.util.Repetition
+      |// For Cypher types CT...
+      |import org.neo4j.cypher.internal.util.symbols.*
+      |import org.neo4j.cypher.internal.util.UpperBound.Unlimited
+      |import org.neo4j.graphdb.schema.IndexType
+      |import org.neo4j.cypher.internal.logical.plans.FindShortestPaths.*
+      |import org.neo4j.cypher.internal.logical.plans.TraversalPathMode.*
+      |""".stripMargin
+  }
+
   private def interpretPlanBuilder(code: String): LogicalPlan = {
-    val completeCode =
-      s"""
-         |new org.neo4j.cypher.internal.logical.builder.TestPlanBuilder()
-         |$code""".stripMargin
-    val res = Array[AnyRef](null)
-
-    val settings = new Settings()
-    settings.usejavacp.value = true
-
-    val reporter = new ReplReporterImpl(new Settings())
-
-    val interpreter = new IMain(settings, reporter)
-
-    try {
-      interpreter.beQuietDuring {
-        // imports
-        interpreter.interpret(
-          """import org.neo4j.cypher.internal.util.collection.immutable.ListSet
-            |
-            |import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorFail
-            |import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorContinue
-            |import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorBreak
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.column
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createPattern
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createNode
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createNodeFull
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createNodeWithProperties
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createRelationship
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createRelationshipWithDynamicType
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.delete
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setLabel
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setDynamicProperty
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setNodeProperty
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setNodePropertiesFromMap
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setRelationshipProperty
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setRelationshipPropertiesFromMap
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setProperty
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setProperties
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setNodeProperties
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setRelationshipProperties
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.setPropertyFromMap
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.Predicate
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.removeLabel
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.TrailParameters
-            |import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.WalkParameters
-            |import org.neo4j.cypher.internal.logical.builder.TestNFABuilder
-            |import org.neo4j.cypher.internal.expressions.SemanticDirection.{INCOMING, OUTGOING, BOTH}
-            |import org.neo4j.cypher.internal.expressions.LabelName
-            |import org.neo4j.cypher.internal.expressions.RelTypeName
-            |import org.neo4j.cypher.internal.expressions.PropertyKeyName
-            |import org.neo4j.cypher.internal.logical.plans._
-            |import org.neo4j.cypher.internal.logical.plans.Expand._
-            |import org.neo4j.cypher.internal.logical.plans.TransactionConcurrency.Concurrent
-            |import org.neo4j.cypher.internal.logical.plans.TransactionConcurrency.Serial
-            |import org.neo4j.cypher.internal.logical.builder.TestException
-            |import org.neo4j.cypher.internal.ir.HasHeaders
-            |import org.neo4j.cypher.internal.ir.NoHeaders
-            |import org.neo4j.cypher.internal.ir.EagernessReason
-            |import org.neo4j.cypher.internal.util.attribution.Id
-            |import org.neo4j.cypher.internal.util.InputPosition
-            |import org.neo4j.cypher.internal.util.UpperBound.Limited
-            |import org.neo4j.cypher.internal.util.Repetition
-            |import org.neo4j.cypher.internal.util.UpperBound.Unlimited
-            |import org.neo4j.graphdb.schema.IndexType
-            |import org.neo4j.cypher.internal.logical.plans.FindShortestPaths._
-            |import org.neo4j.cypher.internal.logical.plans.TraversalMatchMode._
-            |""".stripMargin
-        )
-        interpreter.bind("result", "Array[AnyRef]", res)
-      }
-      interpreter.interpret(s"result(0) = $completeCode")
-    } catch {
-      case t: Throwable =>
-        fail("Failed to interpret generated code: ", t)
-    } finally {
-      interpreter.close()
-    }
-    res(0).asInstanceOf[LogicalPlan]
+    scalaInterpreter.get.evalPlanBuilderString(code)
   }
 
   /**
@@ -3071,7 +3650,7 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
    * This is done via reflection.
    */
   test("all the tests exist") {
-    val methodsWeCantTest = Set(
+    val methodsWeCannotTest = Set(
       "filterExpression",
       "filterExpressionOrString",
       "appendAtCurrentIndent",
@@ -3080,6 +3659,7 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
       "nestedPlanGetByNameExpressionProjection",
       "nestedPlanGetByNameExpressionInListComprehensionProjection",
       "pointDistanceNodeIndexSeekExpr",
+      "exprPointDistanceNodeIndexSeek",
       "pointDistanceNodeIndexSeekParam",
       "pointDistanceRelationshipIndexSeekExpr",
       "pointBoundingBoxNodeIndexSeekExpr",
@@ -3091,7 +3671,11 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
       "varExpandAsShortest",
       "resetIndent",
       "planIf",
-      "planAny"
+      "planAny",
+      "remoteBatchPropertiesByExpr",
+      "foreachWithExpression",
+      "___CONDITION_BEGIN___",
+      "___CONDITION_END___"
     )
     withClue("tests missing for these operators:") {
       val methods = classOf[AbstractLogicalPlanBuilder[_, _]].getDeclaredMethods.filter { m =>
@@ -3104,12 +3688,12 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
       methods should not be empty
       val m = methods.map { m =>
         val name = m.getName
-        val index = name.indexOf("$") // filter out the $bar method
+        val index = name.indexOf('$') // filter out the $bar method
         val end = if (index == -1) name.length else index
         name.substring(0, end)
       }
 
-      m.filter(_.nonEmpty).toSet[String] -- methodsWeCantTest -- testedOperators should be(empty)
+      m.filter(_.nonEmpty).toSet[String] -- methodsWeCannotTest -- testedOperators should be(empty)
     }
   }
 
@@ -3121,8 +3705,8 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
    */
   private def testPlan(name: String, buildPlan: => LogicalPlan): Unit = {
     testedOperators.add(name)
-    test(name) {
-      val plan = buildPlan
+
+    def roundtripTest(plan: LogicalPlan) = {
       val code = LogicalPlanToPlanBuilderString(plan)
       val rebuiltPlan = interpretPlanBuilder(code)
       if (rebuiltPlan == null) {
@@ -3130,7 +3714,93 @@ class LogicalPlanToPlanBuilderStringTest extends CypherFunSuite with TestName wi
       }
       rebuiltPlan should equal(plan)
     }
+
+    test(name) {
+      val plan = buildPlan
+      roundtripTest(plan)
+
+      withClue("with spaced variables") {
+        val planWithDifficultVars =
+          plan.endoRewrite(topDown(Rewriter.lift {
+            case variable @ Variable(name) =>
+              variable.copy(s"  $name")(variable.position, variable.isIsolated)
+          }))
+
+        roundtripTest(planWithDifficultVars)
+      }
+    }
   }
+
+  // relies on the current thread's class loader, so make it thread-local to make sure we don't accidentally use the wrong class loader
+  private lazy val scalaInterpreter: ThreadLocal[ScalaInterpreter] = ThreadLocal.withInitial(() => ScalaInterpreter())
+
+  class ScalaInterpreter() {
+
+    private val errStream = new java.io.ByteArrayOutputStream()
+
+    // The Scala 3 REPL creates a fresh URLClassLoader (child of the system classloader) for
+    // generated code, so without an explicit parent it would load a second copy of
+    // LogicalPlanToPlanBuilderStringTest with a different RESULT_ARRAY instance.
+    // Passing the test classloader as parent ensures both sides share the same instance.
+    private val repl = new ReplDriver(
+      Array("-usejavacp", "-color:never"),
+      out = new java.io.PrintStream(errStream),
+      classLoader = Some(Thread.currentThread().getContextClassLoader)
+    ) {
+      override protected def redirectOutput: Boolean =
+        false // don't redirect output, ScalaTest uses it for communicating test results
+    }
+
+    private var replState: dotty.tools.repl.State = repl.initialState
+
+    loadImports()
+
+    private def loadImports(): Unit = {
+      val result = eval(preludeCode = imports, resultExpressionCode = "Seq()")
+      if (result != Seq()) {
+        throw new RuntimeException(s"Failed to load imports:\n$errStream")
+      }
+    }
+
+    def evalPlanBuilderString(code: String): LogicalPlan = {
+      val completeCode =
+        s"""new org.neo4j.cypher.internal.logical.builder.TestPlanBuilder()
+           |$code""".stripMargin
+
+      eval(preludeCode = "", resultExpressionCode = completeCode) match {
+        case plan: LogicalPlan =>
+          plan
+        case other =>
+          throw new RuntimeException(
+            s"This code did not produce a plan:\n$code\nResult: $other\nREPL output:\n$errStream"
+          )
+      }
+    }
+
+    private def eval(preludeCode: String, resultExpressionCode: String): AnyRef = {
+      val codeToRun =
+        s"""$preludeCode
+           |
+           |org.neo4j.cypher.internal.logical.builder.LogicalPlanToPlanBuilderStringTest.RESULT_ARRAY.value(0) = $resultExpressionCode""".stripMargin
+
+      errStream.reset()
+      val res = Array[AnyRef](null)
+      LogicalPlanToPlanBuilderStringTest.RESULT_ARRAY.withValue(res) {
+        try {
+          replState = repl.run(codeToRun)(using replState)
+        } catch {
+          case t: Throwable =>
+            fail(s"Failed to interpret generated code: $t")
+        }
+      }
+      res.head
+    }
+  }
+}
+
+object LogicalPlanToPlanBuilderStringTest {
+  // Passes the result array into the REPL's generated code via a thread-local storage.
+  val RESULT_ARRAY: DynamicVariable[Array[AnyRef]] = new DynamicVariable[Array[AnyRef]](null)
 }
 
 case class TestException() extends RuntimeException()

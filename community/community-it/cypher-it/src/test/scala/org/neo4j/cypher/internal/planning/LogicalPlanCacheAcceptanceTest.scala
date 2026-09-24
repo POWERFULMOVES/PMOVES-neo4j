@@ -21,36 +21,41 @@ package org.neo4j.cypher.internal.planning
 
 import org.neo4j.configuration.Config
 import org.neo4j.configuration.GraphDatabaseSettings
+import org.neo4j.cypher.CypherITTestSuite
 import org.neo4j.cypher.ExecutionEngineHelper.asJavaMapDeep
 import org.neo4j.cypher.GraphDatabaseTestSupport
 import org.neo4j.cypher.internal.CachingPreParser
 import org.neo4j.cypher.internal.CommunityCompilerFactory
 import org.neo4j.cypher.internal.CommunityRuntimeContextManager
 import org.neo4j.cypher.internal.CommunityRuntimeFactory
+import org.neo4j.cypher.internal.CommunitySchemaCommandRuntime
 import org.neo4j.cypher.internal.Compiler
 import org.neo4j.cypher.internal.CompilerLibrary
 import org.neo4j.cypher.internal.CypherCurrentCompiler
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.LastCommittedTxIdProvider
 import org.neo4j.cypher.internal.MasterCompiler
-import org.neo4j.cypher.internal.PreParsedQuery
 import org.neo4j.cypher.internal.RuntimeContext
 import org.neo4j.cypher.internal.cache.CypherQueryCaches
+import org.neo4j.cypher.internal.cache.CypherQueryCaches.CacheStrategy
 import org.neo4j.cypher.internal.cache.LFUCache
 import org.neo4j.cypher.internal.cache.TestExecutorCaffeineCacheFactory
 import org.neo4j.cypher.internal.compiler.CypherParsingConfig
 import org.neo4j.cypher.internal.compiler.CypherPlannerConfiguration
 import org.neo4j.cypher.internal.config.CypherConfiguration
 import org.neo4j.cypher.internal.frontend.phases.CompilationPhaseTracer
+import org.neo4j.cypher.internal.frontend.phases.InternalUsageStatsImpl
+import org.neo4j.cypher.internal.notification.devNullLogger
 import org.neo4j.cypher.internal.options.CypherPlannerOption
 import org.neo4j.cypher.internal.options.CypherRuntimeOption
 import org.neo4j.cypher.internal.planner.spi.MinimumGraphStatistics.MIN_NODES_ALL
 import org.neo4j.cypher.internal.planner.spi.MinimumGraphStatistics.MIN_NODES_WITH_LABEL
+import org.neo4j.cypher.internal.preparser.PreParsedQuery
 import org.neo4j.cypher.internal.runtime.CypherRuntimeConfiguration
-import org.neo4j.cypher.internal.util.devNullLogger
-import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 import org.neo4j.cypher.util.CacheCountsTestSupport
 import org.neo4j.cypher.util.CacheCountsTestSupport.CacheCounts
 import org.neo4j.graphdb.config.Setting
+import org.neo4j.internal.kernel.api.security.CommunitySecurityLog
 import org.neo4j.kernel.impl.util.ValueUtils
 import org.neo4j.logging.AssertableLogProvider
 import org.neo4j.logging.AssertableLogProvider.Level
@@ -63,7 +68,8 @@ import java.time.Duration
 import java.time.Instant
 import java.time.ZoneOffset
 
-class LogicalPlanCacheAcceptanceTest extends CypherFunSuite with GraphDatabaseTestSupport with CacheCountsTestSupport {
+class LogicalPlanCacheAcceptanceTest extends CypherITTestSuite with GraphDatabaseTestSupport
+    with CacheCountsTestSupport {
 
   private val cacheFactory = TestExecutorCaffeineCacheFactory
 
@@ -96,17 +102,19 @@ class LogicalPlanCacheAcceptanceTest extends CypherFunSuite with GraphDatabaseTe
 
     val log = logProvider.getLog(getClass)
 
-    val planner = CypherPlanner(
+    val planner = DefaultCypherPlanner(
       CypherParsingConfig.fromCypherConfiguration(config),
       CypherPlannerConfiguration.fromCypherConfiguration(config, Config.defaults(), planSystemCommands = false, false),
       clock,
       kernelMonitors,
       log,
+      CommunitySecurityLog.NULL_LOG,
       caches,
       CypherPlannerOption.default,
       null,
+      CommunitySchemaCommandRuntime,
       null,
-      null
+      new InternalUsageStatsImpl
     )
 
     CypherCurrentCompiler(
@@ -116,12 +124,13 @@ class LogicalPlanCacheAcceptanceTest extends CypherFunSuite with GraphDatabaseTe
         log,
         CypherRuntimeConfiguration.fromCypherConfiguration(CypherConfiguration.fromConfig(Config.defaults()))
       ),
+      CommunitySchemaCommandRuntime,
       kernelMonitors,
       caches
     )
   }
 
-  override def databaseConfig(): Map[Setting[_], Object] =
+  override def databaseConfig(): Map[Setting[?], Object] =
     super.databaseConfig() ++ Map(GraphDatabaseSettings.cypher_min_replan_interval -> Duration.ZERO)
 
   private var compiler: CypherCurrentCompiler[RuntimeContext] = _
@@ -143,10 +152,10 @@ class LogicalPlanCacheAcceptanceTest extends CypherFunSuite with GraphDatabaseTe
 
     val preParser = new CachingPreParser(
       CypherConfiguration.fromConfig(Config.defaults()),
-      new LFUCache[String, PreParsedQuery](TestExecutorCaffeineCacheFactory, 1)
+      new LFUCache[PreParsedQuery.CacheKey, PreParsedQuery](TestExecutorCaffeineCacheFactory, 1)
     )
 
-    val preParsedQuery = preParser.preParseQuery(query, devNullLogger)
+    val preParsedQuery = preParser.preParseQuery(query, devNullLogger, CypherVersion.Legacy.legacyVersion())
 
     graph.withTx { tx =>
       val noTracing = CompilationPhaseTracer.NO_TRACING
@@ -157,7 +166,9 @@ class LogicalPlanCacheAcceptanceTest extends CypherFunSuite with GraphDatabaseTe
         context,
         ValueUtils.asParameterMapValue(asJavaMapDeep(params)),
         devNullLogger,
-        null
+        null,
+        cacheStrategy = CacheStrategy.defaultDefault,
+        isOutermostQuery = true
       )
       val id = context.executingQuery().id()
       context.close()
@@ -289,8 +300,10 @@ class LogicalPlanCacheAcceptanceTest extends CypherFunSuite with GraphDatabaseTe
   test(
     "should keep different cache entries for explicitly parametrized lists where inner type is not string and where inner type is string"
   ) {
-    runQuery("MATCH (n:Label) WHERE n.prop IN $list RETURN *", params = Map("list" -> Seq("1", "2", "3")))
-    runQuery("MATCH (n:Label) WHERE n.prop IN $list RETURN *", params = Map("list" -> Seq("1", 2, "3")))
+    val arguments1: Map[String, Seq[String]] = Map("list" -> Seq("1", "2", "3"))
+    val arguments2: Map[String, Seq[Any]] = Map("list" -> Seq("1", 2, "3"))
+    runQuery("MATCH (n:Label) WHERE n.prop IN $list RETURN *", params = arguments1)
+    runQuery("MATCH (n:Label) WHERE n.prop IN $list RETURN *", params = arguments2)
 
     logicalPlanCacheCounts should equal(CacheCounts(misses = 2, flushes = 1, compilations = 2))
   }

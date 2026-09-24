@@ -68,7 +68,7 @@ import org.neo4j.values.virtual.PathReference;
  * <p>
  * Iteration and retracing of paths is done with a PathsIterator which is described in more detail at its declaration.
  */
-public class BiDirectionalBFS implements AutoCloseable {
+public class BiDirectionalBFS implements ShortestPathBFS {
     private final BiDirectionalBFSImpl<?> inner;
 
     private BiDirectionalBFS(BiDirectionalBFSImpl<?> inner) {
@@ -265,14 +265,6 @@ public class BiDirectionalBFS implements AutoCloseable {
     public void resetForNewRow(
             long sourceNodeId,
             long targetNodeId,
-            LongPredicate nodeFilter,
-            Predicate<RelationshipTraversalEntities> relFilter) {
-        inner.resetForNewRow(sourceNodeId, targetNodeId, nodeFilter, relFilter);
-    }
-
-    public void resetForNewRow(
-            long sourceNodeId,
-            long targetNodeId,
             NodeCursor nodeCursor,
             RelationshipTraversalCursor relCursor,
             LongPredicate nodeFilter,
@@ -280,6 +272,7 @@ public class BiDirectionalBFS implements AutoCloseable {
         inner.resetForNewRow(sourceNodeId, targetNodeId, nodeCursor, relCursor, nodeFilter, relFilter);
     }
 
+    @Override
     public Iterator<PathReference> shortestPathIterator() {
         return inner.shortestPathIterator();
     }
@@ -289,6 +282,7 @@ public class BiDirectionalBFS implements AutoCloseable {
         inner.close();
     }
 
+    @Override
     public void setTracer(KernelReadTracer tracer) {
         inner.setTracer(tracer);
     }

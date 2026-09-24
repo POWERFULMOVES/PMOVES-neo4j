@@ -23,7 +23,6 @@ import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.locks.LockSupport.parkNanos;
-import static org.neo4j.kernel.api.exceptions.Status.Transaction.Interrupted;
 import static org.neo4j.lock.LockType.EXCLUSIVE;
 import static org.neo4j.lock.LockType.SHARED;
 
@@ -41,7 +40,7 @@ import org.neo4j.collection.trackable.HeapTrackingLongIntHashMap;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.configuration.GraphDatabaseSettings;
-import org.neo4j.graphdb.TransactionFailureException;
+import org.neo4j.graphdb.TransactionFailureHelper;
 import org.neo4j.kernel.DeadlockDetectedException;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.impl.api.LeaseClient;
@@ -49,6 +48,7 @@ import org.neo4j.kernel.impl.locking.LockAcquisitionTimeoutException;
 import org.neo4j.kernel.impl.locking.LockClientStateHolder;
 import org.neo4j.kernel.impl.locking.LockClientStoppedException;
 import org.neo4j.kernel.impl.locking.LockManager;
+import org.neo4j.kernel.impl.locking.LockMonitor;
 import org.neo4j.lock.ActiveLock;
 import org.neo4j.lock.LockTracer;
 import org.neo4j.lock.LockType;
@@ -103,6 +103,7 @@ public class ForsetiClient implements LockManager.Client {
     private long lockAcquisitionTimeoutNano;
 
     private final SystemNanoClock clock;
+    private final LockMonitor lockMonitor;
     private boolean verboseDeadlocks;
 
     /** List of other clients this client is waiting for. */
@@ -144,17 +145,31 @@ public class ForsetiClient implements LockManager.Client {
     private final long clientId;
     private volatile DeferredScopedMemoryTracker memoryTracker;
     private static final long CONCURRENT_NODE_SIZE = HeapEstimator.LONG_SIZE + HeapEstimator.HASH_MAP_NODE_SHALLOW_SIZE;
+    /**
+     * Memory reported when this client installs a shared-lock entry in a global lock map: the global map node
+     * ({@link #CONCURRENT_NODE_SIZE}) plus the {@link SharedLock} instance and its holder set ({@link
+     * SharedLock#SHALLOW_SIZE}). Exclusive locks re-use {@link #myExclusiveLock} and so only report {@link
+     * #CONCURRENT_NODE_SIZE}.
+     * <p>
+     * A multi-holder {@link SharedLock} is a single shared instance, yet every holder reports the full size: a
+     * deliberate overestimate that keeps each transaction's accounting self-contained and never undercounts. For
+     * single-holder locks — the flood scenario this guards against — the estimate is exact.
+     */
+    private static final long SHARED_LOCK_SIZE = CONCURRENT_NODE_SIZE + SharedLock.SHALLOW_SIZE;
+
     private volatile long prepareThreadId;
 
     public ForsetiClient(
             ConcurrentMap<Long, ForsetiLockManager.Lock>[] lockMaps,
             SystemNanoClock clock,
+            LockMonitor lockMonitor,
             boolean verboseDeadlocks,
             long clientId) {
         this.lockMaps = lockMaps;
         this.sharedLockCounts = new HeapTrackingLongIntHashMap[lockMaps.length];
         this.exclusiveLockCounts = new HeapTrackingLongIntHashMap[lockMaps.length];
         this.clock = clock;
+        this.lockMonitor = lockMonitor;
         this.verboseDeadlocks = verboseDeadlocks;
         this.clientId = clientId;
     }
@@ -203,7 +218,7 @@ public class ForsetiClient implements LockManager.Client {
                     continue;
                 }
 
-                memoryTracker.allocateHeap(CONCURRENT_NODE_SIZE);
+                memoryTracker.allocateHeap(SHARED_LOCK_SIZE);
 
                 // We don't hold the lock, so we need to grab it via the global lock map
                 int tries = 0;
@@ -427,7 +442,7 @@ public class ForsetiClient implements LockManager.Client {
                 return true;
             }
 
-            memoryTracker.allocateHeap(CONCURRENT_NODE_SIZE);
+            memoryTracker.allocateHeap(SHARED_LOCK_SIZE);
             long waitStartNano = clock.nanos();
             while (true) {
                 assertValid(waitStartNano, resourceType, resourceId);
@@ -447,11 +462,11 @@ public class ForsetiClient implements LockManager.Client {
                         // Success!
                         break;
                     } else if (sharedLock.isUpdateLock()) {
-                        memoryTracker.releaseHeap(CONCURRENT_NODE_SIZE);
+                        memoryTracker.releaseHeap(SHARED_LOCK_SIZE);
                         return false;
                     }
                 } else if (existingLock instanceof ExclusiveLock) {
-                    memoryTracker.releaseHeap(CONCURRENT_NODE_SIZE);
+                    memoryTracker.releaseHeap(SHARED_LOCK_SIZE);
                     return false;
                 } else {
                     throw new UnsupportedOperationException("Unknown lock type: " + existingLock);
@@ -511,7 +526,10 @@ public class ForsetiClient implements LockManager.Client {
                                     + "to exclusive before attempt to release it. Lock: " + this);
                         }
                     } else {
-                        // in case if current lock is exclusive we swap it to new shared lock
+                        // in case if current lock is exclusive we swap it to new shared lock. The global map node was
+                        // already reported when the exclusive lock was taken, so only the SharedLock instance and its
+                        // holder set are new here.
+                        memoryTracker.allocateHeap(SharedLock.SHALLOW_SIZE);
                         SharedLock sharedLock = new SharedLock(this);
                         resourceTypeLocks.put(resourceId, sharedLock);
                     }
@@ -552,7 +570,7 @@ public class ForsetiClient implements LockManager.Client {
 
     @Override
     public void prepareForCommit() {
-        prepareThreadId = Thread.currentThread().getId();
+        prepareThreadId = Thread.currentThread().threadId();
         stateHolder.prepare(this);
     }
 
@@ -612,16 +630,17 @@ public class ForsetiClient implements LockManager.Client {
     }
 
     @Override
-    public Collection<ActiveLock> activeLocks() {
+    public Collection<ActiveLock> activeLocks(MemoryTracker memoryTracker) {
         // We're iterating the global map instead of the client local maps because this can be called from separate
         // threads
-        var locks = new ArrayList<ActiveLock>();
+        List<ActiveLock> locks = HeapTrackingCollections.newArrayList(memoryTracker);
         for (int typeId = 0; typeId < lockMaps.length; typeId++) {
             ResourceType resourceType = ResourceType.fromId(typeId);
             ConcurrentMap<Long, ForsetiLockManager.Lock> lockMap = lockMaps[typeId];
             if (lockMap != null) {
                 lockMap.forEach((resourceId, lock) -> {
                     if (lock.isOwnedBy(this)) {
+                        memoryTracker.allocateHeap(ActiveLock.SHALLOW_SIZE);
                         locks.add(new ActiveLock(resourceType, lock.type(), transactionId, resourceId));
                     }
                 });
@@ -700,7 +719,7 @@ public class ForsetiClient implements LockManager.Client {
         } else if (lock instanceof SharedLock sharedLock && sharedLock.release(this)) {
             // We were the last to hold this lock
             lockMap.remove(resourceId);
-            memoryTracker.releaseHeap(CONCURRENT_NODE_SIZE);
+            memoryTracker.releaseHeap(SHARED_LOCK_SIZE);
         }
         activeLockCount.decrementAndGet();
     }
@@ -734,10 +753,10 @@ public class ForsetiClient implements LockManager.Client {
         int tries = 0;
         boolean holdsSharedLock = getSharedLockCount(resourceType).containsKey(resourceId);
         if (!holdsSharedLock) {
-            memoryTracker.allocateHeap(CONCURRENT_NODE_SIZE);
+            memoryTracker.allocateHeap(SHARED_LOCK_SIZE);
             // We don't hold the shared lock, we need to grab it to upgrade it to an exclusive one
             if (!sharedLock.acquire(this)) {
-                memoryTracker.releaseHeap(CONCURRENT_NODE_SIZE);
+                memoryTracker.releaseHeap(SHARED_LOCK_SIZE);
                 return false;
             }
             activeLockCount.incrementAndGet();
@@ -789,8 +808,11 @@ public class ForsetiClient implements LockManager.Client {
                     throw (RuntimeException) e;
                 }
                 var status = (e instanceof Status.HasStatus se) ? se.status() : Status.Database.Unknown;
-                throw new TransactionFailureException(
-                        "Failed to upgrade shared lock to exclusive: " + sharedLock, e, status);
+                throw TransactionFailureHelper.internalError(
+                        this.getClass().getSimpleName(),
+                        "Failed to upgrade shared lock to exclusive: " + sharedLock,
+                        e,
+                        status);
             } finally {
                 if (waitEvent != null) {
                     waitEvent.close();
@@ -825,15 +847,14 @@ public class ForsetiClient implements LockManager.Client {
                 if (verboseDeadlocks) {
                     var deadlockCycleMessage = findDeadlockPath(lock, type, resourceId, depth);
                     if (deadlockCycleMessage != null) {
-                        var message = String.format(
+                        raiseDeadlockException(String.format(
                                 "%s can't acquire %s %s because it would form this deadlock wait cycle:%n%s",
-                                this, lockType, lockString(type, resourceId), deadlockCycleMessage);
-                        throw DeadlockDetectedException.deadlockDetected(message);
+                                this, lockType, lockString(type, resourceId), deadlockCycleMessage));
                     }
                     // else we tried to find a precise deadlock cycle, but found none - which means that
                     // there was no real deadlock
                 } else {
-                    throw DeadlockDetectedException.deadlockDetected(format(
+                    raiseDeadlockException(format(
                             "%s can't acquire %s on %s because holders of that lock are waiting for %s.%n Wait list:%s",
                             this, lock, lockString(type, resourceId), this, lock.describeWaitList()));
                 }
@@ -845,10 +866,15 @@ public class ForsetiClient implements LockManager.Client {
                 if (clientCommittingByCurrentThread(client) && isDeadlockReal(lock) != -1) {
                     String message = this + " can't acquire " + lock + " on " + type + "(" + resourceId
                             + "), because we are waiting for " + client + " that is committing on the same thread";
-                    throw DeadlockDetectedException.deadlockDetected(message);
+                    raiseDeadlockException(message);
                 }
             }
         }
+    }
+
+    private void raiseDeadlockException(String message) {
+        lockMonitor.deadlockDetected();
+        throw DeadlockDetectedException.deadlockDetected(message);
     }
 
     @VisibleForTesting
@@ -866,7 +892,7 @@ public class ForsetiClient implements LockManager.Client {
             }
         } catch (InterruptedException e) {
             Thread.interrupted();
-            throw new LockAcquisitionTimeoutException(Interrupted, "Interrupted while waiting.");
+            throw LockAcquisitionTimeoutException.interrupted();
         }
     }
 
@@ -902,7 +928,7 @@ public class ForsetiClient implements LockManager.Client {
     private boolean clientCommittingByCurrentThread(ForsetiClient otherClient) {
         return otherClient != this
                 && otherClient.stateHolder.isPrepared()
-                && Thread.currentThread().getId() == otherClient.prepareThreadId;
+                && Thread.currentThread().threadId() == otherClient.prepareThreadId;
     }
 
     private void clearAndCopyWaitList(ForsetiLockManager.Lock lock) {
@@ -1054,7 +1080,7 @@ public class ForsetiClient implements LockManager.Client {
 
     private void assertNotStopped() {
         if (stateHolder.isStopped()) {
-            throw new LockClientStoppedException(this);
+            throw LockClientStoppedException.lockClientStopped(this);
         }
     }
 
@@ -1062,7 +1088,7 @@ public class ForsetiClient implements LockManager.Client {
         long timeoutNano = this.lockAcquisitionTimeoutNano;
         if (timeoutNano > 0) {
             if ((clock.nanos() - waitStartNano) > timeoutNano) {
-                throw new LockAcquisitionTimeoutException(resourceType, resourceId, timeoutNano);
+                throw LockAcquisitionTimeoutException.lockAcquisitionTimeout(resourceType, resourceId, timeoutNano);
             }
         }
     }

@@ -30,8 +30,9 @@ import org.neo4j.cypher.internal.logical.plans.Foreach
 import org.neo4j.cypher.internal.logical.plans.ForeachApply
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 import org.neo4j.cypher.internal.logical.plans.NestedPlanExpression
+import org.neo4j.cypher.internal.logical.plans.RemoteBatchPropertiesWithPushdownOperators
 import org.neo4j.cypher.internal.logical.plans.StatefulShortestPath
-import org.neo4j.cypher.internal.rewriting.ValidatingCondition
+import org.neo4j.cypher.internal.rewriting.LogicalPlanValidatingCondition
 import org.neo4j.cypher.internal.runtime.ast.RuntimeConstant
 import org.neo4j.cypher.internal.runtime.ast.TraversalEndpoint
 import org.neo4j.cypher.internal.util.CancellationChecker
@@ -45,17 +46,33 @@ import org.neo4j.cypher.internal.util.attribution.Id
  * Sanity check to make sure variables that are read in a plan is available.
  * Note, current implementation is not complete.
  */
-object ValidateAvailableSymbols extends ValidatingCondition {
+case object ValidateAvailableSymbols extends LogicalPlanValidatingCondition[AnyRef] {
   override def name: String = "ValidateAvailableSymbols"
 
-  override def apply(input: Any)(cancellationChecker: CancellationChecker): Seq[String] = {
+  override def targetClass: Class[AnyRef] = classOf[AnyRef]
+
+  override def check(input: Any)(cancellationChecker: CancellationChecker): Seq[String] = {
     input.folder(cancellationChecker).treeFold(Seq.empty[String]) {
+      // pushdown predicates introduces new variables if it imports cached properties from other variables.
+      case pushdownPredicates: RemoteBatchPropertiesWithPushdownOperators
+        if pushdownPredicates.importedPerRowValues.nonEmpty =>
+        acc =>
+          val locallyIntroduced = pushdownPredicates.importedPerRowValues.collect {
+            case (varRef, expr) if varRef != expr =>
+              varRef // if varRef == expr, that would mean we are importing a variable itself, so it wouldn't be a new locally introduced variable.
+          }.toSet
+          TraverseChildren(acc ++ doApply(pushdownPredicates, input, locallyIntroduced)(cancellationChecker))
       case plan: LogicalPlan => acc => TraverseChildren(acc ++ doApply(plan, input)(cancellationChecker))
     }
   }
 
-  private def doApply(plan: LogicalPlan, input: Any)(cancellationChecker: CancellationChecker): Seq[String] = {
-    val unavailable = readVariables(plan)(cancellationChecker).diff(availableVariables(plan))
+  private def doApply(
+    plan: LogicalPlan,
+    input: Any,
+    locallyIntroducedVariables: Set[LogicalVariable] = Set.empty
+  )(cancellationChecker: CancellationChecker): Seq[String] = {
+    val unavailable =
+      readVariables(plan)(cancellationChecker).diff(availableVariables(plan) ++ locallyIntroducedVariables)
     if (unavailable.nonEmpty) {
       Seq(
         s"""Plan references unavailable variables ${unavailable.mkString(", ")}

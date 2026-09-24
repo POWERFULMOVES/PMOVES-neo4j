@@ -28,6 +28,7 @@ import org.neo4j.configuration.GraphDatabaseSettings.auth_enabled
 import org.neo4j.cypher.CommunityShowFuncProcAcceptanceTest.readAll
 import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.RewindableExecutionResult
+import org.neo4j.cypher.util.DontRunOnSpdBuild
 import org.neo4j.graphdb.config.Setting
 import org.neo4j.internal.kernel.api.connectioninfo.ClientConnectionInfo
 import org.neo4j.kernel.api.KernelTransaction.Type
@@ -54,11 +55,12 @@ import java.nio.file.Paths
 
 import scala.jdk.CollectionConverters.SeqHasAsJava
 
-class CommunityShowFuncProcAcceptanceTest extends ExecutionEngineFunSuite with GraphDatabaseTestSupport {
+class CommunityShowFuncProcAcceptanceTest extends ExecutionEngineFunSuite with GraphDatabaseTestSupport
+    with DontRunOnSpdBuild {
   private val username = "foo"
   private val password = "secretpassword"
 
-  override def databaseConfig(): Map[Setting[_], Object] =
+  override def databaseConfig(): Map[Setting[?], Object] =
     super.databaseConfig() ++ Map(auth_enabled -> java.lang.Boolean.TRUE)
 
   override protected def onNewGraphDatabase(): Unit = {
@@ -68,9 +70,11 @@ class CommunityShowFuncProcAcceptanceTest extends ExecutionEngineFunSuite with G
     globalProcedures.registerAggregationFunction(classOf[TestShowFunction])
   }
 
+  private val defaultsToCypher5: Boolean = dbmsDefaultQueryLanguage.equals(CypherVersion.Cypher5)
+
   private val cypherVersions =
     (CypherVersion.values().map(cv => (s"CYPHER ${cv.versionName} ", cv.equals(CypherVersion.Cypher5)))
-      :+ ("", CypherVersion.Default.equals(CypherVersion.Cypher5)))
+      :+ ("", defaultsToCypher5))
 
   // SHOW FUNCTIONS
 
@@ -90,6 +94,14 @@ class CommunityShowFuncProcAcceptanceTest extends ExecutionEngineFunSuite with G
           case m                            => m
         }
       )
+
+  protected val builtInFunctionsVerboseCypher5: List[Map[String, Any]] =
+    builtInFunctionsVerbose.filter(m => m("cypherVersionScope").asInstanceOf[List[Int]].contains(5))
+      .map(m => m.view.filterKeys(k => !k.equals("cypherVersionScope")).toMap)
+
+  protected val builtInFunctionsVerboseCypher25: List[Map[String, Any]] =
+    builtInFunctionsVerbose.filter(m => m("cypherVersionScope").asInstanceOf[List[Int]].contains(25))
+      .map(m => m.view.filterKeys(k => !k.equals("cypherVersionScope")).toMap)
 
   private val userDefinedFunctionsVerbose = List(
     Map[String, Any](
@@ -154,16 +166,29 @@ class CommunityShowFuncProcAcceptanceTest extends ExecutionEngineFunSuite with G
     )
   )
 
-  private val allFunctionsVerbose =
-    (builtInFunctionsVerbose ++ userDefinedFunctionsVerbose).sortBy(m => m("name").asInstanceOf[String])
+  private val allFunctionsVerboseCypher5 =
+    (builtInFunctionsVerboseCypher5 ++ userDefinedFunctionsVerbose).sortBy(m => m("name").asInstanceOf[String])
 
+  private val allFunctionsVerboseCypher25 =
+    (builtInFunctionsVerboseCypher25 ++ userDefinedFunctionsVerbose).sortBy(m => m("name").asInstanceOf[String])
+
+  private val allFunctionsVerbose = if (defaultsToCypher5) allFunctionsVerboseCypher5 else allFunctionsVerboseCypher25
   // Brief output
 
-  private val builtInFunctionsBrief =
-    builtInFunctionsVerbose.map(m =>
+  private val builtInFunctionsBriefCypher5 =
+    builtInFunctionsVerboseCypher5.map(m =>
       m.view.filterKeys(k => Seq("name", "category", "description").contains(k)).toMap
         .map { case (key, value) => (key, value.asInstanceOf[String]) }
     ) // All brief columns are String columns
+
+  private val builtInFunctionsBriefCypher25 =
+    builtInFunctionsVerboseCypher25.map(m =>
+      m.view.filterKeys(k => Seq("name", "category", "description").contains(k)).toMap
+        .map { case (key, value) => (key, value.asInstanceOf[String]) }
+    ) // All brief columns are String columns
+
+  private val builtInFunctionsBrief =
+    if (defaultsToCypher5) builtInFunctionsBriefCypher5 else builtInFunctionsBriefCypher25
 
   private val userDefinedFunctionsBrief = List(
     Map("name" -> "test.function", "category" -> "", "description" -> ""),
@@ -175,7 +200,13 @@ class CommunityShowFuncProcAcceptanceTest extends ExecutionEngineFunSuite with G
     )
   )
 
-  private val allFunctionsBrief = (builtInFunctionsBrief ++ userDefinedFunctionsBrief).sortBy(m => m("name"))
+  private val allFunctionsBriefCypher5 =
+    (builtInFunctionsBriefCypher5 ++ userDefinedFunctionsBrief).sortBy(m => m("name"))
+
+  private val allFunctionsBriefCypher25 =
+    (builtInFunctionsBriefCypher25 ++ userDefinedFunctionsBrief).sortBy(m => m("name"))
+
+  private val allFunctionsBrief = if (defaultsToCypher5) allFunctionsBriefCypher5 else allFunctionsBriefCypher25
 
   // Tests
 
@@ -281,14 +312,15 @@ class CommunityShowFuncProcAcceptanceTest extends ExecutionEngineFunSuite with G
   }
 
   test("show functions with Cypher versions") {
-    cypherVersions.foreach { case (cypherVersionString, _) =>
+    cypherVersions.foreach { case (cypherVersionString, usesCypher5) =>
       selectDatabase(DEFAULT_DATABASE_NAME)
       withClue(cypherVersionString + "user database") {
         // WHEN
         val result = execute(cypherVersionString + "SHOW FUNCTIONS")
 
         // THEN
-        result.toList should be(allFunctionsBrief)
+        val allFunctions = if (usesCypher5) allFunctionsBriefCypher5 else allFunctionsBriefCypher25
+        result.toList should be(allFunctions)
       }
 
       selectDatabase(SYSTEM_DATABASE_NAME)
@@ -297,7 +329,8 @@ class CommunityShowFuncProcAcceptanceTest extends ExecutionEngineFunSuite with G
         val result = execute(cypherVersionString + "SHOW FUNCTIONS")
 
         // THEN
-        result.toList should be(allFunctionsBrief)
+        val allFunctions = if (usesCypher5) allFunctionsBriefCypher5 else allFunctionsBriefCypher25
+        result.toList should be(allFunctions)
       }
     }
   }
@@ -309,7 +342,8 @@ class CommunityShowFuncProcAcceptanceTest extends ExecutionEngineFunSuite with G
 
   private val allProceduresVerboseCypher5: List[Map[String, Any]] = readAll(procResourceUrl)
     .filterNot(m => m("enterpriseOnly").asInstanceOf[Boolean])
-    .map(m => m.view.filterKeys(k => !Seq("enterpriseOnly", "removedInCypher25").contains(k)).toMap)
+    .filter(m => m("cypherVersionScope").asInstanceOf[List[Int]].contains(5))
+    .map(m => m.view.filterKeys(k => !Seq("enterpriseOnly", "cypherVersionScope").contains(k)).toMap)
     .map(m =>
       m.map {
         case ("rolesExecution", _)        => ("rolesExecution", null)
@@ -320,8 +354,8 @@ class CommunityShowFuncProcAcceptanceTest extends ExecutionEngineFunSuite with G
 
   private val allProceduresVerboseCypher25: List[Map[String, Any]] = readAll(procResourceUrl)
     .filterNot(m => m("enterpriseOnly").asInstanceOf[Boolean])
-    .filterNot(m => m("removedInCypher25").asInstanceOf[Boolean])
-    .map(m => m.view.filterKeys(k => !Seq("enterpriseOnly", "removedInCypher25").contains(k)).toMap)
+    .filter(m => m("cypherVersionScope").asInstanceOf[List[Int]].contains(25))
+    .map(m => m.view.filterKeys(k => !Seq("enterpriseOnly", "cypherVersionScope").contains(k)).toMap)
     .map(m =>
       m.map {
         case ("rolesExecution", _)        => ("rolesExecution", null)
@@ -329,6 +363,9 @@ class CommunityShowFuncProcAcceptanceTest extends ExecutionEngineFunSuite with G
         case m                            => m
       }
     )
+
+  private val allProceduresVerboseDefault: List[Map[String, Any]] =
+    if (defaultsToCypher5) allProceduresVerboseCypher5 else allProceduresVerboseCypher25
 
   private val allProceduresBriefCypher5 = allProceduresVerboseCypher5.map(m =>
     m.view.filterKeys(k => Seq("name", "description", "mode", "worksOnSystem").contains(k)).toMap
@@ -338,6 +375,9 @@ class CommunityShowFuncProcAcceptanceTest extends ExecutionEngineFunSuite with G
     m.view.filterKeys(k => Seq("name", "description", "mode", "worksOnSystem").contains(k)).toMap
   )
 
+  private val allProceduresBriefDefault: List[Map[String, Any]] =
+    if (defaultsToCypher5) allProceduresBriefCypher5 else allProceduresBriefCypher25
+
   test("should show procedures") {
     // GIVEN
     selectDatabase(DEFAULT_DATABASE_NAME)
@@ -346,7 +386,7 @@ class CommunityShowFuncProcAcceptanceTest extends ExecutionEngineFunSuite with G
     val result = execute("SHOW PROCEDURES")
 
     // THEN
-    result.toList should be(allProceduresBriefCypher5)
+    result.toList should be(allProceduresBriefDefault)
   }
 
   test("should show procedures with yield") {
@@ -357,7 +397,7 @@ class CommunityShowFuncProcAcceptanceTest extends ExecutionEngineFunSuite with G
     val result = execute("SHOW PROCEDURES YIELD *")
 
     // THEN
-    result.toList should be(allProceduresVerboseCypher5)
+    result.toList should be(allProceduresVerboseDefault)
   }
 
   test("should show procedures executable by current user") {
@@ -368,7 +408,7 @@ class CommunityShowFuncProcAcceptanceTest extends ExecutionEngineFunSuite with G
     val result = executeAs(username, password, "SHOW PROCEDURES EXECUTABLE")
 
     // THEN
-    result.toList should be(allProceduresBriefCypher5)
+    result.toList should be(allProceduresBriefDefault)
   }
 
   test("should show procedures executable by current user with yield") {
@@ -379,7 +419,7 @@ class CommunityShowFuncProcAcceptanceTest extends ExecutionEngineFunSuite with G
     val result = executeAs(username, password, "SHOW PROCEDURES EXECUTABLE YIELD name, description, signature")
 
     // THEN
-    result.toList should be(allProceduresVerboseCypher5.map(m =>
+    result.toList should be(allProceduresVerboseDefault.map(m =>
       m.view.filterKeys(k => Seq("name", "description", "signature").contains(k)).toMap
     ))
   }
@@ -392,7 +432,7 @@ class CommunityShowFuncProcAcceptanceTest extends ExecutionEngineFunSuite with G
     val result = execute(s"SHOW PROCEDURES EXECUTABLE BY $username")
 
     // THEN
-    result.toList should be(allProceduresBriefCypher5)
+    result.toList should be(allProceduresBriefDefault)
   }
 
   test("should show procedures executable by specified user with yield") {
@@ -403,7 +443,7 @@ class CommunityShowFuncProcAcceptanceTest extends ExecutionEngineFunSuite with G
     val result = execute(s"SHOW PROCEDURES EXECUTABLE BY $username YIELD *")
 
     // THEN
-    result.toList should be(allProceduresVerboseCypher5)
+    result.toList should be(allProceduresVerboseDefault)
   }
 
   test("should show procedures on system") {
@@ -414,7 +454,7 @@ class CommunityShowFuncProcAcceptanceTest extends ExecutionEngineFunSuite with G
     val result = execute("SHOW PROCEDURES")
 
     // THEN
-    result.toList should be(allProceduresBriefCypher5)
+    result.toList should be(allProceduresBriefDefault)
   }
 
   test("show procedures with Cypher versions") {

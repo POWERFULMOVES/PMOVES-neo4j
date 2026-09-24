@@ -22,7 +22,7 @@ package org.neo4j.internal.batchimport;
 import static org.neo4j.token.api.TokenConstants.ANY_LABEL;
 
 import org.neo4j.counts.CountsUpdater;
-import org.neo4j.internal.batchimport.cache.NodeLabelsCache;
+import org.neo4j.internal.batchimport.cache.legacy.NodeLabelsCache;
 import org.neo4j.internal.helpers.progress.ProgressListener;
 import org.neo4j.kernel.impl.store.NodeLabelsField;
 import org.neo4j.kernel.impl.store.NodeStore;
@@ -64,7 +64,7 @@ public class NodeCountsProcessor implements RecordProcessor<NodeRecord> {
 
     @Override
     public boolean process(NodeRecord node, StoreCursors storeCursors, MemoryTracker memoryTracker) {
-        int[] labels = NodeLabelsField.get(node, nodeStore, storeCursors, memoryTracker);
+        int[] labels = NodeLabelsField.get(node, nodeStore, storeCursors);
         if (labels.length > 0) {
             for (int labelId : labels) {
                 if (node.getId() >= fromNodeId) {

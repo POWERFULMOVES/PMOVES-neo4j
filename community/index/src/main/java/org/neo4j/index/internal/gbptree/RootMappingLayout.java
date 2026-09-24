@@ -23,12 +23,16 @@ import org.neo4j.io.pagecache.PageCursor;
 
 /**
  * Default {@link Layout} for the "root layer" tree in a multi-root {@link MultiRootGBPTree}, containing mappings to all data trees.
+ *
+ * rootId in the RootMappingValue is a pointer as described in {@link GenerationSafePointer} and {@link GenerationSafePointerPair}.
+ * Pointer itself is 6 bytes.
  */
 class RootMappingLayout<ROOT_KEY> extends Layout.Adapter<ROOT_KEY, RootMappingLayout.RootMappingValue> {
     private static final long IDENTIFIER = 53468735487453L;
     private static final int MAJOR_VERSION = 1;
     private static final int MINOR_VERSION = 1;
     private static final int KEY_LAYOUT_VERSION_SHIFT = Integer.SIZE / 2;
+    private static final int ROOT_MAPPING_SIZE = Long.BYTES * 2;
 
     private final KeyLayout<ROOT_KEY> keyLayout;
 
@@ -63,7 +67,7 @@ class RootMappingLayout<ROOT_KEY> extends Layout.Adapter<ROOT_KEY, RootMappingLa
 
     @Override
     public int valueSize(RootMappingValue value) {
-        return Long.BYTES * 2;
+        return ROOT_MAPPING_SIZE;
     }
 
     @Override
@@ -73,6 +77,7 @@ class RootMappingLayout<ROOT_KEY> extends Layout.Adapter<ROOT_KEY, RootMappingLa
 
     @Override
     public void writeValue(PageCursor cursor, RootMappingValue value) {
+        assert (value.rootId & ~GenerationSafePointerPair.POINTER_MASK) == 0L;
         cursor.putLong(value.rootId);
         cursor.putLong(value.rootGeneration);
     }
@@ -84,7 +89,8 @@ class RootMappingLayout<ROOT_KEY> extends Layout.Adapter<ROOT_KEY, RootMappingLa
 
     @Override
     public void readValue(PageCursor cursor, RootMappingValue into, int valueSize) {
-        into.rootId = cursor.getLong();
+        long first = cursor.getLong();
+        into.rootId = first & GenerationSafePointerPair.POINTER_MASK;
         into.rootGeneration = cursor.getLong();
     }
 
@@ -107,6 +113,8 @@ class RootMappingLayout<ROOT_KEY> extends Layout.Adapter<ROOT_KEY, RootMappingLa
         long rootId;
         long rootGeneration;
 
+        public RootMappingValue() {}
+
         RootMappingValue initialize(Root root) {
             this.rootId = root.id();
             this.rootGeneration = root.generation();
@@ -115,6 +123,18 @@ class RootMappingLayout<ROOT_KEY> extends Layout.Adapter<ROOT_KEY, RootMappingLa
 
         Root asRoot() {
             return new Root(rootId, rootGeneration);
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof RootMappingValue that && rootId == that.rootId && rootGeneration == that.rootGeneration;
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Long.hashCode(rootId);
+            result = 31 * result + Long.hashCode(rootGeneration);
+            return result;
         }
     }
 }

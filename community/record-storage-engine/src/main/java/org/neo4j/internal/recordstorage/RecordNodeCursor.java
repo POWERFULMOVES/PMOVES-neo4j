@@ -93,7 +93,7 @@ public class RecordNodeCursor extends NodeRecord implements StorageNodeCursor {
     }
 
     @Override
-    public void scan() {
+    public void scan(boolean includeChangesFromThisTransaction) {
         if (getId() != LongReference.NULL) {
             resetState();
         }
@@ -154,12 +154,12 @@ public class RecordNodeCursor extends NodeRecord implements StorageNodeCursor {
 
     @Override
     public int[] labels() {
-        return NodeLabelsField.get(this, read, storeCursors, memoryTracker);
+        return NodeLabelsField.get(this, read, storeCursors);
     }
 
     @Override
     public boolean hasLabel(int label) {
-        return NodeLabelsField.hasLabel(this, read, storeCursors, label, memoryTracker);
+        return NodeLabelsField.hasLabel(this, read, storeCursors, label);
     }
 
     @Override
@@ -186,7 +186,10 @@ public class RecordNodeCursor extends NodeRecord implements StorageNodeCursor {
     }
 
     @Override
-    public void relationships(StorageRelationshipTraversalCursor traversalCursor, RelationshipSelection selection) {
+    public void relationships(
+            StorageRelationshipTraversalCursor traversalCursor,
+            RelationshipSelection selection,
+            boolean includeChangesFromThisTransaction) {
         ((RecordRelationshipTraversalCursor) traversalCursor).init(this, selection);
     }
 
@@ -317,12 +320,7 @@ public class RecordNodeCursor extends NodeRecord implements StorageNodeCursor {
     }
 
     @Override
-    public void setForceLoad() {
-        this.loadMode = RecordLoadOverride.FORCE;
-        if (groupCursor != null) {
-            groupCursor.loadMode = RecordLoadOverride.FORCE;
-        }
-    }
+    public void check() {}
 
     @Override
     public Reference propertiesReference() {

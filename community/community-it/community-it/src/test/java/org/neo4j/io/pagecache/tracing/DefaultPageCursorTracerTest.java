@@ -26,7 +26,7 @@ import java.io.IOException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.neo4j.io.ByteUnit;
-import org.neo4j.io.pagecache.PageSwapper;
+import org.neo4j.io.pagecache.impl.muninn.swapper.PageSwapper;
 import org.neo4j.io.pagecache.tracing.cursor.CursorStatisticSnapshot;
 import org.neo4j.io.pagecache.tracing.cursor.DefaultPageCursorTracer;
 import org.neo4j.io.pagecache.tracing.cursor.PageCursorTracer;
@@ -132,6 +132,39 @@ class DefaultPageCursorTracerTest {
         assertEquals(1, pageCursorTracer.pins());
         assertEquals(1, pageCursorTracer.faults());
         assertEquals(1, pageCursorTracer.failedFaults());
+    }
+
+    @Test
+    void countVectoredFaultsAndFailures() {
+        try (var faultEvent = pageCursorTracer.beginVectoredPageFault(swapper)) {
+            faultEvent.addPagesFaulted(2, new long[] {0, 1}, referenceTranslator);
+        }
+        try (var faultEvent = pageCursorTracer.beginVectoredPageFault(swapper)) {
+            faultEvent.setException(new IOException("vectored fault exception"));
+        }
+        try (var faultEvent = pageCursorTracer.beginVectoredPageFault(swapper)) {
+            faultEvent.setException(new IOException("vectored fault exception"));
+        }
+
+        assertEquals(3, pageCursorTracer.vectoredFaults());
+        assertEquals(2, pageCursorTracer.failedVectoredFaults());
+    }
+
+    @Test
+    void reportVectoredFaultsAndFailuresToPageCacheTracer() {
+        try (var faultEvent = pageCursorTracer.beginVectoredPageFault(swapper)) {
+            faultEvent.addPagesFaulted(2, new long[] {0, 1}, referenceTranslator);
+        }
+        try (var faultEvent = pageCursorTracer.beginVectoredPageFault(swapper)) {
+            faultEvent.setException(new IOException("vectored fault exception"));
+        }
+        try (var faultEvent = pageCursorTracer.beginVectoredPageFault(swapper)) {
+            faultEvent.setException(new IOException("vectored fault exception"));
+        }
+        pageCursorTracer.reportEvents();
+
+        assertEquals(3, cacheTracer.vectoredFaults());
+        assertEquals(2, cacheTracer.failedVectoredFaults());
     }
 
     @Test

@@ -25,15 +25,8 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
 import org.neo4j.configuration.Config;
-import org.neo4j.cypher.internal.PreParser;
-import org.neo4j.cypher.internal.ast.Statement;
-import org.neo4j.cypher.internal.ast.semantics.SemanticCheckContext;
-import org.neo4j.cypher.internal.ast.semantics.SemanticState;
-import org.neo4j.cypher.internal.config.CypherConfiguration;
-import org.neo4j.cypher.internal.parser.AstParserFactory$;
-import org.neo4j.cypher.internal.util.InternalNotificationLogger;
-import org.neo4j.cypher.internal.util.Neo4jCypherExceptionFactory;
-import org.neo4j.cypher.internal.util.devNullLogger$;
+import org.neo4j.cypher.internal.CypherVersion;
+import org.neo4j.cypher.internal.schema.SchemaCommandConverter;
 import org.neo4j.internal.schema.SchemaCommand;
 import org.neo4j.internal.schema.SchemaCommand.SchemaCommandReaderException;
 import org.neo4j.io.fs.FileSystemAbstraction;
@@ -42,27 +35,31 @@ import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.api.impl.schema.vector.VectorIndexVersion;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.util.Preconditions;
-import scala.Option;
+import org.neo4j.util.VisibleForTesting;
 
 /**
  * Reads a file that contains Cypher schema commands and converts them into the appropriate {@link SchemaCommand}s.
  */
 public class SchemaCommandReader {
-
-    private static final String ERROR_SUFFIX = " in import change commands.";
-
-    private static final InternalNotificationLogger NOTIFICATION_LOGGER = devNullLogger$.MODULE$;
-
     private final FileSystemAbstraction fileSystem;
-
     private final ReaderConfig readerConfig;
+    private final SchemaCommandParser parser;
+    private final SchemaCommandConverter converter;
 
-    private final PreParser preParser;
-
-    public SchemaCommandReader(FileSystemAbstraction fileSystem, Config config, ReaderConfig readerConfig) {
+    public SchemaCommandReader(
+            FileSystemAbstraction fileSystem,
+            SchemaCommandParser parser,
+            SchemaCommandConverter converter,
+            ReaderConfig readerConfig) {
         this.fileSystem = requireNonNull(fileSystem);
-        this.preParser = new PreParser(CypherConfiguration.fromConfig(requireNonNull(config)));
         this.readerConfig = requireNonNull(readerConfig);
+        this.parser = requireNonNull(parser);
+        this.converter = requireNonNull(converter);
+    }
+
+    public SchemaCommandReader(
+            FileSystemAbstraction fileSystem, SchemaCommandParser parser, ReaderConfig readerConfig) {
+        this(fileSystem, parser, new SchemaCommandConverter(readerConfig.config()), readerConfig);
     }
 
     /**
@@ -70,97 +67,77 @@ public class SchemaCommandReader {
      * @return the {@link SchemaCommand} objects representing the Cypher statements at the provided path.
      * @throws SchemaCommandReaderException if unable to parse the Cypher content
      */
-    public List<SchemaCommand> parse(Path cypherPath) throws SchemaCommandReaderException {
-        final var cypherText = parseFile(cypherPath);
-        if (cypherText.isEmpty()) {
-            return List.of();
-        }
-
-        var semanticState = SemanticState.clean();
-
-        final var preParsedQuery = preParser.preParse(cypherText, NOTIFICATION_LOGGER);
-        final var cypherVersion =
-                preParsedQuery.options().queryOptions().cypherVersion().actualVersion();
-
-        final var exceptionFactory = new Neo4jCypherExceptionFactory(
-                cypherText, Option.apply(preParsedQuery.options().offset()));
-
-        final var statements = AstParserFactory$.MODULE$
-                .apply(cypherVersion)
-                .apply(preParsedQuery.statement(), exceptionFactory, Option.apply(NOTIFICATION_LOGGER))
-                .statements();
-
-        final var changesBuilder = new SchemaCommandsBuilder(readerConfig, cypherVersion);
-
-        final var checkContext = SemanticCheckContext.empty();
-        for (int i = 0, length = statements.size(); i < length; i++) {
-            semanticState = transform(changesBuilder, statements.get(i), semanticState, checkContext);
-        }
-        return changesBuilder.build();
-    }
-
-    private String parseFile(Path cypherPath) throws SchemaCommandReaderException {
+    public List<SchemaCommand> parse(Path cypherPath) throws SchemaCommandReaderException, IOException {
         Preconditions.checkState(
                 cypherPath != null && fileSystem.fileExists(cypherPath),
                 "The path to the Cypher schema commands must exist");
-        try {
-            return FileSystemUtils.readString(fileSystem, cypherPath, EmptyMemoryTracker.INSTANCE);
-        } catch (IOException ex) {
-            throw new SchemaCommandReaderException("Unable to read Cypher statement(s) in " + cypherPath, ex);
+
+        String cypherText = FileSystemUtils.readString(fileSystem, cypherPath, EmptyMemoryTracker.INSTANCE);
+        if (cypherText == null || cypherText.isEmpty()) {
+            return List.of();
         }
+        return parse(cypherText);
     }
 
-    private SemanticState transform(
-            SchemaCommandsBuilder changesBuilder,
-            Statement statement,
-            SemanticState semanticState,
-            SemanticCheckContext checkContext)
-            throws SchemaCommandReaderException {
-        if (statement instanceof org.neo4j.cypher.internal.ast.SchemaCommand command) {
-            if (!command.useGraph().isEmpty()) {
-                throw new SchemaCommandReaderException("Schema commands are only applied to the database to be imported"
-                        + " into so graph names are not allowed: "
-                        + command.useGraph().get().graphReference().print());
+    public List<SchemaCommand> parse(String cypherText) {
+        switch (parser.parse(cypherText)) {
+            case ParseResult.Success(
+                    CypherVersion version,
+                    List<org.neo4j.cypher.internal.ast.SchemaCommand> statements) -> {
+                final var changesBuilder = new SchemaCommandsBuilder(readerConfig, converter);
+                for (var statement : statements) {
+                    changesBuilder.withCommand(statement, version);
+                }
+                return changesBuilder.build();
             }
-
-            final var nextState = checkStatement(statement, semanticState, checkContext);
-            changesBuilder.withCommand(command);
-            return nextState;
-        } else {
-            throw new SchemaCommandReaderException("Only schema change clauses are allowed here but found: "
-                    + statement.getClass().getSimpleName());
+            case ParseResult.Failure(List<String> errors) -> {
+                var sb = new StringBuilder();
+                sb.append("Unable to parse the Cypher in import change commands.");
+                errors.forEach(e -> sb.append(System.lineSeparator()).append(e));
+                throw new SchemaCommandReaderException(sb.toString());
+            }
         }
     }
 
-    private static SemanticState checkStatement(
-            Statement statement, SemanticState semanticState, SemanticCheckContext checkContext)
-            throws SchemaCommandReaderException {
-        final var checkResult = statement.semanticCheck().run(semanticState, checkContext);
-        if (!checkResult.errors().isEmpty()) {
-            final var errorText = new StringBuilder("Unable to parse the Cypher").append(ERROR_SUFFIX);
-            checkResult.errors().foreach(error -> {
-                errorText.append(System.lineSeparator()).append(error.msg());
-                return null;
-            });
+    public sealed interface ReaderConfig {
+        boolean allowEnterpriseFeatures();
 
-            throw new SchemaCommandReaderException(errorText.toString());
+        boolean allowDropOperations();
+
+        Config config();
+
+        VectorIndexVersion latestVectorIndexVersion();
+
+        static ReaderConfig communityImporter(Config config) {
+            return new ReaderConfigImpl(false, false, config);
         }
 
-        return checkResult.state();
+        static ReaderConfig enterpriseImporter(Config config) {
+            return new ReaderConfigImpl(true, false, config);
+        }
+
+        static ReaderConfig enterpriseIncrementalImporter(Config config) {
+            return new ReaderConfigImpl(true, true, config);
+        }
+
+        @VisibleForTesting
+        static ReaderConfig forTesting(boolean allowEnterpriseFeatures, boolean allowDropOperations, Config config) {
+            return new ReaderConfigImpl(allowEnterpriseFeatures, allowDropOperations, config);
+        }
     }
 
-    public record ReaderConfig(
+    private record ReaderConfigImpl(
             boolean allowEnterpriseFeatures,
-            boolean allowConstraints,
             boolean allowDropOperations,
-            VectorIndexVersion latestVectorIndexVersion) {
-        public static ReaderConfig defaults() {
-            // initial implementation will be just for CREATE INDEX commands
-            return new ReaderConfig(
-                    false,
-                    false,
-                    false,
-                    VectorIndexVersion.latestSupportedVersion(KernelVersion.getLatestVersion(Config.defaults())));
+            Config config,
+            VectorIndexVersion latestVectorIndexVersion)
+            implements ReaderConfig {
+        ReaderConfigImpl(boolean allowEnterpriseFeatures, boolean allowDropOperations, Config config) {
+            this(
+                    allowEnterpriseFeatures,
+                    allowDropOperations,
+                    config,
+                    VectorIndexVersion.latestSupportedVersion(KernelVersion.getLatestVersion(config)));
         }
     }
 }

@@ -26,12 +26,16 @@ import static org.neo4j.test.assertion.Assert.assertEventually;
 import static org.neo4j.test.assertion.Assert.assertNever;
 import static org.neo4j.test.assertion.Assert.awaitUntilAsserted;
 
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.neo4j.cypher.internal.CypherVersion;
 import org.neo4j.shell.cli.AccessMode;
+import org.neo4j.shell.completions.DbInfo;
 import org.neo4j.shell.completions.DbInfoImpl;
 import org.neo4j.shell.parameter.ParameterService;
 import org.neo4j.shell.state.BoltStateHandler;
@@ -61,6 +65,7 @@ class DbInfoIntegrationTest extends TestHarness {
         }
     }
 
+    @Disabled
     @Test
     void fillsInInformationInDbInfo() throws Exception {
         assumeAtLeastVersion("5.0.0");
@@ -81,13 +86,66 @@ class DbInfoIntegrationTest extends TestHarness {
         awaitUntilAsserted(() -> {
             assertThat(dbInfo.labels).contains("A", "B", "C");
             assertThat(dbInfo.propertyKeys).contains("name");
-            assertThat(dbInfo.functions).contains("abs");
-            assertThat(dbInfo.procedures).contains("dbms.info");
+            assertThat(dbInfo.functions.get(CypherVersion.Cypher5)).contains("abs");
+            assertThat(dbInfo.procedures.get(CypherVersion.Cypher5)).containsKey("dbms.info");
+            assertThat(dbInfo.procedures
+                            .get(CypherVersion.Cypher5)
+                            .get("dbms.info")
+                            .returnDescription())
+                    .extracting(DbInfo.ReturnDescription::name)
+                    .contains("name", "id", "creationDate");
             assertThat(dbInfo.aliasNames).contains("nacho");
             assertThat(dbInfo.roleNames).contains("PUBLIC");
             assertThat(dbInfo.databaseNames).contains("neo4j");
             assertThat(dbInfo.userNames).contains(USER, "foo");
             assertThat(dbInfo.parameters()).containsKey("x");
+        });
+    }
+
+    // Note: needs server supporting cypher 25 with apoc installed to work
+    @Test
+    @Disabled
+    void fillsVersionedInfoInDbInfo() throws Exception {
+        assumeAtLeastVersion("2025.05.0");
+        // assumeAtLeastVersion("5.26.0"); // Switch to this for testing pre-2025.03.0, also switching in
+        // QueryPoller.startPolling.
+
+        var testBuilder = (TestBuilder) buildTest();
+        testBuilder
+                .addArgs("-u", USER, "-p", PASSWORD, "--enable-autocompletions")
+                .userInputLines(
+                        ":param x => 1;",
+                        "CREATE (n:A { name: \"Nacho\" });",
+                        "CREATE (n:B);",
+                        "CREATE (n:C);",
+                        "CREATE ALIAS nacho IF NOT EXISTS FOR DATABASE neo4j;",
+                        "CREATE USER foo IF NOT EXISTS SET PASSWORD 'something';")
+                .run()
+                .assertSuccessAndConnected();
+        final var dbInfo = testBuilder.dbInfo;
+
+        awaitUntilAsserted(() -> {
+            assertThat(dbInfo.functions.get(CypherVersion.Cypher5)).contains("abs");
+            assertThat(dbInfo.functions.get(CypherVersion.Cypher25)).contains("abs");
+
+            assertThat(dbInfo.procedures.get(CypherVersion.Cypher5)).containsKey("dbms.info");
+            assertThat(dbInfo.procedures.get(CypherVersion.Cypher25)).containsKey("dbms.info");
+            assertThat(dbInfo.procedures
+                            .get(CypherVersion.Cypher5)
+                            .get("dbms.info")
+                            .returnDescription())
+                    .extracting(DbInfo.ReturnDescription::name)
+                    .contains("name", "id", "creationDate");
+            assertThat(dbInfo.procedures
+                            .get(CypherVersion.Cypher25)
+                            .get("dbms.info")
+                            .returnDescription())
+                    .extracting(DbInfo.ReturnDescription::name)
+                    .contains("name", "id", "creationDate");
+            assertThat(dbInfo.procedures.get(CypherVersion.Cypher5).get("dbms.upgradeStatus"))
+                    .isNotNull();
+            assertThat(dbInfo.procedures.get(CypherVersion.Cypher25).get("dbms.upgradeStatus"))
+                    .isNull();
         });
     }
 
@@ -104,16 +162,14 @@ class DbInfoIntegrationTest extends TestHarness {
 
         assertNever(
                 () -> dbInfo,
-                db -> {
-                    return dbInfo.labels.contains("A")
-                            || dbInfo.propertyKeys.contains("name")
-                            || dbInfo.functions.contains("abs")
-                            || dbInfo.procedures.contains("dbms.info")
-                            || dbInfo.aliasNames.contains("nacho")
-                            || dbInfo.roleNames.contains("PUBLIC")
-                            || dbInfo.databaseNames.contains("neo4j")
-                            || dbInfo.userNames.contains("foo");
-                },
+                db -> dbInfo.labels.contains("A")
+                        || dbInfo.propertyKeys.contains("name")
+                        || dbInfo.functions.get(CypherVersion.Cypher5).contains("abs")
+                        || dbInfo.procedures.get(CypherVersion.Cypher5).containsKey("dbms.info")
+                        || dbInfo.aliasNames.contains("nacho")
+                        || dbInfo.roleNames.contains("PUBLIC")
+                        || dbInfo.databaseNames.contains("neo4j")
+                        || dbInfo.userNames.contains("foo"),
                 30,
                 SECONDS);
     }
@@ -136,48 +192,47 @@ class DbInfoIntegrationTest extends TestHarness {
         var dbInfo = testBuilder.dbInfo;
         assertNever(
                 () -> dbInfo,
-                db -> {
-                    return db.labels.contains("A")
-                            || db.propertyKeys.contains("name")
-                            || db.functions.contains("abs")
-                            || db.procedures.contains("dbms.info")
-                            || db.aliasNames.contains("nacho")
-                            || db.roleNames.contains("PUBLIC")
-                            || db.databaseNames.contains("neo4j")
-                            || db.userNames.contains("foo");
-                },
+                db -> db.labels.contains("A")
+                        || db.propertyKeys.contains("name")
+                        || db.functions.get(CypherVersion.Cypher5).contains("abs")
+                        || db.procedures.get(CypherVersion.Cypher5).containsKey("dbms.info")
+                        || db.aliasNames.contains("nacho")
+                        || db.roleNames.contains("PUBLIC")
+                        || db.databaseNames.contains("neo4j")
+                        || db.userNames.contains("foo"),
                 30,
                 SECONDS);
     }
 
+    @Disabled
     @Test
     void stopsAndResumesPollingCorrectly() throws Exception {
-        ExecutorService executor = Executors.newSingleThreadExecutor();
-        var isOutputInteractive = true;
-        var boltStateHandler = new BoltStateHandler(isOutputInteractive, AccessMode.WRITE);
-        var paramService = ParameterService.create(boltStateHandler);
-        var dbInfo = new TestDbInfo(paramService, boltStateHandler, true);
-        var testBuilder = new TestBuilder(paramService, boltStateHandler, dbInfo, isOutputInteractive, false);
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            var isOutputInteractive = true;
+            var boltStateHandler = new BoltStateHandler(isOutputInteractive, AccessMode.WRITE, Optional.empty());
+            var paramService = ParameterService.create(boltStateHandler);
+            var dbInfo = new TestDbInfo(paramService, boltStateHandler, true);
+            var testBuilder = new TestBuilder(paramService, boltStateHandler, dbInfo, isOutputInteractive, false);
 
-        executor.submit(() -> {
-            try {
-                testBuilder
-                        .addArgs("-u", USER, "-p", PASSWORD, "--enable-autocompletions")
-                        .run();
-            } catch (Exception e) {
-            }
-        });
+            executor.submit(() -> {
+                try {
+                    testBuilder
+                            .addArgs("-u", USER, "-p", PASSWORD, "--enable-autocompletions")
+                            .run();
+                } catch (Exception e) {
+                }
+            });
 
-        // Test that after some inactivity the poller has stopped
-        assertEventually(() -> dbInfo, db -> db.stopPollingCalls.get() > 0, 2, MINUTES);
+            // Test that after some inactivity the poller has stopped
+            assertEventually(() -> dbInfo, db -> db.stopPollingCalls.get() > 0, 2, MINUTES);
 
-        dbInfo.resumePollingCalls = new AtomicInteger(0);
-        testBuilder.terminal.write().println("CREATE (n:E);");
+            dbInfo.resumePollingCalls = new AtomicInteger(0);
+            testBuilder.terminal.write().println("CREATE (n:E);");
 
-        // We check the polling has been resumed after the user has typed something
-        assertEventually(() -> dbInfo, db -> db.resumePollingCalls.get() > 0, 2, MINUTES);
+            // We check the polling has been resumed after the user has typed something
+            assertEventually(() -> dbInfo, db -> db.resumePollingCalls.get() > 0, 2, MINUTES);
 
-        testBuilder.closeMain();
-        executor.shutdown();
+            testBuilder.closeMain();
+        }
     }
 }

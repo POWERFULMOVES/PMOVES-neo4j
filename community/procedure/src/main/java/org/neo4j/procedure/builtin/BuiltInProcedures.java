@@ -19,6 +19,7 @@
  */
 package org.neo4j.procedure.builtin;
 
+import static java.lang.String.format;
 import static org.neo4j.internal.helpers.collection.Iterators.stream;
 import static org.neo4j.kernel.impl.api.TokenAccess.LABELS;
 import static org.neo4j.kernel.impl.api.TokenAccess.PROPERTY_KEYS;
@@ -57,12 +58,15 @@ import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.procedure.Admin;
 import org.neo4j.procedure.Context;
 import org.neo4j.procedure.Description;
+import org.neo4j.procedure.Internal;
 import org.neo4j.procedure.Mode;
 import org.neo4j.procedure.Name;
 import org.neo4j.procedure.NotThreadSafe;
 import org.neo4j.procedure.Procedure;
 import org.neo4j.procedure.UnsupportedDatabaseTypes;
+import org.neo4j.procedure.memory.ProcedureMemory;
 import org.neo4j.storageengine.api.StoreIdProvider;
+import org.neo4j.time.Stopwatch;
 
 @SuppressWarnings({"unused", "WeakerAccess"})
 public class BuiltInProcedures {
@@ -84,6 +88,12 @@ public class BuiltInProcedures {
 
     @Context
     public ProcedureCallContext callContext;
+
+    @Context
+    public SpdBuiltInProcedures spdBuiltInProcedures;
+
+    @Context
+    public ProcedureMemory procedureMemory;
 
     @SystemProcedure
     @NotThreadSafe
@@ -177,8 +187,13 @@ public class BuiltInProcedures {
         if (callContext.isSystemDatabase()) {
             return;
         }
-        IndexProcedures indexProcedures = indexProcedures();
-        indexProcedures.awaitIndexByName(indexName, timeout, TimeUnit.SECONDS);
+
+        if (spdBuiltInProcedures.isGraphShard()) {
+            transaction.schema().awaitIndexOnline(indexName, timeout, TimeUnit.SECONDS);
+        } else {
+            IndexProcedures indexProcedures = indexProcedures();
+            indexProcedures.awaitIndexByName(indexName, timeout, TimeUnit.SECONDS);
+        }
     }
 
     @SystemProcedure
@@ -199,11 +214,14 @@ public class BuiltInProcedures {
     @NotThreadSafe
     @Description("Schedule resampling of an index (for example: CALL db.resampleIndex(\"MyIndex\")).")
     @Procedure(name = "db.resampleIndex", mode = READ)
-    @UnsupportedDatabaseTypes(UnsupportedDatabaseTypes.DatabaseType.SPD)
     public void resampleIndex(@Name(value = "indexName", description = "The name of the index.") String indexName)
             throws ProcedureException {
         if (callContext.isSystemDatabase()) {
             return;
+        }
+
+        if (spdBuiltInProcedures.isGraphShard()) {
+            spdBuiltInProcedures.resampleIndex(indexName);
         }
 
         IndexProcedures indexProcedures = indexProcedures();
@@ -214,10 +232,13 @@ public class BuiltInProcedures {
     @NotThreadSafe
     @Description("Schedule resampling of all outdated indexes.")
     @Procedure(name = "db.resampleOutdatedIndexes", mode = READ)
-    @UnsupportedDatabaseTypes(UnsupportedDatabaseTypes.DatabaseType.SPD)
     public void resampleOutdatedIndexes() {
         if (callContext.isSystemDatabase()) {
             return;
+        }
+
+        if (spdBuiltInProcedures.isGraphShard()) {
+            spdBuiltInProcedures.resampleOutdatedIndexes();
         }
 
         IndexProcedures indexProcedures = indexProcedures();
@@ -228,10 +249,9 @@ public class BuiltInProcedures {
     @SystemProcedure
     @NotThreadSafe
     @Description(
-            "Triggers an index resample and waits for it to complete, and after that clears query caches. After this "
-                    + "procedure has finished queries will be planned using the latest database statistics.")
+            "Triggers an index resample and waits for its completion. If the wait time is 0, it skips waiting."
+                    + " After that, the procedure clears query caches. Once the process is complete, queries are planned using the latest database statistics.")
     @Procedure(name = "db.prepareForReplanning", mode = READ)
-    @UnsupportedDatabaseTypes(UnsupportedDatabaseTypes.DatabaseType.SPD)
     public void prepareForReplanning(
             @Name(value = "timeOutSeconds", defaultValue = "300", description = "The maximum time to wait in seconds.")
                     long timeOutSeconds)
@@ -240,9 +260,21 @@ public class BuiltInProcedures {
             return;
         }
 
+        long remainingTimeOutSeconds = timeOutSeconds;
+        if (spdBuiltInProcedures.isGraphShard()) {
+            Stopwatch startTime = Stopwatch.start();
+            spdBuiltInProcedures.prepareForReplanning(timeOutSeconds);
+            remainingTimeOutSeconds = Long.max(0, timeOutSeconds - startTime.elapsed(TimeUnit.SECONDS));
+        }
+
         // Resample indexes
+        if (timeOutSeconds != 0 && remainingTimeOutSeconds <= 0) {
+            throw new RuntimeException(format(
+                    "Could not finish index sampling within the given time limit, %d milliseconds",
+                    TimeUnit.SECONDS.toMillis(timeOutSeconds)));
+        }
         IndexProcedures indexProcedures = indexProcedures();
-        indexProcedures.resampleOutdatedIndexes(timeOutSeconds);
+        indexProcedures.resampleOutdatedIndexes(remainingTimeOutSeconds);
 
         // now that index-stats are up-to-date, clear caches so that we are ready to re-plan
         graphDatabaseAPI
@@ -277,6 +309,10 @@ public class BuiltInProcedures {
             return Stream.empty();
         }
 
+        if (spdBuiltInProcedures.isGraphShard()) {
+            return spdBuiltInProcedures.nodePropertySchema(kernelTransaction);
+        }
+
         return new SchemaCalculator(kernelTransaction, true).calculateTabularResultStreamForNodes();
     }
 
@@ -306,6 +342,10 @@ public class BuiltInProcedures {
             return Stream.empty();
         }
 
+        if (spdBuiltInProcedures.isGraphShard()) {
+            return spdBuiltInProcedures.relationshipPropertySchema(kernelTransaction);
+        }
+
         return new SchemaCalculator(kernelTransaction, true).calculateTabularResultStreamForRels();
     }
 
@@ -323,7 +363,10 @@ public class BuiltInProcedures {
         if (callContext.isSystemDatabase()) {
             return Stream.empty();
         }
-        return Stream.of(new SchemaProcedure((InternalTransaction) transaction).buildSchemaGraph());
+        final var tracker = procedureMemory.newTracker();
+        return Stream.of(new SchemaProcedure((InternalTransaction) transaction, procedureMemory, tracker)
+                        .buildSchemaGraph())
+                .onClose(tracker::close);
     }
 
     @SystemProcedure(allowExpiredCredentials = true)
@@ -335,6 +378,22 @@ public class BuiltInProcedures {
                     + "procedure.")
     public Stream<BooleanResult> ping() {
         return Stream.of(new BooleanResult(Boolean.TRUE));
+    }
+
+    @Internal
+    @NotThreadSafe
+    @Procedure(name = "internal.db.system.info", mode = READ)
+    @UnsupportedDatabaseTypes(UnsupportedDatabaseTypes.DatabaseType.COMPOSITE)
+    public Stream<SysInfoMetricsProvider.SysInfoResult> systemInfo() {
+        var sysInfoMetricsProvider =
+                graphDatabaseAPI.getDependencyResolver().resolveOptionalDependency(SysInfoMetricsProvider.class);
+        if (sysInfoMetricsProvider.isPresent()) {
+            return sysInfoMetricsProvider
+                    .get()
+                    .sysInfoMetrics(callContext.databaseName(), transaction, spdBuiltInProcedures);
+        } else {
+            return Stream.empty();
+        }
     }
 
     private ZoneId getConfiguredTimeZone() {
@@ -354,30 +413,49 @@ public class BuiltInProcedures {
         @Description("A label within the database.")
         public final String label;
 
+        private LabelResult(String label) {
+            this.label = label;
+        }
+
         private LabelResult(Label label) {
-            this.label = label.name();
+            this(label.name());
+        }
+
+        public static LabelResult from(String label) {
+            return new LabelResult(label);
         }
     }
 
-    public record PropertyKeyResult(@Description("A property key in the database.") String propertyKey) {}
+    public record PropertyKeyResult(
+            @Description("A property key in the database.") String propertyKey) {}
 
     public record DatabaseInfo(
             @Description("The id of the database.") String id,
             @Description("The name of the database.") String name,
+
             @Description("The creation date of the database, formatted according to the ISO-8601 Standard.")
-                    String creationDate) {}
+            String creationDate) {}
 
     public static class RelationshipTypeResult {
         @Description("A relationship type in the database.")
         public final String relationshipType;
 
+        private RelationshipTypeResult(String relationshipType) {
+            this.relationshipType = relationshipType;
+        }
+
         private RelationshipTypeResult(RelationshipType relationshipType) {
-            this.relationshipType = relationshipType.name();
+            this(relationshipType.name());
+        }
+
+        public static RelationshipTypeResult from(String relationshipType) {
+            return new RelationshipTypeResult(relationshipType);
         }
     }
 
     public record BooleanResult(
-            @Description("Whether or not the connection call to the database has been successful.") Boolean success) {}
+            @Description("Whether or not the connection call to the database has been successful.")
+            Boolean success) {}
 
     public record NodeResult(Node node) {}
 

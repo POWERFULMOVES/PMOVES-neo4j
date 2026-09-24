@@ -23,11 +23,12 @@ import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito.never
 import org.mockito.Mockito.verify
 import org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME
+import org.neo4j.cypher.CypherITTestSuite
 import org.neo4j.cypher.ExecutionEngineHelper.createEngine
 import org.neo4j.cypher.internal.ExecutionEngine
-import org.neo4j.cypher.internal.javacompat.GraphDatabaseCypherService
 import org.neo4j.cypher.internal.javacompat.ResultSubscriber
-import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
+import org.neo4j.cypher.util.GraphDatabaseCypherTestService
+import org.neo4j.dbms.api.DatabaseManagementService
 import org.neo4j.graphdb.Result.ResultRow
 import org.neo4j.kernel.GraphDatabaseQueryService
 import org.neo4j.kernel.api.query.ExecutingQuery
@@ -37,11 +38,10 @@ import org.neo4j.monitoring.Monitors
 import org.neo4j.test.TestDatabaseManagementServiceBuilder
 import org.neo4j.values.virtual.MapValue
 
-import scala.collection.immutable.Map
 import scala.jdk.CollectionConverters.IteratorHasAsScala
 import scala.language.implicitConversions
 
-class QueryExecutionMonitorTest extends CypherFunSuite with GraphIcing with GraphDatabaseTestSupport
+class QueryExecutionMonitorTest extends CypherITTestSuite with GraphIcing with GraphDatabaseTestSupport
     with ExecutionEngineTestSupport {
   implicit def contextQuery(context: TransactionalContext): ExecutingQuery = context.executingQuery()
 
@@ -211,12 +211,15 @@ class QueryExecutionMonitorTest extends CypherFunSuite with GraphIcing with Grap
   }
 
   var db: GraphDatabaseQueryService = _
+  var databaseManagementService: DatabaseManagementService = _
   var monitor: QueryExecutionMonitor = _
   var engine: ExecutionEngine = _
 
   override protected def beforeEach(): Unit = {
-    db = new GraphDatabaseCypherService(
-      new TestDatabaseManagementServiceBuilder().impermanent().build().database(DEFAULT_DATABASE_NAME)
+    databaseManagementService = new TestDatabaseManagementServiceBuilder().impermanent().build()
+    db = new GraphDatabaseCypherTestService(
+      databaseManagementService.database(DEFAULT_DATABASE_NAME),
+      runOnSpd
     )
     monitor = mock[QueryExecutionMonitor]
     val monitors = db.getDependencyResolver.resolveDependency(classOf[Monitors])
@@ -226,6 +229,9 @@ class QueryExecutionMonitorTest extends CypherFunSuite with GraphIcing with Grap
 
   override protected def afterEach(): Unit = {
     super.afterEach()
+    if (databaseManagementService != null) {
+      databaseManagementService.shutdown()
+    }
     if (managementService != null) {
       managementService.shutdown()
     }

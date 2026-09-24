@@ -24,7 +24,6 @@ import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.False
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
 import org.neo4j.cypher.internal.expressions.FunctionInvocation.ArgumentOrder
-import org.neo4j.cypher.internal.expressions.FunctionName
 import org.neo4j.cypher.internal.expressions.ListLiteral
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.Property
@@ -40,6 +39,7 @@ import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 import org.neo4j.cypher.internal.logical.plans.OrderedAggregation
 import org.neo4j.cypher.internal.logical.plans.Projection
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
+import org.neo4j.cypher.internal.util.FunctionName
 import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.Rewriter.BottomUpMergeableRewriter
@@ -159,7 +159,7 @@ case class groupPercentileFunctions(
   private def groupFunctions(aggregationExpressions: Map[LogicalVariable, Expression])
     : Map[(Expression, Boolean, ArgumentOrder), Map[LogicalVariable, FunctionInvocation]] = {
     aggregationExpressions.collect {
-      case (v, f @ FunctionInvocation(FunctionName(_, name), _, _, _, _))
+      case (v, f @ FunctionInvocation(FunctionName(_, name), _, _, _, _, _, _))
         if name.equalsIgnoreCase(PercentileDisc.name) || name.equalsIgnoreCase(PercentileCont.name) => (v, f)
     }.groupBy { case (_, f: FunctionInvocation) => (f.args(0), f.distinct, f.order) }
       .filter { case (_, fs) => fs.size > 1 }
@@ -226,13 +226,13 @@ case class groupPercentileFunctions(
   private def toVariablePercentilePairs(percentileGroup: Map[LogicalVariable, FunctionInvocation])
     : (Seq[LogicalVariable], Seq[Expression], Seq[BooleanLiteral]) = {
     percentileGroup.foldLeft((Seq.empty[LogicalVariable], Seq.empty[Expression], Seq.empty[BooleanLiteral])) {
-      case ((accVars, accPercentiles, accIsDiscretes), (v, FunctionInvocation(functionName, _, args, _, _))) =>
+      case ((accVars, accPercentiles, accIsDiscretes), (v, FunctionInvocation(functionName, _, args, _, _, _, _))) =>
         val name = functionName.name
         val isDiscrete =
           if (name.equalsIgnoreCase(PercentileDisc.name)) {
-            True()(pos)
+            True()(pos.zeroLength)
           } else if (name.equalsIgnoreCase(PercentileCont.name)) {
-            False()(pos)
+            False()(pos.zeroLength)
           } else {
             throw new IllegalArgumentException(s"Unexpected function name: $name")
           }

@@ -39,17 +39,18 @@ import java.util.concurrent.Callable;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.neo4j.internal.recordstorage.RecordStorageEngineFactory;
 import org.neo4j.kernel.impl.store.PropertyType;
 import org.neo4j.kernel.impl.store.StandaloneDynamicRecordAllocator;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.values.storable.RandomValuesUtils;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class AbstractBaseRecordCopyTest {
     private static final int MAX_RANDOM_ARRAY = 128;
     private static final int MAX_RANDOM_LIST_SIZE = 16;
@@ -61,6 +62,9 @@ class AbstractBaseRecordCopyTest {
 
     @BeforeEach
     void setUp() {
+        random.withConfiguration(
+                        RandomValuesUtils.selectStorageEngineDependentConfiguration(RecordStorageEngineFactory.NAME))
+                .reset();
         dataProviders.put(int.class, () -> random.nextInt());
         dataProviders.put(long.class, () -> random.nextLong());
         dataProviders.put(boolean.class, () -> random.nextBoolean());
@@ -132,7 +136,8 @@ class AbstractBaseRecordCopyTest {
                     stringAllocator,
                     arrayAllocator,
                     NULL_CONTEXT,
-                    INSTANCE);
+                    INSTANCE,
+                    "db-format-2000");
             int tentativeBlocksWithThisOne = blocksOccupied + block.getValueBlocks().length;
             if (tentativeBlocksWithThisOne <= 4) {
                 record.addPropertyBlock(block);

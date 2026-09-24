@@ -19,17 +19,18 @@
  */
 package org.neo4j.cypher.internal.ir
 
-import org.neo4j.cypher.internal.ast.prettifier.ExpressionStringifier.backtick
+import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.RelTypeName
 import org.neo4j.cypher.internal.expressions.SemanticDirection
 import org.neo4j.cypher.internal.expressions.ShortestPathsPatternPart
 import org.neo4j.cypher.internal.expressions.VariableGrouping
 import org.neo4j.cypher.internal.ir.ExhaustivePathPattern.NodeConnections
-import org.neo4j.cypher.internal.macros.AssertMacros
+import org.neo4j.cypher.internal.macros.AssertMacros3
 import org.neo4j.cypher.internal.util.NonEmptyList
 import org.neo4j.cypher.internal.util.Repetition
 import org.neo4j.cypher.internal.util.Rewritable
+import org.neo4j.util.Stringifier.backtick
 
 sealed trait PathVariable {
   val variable: LogicalVariable
@@ -132,11 +133,16 @@ final case class PatternRelationship(
   override val right: LogicalVariable = boundaryNodes._2
   override val nodes: Set[LogicalVariable] = Set(left, right)
   override val relationships: Set[LogicalVariable] = Set(variable)
+  val selfLoop: Boolean = left == right
 
   override def withLeft(left: LogicalVariable): PatternRelationship = copy(boundaryNodes = (left, right))
 
   override def withRight(right: LogicalVariable): PatternRelationship = copy(boundaryNodes = (left, right))
 
+  /**
+   * If the relationship is directed, the order of the nodes is determined by the direction.
+   * If the relationship is undirected, the nodes are returned (left, right)
+   */
   def inOrder: (LogicalVariable, LogicalVariable) = dir match {
     case SemanticDirection.INCOMING => (right, left)
     case _                          => (left, right)
@@ -173,7 +179,7 @@ final case class PatternRelationship(
 sealed trait PatternLength {
   def isSimple: Boolean
 
-  def intersect(patternLength: PatternLength): PatternLength
+  infix def intersect(patternLength: PatternLength): PatternLength
 }
 
 case object SimplePatternLength extends PatternLength {
@@ -185,7 +191,7 @@ case object SimplePatternLength extends PatternLength {
 final case class VarPatternLength(min: Int, max: Option[Int]) extends PatternLength {
   def isSimple = false
 
-  override def intersect(patternLength: PatternLength): PatternLength = patternLength match {
+  override infix def intersect(patternLength: PatternLength): PatternLength = patternLength match {
     case VarPatternLength(otherMin, otherMax) =>
       val newMax = Seq(max, otherMax).flatten.reduceOption(_ min _)
       VarPatternLength(min.max(otherMin), newMax)
@@ -221,22 +227,22 @@ final case class QuantifiedPathPattern(
   val patternNodes: Set[LogicalVariable] = patternRelationships.iterator.flatMap(_.boundaryNodesSet).toSet
 
   // all variables are meant as singletons except those in the groupings
-  AssertMacros.checkOnlyWhenAssertionsAreEnabled(
+  AssertMacros3.checkOnlyWhenAssertionsAreEnabled(
     patternRelationships.head.left == leftBinding.inner,
     s"${leftBinding.inner} is not the left node of the first relationship ${patternRelationships.head.left}"
   )
 
-  AssertMacros.checkOnlyWhenAssertionsAreEnabled(
+  AssertMacros3.checkOnlyWhenAssertionsAreEnabled(
     patternRelationships.last.right == rightBinding.inner,
     s"${rightBinding.inner} is not the right node of the last relationship ${patternRelationships.last.right}"
   )
 
-  AssertMacros.checkOnlyWhenAssertionsAreEnabled(
+  AssertMacros3.checkOnlyWhenAssertionsAreEnabled(
     nodeVariableGroupings.forall(grouping => patternNodes.contains(grouping.singleton)),
     s"Not all singleton node variables ${nodeVariableGroupings.map(_.singleton)} were pattern nodes"
   )
 
-  AssertMacros.checkOnlyWhenAssertionsAreEnabled(
+  AssertMacros3.checkOnlyWhenAssertionsAreEnabled(
     relationshipVariableGroupings.forall(grouping =>
       patternRelationships.map(_.variable).contains(grouping.singleton)
     ),
@@ -260,14 +266,14 @@ final case class QuantifiedPathPattern(
   override def pathVariables: Seq[PathVariable] = {
     val rightTail: Seq[PathVariable] =
       VariableGrouping.singletonToGroup(nodeVariableGroupings, patternRelationships.last.right)
-        .map(NodePathVariable) ++: Seq(NodePathVariable(right))
+        .map(NodePathVariable.apply) ++: Seq(NodePathVariable(right))
 
     NodePathVariable(left) +: patternRelationships.iterator.foldRight(rightTail) {
       case (rel, acc) =>
         VariableGrouping.singletonToGroup(nodeVariableGroupings, rel.left)
-          .map(NodePathVariable) ++:
+          .map(NodePathVariable.apply) ++:
           VariableGrouping.singletonToGroup(relationshipVariableGroupings, rel.variable)
-            .map(RelationshipPathVariable) ++:
+            .map(RelationshipPathVariable.apply) ++:
           acc
     }
   }
@@ -294,6 +300,14 @@ final case class QuantifiedPathPattern(
       .addPatternRelationships(patternRelationships.toSet)
       .addPatternNodes(patternNodes.toList: _*)
       .addSelections(selections)
+
+  /**
+   * Get the group node version of a singleton node
+   */
+  def getGroupVariable(singletonVariable: LogicalVariable): Option[LogicalVariable] = {
+    val maybeFoundVariableGrouping = nodeVariableGroupings.find(_.singleton == singletonVariable)
+    maybeFoundVariableGrouping.map(_.group)
+  }
 }
 
 sealed trait PathPattern {
@@ -359,7 +373,7 @@ object ExhaustivePathPattern {
   final case class NodeConnections[+A <: ExhaustiveNodeConnection](connections: NonEmptyList[A])
       extends ExhaustivePathPattern[A] {
 
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(
       connections.toIndexedSeq.sliding(2).forall {
         case Seq(_)    => true
         case Seq(a, b) => a.right == b.left
@@ -453,6 +467,27 @@ final case class SelectivePathPattern(
 
 object SelectivePathPattern {
 
+  sealed trait PathCount {
+
+    /**
+     * @return A Cypher representation of this count
+     */
+    def solvedString: String
+    def effectiveCardinality: Long
+  }
+
+  case class CountInteger(k: Long) extends PathCount {
+    override def solvedString: String = s"$k"
+    override def effectiveCardinality: Long = k
+  }
+
+  // Note this will always be a parameter, but when runtime rewrites, it fails if this
+  // is explicitly a Parameter
+  case class CountParam(k: Expression) extends PathCount {
+    override def solvedString: String = k.asCanonicalStringVal
+    override def effectiveCardinality: Long = 1
+  }
+
   /**
    * Defines the paths to find for each combination of start and end nodes.
    */
@@ -469,23 +504,23 @@ object SelectivePathPattern {
     /**
      * Finds up to k paths arbitrarily.
      */
-    case class Any(k: Long) extends Selector {
-      override def solvedString: String = s"ANY $k"
+    case class Any(k: PathCount) extends Selector {
+      override def solvedString: String = s"ANY ${k.solvedString}"
     }
 
     /**
      * Returns the shortest, second-shortest, etc. up to k paths.
      * If there are multiple paths of same length, picks arbitrarily.
      */
-    case class Shortest(k: Long) extends Selector {
-      override def solvedString: String = s"SHORTEST $k"
+    case class Shortest(k: PathCount) extends Selector {
+      override def solvedString: String = s"SHORTEST ${k.solvedString}"
     }
 
     /**
      * Finds all shortest paths, all second shortest paths, etc. up to all Kth shortest paths.
      */
-    case class ShortestGroups(k: Long) extends Selector {
-      override def solvedString: String = s"SHORTEST $k GROUPS"
+    case class ShortestGroups(k: PathCount) extends Selector {
+      override def solvedString: String = s"SHORTEST ${k.solvedString} GROUPS"
     }
   }
 }
@@ -513,4 +548,6 @@ final case class ShortestRelationshipPattern(
   override def allQuantifiedPathPatterns: Set[QuantifiedPathPattern] = Set.empty
 
   override def allNodeConnections: Set[NodeConnection] = Set.empty
+
+  def pathAndRelationshipVariables: Set[LogicalVariable] = maybePathVar.toSet + rel.variable
 }

@@ -29,7 +29,6 @@ import static org.neo4j.internal.recordstorage.RecordCursorTypes.RELATIONSHIP_CU
 import java.util.function.Consumer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.neo4j.consistency.checking.ConsistencyFlags;
@@ -56,9 +55,9 @@ import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.TokenIndexEntryUpdate;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class RelationshipCheckerWithRelationshipTypeIndexTest extends CheckerTestBase {
     private int type;
     private int lowerType;
@@ -309,16 +308,17 @@ class RelationshipCheckerWithRelationshipTypeIndexTest extends CheckerTestBase {
 
     private void createIndexEntry(IndexUpdater writer, long relationshipId, int type)
             throws IndexEntryConflictException {
-        writer.process(TokenIndexEntryUpdate.change(relationshipId, rtiDescriptor, EMPTY_INT_ARRAY, new int[] {type}));
+        writer.process(
+                TokenIndexEntryUpdate.tokenChange(relationshipId, rtiDescriptor, EMPTY_INT_ARRAY, new int[] {type}));
     }
 
     private long createStoreEntry(int type) {
         var relIdGenerator = relationshipStore.getIdGenerator();
         var nodeIdGenerator = nodeStore.getIdGenerator();
         long relationship = relIdGenerator.nextId(CursorContext.NULL_CONTEXT);
-        long node1 = nodePlusCached(nodeIdGenerator.nextId(CursorContext.NULL_CONTEXT), NULL, relationship);
-        long node2 = nodePlusCached(nodeIdGenerator.nextId(CursorContext.NULL_CONTEXT), NULL, relationship);
-        relationship(relationship, node1, node2, type, NULL, NULL, NULL, NULL, true, true);
+        long node1 = nodePlusCached(nodeIdGenerator.nextId(CursorContext.NULL_CONTEXT), false, NULL, relationship);
+        long node2 = nodePlusCached(nodeIdGenerator.nextId(CursorContext.NULL_CONTEXT), false, NULL, relationship);
+        relationship(relationship, node1, node2, type, NULL, NULL, NULL, NULL, NULL, true, true, false, false);
         return relationship;
     }
 

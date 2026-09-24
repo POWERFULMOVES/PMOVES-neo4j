@@ -19,126 +19,30 @@ package org.neo4j.cypher.internal.parser.v25.ast.factory
 import org.antlr.v4.runtime.misc.Interval
 import org.antlr.v4.runtime.tree.ParseTree
 import org.antlr.v4.runtime.tree.TerminalNode
-import org.neo4j.cypher.internal.ast.CollectExpression
-import org.neo4j.cypher.internal.ast.CountExpression
-import org.neo4j.cypher.internal.ast.ExistsExpression
-import org.neo4j.cypher.internal.ast.IsNormalized
-import org.neo4j.cypher.internal.ast.IsNotNormalized
-import org.neo4j.cypher.internal.ast.IsNotTyped
-import org.neo4j.cypher.internal.ast.IsTyped
-import org.neo4j.cypher.internal.ast.Match
-import org.neo4j.cypher.internal.ast.Query
-import org.neo4j.cypher.internal.ast.SingleQuery
-import org.neo4j.cypher.internal.ast.Where
-import org.neo4j.cypher.internal.expressions.Add
-import org.neo4j.cypher.internal.expressions.AllIterablePredicate
-import org.neo4j.cypher.internal.expressions.AllPropertiesSelector
-import org.neo4j.cypher.internal.expressions.And
-import org.neo4j.cypher.internal.expressions.Ands
-import org.neo4j.cypher.internal.expressions.AnyIterablePredicate
-import org.neo4j.cypher.internal.expressions.CaseExpression
-import org.neo4j.cypher.internal.expressions.Concatenate
-import org.neo4j.cypher.internal.expressions.ContainerIndex
-import org.neo4j.cypher.internal.expressions.Contains
-import org.neo4j.cypher.internal.expressions.CountStar
-import org.neo4j.cypher.internal.expressions.Divide
-import org.neo4j.cypher.internal.expressions.EndsWith
-import org.neo4j.cypher.internal.expressions.Equals
-import org.neo4j.cypher.internal.expressions.ExplicitParameter
-import org.neo4j.cypher.internal.expressions.Expression
-import org.neo4j.cypher.internal.expressions.FixedQuantifier
-import org.neo4j.cypher.internal.expressions.FunctionInvocation
+import org.neo4j.cypher.internal.ast._
 import org.neo4j.cypher.internal.expressions.FunctionInvocation.ArgumentUnordered
-import org.neo4j.cypher.internal.expressions.FunctionName
-import org.neo4j.cypher.internal.expressions.GreaterThan
-import org.neo4j.cypher.internal.expressions.GreaterThanOrEqual
-import org.neo4j.cypher.internal.expressions.In
-import org.neo4j.cypher.internal.expressions.IntervalQuantifier
-import org.neo4j.cypher.internal.expressions.InvalidNotEquals
-import org.neo4j.cypher.internal.expressions.IsNotNull
-import org.neo4j.cypher.internal.expressions.IsNull
-import org.neo4j.cypher.internal.expressions.LessThan
-import org.neo4j.cypher.internal.expressions.LessThanOrEqual
-import org.neo4j.cypher.internal.expressions.ListComprehension
-import org.neo4j.cypher.internal.expressions.ListSlice
-import org.neo4j.cypher.internal.expressions.LiteralEntry
-import org.neo4j.cypher.internal.expressions.LogicalVariable
-import org.neo4j.cypher.internal.expressions.MapExpression
-import org.neo4j.cypher.internal.expressions.MapProjection
-import org.neo4j.cypher.internal.expressions.MatchMode
-import org.neo4j.cypher.internal.expressions.Modulo
-import org.neo4j.cypher.internal.expressions.Multiply
-import org.neo4j.cypher.internal.expressions.NFCNormalForm
-import org.neo4j.cypher.internal.expressions.NFDNormalForm
-import org.neo4j.cypher.internal.expressions.NFKCNormalForm
-import org.neo4j.cypher.internal.expressions.NFKDNormalForm
-import org.neo4j.cypher.internal.expressions.Namespace
-import org.neo4j.cypher.internal.expressions.NodePattern
-import org.neo4j.cypher.internal.expressions.NonPrefixedPatternPart
-import org.neo4j.cypher.internal.expressions.NoneIterablePredicate
-import org.neo4j.cypher.internal.expressions.NormalForm
-import org.neo4j.cypher.internal.expressions.Not
-import org.neo4j.cypher.internal.expressions.NotEquals
-import org.neo4j.cypher.internal.expressions.Or
-import org.neo4j.cypher.internal.expressions.ParenthesizedPath
-import org.neo4j.cypher.internal.expressions.PathConcatenation
-import org.neo4j.cypher.internal.expressions.PathFactor
-import org.neo4j.cypher.internal.expressions.PathPatternPart
-import org.neo4j.cypher.internal.expressions.Pattern
-import org.neo4j.cypher.internal.expressions.PatternComprehension
-import org.neo4j.cypher.internal.expressions.PatternExpression
-import org.neo4j.cypher.internal.expressions.PatternPart
-import org.neo4j.cypher.internal.expressions.PatternPartWithSelector
-import org.neo4j.cypher.internal.expressions.PlusQuantifier
-import org.neo4j.cypher.internal.expressions.Pow
-import org.neo4j.cypher.internal.expressions.Property
-import org.neo4j.cypher.internal.expressions.PropertyKeyName
-import org.neo4j.cypher.internal.expressions.PropertySelector
-import org.neo4j.cypher.internal.expressions.QuantifiedPath
-import org.neo4j.cypher.internal.expressions.ReduceExpression
-import org.neo4j.cypher.internal.expressions.ReduceScope
-import org.neo4j.cypher.internal.expressions.RegexMatch
-import org.neo4j.cypher.internal.expressions.RelationshipChain
-import org.neo4j.cypher.internal.expressions.RelationshipPattern
-import org.neo4j.cypher.internal.expressions.RelationshipsPattern
-import org.neo4j.cypher.internal.expressions.ShortestPathExpression
-import org.neo4j.cypher.internal.expressions.ShortestPathsPatternPart
-import org.neo4j.cypher.internal.expressions.SimplePattern
-import org.neo4j.cypher.internal.expressions.SingleIterablePredicate
-import org.neo4j.cypher.internal.expressions.StarQuantifier
-import org.neo4j.cypher.internal.expressions.StartsWith
-import org.neo4j.cypher.internal.expressions.StringLiteral
-import org.neo4j.cypher.internal.expressions.Subtract
-import org.neo4j.cypher.internal.expressions.UnaryAdd
-import org.neo4j.cypher.internal.expressions.UnarySubtract
-import org.neo4j.cypher.internal.expressions.UnsignedDecimalIntegerLiteral
-import org.neo4j.cypher.internal.expressions.Variable
-import org.neo4j.cypher.internal.expressions.VariableSelector
-import org.neo4j.cypher.internal.expressions.Xor
+import org.neo4j.cypher.internal.expressions._
+import org.neo4j.cypher.internal.expressions.functions.AllReduce
 import org.neo4j.cypher.internal.expressions.functions.Trim
+import org.neo4j.cypher.internal.label_expressions.LabelExpression
+import org.neo4j.cypher.internal.label_expressions.LabelExpression.ColonConjunction
+import org.neo4j.cypher.internal.label_expressions.LabelExpression.ColonDisjunction
+import org.neo4j.cypher.internal.label_expressions.LabelExpression.Conjunctions
+import org.neo4j.cypher.internal.label_expressions.LabelExpression.Disjunctions
+import org.neo4j.cypher.internal.label_expressions.LabelExpression.DynamicLeaf
+import org.neo4j.cypher.internal.label_expressions.LabelExpression.Leaf
+import org.neo4j.cypher.internal.label_expressions.LabelExpression.Negation
+import org.neo4j.cypher.internal.label_expressions.LabelExpression.Wildcard
 import org.neo4j.cypher.internal.label_expressions.LabelExpressionPredicate
-import org.neo4j.cypher.internal.macros.AssertMacros
+import org.neo4j.cypher.internal.macros.AssertMacros3
+import org.neo4j.cypher.internal.notification.InternalNotificationLogger
 import org.neo4j.cypher.internal.parser.AstRuleCtx
-import org.neo4j.cypher.internal.parser.ast.util.Util.astBinaryFold
-import org.neo4j.cypher.internal.parser.ast.util.Util.astChild
-import org.neo4j.cypher.internal.parser.ast.util.Util.astCtxReduce
-import org.neo4j.cypher.internal.parser.ast.util.Util.astOpt
-import org.neo4j.cypher.internal.parser.ast.util.Util.astPairs
-import org.neo4j.cypher.internal.parser.ast.util.Util.astSeq
-import org.neo4j.cypher.internal.parser.ast.util.Util.child
-import org.neo4j.cypher.internal.parser.ast.util.Util.ctxChild
-import org.neo4j.cypher.internal.parser.ast.util.Util.lastChild
-import org.neo4j.cypher.internal.parser.ast.util.Util.nodeChild
-import org.neo4j.cypher.internal.parser.ast.util.Util.nodeChildType
-import org.neo4j.cypher.internal.parser.ast.util.Util.optUnsignedDecimalInt
-import org.neo4j.cypher.internal.parser.ast.util.Util.pos
-import org.neo4j.cypher.internal.parser.ast.util.Util.unsignedDecimalInt
+import org.neo4j.cypher.internal.parser.ast.util.Util._
 import org.neo4j.cypher.internal.parser.common.ast.factory.ParserTrimSpecification
 import org.neo4j.cypher.internal.parser.v25.Cypher25Parser
 import org.neo4j.cypher.internal.parser.v25.Cypher25ParserListener
-import org.neo4j.cypher.internal.util.CypherExceptionFactory
-import org.neo4j.cypher.internal.util.InputPosition
-import org.neo4j.cypher.internal.util.InternalNotificationLogger
+import org.neo4j.cypher.internal.parser.v25.ast.factory.LiteralBuilder.cypherStringToString
+import org.neo4j.cypher.internal.util._
 import org.neo4j.cypher.internal.util.symbols.AnyType
 import org.neo4j.cypher.internal.util.symbols.BooleanType
 import org.neo4j.cypher.internal.util.symbols.CTAny
@@ -149,7 +53,11 @@ import org.neo4j.cypher.internal.util.symbols.ClosedDynamicUnionType
 import org.neo4j.cypher.internal.util.symbols.CypherType
 import org.neo4j.cypher.internal.util.symbols.DateType
 import org.neo4j.cypher.internal.util.symbols.DurationType
+import org.neo4j.cypher.internal.util.symbols.Float32Type
 import org.neo4j.cypher.internal.util.symbols.FloatType
+import org.neo4j.cypher.internal.util.symbols.Integer16Type
+import org.neo4j.cypher.internal.util.symbols.Integer32Type
+import org.neo4j.cypher.internal.util.symbols.Integer8Type
 import org.neo4j.cypher.internal.util.symbols.IntegerType
 import org.neo4j.cypher.internal.util.symbols.ListType
 import org.neo4j.cypher.internal.util.symbols.LocalDateTimeType
@@ -163,6 +71,8 @@ import org.neo4j.cypher.internal.util.symbols.PointType
 import org.neo4j.cypher.internal.util.symbols.PropertyValueType
 import org.neo4j.cypher.internal.util.symbols.RelationshipType
 import org.neo4j.cypher.internal.util.symbols.StringType
+import org.neo4j.cypher.internal.util.symbols.UUIDType
+import org.neo4j.cypher.internal.util.symbols.VectorType
 import org.neo4j.cypher.internal.util.symbols.ZonedDateTimeType
 import org.neo4j.cypher.internal.util.symbols.ZonedTimeType
 
@@ -177,14 +87,27 @@ trait ExpressionBuilder extends Cypher25ParserListener {
 
   protected def exceptionFactory: CypherExceptionFactory
 
+  override def exitNonNegativeIntegerSpecification(ctx: Cypher25Parser.NonNegativeIntegerSpecificationContext): Unit = {
+    val integer = ctx.UNSIGNED_DECIMAL_INTEGER()
+    ctx.ast = if (integer != null) {
+      Left(PathLengthQuantifier(ctx.getText)(pos(ctx)))
+    } else {
+      val count = ctx.parameter().ast[Parameter]()
+      Right(ExplicitParameter(count.name, CTInteger)(count.position))
+    }
+  }
+
   final override def exitQuantifier(ctx: Cypher25Parser.QuantifierContext): Unit = {
     val firstToken = nodeChild(ctx, 0).getSymbol
     ctx.ast = firstToken.getType match {
       case Cypher25Parser.LCURLY =>
         if (ctx.from != null || ctx.to != null || ctx.COMMA() != null) {
-          IntervalQuantifier(optUnsignedDecimalInt(ctx.from), optUnsignedDecimalInt(ctx.to))(pos(ctx))
+          IntervalQuantifier(
+            optSafeUnsignedDecimalInt(ctx.from),
+            optSafeUnsignedDecimalInt(ctx.to)
+          )(pos(ctx))
         } else {
-          FixedQuantifier(unsignedDecimalInt(nodeChild(ctx, 1).getSymbol))(pos(firstToken))
+          FixedQuantifier(safeUnsignedDecimalInt(nodeChild(ctx, 1).getSymbol))(pos(firstToken))
         }
       case Cypher25Parser.PLUS  => PlusQuantifier()(pos(firstToken))
       case Cypher25Parser.TIMES => StarQuantifier()(pos(firstToken))
@@ -212,7 +135,6 @@ trait ExpressionBuilder extends Cypher25ParserListener {
     if (size == 1) {
       ctx.ast = ctxChild(ctx, 0).ast[PathFactor]()
     } else {
-      val p = pos(ctx)
       val parts = new mutable.ArrayDeque[PathFactor](1)
       var relPattern: RelationshipPattern = null
       var i = 0
@@ -222,7 +144,7 @@ trait ExpressionBuilder extends Cypher25ParserListener {
             val nodePattern = nCtx.ast[NodePattern]()
             if (relPattern != null) {
               val lhs = parts.removeLast().asInstanceOf[SimplePattern]
-              parts.addOne(RelationshipChain(lhs, relPattern, nodePattern)(p))
+              parts.addOne(RelationshipChain(lhs, relPattern, nodePattern)(lhs.position))
               relPattern = null
             } else {
               parts.addOne(nodePattern)
@@ -247,23 +169,56 @@ trait ExpressionBuilder extends Cypher25ParserListener {
     }
   }
 
-  private def selectorCount(node: TerminalNode, p: InputPosition): UnsignedDecimalIntegerLiteral =
-    if (node == null) UnsignedDecimalIntegerLiteral("1")(p)
-    else UnsignedDecimalIntegerLiteral(node.getText)(pos(node))
+  final override def exitPathMode(ctx: Cypher25Parser.PathModeContext): Unit = {
+    val p = pos(ctx)
+    ctx.ast = nodeChildType(ctx, 0) match {
+      case Cypher25Parser.ACYCLIC => PathMode.Acyclic()(p)
+      case Cypher25Parser.TRAIL   => PathMode.Trail()(p)
+      case Cypher25Parser.WALK    => PathMode.Walk()(p)
+      case _                      => throw new IllegalStateException(s"Unexpected context $ctx")
+    }
+  }
 
-  final override def exitSelector(ctx: Cypher25Parser.SelectorContext): Unit = {
+  private def selectorCount(
+    ctx: Cypher25Parser.NonNegativeIntegerSpecificationContext,
+    p: InputPosition
+  ): Either[PathLengthQuantifier, Parameter] =
+    astOpt[Either[PathLengthQuantifier, Parameter]](
+      ctx,
+      Left(PathLengthQuantifier("1")(p))
+    )
+
+  private def pathMode(ctx: Cypher25Parser.PathModeContext, p: InputPosition): PathMode =
+    astOpt[PathMode](ctx, PathMode.Walk(implicitlyCreated = true)(p))
+
+  final override def exitPathPatternPrefix(ctx: Cypher25Parser.PathPatternPrefixContext): Unit = {
     val p = pos(ctx)
     ctx.ast = ctx match {
-      case anyShortestCtx: Cypher25Parser.AnyShortestPathContext =>
-        PatternPart.AnyShortestPath(selectorCount(anyShortestCtx.UNSIGNED_DECIMAL_INTEGER(), p))(p)
-      case allShortestCtx: Cypher25Parser.AllShortestPathContext =>
-        PatternPart.AllShortestPaths()(pos(allShortestCtx))
-      case anyCtx: Cypher25Parser.AnyPathContext =>
-        PatternPart.AnyPath(selectorCount(anyCtx.UNSIGNED_DECIMAL_INTEGER(), p))(p)
-      case shortestGrpCtx: Cypher25Parser.ShortestGroupContext =>
-        PatternPart.ShortestGroups(selectorCount(shortestGrpCtx.UNSIGNED_DECIMAL_INTEGER(), p))(p)
-      case allPathCtx: Cypher25Parser.AllPathContext =>
-        PatternPart.AllPaths()(p)
+      case c: Cypher25Parser.AnyShortestPathContext =>
+        (
+          PatternPart.AnyShortestPath(selectorCount(c.nonNegativeIntegerSpecification(), p))(p),
+          pathMode(c.pathMode(), p)
+        )
+      case c: Cypher25Parser.AllShortestPathContext =>
+        (
+          PatternPart.AllShortestPaths()(pos(c)),
+          pathMode(c.pathMode(), p)
+        )
+      case c: Cypher25Parser.AnyPathContext =>
+        (
+          PatternPart.AnyPath(selectorCount(c.nonNegativeIntegerSpecification(), p))(p),
+          pathMode(c.pathMode(), p)
+        )
+      case c: Cypher25Parser.ShortestGroupContext =>
+        (
+          PatternPart.ShortestGroups(selectorCount(c.nonNegativeIntegerSpecification(), p))(p),
+          pathMode(c.pathMode(), p)
+        )
+      case c: Cypher25Parser.AllPathContext =>
+        (
+          PatternPart.AllPaths()(p),
+          pathMode(c.pathMode(), p)
+        )
       case _ => throw new IllegalStateException(s"Unexpected context $ctx")
     }
   }
@@ -272,12 +227,21 @@ trait ExpressionBuilder extends Cypher25ParserListener {
     val p = pos(ctx)
     val pattern = astChild[PatternPart](ctx, 1) match {
       case nonPrefixedPatternPart: NonPrefixedPatternPart => nonPrefixedPatternPart
-      case ps: PatternPartWithSelector =>
+      case ps: PrefixedPatternPart =>
         val pathPatternKind = if (ctx.quantifier() == null) "parenthesized" else "quantified"
-        throw exceptionFactory.syntaxException(
-          s"Path selectors such as `${ps.selector.prettified}` are not supported within $pathPatternKind path patterns.",
-          ps.position
-        )
+        ps.pathMode match {
+          case pathMode: PathMode if !pathMode.implicitlyCreated =>
+            throw exceptionFactory.unsupportedPathModeInPathPattern(
+              pathMode.prettified,
+              pathPatternKind,
+              ps.position
+            )
+          case _ => throw exceptionFactory.unsupportedPathSelectorInPathPattern(
+              ps.selector.prettified,
+              pathPatternKind,
+              ps.position
+            )
+        }
     }
     val quantifier = ctx.quantifier()
     ctx.ast = if (quantifier != null) QuantifiedPath(pattern, quantifier.ast(), astOpt(ctx.expression()))(p)
@@ -295,32 +259,32 @@ trait ExpressionBuilder extends Cypher25ParserListener {
   ): Unit = {
     // This is weird, we should refactor range to be more sensible and not use nested options
     ctx.ast = if (ctx.DOTDOT() != null) {
-      val from = optUnsignedDecimalInt(ctx.from)
-      val to = optUnsignedDecimalInt(ctx.to)
+      val from = optSafeUnsignedDecimalInt(ctx.from)
+      val to = optSafeUnsignedDecimalInt(ctx.to)
       Some(org.neo4j.cypher.internal.expressions.Range(from, to)(from.map(_.position).getOrElse(pos(ctx))))
     } else if (ctx.single != null) {
-      val single = Some(UnsignedDecimalIntegerLiteral(ctx.single.getText)(pos(ctx.single)))
+      val single = Some(PathLengthQuantifier(ctx.single.getText)(pos(ctx.single)))
       Some(org.neo4j.cypher.internal.expressions.Range(single, single)(pos(ctx)))
     } else None
   }
 
   final override def exitExpression(ctx: Cypher25Parser.ExpressionContext): Unit = {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
     ctx.ast = astBinaryFold[Expression](ctx, (lhs, token, rhs) => Or(lhs, rhs)(pos(token)))
   }
 
   final override def exitExpression11(ctx: Cypher25Parser.Expression11Context): Unit = {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
     ctx.ast = astBinaryFold[Expression](ctx, (lhs, token, rhs) => Xor(lhs, rhs)(pos(token)))
   }
 
   final override def exitExpression10(ctx: Cypher25Parser.Expression10Context): Unit = {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
     ctx.ast = astBinaryFold[Expression](ctx, (lhs, token, rhs) => And(lhs, rhs)(pos(token)))
   }
 
   final override def exitExpression9(ctx: Cypher25Parser.Expression9Context): Unit = {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(ctx.expression8() == lastChild(ctx))
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(ctx.expression8() == lastChild(ctx))
     ctx.ast = ctx.children.size match {
       case 1 => ctxChild(ctx, 0).ast
       case 2 => Not(astChild(ctx, 1))(pos(ctx))
@@ -331,7 +295,7 @@ trait ExpressionBuilder extends Cypher25ParserListener {
   }
 
   final override def exitExpression8(ctx: Cypher25Parser.Expression8Context): Unit = {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
     ctx.ast = ctx.children.size match {
       case 1 => ctxChild(ctx, 0).ast
       case 3 => binaryPredicate(ctxChild(ctx, 0).ast(), child(ctx, 1), child(ctx, 2))
@@ -357,30 +321,36 @@ trait ExpressionBuilder extends Cypher25ParserListener {
 
   final override def exitExpression7(ctx: Cypher25Parser.Expression7Context): Unit = {
     ctx.ast = ctx.children.size match {
-      case 1 => ctxChild(ctx, 0).ast
+      case 1 =>
+        ctxChild(ctx, 0).ast
       case _ =>
         val lhs = ctxChild(ctx, 0).ast[Expression]()
-        ctxChild(ctx, 1) match {
-          case strCtx: Cypher25Parser.StringAndListComparisonContext =>
-            stringAndListComparisonExpression(lhs, strCtx)
-          case nullCtx: Cypher25Parser.NullComparisonContext =>
-            nullComparisonExpression(lhs, nullCtx)
-          case typeCtx: Cypher25Parser.TypeComparisonContext =>
-            typeComparisonExpression(lhs, typeCtx)
-          case nfCtx: Cypher25Parser.NormalFormComparisonContext =>
-            normalFormComparisonExpression(lhs, nfCtx.normalForm(), nfCtx.NOT() != null, pos(nfCtx))
-          case _ => throw new IllegalStateException(s"Unexpected parse result $ctx")
-        }
+        advancedPredicate(lhs, ctxChild(ctx, 1))
     }
   }
 
-  private def stringAndListComparisonExpression(lhs: Expression, ctx: AstRuleCtx): Expression = {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(
-      ctx.isInstanceOf[Cypher25Parser.StringAndListComparisonContext] ||
-        ctx.isInstanceOf[Cypher25Parser.WhenStringOrListContext]
-    )
-    val token = child[TerminalNode](ctx, 0).getSymbol
-    val rhs = lastChild[AstRuleCtx](ctx).ast[Expression]()
+  private def advancedPredicate(lhs: Expression, advancedPart2Ctx: AstRuleCtx): Expression = {
+    advancedPart2Ctx match {
+      case labelCtx: Cypher25Parser.LabelComparisonContext =>
+        labelComparisonExpression(lhs, labelCtx)
+      case strCtx: Cypher25Parser.StringAndListComparisonContext =>
+        stringAndListComparisonExpression(lhs, strCtx)
+      case nullCtx: Cypher25Parser.NullComparisonContext =>
+        nullComparisonExpression(lhs, nullCtx)
+      case typeCtx: Cypher25Parser.TypeComparisonContext =>
+        typeComparisonExpression(lhs, typeCtx)
+      case nfCtx: Cypher25Parser.NormalFormComparisonContext =>
+        normalFormComparisonExpression(lhs, nfCtx.normalForm(), nfCtx.NOT() != null, pos(nfCtx))
+      case _ => throw new IllegalStateException(s"Unexpected parse result $advancedPart2Ctx")
+    }
+  }
+
+  private def stringAndListComparisonExpression(
+    lhs: Expression,
+    strCtx: Cypher25Parser.StringAndListComparisonContext
+  ): Expression = {
+    val token = child[TerminalNode](strCtx, 0).getSymbol
+    val rhs = lastChild[AstRuleCtx](strCtx).ast[Expression]()
     token.getType match {
       case Cypher25Parser.REGEQ    => RegexMatch(lhs, rhs)(pos(token))
       case Cypher25Parser.STARTS   => StartsWith(lhs, rhs)(pos(token))
@@ -390,27 +360,59 @@ trait ExpressionBuilder extends Cypher25ParserListener {
     }
   }
 
-  private def nullComparisonExpression(lhs: Expression, ctx: AstRuleCtx): Expression = {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(
-      ctx.isInstanceOf[Cypher25Parser.NullComparisonContext] ||
-        ctx.isInstanceOf[Cypher25Parser.WhenNullContext]
+  private def labelComparisonExpression(
+    lhs: Expression,
+    labelCtx: Cypher25Parser.LabelComparisonContext
+  ): Expression = {
+    val hasIs = labelCtx.IS() != null
+    val hasNot = labelCtx.NOT() != null
+    val hasLabeled = labelCtx.LABELED() != null
+    val rawLabelExpr = labelCtx.labelExpression4().ast[LabelExpression]()
+    val labelExpr = if (hasIs) setContainsIs(rawLabelExpr) else rawLabelExpr
+    val finalExpr = if (hasNot) Negation(labelExpr, containsIs = true)(pos(labelCtx)) else labelExpr
+    LabelExpressionPredicate(lhs, finalExpr)(
+      pos(labelCtx),
+      isParenthesized = LabelExpressionPredicate.isParenthesizedDefault,
+      isPostfix = LabelExpressionPredicate.isPostfixDefault,
+      hasLabeledKeyword = hasLabeled,
+      hasNotKeyword = hasNot
     )
-    if (nodeChildType(ctx, 1) != Cypher25Parser.NOT) IsNull(lhs)(pos(ctx))
-    else IsNotNull(lhs)(pos(ctx))
   }
 
-  private def typeComparisonExpression(lhs: Expression, ctx: AstRuleCtx): Expression = {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(
-      ctx.isInstanceOf[Cypher25Parser.TypeComparisonContext] ||
-        ctx.isInstanceOf[Cypher25Parser.WhenTypeContext]
-    )
-    val cypherType = lastChild[AstRuleCtx](ctx).ast[CypherType]()
-    val not = child[ParseTree](ctx, 1) match {
+  private def setContainsIs(labelExpression: LabelExpression): LabelExpression = labelExpression match {
+    case sl: Leaf           => sl.copy(containsIs = true)
+    case dl: DynamicLeaf    => dl.copy(containsIs = true)
+    case wc: Wildcard       => wc.copy(containsIs = true)(labelExpression.position)
+    case Negation(child, _) => Negation(setContainsIs(child), containsIs = true)(labelExpression.position)
+    case Conjunctions(children, _) =>
+      Conjunctions(children.map(setContainsIs), containsIs = true)(labelExpression.position)
+    case ColonConjunction(lhsExpr, rhs, _) =>
+      ColonConjunction(setContainsIs(lhsExpr), setContainsIs(rhs), containsIs = true)(labelExpression.position)
+    case Disjunctions(children, _) =>
+      Disjunctions(children.map(setContainsIs), containsIs = true)(labelExpression.position)
+    case ColonDisjunction(lhsExpr, rhs, _) =>
+      ColonDisjunction(setContainsIs(lhsExpr), setContainsIs(rhs), containsIs = true)(labelExpression.position)
+  }
+
+  private def nullComparisonExpression(lhs: Expression, nullCtx: Cypher25Parser.NullComparisonContext): Expression = {
+    if (nodeChildType(nullCtx, 1) != Cypher25Parser.NOT) IsNull(lhs)(pos(nullCtx))
+    else IsNotNull(lhs)(pos(nullCtx))
+  }
+
+  private def typeComparisonExpression(lhs: Expression, typeCtx: Cypher25Parser.TypeComparisonContext): Expression = {
+    val cypherType = lastChild[AstRuleCtx](typeCtx).ast[CypherType]()
+    val not = child[ParseTree](typeCtx, 1) match {
       case n: TerminalNode => n.getSymbol.getType == Cypher25Parser.NOT
       case _               => false
     }
-    if (not) IsNotTyped(lhs, cypherType)(pos(ctx))
-    else IsTyped(lhs, cypherType)(pos(ctx), withDoubleColonOnly = false)
+    if (not) IsNotTyped(lhs, cypherType)(pos(typeCtx))
+    else IsTyped(lhs, cypherType)(pos(typeCtx), withDoubleColonOnly = typeCtx.children.size() == 2)
+  }
+
+  private def vectorType(ctx: Cypher25Parser.TypeNameContext, p: InputPosition): VectorType = {
+    val vectorCoordinateType = astOpt[CypherType](ctx.vectorCoordinateType())
+    val dimension = astOpt[SignedDecimalIntegerLiteral](ctx.signedIntegerLiteral()).map(_.stringVal.toLong)
+    VectorType(vectorCoordinateType, dimension, isNullable = true)(p)
   }
 
   private def normalFormComparisonExpression(
@@ -437,7 +439,7 @@ trait ExpressionBuilder extends Cypher25ParserListener {
   }
 
   final override def exitExpression6(ctx: Cypher25Parser.Expression6Context): Unit = {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
     ctx.ast = astBinaryFold(ctx, binaryAdditive)
   }
 
@@ -462,7 +464,7 @@ trait ExpressionBuilder extends Cypher25ParserListener {
   }
 
   final override def exitExpression4(ctx: Cypher25Parser.Expression4Context): Unit = {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(ctx.getChildCount % 2 == 1)
     ctx.ast = astBinaryFold[Expression](ctx, (lhs, token, rhs) => Pow(lhs, rhs)(pos(token.getSymbol)))
   }
 
@@ -484,19 +486,14 @@ trait ExpressionBuilder extends Cypher25ParserListener {
     }
   }
 
-  // TODO All postfix should probably have positions that work in the same manner
   private def postFix(lhs: Expression, rhs: Cypher25Parser.PostFixContext): Expression = {
-    val p = lhs.position
+    val p = pos(rhs)
     rhs match {
       case propCtx: Cypher25Parser.PropertyPostfixContext => Property(lhs, ctxChild(propCtx, 0).ast())(p)
       case indexCtx: Cypher25Parser.IndexPostfixContext =>
-        ContainerIndex(lhs, ctxChild(indexCtx, 1).ast())(pos(ctxChild(indexCtx, 1)))
-      case labelCtx: Cypher25Parser.LabelPostfixContext => LabelExpressionPredicate(lhs, ctxChild(labelCtx, 0).ast())(
-          p,
-          isParenthesized = LabelExpressionPredicate.isParenthesizedDefault
-        )
+        ContainerIndex(lhs, ctxChild(indexCtx, 1).ast())(p)
       case rangeCtx: Cypher25Parser.RangePostfixContext =>
-        ListSlice(lhs, astOpt(rangeCtx.fromExp), astOpt(rangeCtx.toExp))(pos(rhs))
+        ListSlice(lhs, astOpt(rangeCtx.fromExp), astOpt(rangeCtx.toExp))(p)
       case _ => throw new IllegalStateException(s"Unexpected rhs $rhs")
     }
   }
@@ -511,25 +508,9 @@ trait ExpressionBuilder extends Cypher25ParserListener {
     ctx.ast = ctxChild(ctx, 1).ast()
   }
 
-  final override def exitPropertyExpression(ctx: Cypher25Parser.PropertyExpressionContext): Unit = {
-    var result = Property(ctxChild(ctx, 0).ast(), ctxChild(ctx, 1).ast())(pos(ctx))
-    val size = ctx.children.size(); var i = 2
-    while (i < size) {
-      val key = ctxChild(ctx, i).ast[PropertyKeyName]()
-      result = Property(result, key)(key.position)
-      i += 1
-    }
-    ctx.ast = result
-  }
-
-  final override def exitDynamicPropertyExpression(ctx: Cypher25Parser.DynamicPropertyExpressionContext): Unit = {
-    val index = ctxChild(ctx, 1).ast[Expression]()
-    ctx.ast = ContainerIndex(ctxChild(ctx, 0).ast(), index)(index.position)
-  }
-
   final override def exitExpression1(ctx: Cypher25Parser.Expression1Context): Unit = {
     ctx.ast = ctx.children.size match {
-      case 1 => ctxChild(ctx, 0).ast()
+      case 1 => ctxChild(ctx, 0).ast
       case _ => throw new IllegalStateException("Unexpected expression")
     }
   }
@@ -539,7 +520,7 @@ trait ExpressionBuilder extends Cypher25ParserListener {
   ): Unit = {
     ctx.ast = CaseExpression(
       expression = None,
-      alternatives = astSeq(ctx.caseAlternative()),
+      alternatives = astSeq[(Expression, Expression)](ctx.caseAlternative()),
       default = astOpt(ctx.expression())
     )(pos(ctx))
   }
@@ -582,22 +563,17 @@ trait ExpressionBuilder extends Cypher25ParserListener {
     while (i < size) {
       ctx.children.get(i) match {
         case whenCtx: Cypher25Parser.ExtendedWhenContext =>
+          val uniqueThen = thenExp.endoRewrite(topDown(Rewriter.lift { case v: LogicalVariable => v.copyId }))
           val newWhen = whenCtx match {
             case _: Cypher25Parser.WhenEqualsContext =>
               Equals(lhs, astChild(whenCtx, 0))(pos(nodeChild(ctx, i - 1)))
-            case _: Cypher25Parser.WhenComparatorContext =>
-              binaryPredicate(lhs, nodeChild(whenCtx, 0), ctxChild(whenCtx, 1))
-            case _: Cypher25Parser.WhenStringOrListContext =>
-              stringAndListComparisonExpression(lhs, whenCtx)
-            case _: Cypher25Parser.WhenNullContext =>
-              nullComparisonExpression(lhs, whenCtx)
-            case _: Cypher25Parser.WhenTypeContext =>
-              typeComparisonExpression(lhs, whenCtx)
-            case formCtx: Cypher25Parser.WhenFormContext =>
-              normalFormComparisonExpression(lhs, formCtx.normalForm(), formCtx.NOT() != null, pos(formCtx))
+            case _: Cypher25Parser.WhenSimpleComparisonContext =>
+              binaryPredicate(lhs, child(whenCtx, 0), child(whenCtx, 1))
+            case _: Cypher25Parser.WhenAdvancedComparisonContext =>
+              advancedPredicate(lhs, child(whenCtx, 0))
             case _ => throw new IllegalStateException(s"Unexpected context $whenCtx")
           }
-          buffer.addOne(newWhen -> thenExp)
+          buffer.addOne(newWhen -> uniqueThen)
         case _ =>
       }
       i += 1
@@ -615,6 +591,28 @@ trait ExpressionBuilder extends Cypher25ParserListener {
       innerPredicate = if (ctx.whereExp != null) Some(ctx.whereExp.ast()) else None,
       extractExpression = if (ctx.barExp != null) Some(ctx.barExp.ast()) else None
     )(pos(ctx))
+  }
+
+  final override def exitMapComprehension(ctx: Cypher25Parser.MapComprehensionContext): Unit = {
+    ctx.ast = ctx match {
+      case c: Cypher25Parser.MapComprehensionForMapContext =>
+        MapEntriesComprehension(
+          keyVariable = c.keyVar.ast(),
+          valueVariable = c.valueVar.ast(),
+          expression = c.expression(0).ast(),
+          innerPredicate = if (c.whereExp != null) Some(c.whereExp.ast()) else None,
+          keyExpression = c.keyExp.ast(),
+          valueExpression = c.valueExp.ast()
+        )(pos(ctx))
+      case c: Cypher25Parser.MapComprehensionForListContext =>
+        MapComprehension(
+          variable = c.variable().ast(),
+          expression = c.expression(0).ast(),
+          innerPredicate = if (c.whereExp != null) Some(c.whereExp.ast()) else None,
+          keyExpression = c.keyExp.ast(),
+          valueExpression = c.valueExp.ast()
+        )(pos(ctx))
+    }
   }
 
   final override def exitPatternComprehension(
@@ -668,6 +666,48 @@ trait ExpressionBuilder extends Cypher25ParserListener {
     ctx.ast = ReduceExpression(ReduceScope(accumulator, variable, expression)(pos(ctx)), init, collection)(pos(ctx))
   }
 
+  final override def exitAllReduceExpression(
+    ctx: Cypher25Parser.AllReduceExpressionContext
+  ): Unit = {
+    ctx.ast = ctxChild(ctx, 0).ast
+  }
+
+  final override def exitAllReduceExpressionValidArguments(
+    ctx: Cypher25Parser.AllReduceExpressionValidArgumentsContext
+  ): Unit = {
+    val accumulator = ctxChild(ctx, 2).ast[LogicalVariable]()
+    val init = ctxChild(ctx, 4).ast[Expression]()
+    val reductionStepVariable = ctxChild(ctx, 6).ast[LogicalVariable]()
+    val list = ctxChild(ctx, 8).ast[Expression]()
+    val reductionStep = ctxChild(ctx, 10).ast[Expression]()
+    val predicate = ctxChild(ctx, 12).ast[Expression]()
+    ctx.ast = AllReducePredicate(
+      accumulator = accumulator,
+      init = init,
+      reductionStepVariable = reductionStepVariable,
+      list = list,
+      reductionStep = reductionStep,
+      predicate = predicate,
+      pos = pos(ctx)
+    )
+  }
+
+  // Capture an invalid syntax for the all reduce expression
+  // and return a FunctionInvocation.
+  // This FunctionInvocation will return a meaningful error message during semantic analysis.
+  final override def exitAllReduceExpressionInvalidArguments(
+    ctx: Cypher25Parser.AllReduceExpressionInvalidArgumentsContext
+  ): Unit = {
+    val functionName = FunctionName(AllReduce.name)(pos(ctx))
+    ctx.ast = FunctionInvocation(
+      functionName,
+      distinct = false,
+      astSeq[Expression](ctx.expression()),
+      ArgumentUnordered,
+      maybeLocalFunction = None
+    )(functionName.namespace.position)
+  }
+
   final override def exitListItemsPredicate(ctx: Cypher25Parser.ListItemsPredicateContext): Unit = {
     val p = pos(ctx)
     val variable = ctx.variable().ast[Variable]()
@@ -688,7 +728,12 @@ trait ExpressionBuilder extends Cypher25ParserListener {
   final override def exitParenthesizedExpression(
     ctx: Cypher25Parser.ParenthesizedExpressionContext
   ): Unit = {
-    ctx.ast = ctxChild(ctx, 1).ast
+    ctx.ast = ctxChild(ctx, 1).ast match {
+      case lep: LabelExpressionPredicate =>
+        lep.copy()(lep.position, isParenthesized = true, lep.isPostfix, lep.hasLabeledKeyword, lep.hasNotKeyword)
+      case v: Variable if !v.isIsolated => v.copy()(v.position, isIsolated = true)
+      case x                            => x
+    }
   }
 
   final override def exitMapProjection(
@@ -728,18 +773,26 @@ trait ExpressionBuilder extends Cypher25ParserListener {
     ctx: Cypher25Parser.ExistsExpressionContext
   ): Unit = {
     ctx.ast = ExistsExpression(subqueryBuilder(
-      ctx.regularQuery(),
+      ctx.queryWithLocalDefinitions(),
       ctx.matchMode(),
       ctx.whereClause(),
       ctx.patternList()
     ))(pos(ctx), None, None)
   }
 
+  final override def exitPropertyExistsPredicate(
+    ctx: Cypher25Parser.PropertyExistsPredicateContext
+  ): Unit = {
+    val element = ctx.variable().ast[LogicalVariable]()
+    val propertyKey = ctx.propertyKeyName().ast[PropertyKeyName]()
+    ctx.ast = PropertyExists(element, propertyKey)(pos(ctx))
+  }
+
   final override def exitCountExpression(
     ctx: Cypher25Parser.CountExpressionContext
   ): Unit = {
     ctx.ast = CountExpression(subqueryBuilder(
-      ctx.regularQuery(),
+      ctx.queryWithLocalDefinitions(),
       ctx.matchMode(),
       ctx.whereClause(),
       ctx.patternList()
@@ -747,7 +800,7 @@ trait ExpressionBuilder extends Cypher25ParserListener {
   }
 
   private def subqueryBuilder(
-    regQuery: Cypher25Parser.RegularQueryContext,
+    regQuery: Cypher25Parser.QueryWithLocalDefinitionsContext,
     matchMode: Cypher25Parser.MatchModeContext,
     whereClause: Cypher25Parser.WhereClauseContext,
     patternList: Cypher25Parser.PatternListContext
@@ -755,15 +808,15 @@ trait ExpressionBuilder extends Cypher25ParserListener {
     if (regQuery != null) regQuery.ast[Query]()
     else {
       val patternParts = patternList.ast[ArraySeq[PatternPart]]().map {
-        case p: PatternPartWithSelector => p
-        case p: NonPrefixedPatternPart  => PatternPartWithSelector(PatternPart.AllPaths()(p.position), p)
+        case p: PrefixedPatternPart    => p
+        case p: NonPrefixedPatternPart => PrefixedPatternPart(PatternPart.AllPaths()(p.position), p)
       }
       val patternPos = patternParts.head.position
       val where = astOpt[Where](whereClause)
       val finalMatchMode = astOpt(matchMode, MatchMode.default(patternPos))
       SingleQuery(
         ArraySeq(
-          Match(optional = false, finalMatchMode, Pattern.ForMatch(patternParts)(patternPos), Seq.empty, where)(
+          Match(optional = false, finalMatchMode, Pattern.ForMatch(patternParts)(patternPos), Seq.empty, where, None)(
             patternPos
           )
         )
@@ -775,7 +828,7 @@ trait ExpressionBuilder extends Cypher25ParserListener {
   final override def exitCollectExpression(
     ctx: Cypher25Parser.CollectExpressionContext
   ): Unit = {
-    ctx.ast = CollectExpression(ctx.regularQuery().ast[Query]())(pos(ctx), None, None)
+    ctx.ast = CollectExpression(ctx.queryWithLocalDefinitions().ast[Query]())(pos(ctx), None, None)
   }
 
   final override def exitPropertyKeyName(ctx: Cypher25Parser.PropertyKeyNameContext): Unit = {
@@ -814,7 +867,8 @@ trait ExpressionBuilder extends Cypher25ParserListener {
       distinct,
       expressions,
       ArgumentUnordered,
-      ctx.parent.isInstanceOf[Cypher25Parser.GraphReferenceContext]
+      ctx.parent.isInstanceOf[Cypher25Parser.GraphReferenceContext],
+      maybeLocalFunction = None
     )(functionName.namespace.position)
   }
 
@@ -842,7 +896,7 @@ trait ExpressionBuilder extends Cypher25ParserListener {
   final override def exitVariable(
     ctx: Cypher25Parser.VariableContext
   ): Unit = {
-    ctx.ast = Variable(name = ctx.symbolicNameString().ast())(pos(ctx), Variable.isIsolatedDefault)
+    ctx.ast = ctxChild(ctx, 0).ast
   }
 
   final override def exitType(ctx: Cypher25Parser.TypeContext): Unit = {
@@ -870,75 +924,110 @@ trait ExpressionBuilder extends Cypher25ParserListener {
     val firstToken = nodeChild(ctx, 0).getSymbol.getType
     ctx.ast = size match {
       case 1 => firstToken match {
-          case Cypher25Parser.NOTHING                            => NothingType()(p)
-          case Cypher25Parser.NULL                               => NullType()(p)
-          case Cypher25Parser.BOOL | Cypher25Parser.BOOLEAN      => BooleanType(true)(p)
-          case Cypher25Parser.STRING | Cypher25Parser.VARCHAR    => StringType(true)(p)
-          case Cypher25Parser.INT | Cypher25Parser.INTEGER       => IntegerType(true)(p)
-          case Cypher25Parser.FLOAT                              => FloatType(true)(p)
-          case Cypher25Parser.DATE                               => DateType(true)(p)
-          case Cypher25Parser.DURATION                           => DurationType(true)(p)
-          case Cypher25Parser.POINT                              => PointType(true)(p)
-          case Cypher25Parser.NODE | Cypher25Parser.VERTEX       => NodeType(true)(p)
-          case Cypher25Parser.RELATIONSHIP | Cypher25Parser.EDGE => RelationshipType(true)(p)
-          case Cypher25Parser.MAP                                => MapType(true)(p)
-          case Cypher25Parser.PATH | Cypher25Parser.PATHS        => PathType(true)(p)
-          case Cypher25Parser.ANY                                => AnyType(true)(p)
+          case Cypher25Parser.NOTHING                         => NothingType()(p)
+          case Cypher25Parser.NULL                            => NullType()(p)
+          case Cypher25Parser.BOOL | Cypher25Parser.BOOLEAN   => BooleanType(isNullable = true)(p)
+          case Cypher25Parser.STRING | Cypher25Parser.VARCHAR => StringType(isNullable = true)(p)
+          case Cypher25Parser.INT | Cypher25Parser.INTEGER | Cypher25Parser.INT64 | Cypher25Parser.INTEGER64 =>
+            IntegerType(isNullable = true)(p)
+          case Cypher25Parser.FLOAT | Cypher25Parser.FLOAT64     => FloatType(isNullable = true)(p)
+          case Cypher25Parser.DATE                               => DateType(isNullable = true)(p)
+          case Cypher25Parser.DURATION                           => DurationType(isNullable = true)(p)
+          case Cypher25Parser.POINT                              => PointType(isNullable = true)(p)
+          case Cypher25Parser.NODE | Cypher25Parser.VERTEX       => NodeType(isNullable = true)(p)
+          case Cypher25Parser.RELATIONSHIP | Cypher25Parser.EDGE => RelationshipType(isNullable = true)(p)
+          case Cypher25Parser.MAP                                => MapType(isNullable = true)(p)
+          case Cypher25Parser.PATH | Cypher25Parser.PATHS        => PathType(isNullable = true)(p)
+          case Cypher25Parser.ANY                                => AnyType(isNullable = true)(p)
+          case Cypher25Parser.VECTOR                             => VectorType(None, None, isNullable = true)(p)
+          case Cypher25Parser.UUID                               => UUIDType(isNullable = true)(p)
           case _ => throw new IllegalStateException(s"Unexpected context $ctx (first token type $firstToken)")
         }
       case 2 => firstToken match {
-          case Cypher25Parser.SIGNED   => IntegerType(true)(p)
-          case Cypher25Parser.PROPERTY => PropertyValueType(true)(p)
+          case Cypher25Parser.SIGNED   => IntegerType(isNullable = true)(p)
+          case Cypher25Parser.PROPERTY => PropertyValueType(isNullable = true)(p)
           case Cypher25Parser.LOCAL => nodeChild(ctx, 1).getSymbol.getType match {
-              case Cypher25Parser.TIME     => LocalTimeType(true)(p)
-              case Cypher25Parser.DATETIME => LocalDateTimeType(true)(p)
+              case Cypher25Parser.TIME     => LocalTimeType(isNullable = true)(p)
+              case Cypher25Parser.DATETIME => LocalDateTimeType(isNullable = true)(p)
               case _ => throw new IllegalStateException(s"Unexpected context $ctx (first token type $firstToken)")
             }
           case Cypher25Parser.ZONED => nodeChild(ctx, 1).getSymbol.getType match {
-              case Cypher25Parser.TIME     => ZonedTimeType(true)(p)
-              case Cypher25Parser.DATETIME => ZonedDateTimeType(true)(p)
+              case Cypher25Parser.TIME     => ZonedTimeType(isNullable = true)(p)
+              case Cypher25Parser.DATETIME => ZonedDateTimeType(isNullable = true)(p)
               case _ => throw new IllegalStateException(s"Unexpected context $ctx (first token type $firstToken)")
             }
           case Cypher25Parser.ANY => nodeChild(ctx, 1).getSymbol.getType match {
-              case Cypher25Parser.NODE | Cypher25Parser.VERTEX       => NodeType(true)(p)
-              case Cypher25Parser.RELATIONSHIP | Cypher25Parser.EDGE => RelationshipType(true)(p)
-              case Cypher25Parser.MAP                                => MapType(true)(p)
-              case Cypher25Parser.VALUE                              => AnyType(true)(p)
+              case Cypher25Parser.NODE | Cypher25Parser.VERTEX       => NodeType(isNullable = true)(p)
+              case Cypher25Parser.RELATIONSHIP | Cypher25Parser.EDGE => RelationshipType(isNullable = true)(p)
+              case Cypher25Parser.MAP                                => MapType(isNullable = true)(p)
+              case Cypher25Parser.VALUE                              => AnyType(isNullable = true)(p)
               case _ => throw new IllegalStateException(s"Unexpected context $ctx (first token type $firstToken)")
             }
           case _ => throw new IllegalStateException(s"Unexpected context $ctx (first token type $firstToken)")
         }
       case 3 => firstToken match {
           case Cypher25Parser.TIME => nodeChild(ctx, 1).getSymbol.getType match {
-              case Cypher25Parser.WITH    => ZonedTimeType(true)(p)
-              case Cypher25Parser.WITHOUT => LocalTimeType(true)(p)
+              case Cypher25Parser.WITH    => ZonedTimeType(isNullable = true)(p)
+              case Cypher25Parser.WITHOUT => LocalTimeType(isNullable = true)(p)
               case _ => throw new IllegalStateException(s"Unexpected context $ctx (first token type $firstToken)")
             }
           case Cypher25Parser.TIMESTAMP => nodeChild(ctx, 1).getSymbol.getType match {
-              case Cypher25Parser.WITH    => ZonedDateTimeType(true)(p)
-              case Cypher25Parser.WITHOUT => LocalDateTimeType(true)(p)
+              case Cypher25Parser.WITH    => ZonedDateTimeType(isNullable = true)(p)
+              case Cypher25Parser.WITHOUT => LocalDateTimeType(isNullable = true)(p)
               case _ => throw new IllegalStateException(s"Unexpected context $ctx (first token type $firstToken)")
             }
           case Cypher25Parser.ANY => nodeChild(ctx, 1).getSymbol.getType match {
-              case Cypher25Parser.PROPERTY => PropertyValueType(true)(p)
+              case Cypher25Parser.PROPERTY => PropertyValueType(isNullable = true)(p)
               case _ => throw new IllegalStateException(s"Unexpected context $ctx (first token type $firstToken)")
             }
           case _ => throw new IllegalStateException(s"Unexpected context $ctx (first token type $firstToken)")
         }
       case 4 => firstToken match {
+          case Cypher25Parser.VECTOR => vectorType(ctx, p)
           case Cypher25Parser.TIME => nodeChild(ctx, 1).getSymbol.getType match {
-              case Cypher25Parser.WITH    => ZonedTimeType(true)(p)
-              case Cypher25Parser.WITHOUT => LocalTimeType(true)(p)
+              case Cypher25Parser.WITH    => ZonedTimeType(isNullable = true)(p)
+              case Cypher25Parser.WITHOUT => LocalTimeType(isNullable = true)(p)
               case _ => throw new IllegalStateException(s"Unexpected context $ctx (first token type $firstToken)")
             }
           case Cypher25Parser.TIMESTAMP => nodeChild(ctx, 1).getSymbol.getType match {
-              case Cypher25Parser.WITH    => ZonedDateTimeType(true)(p)
-              case Cypher25Parser.WITHOUT => LocalDateTimeType(true)(p)
+              case Cypher25Parser.WITH    => ZonedDateTimeType(isNullable = true)(p)
+              case Cypher25Parser.WITHOUT => LocalDateTimeType(isNullable = true)(p)
               case _ => throw new IllegalStateException(s"Unexpected context $ctx (first token type $firstToken)")
             }
-          case Cypher25Parser.LIST | Cypher25Parser.ARRAY => ListType(ctx.`type`().ast(), true)(p)
+          case Cypher25Parser.LIST | Cypher25Parser.ARRAY => ListType(ctx.`type`().ast(), isNullable = true)(p)
           case Cypher25Parser.ANY =>
-            AssertMacros.checkOnlyWhenAssertionsAreEnabled(ctx.LT() != null && ctx.GT() != null)
+            AssertMacros3.checkOnlyWhenAssertionsAreEnabled(ctx.LT() != null && ctx.GT() != null)
+            ctx.`type`().ast[CypherType]() match {
+              case du: ClosedDynamicUnionType => du
+              case other                      => ClosedDynamicUnionType(Set(other))(other.position)
+            }
+          case _ => throw new IllegalStateException(s"Unexpected context $ctx (first token type $firstToken)")
+        }
+      case 5 => firstToken match {
+          case Cypher25Parser.LIST | Cypher25Parser.ARRAY => ListType(ctx.`type`().ast(), isNullable = true)(p)
+          case Cypher25Parser.ANY =>
+            AssertMacros3.checkOnlyWhenAssertionsAreEnabled(ctx.LT() != null && ctx.GT() != null)
+            ctx.`type`().ast[CypherType]() match {
+              case du: ClosedDynamicUnionType => du
+              case other                      => ClosedDynamicUnionType(Set(other))(other.position)
+            }
+          case _ => throw new IllegalStateException(s"Unexpected context $ctx (first token type $firstToken)")
+        }
+      case 6 => firstToken match {
+          case Cypher25Parser.VECTOR => vectorType(ctx, p)
+          case Cypher25Parser.ANY =>
+            AssertMacros3.checkOnlyWhenAssertionsAreEnabled(ctx.LT() != null && ctx.GT() != null)
+            ctx.`type`().ast[CypherType]() match {
+              case du: ClosedDynamicUnionType => du
+              case other                      => ClosedDynamicUnionType(Set(other))(other.position)
+            }
+          case _ => throw new IllegalStateException(s"Unexpected context $ctx (first token type $firstToken)")
+        }
+      case 7 => firstToken match {
+          case Cypher25Parser.VECTOR                      => vectorType(ctx, p)
+          case Cypher25Parser.LIST | Cypher25Parser.ARRAY => ListType(ctx.`type`().ast(), isNullable = true)(p)
+          case Cypher25Parser.ANY =>
+            AssertMacros3.checkOnlyWhenAssertionsAreEnabled(ctx.LT() != null && ctx.GT() != null)
             ctx.`type`().ast[CypherType]() match {
               case du: ClosedDynamicUnionType => du
               case other                      => ClosedDynamicUnionType(Set(other))(other.position)
@@ -946,9 +1035,9 @@ trait ExpressionBuilder extends Cypher25ParserListener {
           case _ => throw new IllegalStateException(s"Unexpected context $ctx (first token type $firstToken)")
         }
       case _ => firstToken match {
-          case Cypher25Parser.LIST | Cypher25Parser.ARRAY => ListType(ctx.`type`().ast(), true)(p)
+          case Cypher25Parser.LIST | Cypher25Parser.ARRAY => ListType(ctx.`type`().ast(), isNullable = true)(p)
           case Cypher25Parser.ANY =>
-            AssertMacros.checkOnlyWhenAssertionsAreEnabled(ctx.LT() != null && ctx.GT() != null)
+            AssertMacros3.checkOnlyWhenAssertionsAreEnabled(ctx.LT() != null && ctx.GT() != null)
             ctx.`type`().ast[CypherType]() match {
               case du: ClosedDynamicUnionType => du
               case other                      => ClosedDynamicUnionType(Set(other))(other.position)
@@ -961,12 +1050,48 @@ trait ExpressionBuilder extends Cypher25ParserListener {
 
   final override def exitTypeNullability(ctx: Cypher25Parser.TypeNullabilityContext): Unit = {}
 
+  final override def exitVectorCoordinateType(ctx: Cypher25Parser.VectorCoordinateTypeContext): Unit = {
+    // We always parse to IS NOT NULL, as vector inner types may never be null
+    val p = pos(ctx)
+    val firstToken = nodeChild(ctx, 0).getSymbol.getType
+    val cypherType: CypherType = firstToken match {
+      case Cypher25Parser.INTEGER | Cypher25Parser.INT | Cypher25Parser.INTEGER64 | Cypher25Parser.INT64 =>
+        IntegerType(isNullable = false)(p)
+      case Cypher25Parser.INTEGER32 | Cypher25Parser.INT32 => Integer32Type(isNullable = false)(p)
+      case Cypher25Parser.INTEGER16 | Cypher25Parser.INT16 => Integer16Type(isNullable = false)(p)
+      case Cypher25Parser.INTEGER8 | Cypher25Parser.INT8   => Integer8Type(isNullable = false)(p)
+      case Cypher25Parser.FLOAT | Cypher25Parser.FLOAT64   => FloatType(isNullable = false)(p)
+      case Cypher25Parser.FLOAT32                          => Float32Type(isNullable = false)(p)
+      case Cypher25Parser.SIGNED                           => IntegerType(isNullable = false)(p)
+      case _ => throw new IllegalStateException(s"Unexpected context $ctx (first token type $firstToken)")
+    }
+    ctx.ast = cypherType
+  }
+
   final override def exitTypeListSuffix(ctx: Cypher25Parser.TypeListSuffixContext): Unit = {
     ctx.ast = ctx.typeNullability() == null
   }
 
   final override def exitMap(ctx: Cypher25Parser.MapContext): Unit =
     ctx.ast = MapExpression(astPairs(ctx.propertyKeyName(), ctx.expression()))(pos(ctx))
+
+  final override def exitSymbolicVariableNameString(
+    ctx: Cypher25Parser.SymbolicVariableNameStringContext
+  ): Unit = {
+    ctx.ast = ctxChild(ctx, 0).ast
+  }
+
+  final override def exitEscapedSymbolicVariableNameString(
+    ctx: Cypher25Parser.EscapedSymbolicVariableNameStringContext
+  ): Unit = {
+    ctx.ast = Variable(name = astChild[String](ctx, 0))(pos(ctx), isIsolated = true)
+  }
+
+  final override def exitUnescapedSymbolicVariableNameString(
+    ctx: Cypher25Parser.UnescapedSymbolicVariableNameStringContext
+  ): Unit = {
+    ctx.ast = Variable(name = astChild[String](ctx, 0))(pos(ctx), isIsolated = false)
+  }
 
   final override def exitSymbolicNameString(
     ctx: Cypher25Parser.SymbolicNameStringContext
@@ -982,24 +1107,10 @@ trait ExpressionBuilder extends Cypher25ParserListener {
   protected def notificationLogger: Option[InternalNotificationLogger]
 
   final override def exitUnescapedSymbolicNameString(ctx: Cypher25Parser.UnescapedSymbolicNameStringContext): Unit = {
-    ctx.ast = ctx.getText
-  }
-
-  final override def exitSymbolicLabelNameString(
-    ctx: Cypher25Parser.SymbolicLabelNameStringContext
-  ): Unit = {
     ctx.ast = ctxChild(ctx, 0).ast
   }
 
-  final override def exitUnescapedLabelSymbolicNameString(
-    ctx: Cypher25Parser.UnescapedLabelSymbolicNameStringContext
-  ): Unit = {
-    ctx.ast = ctxChild(ctx, 0).ast
-  }
-
-  final override def exitUnescapedLabelSymbolicNameString_(
-    ctx: Cypher25Parser.UnescapedLabelSymbolicNameString_Context
-  ): Unit = {
+  final override def exitUnescapedSymbolicNameString_(ctx: Cypher25Parser.UnescapedSymbolicNameString_Context): Unit = {
     ctx.ast = ctx.getText
   }
 
@@ -1014,8 +1125,68 @@ trait ExpressionBuilder extends Cypher25ParserListener {
       FunctionInvocation(
         FunctionName("normalize")(pos(ctx)),
         distinct = false,
-        IndexedSeq(expression, StringLiteral(normalForm)(pos(ctx).withInputLength(0)))
+        IndexedSeq(expression, StringLiteral(normalForm)(pos(ctx).withInputLength(0))),
+        maybeLocalFunction = None
       )(pos(ctx))
+  }
+
+  final override def exitVectorFunction(
+    ctx: Cypher25Parser.VectorFunctionContext
+  ): Unit = {
+    val expression = ctx.vectorValue.ast[Expression]()
+    val dimension = ctx.dimension.ast[Expression]()
+
+    ctx.ast =
+      VectorValueConstructor(
+        expression,
+        dimension,
+        ctx.vectorCoordinateType().ast[CypherType]()
+      )(pos(ctx))
+  }
+
+  final override def exitVectorDistanceFunction(ctx: Cypher25Parser.VectorDistanceFunctionContext): Unit = {
+    val vector1 = ctx.vector1.ast[Expression]()
+    val vector2 = ctx.vector2.ast[Expression]()
+    val distanceMetric = ctx.vectorDistanceMetric().ast[VectorDistanceMetric]().metricName
+
+    ctx.ast =
+      FunctionInvocation(
+        FunctionName("vector_distance")(pos(ctx)),
+        distinct = false,
+        IndexedSeq(vector1, vector2, StringLiteral(distanceMetric)(pos(ctx).withInputLength(0))),
+        maybeLocalFunction = None
+      )(pos(ctx))
+  }
+
+  final override def exitVectorNormFunction(ctx: Cypher25Parser.VectorNormFunctionContext): Unit = {
+    val vector = ctx.vectorValue.ast[Expression]()
+    val distanceMetric = ctx.vectorNormDistanceMetric().ast[VectorDistanceMetric]().metricName
+
+    ctx.ast =
+      FunctionInvocation(
+        FunctionName("vector_norm")(pos(ctx)),
+        distinct = false,
+        IndexedSeq(vector, StringLiteral(distanceMetric)(pos(ctx).withInputLength(0))),
+        maybeLocalFunction = None
+      )(pos(ctx))
+  }
+
+  final override def exitVectorDistanceMetric(ctx: Cypher25Parser.VectorDistanceMetricContext): Unit = {
+    ctx.ast = child[TerminalNode](ctx, 0).getSymbol.getType match {
+      case Cypher25Parser.EUCLIDEAN         => EuclideanVectorDistanceMetric
+      case Cypher25Parser.EUCLIDEAN_SQUARED => EuclideanSquaredVectorDistanceMetric
+      case Cypher25Parser.MANHATTAN         => ManhattanVectorDistanceMetric
+      case Cypher25Parser.COSINE            => CosineVectorDistanceMetric
+      case Cypher25Parser.DOT_METRIC        => DotVectorDistanceMetric
+      case Cypher25Parser.HAMMING           => HammingVectorDistanceMetric
+    }
+  }
+
+  final override def exitVectorNormDistanceMetric(ctx: Cypher25Parser.VectorNormDistanceMetricContext): Unit = {
+    ctx.ast = child[TerminalNode](ctx, 0).getSymbol.getType match {
+      case Cypher25Parser.EUCLIDEAN => EuclideanVectorDistanceMetric
+      case Cypher25Parser.MANHATTAN => ManhattanVectorDistanceMetric
+    }
   }
 
   final override def exitTrimFunction(
@@ -1034,7 +1205,8 @@ trait ExpressionBuilder extends Cypher25ParserListener {
         args = IndexedSeq(
           StringLiteral(trimSpecification)(pos(ctx).withInputLength(0)),
           trimSource
-        )
+        ),
+        maybeLocalFunction = None
       )(
         pos(ctx)
       )
@@ -1046,10 +1218,91 @@ trait ExpressionBuilder extends Cypher25ParserListener {
           StringLiteral(trimSpecification)(pos(ctx).withInputLength(0)),
           trimCharacterString.get,
           trimSource
-        )
+        ),
+        maybeLocalFunction = None
       )(
         pos(ctx)
       )
     }
+  }
+
+  override def exitInterpolatedStringLiteral(ctx: Cypher25Parser.InterpolatedStringLiteralContext): Unit = {
+    val collectedInterpolations =
+      if (ctx.interpolatedStringLiteralSingle() != null)
+        ctx.interpolatedStringLiteralSingle().ast[StringInterpolation]()
+      else ctx.interpolatedStringLiteralDouble().ast[StringInterpolation]()
+
+    ctx.ast = collectedInterpolations.getResultingExpression
+  }
+
+  override def exitInterpolatedStringLiteralSingle(ctx: Cypher25Parser.InterpolatedStringLiteralSingleContext): Unit = {
+    ctx.ast = buildInterpolatedString(astSeq[StringInterpolation](ctx.interpolatedElementSingle()), pos(ctx))
+  }
+
+  override def exitInterpolatedElementSingle(ctx: Cypher25Parser.InterpolatedElementSingleContext): Unit = {
+    ctx.ast = if (ctx.INTERPOLATED_TEXT_SINGLE() != null)
+      StringInterpolation(
+        Seq(buildStringPart(ctx.getText, pos(ctx.start), prefixLength = 0, suffixLength = 0)),
+        Seq.empty
+      )(pos(ctx))
+    else
+      StringInterpolation(
+        Seq.empty,
+        Seq(ctx.expression().ast[Expression]())
+      )(pos(ctx))
+  }
+
+  override def exitInterpolatedStringLiteralDouble(ctx: Cypher25Parser.InterpolatedStringLiteralDoubleContext): Unit = {
+    ctx.ast = buildInterpolatedString(astSeq[StringInterpolation](ctx.interpolatedElementDouble()), pos(ctx))
+  }
+
+  override def exitInterpolatedElementDouble(ctx: Cypher25Parser.InterpolatedElementDoubleContext): Unit = {
+    ctx.ast = if (ctx.INTERPOLATED_TEXT_DOUBLE() != null)
+      StringInterpolation(
+        Seq(buildStringPart(ctx.getText, pos(ctx.start), prefixLength = 0, suffixLength = 0)),
+        Seq.empty
+      )(pos(ctx))
+    else
+      StringInterpolation(
+        Seq.empty,
+        Seq(ctx.expression().ast[Expression]())
+      )(pos(ctx))
+  }
+
+  private def buildInterpolatedString(
+    elements: Seq[StringInterpolation],
+    position: InputPosition
+  ): StringInterpolation = {
+    val stringParts = ArrayBuffer.empty[Expression]
+    val expressions = ArrayBuffer.empty[Expression]
+    val emptyStringPart = StringLiteral("")(position.withInputLength(0))
+    var lastWasExpression = false
+
+    elements.foreach { element =>
+      if (element.expressions.isEmpty) {
+        stringParts += element.stringParts.head
+        lastWasExpression = false
+      } else {
+        if (lastWasExpression || stringParts.isEmpty) stringParts += emptyStringPart
+        expressions += element.expressions.head
+        lastWasExpression = true
+      }
+    }
+    if (lastWasExpression || stringParts.isEmpty) stringParts += emptyStringPart
+
+    StringInterpolation(stringParts.toSeq, expressions.toSeq)(position)
+  }
+
+  private def buildStringPart(
+    tokenText: String,
+    tokenPos: InputPosition,
+    prefixLength: Int,
+    suffixLength: Int
+  ): StringLiteral = {
+    val content = tokenText.substring(prefixLength, tokenText.length - suffixLength)
+    val contentStart = InputPosition(tokenPos.offset + prefixLength, tokenPos.line, tokenPos.column + prefixLength)
+    StringLiteral(cypherStringToString(content, tokenPos, exceptionFactory, Set('{', '}')))(
+      contentStart.withInputLength(content.length)
+    )
   }
 }

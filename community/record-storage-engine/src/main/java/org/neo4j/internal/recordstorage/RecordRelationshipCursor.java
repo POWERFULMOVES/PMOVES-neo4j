@@ -102,6 +102,8 @@ abstract class RecordRelationshipCursor extends RelationshipRecord
                 LongReference.NULL,
                 LongReference.NULL,
                 false,
+                false,
+                false,
                 false);
     }
 
@@ -127,10 +129,5 @@ abstract class RecordRelationshipCursor extends RelationshipRecord
 
     long relationshipHighMark() {
         return relationshipStore.getHighestPossibleIdInUse(cursorContext);
-    }
-
-    @Override
-    public void setForceLoad() {
-        loadMode = RecordLoadOverride.FORCE;
     }
 }

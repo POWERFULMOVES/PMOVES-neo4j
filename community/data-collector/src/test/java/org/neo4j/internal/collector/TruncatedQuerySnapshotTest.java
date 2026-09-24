@@ -19,8 +19,7 @@
  */
 package org.neo4j.internal.collector;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.neo4j.values.virtual.VirtualValues.nodeValue;
 import static org.neo4j.values.virtual.VirtualValues.relationshipValue;
 
@@ -44,24 +43,24 @@ class TruncatedQuerySnapshotTest {
     @Test
     void shouldTruncateNode() {
         // when
-        TruncatedQuerySnapshot x = new TruncatedQuerySnapshot(null, "", null, map("n", NODE), -1L, -1L, -1L, 100);
+        TruncatedQuerySnapshot x = new TruncatedQuerySnapshot(null, "", null, map("n", NODE), -1L, -1L, -1L, 100, null);
 
         // then
         AnyValue truncatedNode = x.queryParameters.get("n");
-        assertTrue(truncatedNode instanceof NodeIdReference);
-        assertEquals(NODE.id(), ((NodeIdReference) truncatedNode).id());
+        assertThat(truncatedNode).isInstanceOf(NodeIdReference.class);
+        assertThat(((NodeIdReference) truncatedNode).id()).isEqualTo(NODE.id());
     }
 
     @Test
     void shouldTruncateRelationship() {
         // when
         TruncatedQuerySnapshot x =
-                new TruncatedQuerySnapshot(null, "", null, map("r", RELATIONSHIP), -1L, -1L, -1L, 100);
+                new TruncatedQuerySnapshot(null, "", null, map("r", RELATIONSHIP), -1L, -1L, -1L, 100, null);
 
         // then
         AnyValue truncatedRelationship = x.queryParameters.get("r");
-        assertTrue(truncatedRelationship instanceof RelationshipReference);
-        assertEquals(RELATIONSHIP.id(), ((RelationshipReference) truncatedRelationship).id());
+        assertThat(truncatedRelationship).isInstanceOf(RelationshipReference.class);
+        assertThat(((RelationshipReference) truncatedRelationship).id()).isEqualTo(RELATIONSHIP.id());
     }
 
     private static MapValue map(String key, AnyValue value) {

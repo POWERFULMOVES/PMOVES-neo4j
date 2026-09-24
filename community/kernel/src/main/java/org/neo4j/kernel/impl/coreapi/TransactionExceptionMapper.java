@@ -19,7 +19,10 @@
  */
 package org.neo4j.kernel.impl.coreapi;
 
+import org.neo4j.logging.Log;
+import org.neo4j.monitoring.ExceptionHandlerService;
+
 @FunctionalInterface
 public interface TransactionExceptionMapper {
-    RuntimeException mapException(Exception e);
+    RuntimeException mapException(Exception e, Log log, ExceptionHandlerService exceptionHandlerService);
 }

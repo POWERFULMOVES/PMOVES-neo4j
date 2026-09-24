@@ -26,10 +26,12 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.function.Function;
 import java.util.function.Supplier;
-import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import org.neo4j.cypher.internal.CypherVersion;
 import org.neo4j.graphdb.ExecutionPlanDescription;
 import org.neo4j.graphdb.InputPosition;
 import org.neo4j.internal.kernel.api.connectioninfo.ClientConnectionInfo;
+import org.neo4j.kernel.api.query.QueryObfuscator.ObfuscatedQuery;
 import org.neo4j.kernel.database.NamedDatabaseId;
 import org.neo4j.lock.ActiveLock;
 import org.neo4j.values.virtual.MapValue;
@@ -48,15 +50,15 @@ public class QuerySnapshot {
     private final long allocatedBytes;
     private final long pageHits;
     private final long pageFaults;
-    private final Optional<String> obfuscatedQueryText;
-    private final Optional<Function<InputPosition, InputPosition>> obfuscatePosition;
-    private final Optional<MapValue> obfuscatedQueryParameters;
+    private final QueryObfuscationState obfuscation;
+    private final CypherVersion queryLanguage;
     private final long transactionSequenceNumber;
     private final long parentTransactionSequenceNumber;
     private final String parentDbName;
     private final QueryCacheUsage executableQueryCacheUsage;
     private final QueryCacheUsage logicalPlanCacheUsage;
     private final int executionPlanCacheKeyHash;
+    private final ExtendedQueryStatistics queryStatistics;
 
     QuerySnapshot(
             ExecutingQuery query,
@@ -72,15 +74,15 @@ public class QuerySnapshot {
             List<ActiveLock> waitingLocks,
             long activeLockCount,
             long allocatedBytes,
-            Optional<String> obfuscatedQueryText,
-            Optional<Function<InputPosition, InputPosition>> obfuscatePosition,
-            Optional<MapValue> obfuscatedQueryParameters,
+            QueryObfuscationState obfuscation,
+            CypherVersion queryLanguage,
             long outerTransactionSequenceNumber,
             String parentDbName,
             long parentTransactionSequenceNumber,
             QueryCacheUsage executableQueryCacheUsage,
             QueryCacheUsage logicalPlanCacheUsage,
-            int executionPlanCacheKeyHash) {
+            int executionPlanCacheKeyHash,
+            ExtendedQueryStatistics queryStatistics) {
         this.query = query;
         this.compilerInfo = compilerInfo;
         this.pageHits = pageHits;
@@ -94,15 +96,15 @@ public class QuerySnapshot {
         this.waitingLocks = waitingLocks;
         this.activeLockCount = activeLockCount;
         this.allocatedBytes = allocatedBytes;
-        this.obfuscatedQueryText = obfuscatedQueryText;
-        this.obfuscatePosition = obfuscatePosition;
-        this.obfuscatedQueryParameters = obfuscatedQueryParameters;
+        this.obfuscation = obfuscation;
+        this.queryLanguage = queryLanguage;
         this.transactionSequenceNumber = outerTransactionSequenceNumber;
         this.parentDbName = parentDbName;
         this.parentTransactionSequenceNumber = parentTransactionSequenceNumber;
         this.executableQueryCacheUsage = executableQueryCacheUsage;
         this.logicalPlanCacheUsage = logicalPlanCacheUsage;
         this.executionPlanCacheKeyHash = executionPlanCacheKeyHash;
+        this.queryStatistics = queryStatistics;
     }
 
     public long internalQueryId() {
@@ -118,11 +120,21 @@ public class QuerySnapshot {
     }
 
     public Optional<String> obfuscatedQueryText() {
-        return obfuscatedQueryText;
+        return obfuscation == null
+                ? Optional.empty()
+                : ObfuscatedQuery.optional(obfuscation.defaultView()).map(ObfuscatedQuery::text);
+    }
+
+    public Optional<String> typedObfuscatedQueryText(QueryObfuscator.ObfuscatedLiteralRenderer renderer) {
+        return obfuscation == null
+                ? Optional.empty()
+                : ObfuscatedQuery.optional(obfuscation.typed(renderer)).map(ObfuscatedQuery::text);
     }
 
     public Optional<Function<InputPosition, InputPosition>> obfuscatePosition() {
-        return obfuscatePosition;
+        return obfuscation == null
+                ? Optional.empty()
+                : ObfuscatedQuery.optional(obfuscation.defaultView()).map(ObfuscatedQuery::positionMap);
     }
 
     public MapValue rawQueryParameters() {
@@ -130,7 +142,13 @@ public class QuerySnapshot {
     }
 
     public Optional<MapValue> obfuscatedQueryParameters() {
-        return obfuscatedQueryParameters;
+        return obfuscation == null
+                ? Optional.empty()
+                : ObfuscatedQuery.optional(obfuscation.defaultView()).map(ObfuscatedQuery::parameters);
+    }
+
+    public CypherVersion queryLanguage() {
+        return queryLanguage;
     }
 
     public Supplier<ExecutionPlanDescription> queryPlanSupplier() {
@@ -169,8 +187,16 @@ public class QuerySnapshot {
         return activeLockCount;
     }
 
+    public ExtendedQueryStatistics queryStatistics() {
+        return queryStatistics;
+    }
+
     public String planner() {
         return compilerInfo == null ? null : compilerInfo.planner();
+    }
+
+    public String plannerVersion() {
+        return compilerInfo == null ? null : compilerInfo.plannerVersion();
     }
 
     public String runtime() {
@@ -181,7 +207,14 @@ public class QuerySnapshot {
         if (compilerInfo == null) {
             return Collections.emptyList();
         }
-        return compilerInfo.indexes().stream().map(IndexUsage::asMap).collect(Collectors.toList());
+
+        return Stream.concat(
+                        Stream.concat(compilerInfo.indexes().stream(), compilerInfo.relationshipTypeIndexes().stream()),
+                        Stream.concat(
+                                compilerInfo.semanticNodeIndexes().stream(),
+                                compilerInfo.semanticRelationshipIndexes().stream()))
+                .map(IndexUsage::asMap)
+                .toList();
     }
 
     public String status() {

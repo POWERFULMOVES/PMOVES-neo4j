@@ -21,9 +21,13 @@ package org.neo4j.cypher.internal.runtime.interpreted
 
 import org.neo4j.configuration.Config
 import org.neo4j.csv.reader.CharReadable
+import org.neo4j.cypher.internal.planner.spi.CachingSchemaReadDecorator
+import org.neo4j.cypher.internal.runtime.QueryRuntimeConfig
 import org.neo4j.cypher.internal.runtime.QueryTransactionalContext
-import org.neo4j.cypher.internal.runtime.debug.DebugSupport
+import org.neo4j.cypher.internal.runtime.debug.events.Debug
 import org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands.TransactionId
+import org.neo4j.cypher.internal.runtime.interpreted.debug.events.TransactionalContext.CloseWithSelf
+import org.neo4j.cypher.internal.runtime.interpreted.debug.events.TransactionalContext.CreateParallelContext
 import org.neo4j.cypher.internal.util.CancellationChecker
 import org.neo4j.graphdb.Entity
 import org.neo4j.internal.kernel.api.CursorFactory
@@ -53,6 +57,7 @@ import org.neo4j.kernel.impl.query.QueryExecutionConfiguration
 import org.neo4j.kernel.impl.query.TransactionalContext
 import org.neo4j.kernel.impl.query.statistic.StatisticProvider
 import org.neo4j.kernel.impl.util.DefaultValueMapper
+import org.neo4j.memory.HeapEstimatorCacheConfig
 import org.neo4j.memory.MemoryTracker
 import org.neo4j.values.ElementIdMapper
 import org.neo4j.values.ValueMapper
@@ -71,7 +76,7 @@ abstract class TransactionalContextWrapper extends QueryTransactionalContext {
 
   def contextWithNewTransaction: TransactionalContextWrapper
 
-  def createParallelTransactionalContext(): ParallelTransactionalContextWrapper
+  def createParallelTransactionalContext(queryConfig: QueryRuntimeConfig): ParallelTransactionalContextWrapper
 
   def cancellationChecker: CancellationChecker
 
@@ -129,14 +134,7 @@ class SingleThreadedTransactionalContextWrapper(tc: TransactionalContext)
   override def assertTransactionOpen(): Unit = tc.kernelTransaction.assertOpen()
 
   override def close(): Unit = {
-    if (DebugSupport.DEBUG_TRANSACTIONAL_CONTEXT) {
-      DebugSupport.TRANSACTIONAL_CONTEXT.log(
-        "%s.close(): %s thread=%s",
-        this.getClass.getSimpleName,
-        this,
-        Thread.currentThread().getName
-      )
-    }
+    Debug.log(CloseWithSelf(this))
     tc.close()
   }
 
@@ -164,16 +162,10 @@ class SingleThreadedTransactionalContextWrapper(tc: TransactionalContext)
 
   override def validateSameDB[E <: Entity](entity: E): Unit = tc.transaction().validateSameDB(entity)
 
-  override def createParallelTransactionalContext(): ParallelTransactionalContextWrapper = {
-    val parallelContext = new ParallelTransactionalContextWrapper(kernelTransactionalContext)
-    if (DebugSupport.DEBUG_TRANSACTIONAL_CONTEXT) {
-      DebugSupport.TRANSACTIONAL_CONTEXT.log(
-        "%s.createParallelTransactionalContext(): %s thread=%s",
-        this.getClass.getSimpleName,
-        parallelContext,
-        Thread.currentThread().getName
-      )
-    }
+  override def createParallelTransactionalContext(queryConfig: QueryRuntimeConfig)
+    : ParallelTransactionalContextWrapper = {
+    val parallelContext = new ParallelTransactionalContextWrapper(kernelTransactionalContext, queryConfig)
+    Debug.log(CreateParallelContext(this.getClass, parallelContext))
     parallelContext
   }
 
@@ -205,15 +197,30 @@ class SingleThreadedTransactionalContextWrapper(tc: TransactionalContext)
 
   override def constituentTransactionFactory: ConstituentTransactionFactory = tc.constituentTransactionFactory()
 
-  override def createExecutionContextMemoryTracker(): MemoryTracker =
-    tc.kernelTransaction().createExecutionContextMemoryTracker()
+  override def createExecutionContextMemoryTracker(heapEstimatorCacheConfig: HeapEstimatorCacheConfig)
+    : MemoryTracker = {
+    tc.kernelTransaction().createExecutionContextMemoryTracker(heapEstimatorCacheConfig)
+  }
 
   override def queryExecutingConfiguration: QueryExecutionConfiguration = tc.queryExecutingConfiguration()
+
+  override def registerTransactionResource(resource: AutoCloseable): Unit =
+    tc.transaction().registerCloseableResource(resource)
+}
+
+class CachedSchemaSingleThreadedTransactionalContextWrapper(tc: TransactionalContext)
+    extends SingleThreadedTransactionalContextWrapper(tc) {
+
+  private val cachedSchemaRead = CachingSchemaReadDecorator(tc.kernelTransaction().schemaRead())
+
+  override def schemaRead: SchemaRead = cachedSchemaRead
 }
 
 object TransactionalContextWrapper {
 
-  def apply(tc: TransactionalContext): TransactionalContextWrapper = {
+  def apply(tc: TransactionalContext): TransactionalContextWrapper =
     new SingleThreadedTransactionalContextWrapper(tc)
-  }
+
+  def cachedSchemaWrapper(tc: TransactionalContext): TransactionalContextWrapper =
+    new CachedSchemaSingleThreadedTransactionalContextWrapper(tc)
 }

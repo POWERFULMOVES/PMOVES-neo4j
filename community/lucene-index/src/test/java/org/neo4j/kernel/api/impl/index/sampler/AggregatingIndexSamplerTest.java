@@ -34,24 +34,17 @@ class AggregatingIndexSamplerTest {
     @Test
     void samplePartitionedIndex() {
         List<IndexSampler> samplers = Arrays.asList(createSampler(1), createSampler(2));
-        AggregatingIndexSampler partitionedSampler = new AggregatingIndexSampler(samplers);
-
-        IndexSample sample = partitionedSampler.sampleIndex(NULL_CONTEXT, new AtomicBoolean());
-
-        assertEquals(new IndexSample(3, 3, 6), sample);
+        try (AggregatingIndexSampler partitionedSampler = new AggregatingIndexSampler(samplers)) {
+            IndexSample sample = partitionedSampler.sampleIndex(NULL_CONTEXT, new AtomicBoolean());
+            assertEquals(new IndexSample(3, 3, 6), sample);
+        }
     }
 
     private static IndexSampler createSampler(long value) {
         return new TestIndexSampler(value);
     }
 
-    private static class TestIndexSampler implements IndexSampler {
-        private final long value;
-
-        TestIndexSampler(long value) {
-            this.value = value;
-        }
-
+    private record TestIndexSampler(long value) implements IndexSampler {
         @Override
         public IndexSample sampleIndex(CursorContext cursorContext, AtomicBoolean stopped) {
             return new IndexSample(value, value, value * 2);

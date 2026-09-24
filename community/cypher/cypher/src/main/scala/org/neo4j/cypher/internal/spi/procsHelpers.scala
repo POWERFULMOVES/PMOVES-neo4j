@@ -27,7 +27,7 @@ import org.neo4j.cypher.internal.frontend.phases.ProcedureReadOnlyAccess
 import org.neo4j.cypher.internal.frontend.phases.ProcedureReadWriteAccess
 import org.neo4j.cypher.internal.frontend.phases.ProcedureSchemaWriteAccess
 import org.neo4j.cypher.internal.frontend.phases.ProcedureSignature
-import org.neo4j.cypher.internal.frontend.phases.QualifiedName
+import org.neo4j.cypher.internal.util.ProcedureName
 import org.neo4j.cypher.internal.util.symbols.CTAny
 import org.neo4j.cypher.internal.util.symbols.CTBoolean
 import org.neo4j.cypher.internal.util.symbols.CTDate
@@ -47,8 +47,9 @@ import org.neo4j.cypher.internal.util.symbols.CTPoint
 import org.neo4j.cypher.internal.util.symbols.CTRelationship
 import org.neo4j.cypher.internal.util.symbols.CTString
 import org.neo4j.cypher.internal.util.symbols.CTTime
+import org.neo4j.cypher.internal.util.symbols.CTUUID
+import org.neo4j.cypher.internal.util.symbols.CTVector
 import org.neo4j.cypher.internal.util.symbols.CypherType
-import org.neo4j.exceptions.CypherExecutionException
 import org.neo4j.internal.kernel.api.procs.DefaultParameterValue
 import org.neo4j.internal.kernel.api.procs.Neo4jTypes
 import org.neo4j.internal.kernel.api.procs.Neo4jTypes.AnyType
@@ -70,14 +71,13 @@ object procsHelpers {
     case Mode.WRITE   => ProcedureReadWriteAccess
     case Mode.SCHEMA  => ProcedureSchemaWriteAccess
     case Mode.DBMS    => ProcedureDbmsAccess
-
-    case _ => throw CypherExecutionException.unrecognisedExecutionMode(signature, mode.name())
   }
 
   def asCypherValue(neo4jValue: DefaultParameterValue): AnyValue = ValueUtils.of(neo4jValue.value())
 
   def asCypherType(neoType: AnyType): CypherType = neoType match {
     case Neo4jTypes.NTString        => CTString
+    case Neo4jTypes.NTUUID          => CTUUID
     case Neo4jTypes.NTInteger       => CTInteger
     case Neo4jTypes.NTFloat         => CTFloat
     case Neo4jTypes.NTNumber        => CTNumber
@@ -97,11 +97,12 @@ object procsHelpers {
     case Neo4jTypes.NTGeometry      => CTGeometry
     case Neo4jTypes.NTMap           => CTMap
     case Neo4jTypes.NTAny           => CTAny
+    case Neo4jTypes.NTVector        => CTVector
     case t => throw new IllegalArgumentException(s"Could not find a valid mapping for the type $t")
   }
 
   def asCypherProcedureSignature(
-    name: QualifiedName,
+    name: ProcedureName,
     id: Int,
     signature: org.neo4j.internal.kernel.api.procs.ProcedureSignature
   ): ProcedureSignature = {

@@ -19,6 +19,8 @@
  */
 package org.neo4j.bolt.protocol.common.fsm.response;
 
+import static org.neo4j.bolt.testing.util.ErrorUtil.useNewMessage;
+
 import io.netty.channel.embedded.EmbeddedChannel;
 import java.util.List;
 import org.assertj.core.api.Assertions;
@@ -26,17 +28,17 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.neo4j.bolt.fsm.error.BoltException;
-import org.neo4j.bolt.protocol.common.connector.connection.Connection;
+import org.neo4j.bolt.protocol.common.connector.connection.ConnectionHandle;
 import org.neo4j.bolt.protocol.common.fsm.response.metadata.MetadataHandler;
 import org.neo4j.bolt.protocol.common.message.Error;
-import org.neo4j.bolt.protocol.common.message.response.FailureMessage;
-import org.neo4j.bolt.protocol.common.message.response.IgnoredMessage;
-import org.neo4j.bolt.protocol.common.message.response.SuccessMessage;
 import org.neo4j.bolt.testing.assertions.FailureMessageAssertions;
 import org.neo4j.bolt.testing.assertions.MapValueAssertions;
 import org.neo4j.bolt.testing.assertions.ResponseMessageAssertions;
 import org.neo4j.bolt.testing.assertions.SuccessMessageAssertions;
 import org.neo4j.bolt.testing.mock.ConnectionMockFactory;
+import org.neo4j.boltmessages.response.FailureMessage;
+import org.neo4j.boltmessages.response.IgnoredMessage;
+import org.neo4j.boltmessages.response.SuccessMessage;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.logging.AssertableLogProvider;
 import org.neo4j.logging.AssertableLogProvider.Level;
@@ -51,7 +53,7 @@ class NetworkResponseHandlerTest {
 
     private EmbeddedChannel channel;
 
-    private Connection connection;
+    private ConnectionHandle connection;
     private MetadataHandler metadataHandler;
 
     private AssertableLogProvider internalLog;
@@ -72,7 +74,11 @@ class NetworkResponseHandlerTest {
 
     @Test
     void shouldPrepareRecordHandler() {
-        var handler = new NetworkResponseHandler(this.connection, this.metadataHandler, 512, 0, this.logService);
+        var handler = new NetworkResponseHandler(
+                this.connection,
+                this.metadataHandler,
+                new NetworkRecordHandler.Factory(this.connection, 512, 0),
+                this.logService);
 
         var recordHandler = handler.onBeginStreaming(List.of("foo", "bar"));
 
@@ -81,7 +87,7 @@ class NetworkResponseHandlerTest {
 
     @Test
     void shouldAssembleSuccessResponse() {
-        var handler = new NetworkResponseHandler(this.connection, this.metadataHandler, 512, 0, this.logService);
+        var handler = new NetworkResponseHandler(this.connection, this.metadataHandler, null, this.logService);
 
         handler.onMetadata("foo", Values.stringValue("bar"));
         handler.onMetadata("baz", Values.stringValue("foo"));
@@ -101,7 +107,7 @@ class NetworkResponseHandlerTest {
 
     @Test
     void shouldUseEmptyMapValueInSuccessResponseWhenNoMetadataIsGiven() {
-        var handler = new NetworkResponseHandler(this.connection, this.metadataHandler, 512, 0, this.logService);
+        var handler = new NetworkResponseHandler(this.connection, this.metadataHandler, null, this.logService);
 
         handler.onSuccess();
 
@@ -115,7 +121,7 @@ class NetworkResponseHandlerTest {
 
     @Test
     void shouldAssembleIgnoredResponse() {
-        var handler = new NetworkResponseHandler(this.connection, this.metadataHandler, 512, 0, this.logService);
+        var handler = new NetworkResponseHandler(this.connection, this.metadataHandler, null, this.logService);
 
         handler.onIgnored();
 
@@ -129,7 +135,7 @@ class NetworkResponseHandlerTest {
 
     @Test
     void shouldAssembleFailureResponse() {
-        var handler = new NetworkResponseHandler(this.connection, this.metadataHandler, 512, 0, this.logService);
+        var handler = new NetworkResponseHandler(this.connection, this.metadataHandler, null, this.logService);
 
         handler.onFailure(Error.from(BoltException.unknownError(new Exception("Something went wrong!"))));
 
@@ -137,13 +143,14 @@ class NetworkResponseHandlerTest {
 
         FailureMessageAssertions.assertThat(response)
                 .hasStatus(Status.General.UnknownError)
-                .hasMessage("Something went wrong!")
+                .hasMessage(useNewMessage("50N00: Internal exception raised Exception: Something went wrong!")
+                        .whenLegacyFallbackTo("Something went wrong!"))
                 .isNotFatal();
     }
 
     @Test
     void shouldAssembleFatalFailureResponse() {
-        var handler = new NetworkResponseHandler(this.connection, this.metadataHandler, 512, 0, this.logService);
+        var handler = new NetworkResponseHandler(this.connection, this.metadataHandler, null, this.logService);
 
         handler.onFailure(Error.fatalFrom(BoltException.unknownError(new Exception("Something went wrong!"))));
 
@@ -151,7 +158,8 @@ class NetworkResponseHandlerTest {
 
         FailureMessageAssertions.assertThat(response)
                 .hasStatus(Status.General.UnknownError)
-                .hasMessage("Something went wrong!")
+                .hasMessage(useNewMessage("50N00: Internal exception raised Exception: Something went wrong!")
+                        .whenLegacyFallbackTo("Something went wrong!"))
                 .isFatal();
 
         LogAssertions.assertThat(this.internalLog)

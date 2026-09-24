@@ -19,6 +19,7 @@
  */
 package org.neo4j.cypher.internal.runtime.slotted.expressions
 
+import org.neo4j.cypher.internal.physicalplanning.SlotConfigurationUtils
 import org.neo4j.cypher.internal.planner.spi.ReadTokenContext
 import org.neo4j.cypher.internal.runtime.ReadableRow
 import org.neo4j.cypher.internal.runtime.interpreted.commands.AstNode
@@ -26,7 +27,8 @@ import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Abstra
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.AbstractCachedNodeProperty
 import org.neo4j.kernel.api.StatementConstants
 import org.neo4j.values.storable.Value
-import org.neo4j.values.virtual.VirtualNodeValue
+
+import java.util.function.ToLongFunction
 
 case class SlottedCachedNodeProperty(
   nodeOffset: Int,
@@ -35,11 +37,11 @@ case class SlottedCachedNodeProperty(
   cachedPropertyOffset: Int
 ) extends AbstractCachedNodeProperty with SlottedExpression {
 
-  override def getId(ctx: ReadableRow): Long =
-    if (offsetIsForLongSlot)
-      ctx.getLongAt(nodeOffset)
-    else
-      ctx.getRefAt(nodeOffset).asInstanceOf[VirtualNodeValue].id()
+  private val getLongId: ToLongFunction[ReadableRow] =
+    if (offsetIsForLongSlot) (ctx: ReadableRow) => ctx.getLongAt(nodeOffset)
+    else SlotConfigurationUtils.makeGetPrimitiveNodeFunctionFor(nodeOffset)
+
+  override def getId(ctx: ReadableRow): Long = getLongId.applyAsLong(ctx)
 
   override def getCachedProperty(ctx: ReadableRow): Value = ctx.getCachedPropertyAt(cachedPropertyOffset)
 
@@ -58,11 +60,11 @@ case class SlottedCachedNodePropertyLate(
   cachedPropertyOffset: Int
 ) extends AbstractCachedNodeProperty with SlottedExpression {
 
-  override def getId(ctx: ReadableRow): Long =
-    if (offsetIsForLongSlot)
-      ctx.getLongAt(nodeOffset)
-    else
-      ctx.getRefAt(nodeOffset).asInstanceOf[VirtualNodeValue].id()
+  private val getLongId: ToLongFunction[ReadableRow] =
+    if (offsetIsForLongSlot) (ctx: ReadableRow) => ctx.getLongAt(nodeOffset)
+    else SlotConfigurationUtils.makeGetPrimitiveNodeFunctionFor(nodeOffset)
+
+  override def getId(ctx: ReadableRow): Long = getLongId.applyAsLong(ctx)
 
   override def getCachedProperty(ctx: ReadableRow): Value = ctx.getCachedPropertyAt(cachedPropertyOffset)
 
@@ -82,11 +84,11 @@ case class SlottedCachedNodeHasProperty(
   cachedPropertyOffset: Int
 ) extends AbstractCachedNodeHasProperty with SlottedExpression {
 
-  override def getId(ctx: ReadableRow): Long =
-    if (offsetIsForLongSlot)
-      ctx.getLongAt(nodeOffset)
-    else
-      ctx.getRefAt(nodeOffset).asInstanceOf[VirtualNodeValue].id()
+  private val getLongId: ToLongFunction[ReadableRow] =
+    if (offsetIsForLongSlot) (ctx: ReadableRow) => ctx.getLongAt(nodeOffset)
+    else SlotConfigurationUtils.makeGetPrimitiveNodeFunctionFor(nodeOffset)
+
+  override def getId(ctx: ReadableRow): Long = getLongId.applyAsLong(ctx)
 
   override def getCachedProperty(ctx: ReadableRow): Value = ctx.getCachedPropertyAt(cachedPropertyOffset)
 
@@ -105,11 +107,11 @@ case class SlottedCachedNodeHasPropertyLate(
   cachedPropertyOffset: Int
 ) extends AbstractCachedNodeHasProperty with SlottedExpression {
 
-  override def getId(ctx: ReadableRow): Long =
-    if (offsetIsForLongSlot)
-      ctx.getLongAt(nodeOffset)
-    else
-      ctx.getRefAt(nodeOffset).asInstanceOf[VirtualNodeValue].id()
+  private val getLongId: ToLongFunction[ReadableRow] =
+    if (offsetIsForLongSlot) (ctx: ReadableRow) => ctx.getLongAt(nodeOffset)
+    else SlotConfigurationUtils.makeGetPrimitiveNodeFunctionFor(nodeOffset)
+
+  override def getId(ctx: ReadableRow): Long = getLongId.applyAsLong(ctx)
 
   override def getCachedProperty(ctx: ReadableRow): Value = ctx.getCachedPropertyAt(cachedPropertyOffset)
 

@@ -24,8 +24,12 @@ import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast
 import org.neo4j.cypher.internal.ast.AliasedReturnItem
 import org.neo4j.cypher.internal.ast.Clause
+import org.neo4j.cypher.internal.ast.Finish
+import org.neo4j.cypher.internal.ast.FreeProjection
 import org.neo4j.cypher.internal.ast.GraphSelection
+import org.neo4j.cypher.internal.ast.ImportingWithSubqueryCall
 import org.neo4j.cypher.internal.ast.InputDataStream
+import org.neo4j.cypher.internal.ast.PartQuery
 import org.neo4j.cypher.internal.ast.Query
 import org.neo4j.cypher.internal.ast.Return
 import org.neo4j.cypher.internal.ast.ReturnItems
@@ -92,14 +96,15 @@ case class FabricStitcher(
 
   private def processCompositeCallInTx(fragment: Fragment): Fragment.Chain = fragment match {
     // Go over the fragment chain and process CALL IN TX Apply if present
-    case apply: Apply if apply.inTransactionsParameters.isDefined => {
+    case apply: Apply if apply.inTransactionsParameters.isDefined =>
       val newExec = apply.inner match {
-        case exec: Exec => constructCallInTransactionExec(exec, apply.inTransactionsParameters.get)
+        case exec: Exec =>
+          constructCallInTransactionExec(exec, apply.inTransactionsParameters.get, apply.importMode)
         // At the end of stitching an Apply can have only Exec as the inner fragment
         case f => throw new IllegalArgumentException("Unexpected fragment: " + f);
       }
       apply.copy(input = processCompositeCallInTx(apply.input), inner = newExec)(apply.pos)
-    }
+
     case apply: Apply => apply.copy(input = processCompositeCallInTx(apply.input))(apply.pos)
     case init: Init   => init
     case exec: Exec   => exec.copy(input = processCompositeCallInTx(exec.input))
@@ -108,7 +113,8 @@ case class FabricStitcher(
 
   private def constructCallInTransactionExec(
     originalExec: Exec,
-    inTransactionsParameters: SubqueryCall.InTransactionsParameters
+    inTransactionsParameters: SubqueryCall.InTransactionsParameters,
+    importMode: Fragment.SubqueryImport
   ): Fragment = {
     val pos = originalExec.pos
     val clauses = originalExec.query match {
@@ -122,7 +128,7 @@ case class FabricStitcher(
         Variable(Apply.CALL_IN_TX_ROW)(pos, Variable.isIsolatedDefault)
       )(pos)
     val postUnwindWith = With(ReturnItems(
-      includeExisting = false,
+      FreeProjection,
       items =
         for {
           varName <- originalExec.importColumns :+ Apply.CALL_IN_TX_ROW_ID
@@ -136,14 +142,23 @@ case class FabricStitcher(
     )(pos))(pos)
 
     val adjustedParameters = adjustInTransactionsParameters(inTransactionsParameters)
-    val call =
-      ScopeClauseSubqueryCall(
-        SingleQuery(clausesWithoutInsertedWith)(pos),
-        isImportingAll = false,
-        originalExec.importColumns.map(x => Variable(x)(pos, Variable.isIsolatedDefault)),
-        Some(adjustedParameters),
-        optional = false
-      )(pos)
+    val innerQuery = SingleQuery(clausesWithoutInsertedWith)(pos)
+    val call = importMode match {
+      case Fragment.SubqueryImport.ScopeClause =>
+        ScopeClauseSubqueryCall(
+          innerQuery,
+          isImportingAll = false,
+          originalExec.importColumns.map(x => Variable(x)(pos, Variable.isIsolatedDefault)),
+          Some(adjustedParameters),
+          optional = false
+        )(pos)
+      case Fragment.SubqueryImport.ImportingWith =>
+        ImportingWithSubqueryCall(
+          innerQuery,
+          Some(adjustedParameters),
+          optional = false
+        )(pos)
+    }
     val outputColumns = callInTxOutputColumns(originalExec, adjustedParameters)
     val returnClause = aliasedReturn(outputColumns, pos)
 
@@ -211,22 +226,86 @@ case class FabricStitcher(
         input
 
     case apply: Fragment.Apply =>
-      apply.copy(input = convertSeparate(apply.input, lastInChain = false), inner = convert(apply.inner))(apply.pos)
+      val convertedInner = convert(apply.inner)
+      val wrappedInner = apply.importMode match {
+        case Fragment.SubqueryImport.ScopeClause if apply.inTransactionsParameters.isEmpty =>
+          wrapSeparateScopeClauseImports(convertedInner, apply.inner.importColumns)
+        case _ => convertedInner
+      }
+      apply.copy(input = convertSeparate(apply.input, lastInChain = false), inner = wrappedInner)(apply.pos)
   }
 
-  def validateNoTransactionalSubquery(fragment: Fragment): Unit = {
-    fragment.flatten.foreach {
-      case apply: Fragment.Apply if apply.inTransactionsParameters.isDefined =>
-        failFabricTransactionalSubquery(apply.pos)
-      case exec: Fragment.Exec => SubqueryCall.findTransactionalSubquery(exec.query).foreach(subquery =>
-          failFabricTransactionalSubquery(subquery.position)
-        )
-      case leaf: Fragment.Leaf => leaf.clauses.foreach(c =>
-          SubqueryCall.findTransactionalSubquery(c).foreach(subquery =>
-            failFabricTransactionalSubquery(subquery.position)
-          )
-        )
-      case _ => ()
+  /**
+   * For a separate (cross-graph) scope-clause subquery whose inner has been stitched into a single Exec, wrap the
+   * body (everything after the `WITH $@@x AS x` parameter bindings) in a scope-clause `CALL (imports){…}` so the
+   * imports stay available as arguments rather than being delisted by an intervening WITH.
+   */
+  private def wrapSeparateScopeClauseImports(inner: Fragment, imports: Seq[String]): Fragment =
+    if (imports.isEmpty) inner
+    else
+      inner match {
+        case exec: Fragment.Exec =>
+          val wrapped = wrapQueryScopeClauseImports(exec.query, imports, exec.outputColumns)
+          if (wrapped eq exec.query) exec else asExec(exec.input, wrapped, exec.outputColumns)
+        // A cross-graph union is converted per-branch; wrap each branch so the imports stay pinned in all of them.
+        case union: Fragment.Union =>
+          union.copy(
+            lhs = wrapSeparateScopeClauseImports(union.lhs, imports),
+            rhs = wrapSeparateScopeClauseChain(union.rhs, imports)
+          )(union.pos)
+        case other => other
+      }
+
+  private def wrapSeparateScopeClauseChain(chain: Fragment.Chain, imports: Seq[String]): Fragment.Chain =
+    wrapSeparateScopeClauseImports(chain, imports) match {
+      case c: Fragment.Chain => c
+      case _                 => chain
+    }
+
+  private def wrapQueryScopeClauseImports(
+    statement: Statement,
+    imports: Seq[String],
+    outputColumns: Seq[String]
+  ): Statement = {
+    def wrapSingle(sq: SingleQuery): SingleQuery = {
+      val pos = sq.position
+      def isImportBinding(w: With): Boolean =
+        w.returnItems.items.nonEmpty && w.returnItems.items.forall {
+          case AliasedReturnItem(p: ExplicitParameter, v) =>
+            imports.contains(v.name) && p.name == Columns.paramName(v.name)
+          case _ => false
+        }
+      val inputStreams = sq.clauses.takeWhile(_.isInstanceOf[InputDataStream])
+      sq.clauses.drop(inputStreams.size) match {
+        case (binding: With) :: body if isImportBinding(binding) && body.nonEmpty =>
+          val bodyQuery = SingleQuery(body)(pos)
+          val call = ScopeClauseSubqueryCall(
+            bodyQuery,
+            isImportingAll = false,
+            imports.map(x => Variable(x)(pos, Variable.isIsolatedDefault)),
+            None,
+            optional = false
+          )(pos)
+          val terminal: Clause =
+            if (bodyQuery.isReturning) Ast.aliasedReturn(outputColumns, pos) else Finish()(pos)
+          SingleQuery(((inputStreams :+ binding) :+ call) :+ terminal)(pos)
+        case _ => sq
+      }
+    }
+    // A union stitches to a UnionQuery whose branches each carry the import binding; wrap every branch.
+    def wrapPart(pq: PartQuery): PartQuery = pq match {
+      case sq: SingleQuery => wrapSingle(sq)
+      case other           => other
+    }
+    def wrapQuery(query: Query): Query = query match {
+      case sq: SingleQuery  => wrapSingle(sq)
+      case u: UnionDistinct => u.copy(lhs = wrapQuery(u.lhs), rhs = wrapPart(u.rhs))(u.position)
+      case u: UnionAll      => u.copy(lhs = wrapQuery(u.lhs), rhs = wrapPart(u.rhs))(u.position)
+      case other            => other
+    }
+    statement match {
+      case q: Query => wrapQuery(q)
+      case other    => other
     }
   }
 
@@ -301,21 +380,22 @@ case class FabricStitcher(
       case _: SensitiveStringLiteral => true
     }
 
-    val local = pipeline.checkAndFinalize.process(statement, useFullQueryText = !compositeContext)
-
     val (rewriter, extracted) = sensitiveLiteralReplacement(statement)
     val toRender = statement.endoRewrite(rewriter)
     val remote = Fragment.RemoteQuery(QueryRenderer.render(toRender), extracted)
 
-    Fragment.Exec(input, statement, local, remote, sensitive, outputColumns)
+    Fragment.Exec(input, statement, remote, sensitive, outputColumns)
   }
 
-  private def failDynamicGraph(use: Use): Nothing =
-    throw new SyntaxException(
+  private def failDynamicGraph(use: Use): Nothing = {
+    throw SyntaxException.dynamicGraphReferenceUnsupported(
       MessageUtilProvider.createDynamicGraphReferenceUnsupportedError(Use.show(use)).stripMargin,
       queryString,
-      use.position.offset
+      use.position.offset,
+      use.position.line,
+      use.position.column
     )
+  }
 
   private def failMultipleGraphs(use: Use): Nothing =
     throw SyntaxException.accessingMultipleGraphsOnlySupportedOnCompositeDatabases(
@@ -332,13 +412,6 @@ case class FabricStitcher(
          |Attempted to access graph ${Use.show(useInner)}""".stripMargin,
       queryString,
       useInner.position.offset
-    )
-
-  private def failFabricTransactionalSubquery(pos: InputPosition): Nothing =
-    throw new SyntaxException(
-      "Transactional subquery is not allowed here. This feature is not supported on composite databases.",
-      queryString,
-      pos.offset
     )
 
   private case class StitchResult(
@@ -376,7 +449,7 @@ case class FabricStitcher(
       case Some(outer) =>
         def outerIsComposite = useHelper.useTargetsCompositeContext(outer)
         def same = outer.graphSelection == inner.graphSelection
-        if (!outerIsComposite && !same) Some(outer, inner) else None
+        if (!outerIsComposite && !same) Some((outer, inner)) else None
     }
   }
 
@@ -425,17 +498,27 @@ case class FabricStitcher(
         case apply: Fragment.Apply =>
           val before = stitchChain(apply.input, outermost, outerUse)
           val inner = stitch(apply.inner, outermost = false, Some(before.lastUse))
-          val innerImports = inner.query.importColumns
+          val innerImports = inner.query.importColumns.map(_.name)
           val scopeImports = apply.inner.importColumns
           val imports = (innerImports ++ scopeImports).distinct.map(Variable(_)(apply.pos, Variable.isIsolatedDefault))
+          val call = apply.importMode match {
+            case Fragment.SubqueryImport.ScopeClause =>
+              ScopeClauseSubqueryCall(
+                inner.query,
+                isImportingAll = false,
+                imports,
+                apply.inTransactionsParameters,
+                optional = apply.optional
+              )(apply.pos)
+            case Fragment.SubqueryImport.ImportingWith =>
+              ImportingWithSubqueryCall(
+                inner.query,
+                apply.inTransactionsParameters,
+                apply.optional
+              )(apply.pos)
+          }
           before.copy(
-            clauses = before.clauses :+ ScopeClauseSubqueryCall(
-              inner.query,
-              isImportingAll = false,
-              imports,
-              apply.inTransactionsParameters,
-              optional = false
-            )(apply.pos),
+            clauses = before.clauses :+ call,
             useAppearances = before.useAppearances ++ inner.useAppearances
           )
 
@@ -458,7 +541,7 @@ private object Ast {
     conditionally(
       columns.nonEmpty,
       With(ReturnItems(
-        includeExisting = false,
+        FreeProjection,
         items =
           for {
             varName <- columns
@@ -466,7 +549,7 @@ private object Ast {
           } yield AliasedReturnItem(
             expression = ExplicitParameter(parName, CTAny)(pos),
             variable = variable(varName, pos)
-          )(pos)
+          )(pos, AliasedReturnItem.wasAutoAliasedDefault)
       )(pos))(pos)
     )
 
@@ -488,7 +571,7 @@ private object Ast {
 
   def aliasedReturn(names: Seq[String], pos: InputPosition): Return =
     Return(ReturnItems(
-      includeExisting = false,
+      FreeProjection,
       items =
         for {
           name <- names

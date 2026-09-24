@@ -22,6 +22,7 @@ package org.neo4j.index.internal.gbptree;
 import static java.lang.Integer.min;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.neo4j.index.internal.gbptree.GBPTreeTestUtil.consistencyCheckStrict;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
 import static org.neo4j.test.Race.throwing;
@@ -44,7 +45,6 @@ import org.eclipse.collections.impl.factory.primitive.LongObjectMaps;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
@@ -53,13 +53,13 @@ import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.test.Race;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.extension.pagecache.PageCacheSupportExtension;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
 
 @TestDirectoryExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 abstract class GBPTreeParallelWritesIT<KEY, VALUE> {
 
     @Inject
@@ -97,6 +97,10 @@ abstract class GBPTreeParallelWritesIT<KEY, VALUE> {
         return Sets.immutable.empty();
     }
 
+    int writerFlags() {
+        return 0;
+    }
+
     @Test
     void shouldDoRandomWritesInParallel() throws IOException {
         // given
@@ -122,7 +126,7 @@ abstract class GBPTreeParallelWritesIT<KEY, VALUE> {
                             throwing(() -> {
                                 var random = new Random(threadSeed);
                                 var data = dataPerThread[id];
-                                try (var writer = index.writer(cursorContext)) {
+                                try (var writer = index.writer(writerFlags(), cursorContext)) {
                                     for (int j = 0; j < 2_000; j++) {
                                         var v = random.nextFloat();
                                         var entrySeed = random.nextLong(1_000) * threads + id;
@@ -143,10 +147,16 @@ abstract class GBPTreeParallelWritesIT<KEY, VALUE> {
                             1);
                 }
                 race.goUnchecked();
-                index.checkpoint(FileFlushEvent.NULL, cursorContext);
+                index.checkpoint(
+                        Header.CARRY_OVER_PREVIOUS_HEADER,
+                        FileFlushEvent.NULL,
+                        EMPTY_ASYNC_BLOCK_ACCESSOR,
+                        cursorContext,
+                        true);
             }
 
             // then
+            consistencyCheckStrict(index);
             MutableLongObjectMap<Pair<KEY, VALUE>> combined = LongObjectMaps.mutable.empty();
             for (var data : dataPerThread) {
                 data.forEach(
@@ -202,7 +212,7 @@ abstract class GBPTreeParallelWritesIT<KEY, VALUE> {
                             }
                         }
                     }
-                    try (var writer = tree.writer(NULL_CONTEXT)) {
+                    try (var writer = tree.writer(writerFlags(), NULL_CONTEXT)) {
                         for (var id : ids) {
                             writer.put(layout.key(id), layout.value(id));
                         }
@@ -218,7 +228,7 @@ abstract class GBPTreeParallelWritesIT<KEY, VALUE> {
                             ids[i] = committedIds.created.removeAtIndex(random.nextInt(committedIds.created.size()));
                         }
                     }
-                    try (var writer = tree.writer(NULL_CONTEXT)) {
+                    try (var writer = tree.writer(writerFlags(), NULL_CONTEXT)) {
                         for (long id : ids) {
                             writer.remove(layout.key(id));
                         }
@@ -231,7 +241,12 @@ abstract class GBPTreeParallelWritesIT<KEY, VALUE> {
             }));
             race.addContestant(throwing(() -> {
                 Thread.sleep(ThreadLocalRandom.current().nextInt(maxCheckpointDelay));
-                tree.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+                tree.checkpoint(
+                        Header.CARRY_OVER_PREVIOUS_HEADER,
+                        FileFlushEvent.NULL,
+                        EMPTY_ASYNC_BLOCK_ACCESSOR,
+                        NULL_CONTEXT,
+                        true);
             }));
             race.goUnchecked();
 

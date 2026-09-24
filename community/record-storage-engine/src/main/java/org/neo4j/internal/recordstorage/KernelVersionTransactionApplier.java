@@ -22,20 +22,33 @@ package org.neo4j.internal.recordstorage;
 import org.neo4j.internal.helpers.Numbers;
 import org.neo4j.internal.recordstorage.Command.MetaDataCommand;
 import org.neo4j.kernel.KernelVersion;
-import org.neo4j.kernel.KernelVersionRepository;
+import org.neo4j.kernel.database.MetadataCache;
+import org.neo4j.logging.InternalLog;
+import org.neo4j.logging.InternalLogProvider;
+import org.neo4j.wal.entry.LogFormat;
 
 public class KernelVersionTransactionApplier extends TransactionApplier.Adapter {
-    private final KernelVersionRepository kernelVersionRepository;
+    private final MetadataCache metadataCache;
+    private final InternalLog log;
 
-    public KernelVersionTransactionApplier(KernelVersionRepository kernelVersionRepository) {
-        this.kernelVersionRepository = kernelVersionRepository;
+    public KernelVersionTransactionApplier(MetadataCache metadataCache, InternalLogProvider userLogProvider) {
+        this.metadataCache = metadataCache;
+        this.log = userLogProvider.getLog(getClass());
     }
 
     @Override
     public boolean visitMetaDataCommand(MetaDataCommand command) {
-        final var kernelVersion = KernelVersion.getForVersion(
-                Numbers.safeCastLongToByte(command.getAfter().getValue()));
-        kernelVersionRepository.setKernelVersion(kernelVersion);
+        int value = Numbers.safeCastLongToInt(command.getAfter().getValue());
+        final var kernelVersion = KernelVersion.getForVersion((byte) (value & 0xFF));
+        // Not using the format yet, that is coming soon
+        byte logFormatVersion = (byte) ((value >> Byte.SIZE) & 0xFF);
+        log.info("Applying metadata upgrade command: " + command + " previous KernelVersion "
+                + metadataCache.kernelVersion() + " previous LogFormat " + metadataCache.getCurrentLogFormat());
+        metadataCache.setKernelVersion(kernelVersion);
+        metadataCache.setCurrentLogFormat(
+                logFormatVersion == 0
+                        ? LogFormat.fromKernelVersion(kernelVersion)
+                        : LogFormat.fromByteVersion(logFormatVersion));
         return false;
     }
 }

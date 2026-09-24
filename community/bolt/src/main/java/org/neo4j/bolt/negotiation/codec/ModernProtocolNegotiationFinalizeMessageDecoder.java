@@ -25,16 +25,17 @@ import io.netty.handler.codec.ByteToMessageDecoder;
 import io.netty.util.ReferenceCountUtil;
 import java.util.List;
 import java.util.Set;
-import org.neo4j.bolt.negotiation.ProtocolVersion;
 import org.neo4j.bolt.negotiation.message.ModernProtocolNegotiationFinalizeMessage;
 import org.neo4j.bolt.negotiation.message.ProtocolCapability;
 import org.neo4j.bolt.negotiation.util.NegotiationEncodingUtil;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 import org.neo4j.memory.HeapEstimator;
 
 public final class ModernProtocolNegotiationFinalizeMessageDecoder extends ByteToMessageDecoder {
 
     public static final long SHALLOW_SIZE =
             HeapEstimator.shallowSizeOfInstance(ModernProtocolNegotiationFinalizeMessageDecoder.class);
+    public static final int CAPABILITY_MASK_LIMIT = 32;
 
     @Override
     protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
@@ -48,19 +49,23 @@ public final class ModernProtocolNegotiationFinalizeMessageDecoder extends ByteT
             throw new IllegalArgumentException("Illegal version selection: Selection cannot include range");
         }
 
-        if (!NegotiationEncodingUtil.isBitMaskReadable(in, 32)) {
+        if (!NegotiationEncodingUtil.isBitMaskReadable(in, CAPABILITY_MASK_LIMIT)) {
             in.resetReaderIndex();
             return;
         }
 
-        var capabilityMask = NegotiationEncodingUtil.readBitMask(in);
-        Set<ProtocolCapability> capabilities;
         try {
-            capabilities = ProtocolCapability.fromBitMask(capabilityMask);
-        } finally {
-            ReferenceCountUtil.release(capabilityMask);
-        }
+            var capabilityMask = NegotiationEncodingUtil.readBitMask(in, CAPABILITY_MASK_LIMIT);
+            Set<ProtocolCapability> capabilities;
+            try {
+                capabilities = ProtocolCapability.fromBitMask(capabilityMask);
+            } finally {
+                ReferenceCountUtil.release(capabilityMask);
+            }
 
-        out.add(new ModernProtocolNegotiationFinalizeMessage(selectedVersion, capabilities));
+            out.add(new ModernProtocolNegotiationFinalizeMessage(selectedVersion, capabilities));
+        } catch (IllegalArgumentException ex) {
+            throw new IllegalArgumentException("Illegal capability mask", ex);
+        }
     }
 }

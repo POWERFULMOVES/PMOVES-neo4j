@@ -20,6 +20,8 @@ import scala.language.postfixOps
 
 object TypeRange {
   def apply(lower: CypherType, upper: CypherType): TypeRange = TypeRange(lower, Some(upper))
+
+  def exact(invariant: CypherType): TypeRange = TypeRange(invariant, invariant)
 }
 
 /**
@@ -32,13 +34,13 @@ object TypeRange {
 case class TypeRange(lower: CypherType, upper: Option[CypherType]) {
   assert(upper.isEmpty || (lower isAssignableFrom upper.get), "Incompatible TypeRange bounds")
 
-  def contains(aType: CypherType): Boolean =
+  infix def contains(aType: CypherType): Boolean =
     (lower isAssignableFrom aType) && upper.fold(true)(aType isAssignableFrom)
 
-  def contains(that: TypeRange): Boolean =
+  infix def contains(that: TypeRange): Boolean =
     (lower isAssignableFrom that.lower) && upper.fold(true)(t => that.upper.fold(false)(_ isAssignableFrom t))
 
-  lazy val hasDefiniteSize: Boolean = upper.isDefined || !checkForAny(lower)
+  def hasDefiniteSize: Boolean = upper.isDefined || !checkForAny(lower)
 
   private def checkForAny: CypherType => Boolean = {
     case _: AnyType  => true
@@ -46,9 +48,12 @@ case class TypeRange(lower: CypherType, upper: Option[CypherType]) {
     case _           => false
   }
 
+  def rewrite(f: CypherType => CypherType): TypeRange =
+    copy(lower = lower.rewrite(f), upper = upper.map(_.rewrite(f)))
+
   def &(that: TypeRange): Option[TypeRange] = this intersect that
 
-  def intersect(that: TypeRange): Option[TypeRange] =
+  infix def intersect(that: TypeRange): Option[TypeRange] =
     (lower greatestLowerBound that.lower).flatMap { newLower =>
       val newUpper = upper.fold(that.upper)(t => Some(that.upper.fold(t)(_ leastUpperBound t)))
       if (newUpper.isDefined && !(newLower isAssignableFrom newUpper.get))
@@ -59,9 +64,9 @@ case class TypeRange(lower: CypherType, upper: Option[CypherType]) {
 
   def covariant: TypeRange = copy(upper = None)
 
-  def constrain(aType: CypherType): Option[TypeRange] = this & TypeRange(aType, None)
+  infix def constrain(aType: CypherType): Option[TypeRange] = this & TypeRange(aType, None)
 
-  def without(aType: CypherType): Option[TypeRange] = {
+  infix def without(aType: CypherType): Option[TypeRange] = {
     if (aType.isAssignableFrom(lower)) {
       None
     } else if (lower.isAssignableFrom(aType)) {
@@ -82,7 +87,7 @@ case class TypeRange(lower: CypherType, upper: Option[CypherType]) {
    * @param other the other range to determine LUBs in combination with
    * @return a set of TypeRanges that cover the LUBs for all combinations of individual types between both TypeRanges
    */
-  def leastUpperBounds(other: TypeRange): Seq[TypeRange] = {
+  infix def leastUpperBounds(other: TypeRange): Seq[TypeRange] = {
     val newLower = lower leastUpperBound other.lower
     (upper, other.upper) match {
       case (Some(u1), Some(u2)) =>

@@ -20,9 +20,6 @@
 package org.neo4j.cypher.internal.javacompat;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.neo4j.collection.Dependencies.dependenciesOf;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
 
@@ -51,14 +48,15 @@ import org.neo4j.io.pagecache.context.TransactionIdSnapshotFactory;
 import org.neo4j.kernel.impl.coreapi.InternalTransaction;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.snapshot.TestTransactionVersionContextSupplier;
-import org.neo4j.snapshot.TestVersionContext;
 import org.neo4j.storageengine.api.TransactionIdStore;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
 
 @TestDirectoryExtension
+@SkipOnSpd(reason = "Will be superseded by MVCC", notes = SkipOnSpd.Note.irrelevant)
 class EagerResultIT {
     @Inject
     private TestDirectory testDirectory;
@@ -79,7 +77,8 @@ class EagerResultIT {
             TestVersionContext context;
             if (databaseName.equals(database.databaseName())) {
                 context = new TestVersionContext(
-                        () -> new TransactionIdSnapshot(transactionIdStore.getLastClosedTransactionId()), databaseName);
+                        () -> new TransactionIdSnapshot(transactionIdStore.getHighestGapFreeClosedTransactionId()),
+                        databaseName);
 
             } else {
                 context = new TestVersionContext(TransactionIdSnapshotFactory.EMPTY_SNAPSHOT_FACTORY, databaseName);
@@ -102,13 +101,13 @@ class EagerResultIT {
         try (Transaction transaction = database.beginTx()) {
             var versionContext = getTestVersionContext(transaction);
             Result result = transaction.execute("MATCH (n) RETURN n.c");
-            assertEquals(1, versionContext.getNumIsDirtyCalls());
+            assertThat(versionContext.getNumIsDirtyCalls()).isOne();
             int rows = 0;
             while (result.hasNext()) {
                 result.next();
                 rows++;
             }
-            assertEquals(2, rows);
+            assertThat(rows).isEqualTo(2);
             transaction.commit();
         }
     }
@@ -118,9 +117,9 @@ class EagerResultIT {
         try (Transaction transaction = database.beginTx()) {
             var versionContext = getTestVersionContext(transaction);
             Result result = transaction.execute("MATCH (n) RETURN n.c");
-            assertEquals(1, versionContext.getNumIsDirtyCalls());
-            assertEquals(
-                    QueryExecutionType.query(QueryExecutionType.QueryType.READ_ONLY), result.getQueryExecutionType());
+            assertThat(versionContext.getNumIsDirtyCalls()).isOne();
+            assertThat(result.getQueryExecutionType())
+                    .isEqualTo(QueryExecutionType.query(QueryExecutionType.QueryType.READ_ONLY));
             transaction.commit();
         }
     }
@@ -130,8 +129,8 @@ class EagerResultIT {
         try (Transaction transaction = database.beginTx()) {
             var versionContext = getTestVersionContext(transaction);
             Result result = transaction.execute("MATCH (n) RETURN n.c as a, count(n) as b");
-            assertEquals(1, versionContext.getNumIsDirtyCalls());
-            assertEquals(Arrays.asList("a", "b"), result.columns());
+            assertThat(versionContext.getNumIsDirtyCalls()).isOne();
+            assertThat(result.columns()).containsExactlyElementsOf(Arrays.asList("a", "b"));
             transaction.commit();
         }
     }
@@ -141,14 +140,14 @@ class EagerResultIT {
         try (Transaction transaction = database.beginTx()) {
             var versionContext = getTestVersionContext(transaction);
             Result result = transaction.execute("MATCH (n) RETURN n.c as c, n.b as b");
-            assertEquals(1, versionContext.getNumIsDirtyCalls());
+            assertThat(versionContext.getNumIsDirtyCalls()).isOne();
             ResourceIterator<Object> cValues = result.columnAs("c");
             int rows = 0;
             while (cValues.hasNext()) {
                 cValues.next();
                 rows++;
             }
-            assertEquals(2, rows);
+            assertThat(rows).isEqualTo(2);
             transaction.commit();
         }
     }
@@ -158,8 +157,8 @@ class EagerResultIT {
         try (Transaction transaction = database.beginTx()) {
             var versionContext = getTestVersionContext(transaction);
             Result result = transaction.execute("MATCH (n) RETURN n.c");
-            assertEquals(1, versionContext.getNumIsDirtyCalls());
-            assertFalse(result.getQueryStatistics().containsUpdates());
+            assertThat(versionContext.getNumIsDirtyCalls()).isOne();
+            assertThat(result.getQueryStatistics().containsUpdates()).isFalse();
             transaction.commit();
         }
     }
@@ -169,10 +168,11 @@ class EagerResultIT {
         try (Transaction transaction = database.beginTx()) {
             var versionContext = getTestVersionContext(transaction);
             Result result = transaction.execute("profile MATCH (n) RETURN n.c");
-            assertEquals(1, versionContext.getNumIsDirtyCalls());
-            assertEquals(
-                    2,
-                    result.getExecutionPlanDescription().getProfilerStatistics().getRows());
+            assertThat(versionContext.getNumIsDirtyCalls()).isOne();
+            assertThat(result.getExecutionPlanDescription()
+                            .getProfilerStatistics()
+                            .getRows())
+                    .isEqualTo(2);
             transaction.commit();
         }
     }
@@ -182,11 +182,12 @@ class EagerResultIT {
         try (Transaction transaction = database.beginTx()) {
             var versionContext = getTestVersionContext(transaction);
             Result result = transaction.execute("MATCH (n) RETURN n.c, n.d");
-            assertEquals(1, versionContext.getNumIsDirtyCalls());
+            assertThat(versionContext.getNumIsDirtyCalls()).isOne();
             String resultString = result.resultAsString();
-            assertTrue(resultString.contains("n.c | n.d"));
-            assertTrue(resultString.contains("\"d\" | \"a\""));
-            assertTrue(resultString.contains("\"y\" | \"k\""));
+            assertThat(resultString)
+                    .contains("n.c | n.d")
+                    .contains("\"d\" | \"a\"")
+                    .contains("\"y\" | \"k\"");
             transaction.commit();
         }
     }
@@ -196,7 +197,7 @@ class EagerResultIT {
         try (Transaction transaction = database.beginTx()) {
             var versionContext = getTestVersionContext(transaction);
             Result result = transaction.execute("MATCH (n) RETURN n.c");
-            assertEquals(1, versionContext.getNumIsDirtyCalls());
+            assertThat(versionContext.getNumIsDirtyCalls()).isOne();
             String expected = "+-----+" + System.lineSeparator() + "| n.c |"
                     + System.lineSeparator() + "+-----+"
                     + System.lineSeparator() + "| \"d\" |"
@@ -204,7 +205,7 @@ class EagerResultIT {
                     + System.lineSeparator() + "+-----+"
                     + System.lineSeparator() + "2 rows"
                     + System.lineSeparator();
-            assertEquals(expected, printToStream(result));
+            assertThat(printToStream(result)).isEqualTo(expected);
             transaction.commit();
         }
     }
@@ -265,12 +266,12 @@ class EagerResultIT {
         private boolean useCorrectLastCommittedTxId;
 
         TestVersionContext(TransactionIdSnapshotFactory snapshotFactory, String databaseName) {
-            super(snapshotFactory, databaseName);
+            super(snapshotFactory, databaseName, true);
         }
 
         @Override
-        public long lastClosedTransactionId() {
-            return useCorrectLastCommittedTxId ? TransactionIdStore.BASE_TX_ID : super.lastClosedTransactionId();
+        public long highestGapFree() {
+            return useCorrectLastCommittedTxId ? TransactionIdStore.BASE_TX_ID : super.highestGapFree();
         }
 
         @Override

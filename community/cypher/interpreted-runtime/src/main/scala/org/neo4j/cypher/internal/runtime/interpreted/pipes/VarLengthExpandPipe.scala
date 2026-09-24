@@ -19,84 +19,61 @@
  */
 package org.neo4j.cypher.internal.runtime.interpreted.pipes
 
-import org.neo4j.collection.trackable.HeapTrackingCollections
 import org.neo4j.cypher.internal.expressions.SemanticDirection
-import org.neo4j.cypher.internal.logical.plans.TraversalMatchMode
+import org.neo4j.cypher.internal.logical.plans.TraversalPathMode
 import org.neo4j.cypher.internal.runtime.ClosingIterator
 import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.runtime.IsNoValue
-import org.neo4j.cypher.internal.runtime.RelationshipContainer
-import org.neo4j.cypher.internal.runtime.interpreted.pipes.VarLengthExpandPipe.projectBackwards
+import org.neo4j.cypher.internal.runtime.TraversalContainer
 import org.neo4j.cypher.internal.util.attribution.Id
-import org.neo4j.exceptions.InternalException
-import org.neo4j.memory.EmptyMemoryTracker
+import org.neo4j.cypher.operations.CypherTypeValueMapper
+import org.neo4j.exceptions.ParameterWrongTypeException
+import org.neo4j.values.storable.Value
 import org.neo4j.values.virtual.VirtualNodeValue
-import org.neo4j.values.virtual.VirtualValues
 
 case class VarLengthExpandPipe(
   source: Pipe,
   fromName: String,
-  relName: String,
-  toName: String,
+  maybeRelName: Option[String],
+  maybeToName: Option[String],
   dir: SemanticDirection,
   projectedDir: SemanticDirection,
   types: RelationshipTypes,
   min: Int,
   max: Option[Int],
   nodeInScope: Boolean,
-  traversalMatchMode: TraversalMatchMode,
+  traversalPathMode: TraversalPathMode,
   filteringStep: TraversalPredicates = TraversalPredicates.NONE
 )(val id: Id = Id.INVALID_ID) extends PipeWithSource(source) {
+
+  private val writer = (maybeRelName, maybeToName) match {
+    case (Some(relName), Some(toName)) =>
+      (row: CypherRow, rels: TraversalContainer, node: VirtualNodeValue) =>
+        rowFactory.copyWith(row, relName, rels.relationshipsAsList, toName, node)
+
+    case (None, Some(toName)) =>
+      (row: CypherRow, _: TraversalContainer, node: VirtualNodeValue) =>
+        rowFactory.copyWith(row, toName, node)
+
+    case (Some(relName), None) =>
+      (row: CypherRow, rels: TraversalContainer, _: VirtualNodeValue) =>
+        rowFactory.copyWith(row, relName, rels.relationshipsAsList)
+
+    case (None, None) =>
+      (row: CypherRow, _: TraversalContainer, _: VirtualNodeValue) =>
+        rowFactory.copyWith(row)
+
+  }
 
   private def varLengthExpand(
     node: VirtualNodeValue,
     state: QueryState,
     maxDepth: Option[Int],
     row: CypherRow
-  ): ClosingIterator[(VirtualNodeValue, RelationshipContainer)] = {
+  ): ClosingIterator[(VirtualNodeValue, TraversalContainer)] = {
     val memoryTracker = state.memoryTrackerForOperatorProvider.memoryTrackerForOperator(id.x)
-    val stack = HeapTrackingCollections.newArrayDeque[(VirtualNodeValue, RelationshipContainer)](
-      EmptyMemoryTracker.INSTANCE
-    )
-    stack.push((node, RelationshipContainer.empty(memoryTracker, traversalMatchMode)))
-
-    new ClosingIterator[(VirtualNodeValue, RelationshipContainer)] {
-      def next(): (VirtualNodeValue, RelationshipContainer) = {
-        val (node, rels) = stack.pop()
-        if (rels.size < maxDepth.getOrElse(Int.MaxValue) && filteringStep.filterNode(row, state, node)) {
-          val relationships = state.query.getRelationshipsForIds(node.id(), dir, types.types(state.query))
-
-          // relationships get immediately exhausted. Therefore we do not need a ClosingIterator here.
-          while (relationships.hasNext) {
-            val rel = VirtualValues.relationship(
-              relationships.next(),
-              relationships.startNodeId(),
-              relationships.endNodeId(),
-              relationships.typeId()
-            )
-            val otherNode = VirtualValues.node(relationships.otherNodeId(node.id()))
-            if (filteringStep.filterRelationship(row, state, rel, node, otherNode)) {
-              if (rels.canAdd(rel) && filteringStep.filterNode(row, state, otherNode)) {
-                stack.push((otherNode, rels.append(rel)))
-              }
-            }
-          }
-        }
-        val projectedRels = {
-          if (projectBackwards(dir, projectedDir)) {
-            rels.reverse
-          } else {
-            rels
-          }
-        }
-        rels.close()
-        (node, projectedRels)
-      }
-
-      def innerHasNext: Boolean = !stack.isEmpty
-
-      override protected[this] def closeMore(): Unit = stack.close()
-    }
+    VarLengthExpandIterator(maybeRelName.isDefined, dir, projectedDir, types, traversalPathMode, filteringStep)
+      .varLengthExpand(node, state, maxDepth, row, memoryTracker)
   }
 
   protected def internalCreateResults(
@@ -108,7 +85,7 @@ case class VarLengthExpandPipe(
         val paths = varLengthExpand(n, state, max, row)
         paths.collect {
           case (node, rels) if rels.size >= min && isToNodeValid(row, node) =>
-            rowFactory.copyWith(row, relName, rels.asList, toName, node)
+            writer(row, rels, node)
         }
       } else {
         ClosingIterator.empty
@@ -123,8 +100,18 @@ case class VarLengthExpandPipe(
               expand(row, node)
 
             case IsNoValue() => ClosingIterator.empty
+            case value: Value =>
+              throw ParameterWrongTypeException.expectedNodeFoundInstead(
+                value.toString,
+                value.prettyPrint(),
+                CypherTypeValueMapper.valueType(value)
+              )
             case value =>
-              throw new InternalException(s"Expected to find a node at '$fromName' but found $value instead")
+              throw ParameterWrongTypeException.expectedNodeFoundInstead(
+                value.toString,
+                value.toString,
+                CypherTypeValueMapper.valueType(value)
+              )
           }
         }
     }
@@ -132,21 +119,15 @@ case class VarLengthExpandPipe(
 
   private def isToNodeValid(row: CypherRow, node: VirtualNodeValue) =
     !nodeInScope || {
-      row.getByName(toName) match {
-        case toNode: VirtualNodeValue =>
-          toNode.id == node.id
-        case _ =>
-          false
+      maybeToName match {
+        case Some(toName) =>
+          row.getByName(toName) match {
+            case toNode: VirtualNodeValue =>
+              toNode.id == node.id
+            case _ =>
+              false
+          }
+        case None => false
       }
-    }
-}
-
-object VarLengthExpandPipe {
-
-  def projectBackwards(dir: SemanticDirection, projectedDir: SemanticDirection): Boolean =
-    if (dir == SemanticDirection.BOTH) {
-      projectedDir == SemanticDirection.INCOMING
-    } else {
-      dir != projectedDir
     }
 }

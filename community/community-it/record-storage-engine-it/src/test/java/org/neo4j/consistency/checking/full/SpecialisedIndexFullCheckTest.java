@@ -83,6 +83,7 @@ import org.neo4j.kernel.impl.coreapi.InternalTransaction;
 import org.neo4j.kernel.impl.store.NodeStore;
 import org.neo4j.kernel.impl.store.record.NodeRecord;
 import org.neo4j.logging.log4j.Log4jLogProvider;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.storageengine.api.EntityUpdates;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
 import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
@@ -220,10 +221,10 @@ class SpecialisedIndexFullCheckTest {
                     try (IndexUpdater updater = accessor.newUpdater(IndexUpdateMode.ONLINE, NULL_CONTEXT, false)) {
                         for (long nodeId : indexedNodes) {
                             EntityUpdates updates = fixture.nodeAsUpdates(nodeId);
-                            for (IndexEntryUpdate<?> update :
+                            for (IndexEntryUpdate update :
                                     updates.valueUpdatesForIndexKeys(singletonList(indexDescriptor))) {
-                                updater.process(IndexEntryUpdate.remove(
-                                        nodeId, indexDescriptor, ((ValueIndexEntryUpdate<?>) update).values()));
+                                updater.process(EagerValueIndexEntryUpdate.remove(
+                                        nodeId, indexDescriptor, ((ValueIndexEntryUpdate) update).values()));
                             }
                         }
                     }
@@ -252,10 +253,10 @@ class SpecialisedIndexFullCheckTest {
                     try (IndexUpdater updater = accessor.newUpdater(IndexUpdateMode.ONLINE, NULL_CONTEXT, false)) {
                         for (long relId : indexedRelationships) {
                             EntityUpdates updates = fixture.relationshipAsUpdates(relId);
-                            for (IndexEntryUpdate<?> update :
+                            for (IndexEntryUpdate update :
                                     updates.valueUpdatesForIndexKeys(singletonList(indexDescriptor))) {
-                                updater.process(IndexEntryUpdate.remove(
-                                        relId, indexDescriptor, ((ValueIndexEntryUpdate<?>) update).values()));
+                                updater.process(EagerValueIndexEntryUpdate.remove(
+                                        relId, indexDescriptor, ((ValueIndexEntryUpdate) update).values()));
                             }
                         }
                     }
@@ -283,7 +284,8 @@ class SpecialisedIndexFullCheckTest {
                 if (indexDescriptor.schema().entityType() == EntityType.NODE && !indexDescriptor.isUnique()) {
                     IndexAccessor accessor = fixture.indexAccessorLookup().apply(indexDescriptor);
                     try (IndexUpdater updater = accessor.newUpdater(IndexUpdateMode.ONLINE, NULL_CONTEXT, false)) {
-                        updater.process(IndexEntryUpdate.add(newNode, indexDescriptor, values(indexDescriptor)));
+                        updater.process(
+                                EagerValueIndexEntryUpdate.add(newNode, indexDescriptor, values(indexDescriptor)));
                     }
                 }
             }
@@ -477,15 +479,23 @@ class SpecialisedIndexFullCheckTest {
     }
 
     @Nested
+    class TrigramTextIndexV3 extends TextIndexBase {
+        TrigramTextIndexV3() {
+            super(AllIndexProviderDescriptors.TEXT_V3_DESCRIPTOR);
+        }
+    }
+
+    @Nested
     class FullTextIndex extends TestBase {
         @Override
         SchemaDescriptor nodeIndexSchema(int labelId, int propKeyId) {
-            return SchemaDescriptors.fulltext(EntityType.NODE, new int[] {labelId}, new int[] {propKeyId});
+            return SchemaDescriptors.forSemanticSearch(EntityType.NODE, new int[] {labelId}, new int[] {propKeyId});
         }
 
         @Override
         SchemaDescriptor relIndexSchema(int relTypeId, int propKeyId) {
-            return SchemaDescriptors.fulltext(EntityType.RELATIONSHIP, new int[] {relTypeId}, new int[] {propKeyId});
+            return SchemaDescriptors.forSemanticSearch(
+                    EntityType.RELATIONSHIP, new int[] {relTypeId}, new int[] {propKeyId});
         }
 
         @Override
@@ -591,6 +601,13 @@ class SpecialisedIndexFullCheckTest {
     class VectorV2Index extends VectorIndexBase {
         VectorV2Index() {
             super(VectorIndexVersion.V2_0);
+        }
+    }
+
+    @Nested
+    class VectorV3Index extends VectorIndexBase {
+        VectorV3Index() {
+            super(VectorIndexVersion.V3_0);
         }
     }
 

@@ -23,6 +23,8 @@ import org.neo4j.cypher.internal.CypherRuntime
 import org.neo4j.cypher.internal.RuntimeContext
 import org.neo4j.cypher.internal.logical.plans.IndexOrderNone
 import org.neo4j.cypher.internal.runtime.spec.Edition
+import org.neo4j.cypher.internal.runtime.spec.GraphCreation.Connectivity
+import org.neo4j.cypher.internal.runtime.spec.GraphCreation.NodeConnections
 import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.cypher.internal.runtime.spec.rewriters.TestPlanCombinationRewriter.NoRewrites
@@ -32,6 +34,8 @@ import org.neo4j.graphdb.RelationshipType.withName
 import org.neo4j.values.virtual.VirtualNodeValue
 
 import java.util.concurrent.ThreadLocalRandom
+
+object LimitTestBase
 
 abstract class LimitTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
@@ -767,7 +771,7 @@ abstract class LimitTestBase[CONTEXT <: RuntimeContext](
       .produceResults("a1")
       .apply()
       .|.limit(limit)
-      .|.directedRelationshipByIdSeek("r", "x", "y", Set("a1"), relationships.head.getId)
+      .|.relationshipByIdSeek("(x)-[r]->(y)", Set("a1"), relationships.head.getId)
       .allNodeScan("a1")
       .build()
 
@@ -788,7 +792,7 @@ abstract class LimitTestBase[CONTEXT <: RuntimeContext](
       .produceResults("a1")
       .apply()
       .|.limit(limit)
-      .|.directedRelationshipByIdSeek("r", "x", "y", Set("a1"), relationships.map(_.getId): _*)
+      .|.relationshipByIdSeek("(x)-[r]->(y)", Set("a1"), relationships.map(_.getId): _*)
       .allNodeScan("a1")
       .build()
 
@@ -810,7 +814,7 @@ abstract class LimitTestBase[CONTEXT <: RuntimeContext](
       .produceResults("a1")
       .apply()
       .|.limit(limit)
-      .|.undirectedRelationshipByIdSeek("r", "x", "y", Set("a1"), relationships.head.getId)
+      .|.relationshipByIdSeek("(x)-[r]-(y)", Set("a1"), relationships.head.getId)
       .allNodeScan("a1")
       .build()
 
@@ -831,7 +835,7 @@ abstract class LimitTestBase[CONTEXT <: RuntimeContext](
       .produceResults("a1")
       .apply()
       .|.limit(limit)
-      .|.undirectedRelationshipByIdSeek("r", "x", "y", Set("a1"), relationships.map(_.getId): _*)
+      .|.relationshipByIdSeek("(x)-[r]-(y)", Set("a1"), relationships.map(_.getId): _*)
       .allNodeScan("a1")
       .build()
 
@@ -1370,7 +1374,12 @@ abstract class LimitTestBase[CONTEXT <: RuntimeContext](
       .build()
 
     val runtimeResult =
-      execute(logicalQuery, runtime, inputValues(Array[Any](1)), testPlanCombinationRewriterHints = Set(NoRewrites))
+      executeQuery(
+        logicalQuery,
+        runtime,
+        inputValues(Array[Any](1)).stream(),
+        testPlanCombinationRewriterHints = Set(NoRewrites)
+      )
     runtimeResult should beColumns("c").withNoRows()
   }
 }

@@ -52,7 +52,6 @@ import org.neo4j.io.locker.FileLockException;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.impl.muninn.StandalonePageCacheFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
 import org.neo4j.kernel.impl.util.Validators;
 import org.neo4j.kernel.recovery.LogTailExtractor;
 import org.neo4j.memory.EmptyMemoryTracker;
@@ -61,6 +60,7 @@ import org.neo4j.storageengine.ReadOnlyTransactionIdStore;
 import org.neo4j.storageengine.api.StorageEngineFactory;
 import org.neo4j.storageengine.api.StoreId;
 import org.neo4j.storageengine.api.StoreVersion;
+import org.neo4j.wal.LogTailMetadata;
 import picocli.CommandLine;
 import picocli.CommandLine.Option;
 import picocli.CommandLine.Parameters;
@@ -114,8 +114,9 @@ public class StoreInfoCommand extends AbstractAdminCommand {
             return switch (lowerCase) {
                 case PLAIN_FORMAT, FALSE -> false;
                 case JSON_FORMAT, TRUE -> true;
-                default -> throw new CommandLine.TypeConversionException(
-                        format("Invalid format '%s'. Supported options are 'text' or 'json'", name));
+                default ->
+                    throw new CommandLine.TypeConversionException(
+                            format("Invalid format '%s'. Supported options are 'text' or 'json'", name));
             };
         }
     }
@@ -154,7 +155,7 @@ public class StoreInfoCommand extends AbstractAdminCommand {
         } catch (CommandFailedException e) {
             throw e;
         } catch (Exception e) {
-            throw new CommandFailedException(format("Failed to execute command: '%s'.", e.getMessage()), e);
+            throw new CommandFailedException("Failed to execute command", e);
         }
     }
 
@@ -207,10 +208,8 @@ public class StoreInfoCommand extends AbstractAdminCommand {
             var recoveryRequired =
                     checkRecoveryState(fs, pageCache, databaseLayout, config, memoryTracker, storageEngineFactory);
             var txIdStore = new ReadOnlyTransactionIdStore(logTail);
-            var lastTxId =
-                    txIdStore.getLastCommittedTransactionId(); // Latest committed tx id found in metadata store. May be
-            // behind
-            // if recovery is required.
+            // Latest committed tx id found in metadata store. May be behind if recovery is required.
+            var lastTxId = txIdStore.getLastCommittedTransactionId();
             var successorVersion =
                     versionInformation.successorStoreVersion(config).orElse(null);
             var storeInfo = StoreInfo.notInUseResult(
@@ -230,7 +229,7 @@ public class StoreInfoCommand extends AbstractAdminCommand {
         } catch (CommandFailedException e) {
             throw e;
         } catch (Exception e) {
-            throw new CommandFailedException(format("Failed to execute command: '%s'.", e.getMessage()), e);
+            throw new CommandFailedException("Failed to execute command", e);
         }
     }
 
@@ -263,8 +262,7 @@ public class StoreInfoCommand extends AbstractAdminCommand {
                     memoryTracker,
                     EMPTY);
         } catch (Exception e) {
-            throw new CommandFailedException(
-                    format("Failed to execute command when checking for recovery state: '%s'.", e.getMessage()), e);
+            throw new CommandFailedException("Failed to execute command when checking for recovery state", e);
         }
     }
 

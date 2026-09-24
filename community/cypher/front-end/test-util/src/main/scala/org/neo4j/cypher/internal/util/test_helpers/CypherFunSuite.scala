@@ -20,8 +20,11 @@ import org.mockito.ArgumentCaptor
 import org.scalatest.Args
 import org.scalatest.Assertions
 import org.scalatest.BeforeAndAfterEach
+import org.scalatest.Canceled
+import org.scalatest.Outcome
 import org.scalatest.Status
 import org.scalatest.Suite
+import org.scalatest.Tag
 import org.scalatest.funsuite.AnyFunSuiteLike
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
@@ -35,6 +38,39 @@ abstract class CypherFunSuite
     with BeforeAndAfterEach
     with CompareAsPrettyStrings {
 
+  object Tags {
+
+    // Exclusion is done natively in withFixture below to avoid JUnit Platform post-discovery
+    // tag pruning on the ScalaTest tree (helmethair scalatest-junit-runner is not safe under it).
+
+    /**
+     * Use this tag to exclude tests from running with overridden default query language.
+     * See the default-query-lang-cypher-25 maven profile.
+     *
+     * Note: must differ from the cypher25 profile's <excludedTestGroups> value to keep this tag out of the JUnit Platform
+     */
+    val NoQueryLangOverride: Tag = Tag("cypher.skip-on-query-language-override")
+
+    /**
+     * Use this tag to exclude tests from running with SPD.
+     * See the test-spd maven profile.
+     */
+    val NoSpdOverride: Tag = Tag("exclude-spd-override")
+  }
+
+  override def withFixture(test: NoArgTest): Outcome = {
+    val skipForSpd = test.tags.contains(Tags.NoSpdOverride.name) &&
+      Option(System.getProperty("NEO4J_OVERRIDE_DBMS_TEST_FACTORY_SUPPLIER")).contains("spd")
+    val skipForQueryLang = test.tags.contains(Tags.NoQueryLangOverride.name) &&
+      Option(System.getProperty("NEO4J_OVERRIDE_QUERY_LANGUAGE")).contains("cypher_25")
+
+    if (skipForSpd) {
+      Canceled(s"Excluded under SPD test profile: ${test.name}")
+    } else if (skipForQueryLang) {
+      Canceled(s"Excluded under default-query-lang override profile: ${test.name}")
+    } else super.withFixture(test)
+  }
+
   def argCaptor[T <: AnyRef](implicit manifest: Manifest[T]): ArgumentCaptor[T] = {
     ArgumentCaptor.forClass(manifest.runtimeClass.asInstanceOf[Class[T]])
   }
@@ -47,6 +83,34 @@ abstract class CypherFunSuite
 trait TestName extends Suite {
   final def testName: String = __testName.get
 
+  private var __testName: Option[String] = None
+
+  override protected def runTest(testName: String, args: Args): Status = {
+    __testName = Some(testName)
+    try {
+      super.runTest(testName, args)
+    } finally {
+      __testName = None
+    }
+  }
+}
+
+trait TestNameWithCaretPosition extends Suite {
+  final def testName: String = caretPosition.cleanInput
+  final def testPositions: Seq[InputPositionFromCaret] = caretPosition.positions
+
+  private def caretPosition: CaretPosition = {
+    if (__lastTestName == __testName) {
+      __lastCaretPosition.get
+    } else {
+      __lastTestName = __testName
+      __lastCaretPosition = Some(CaretPosition(__testName.get))
+      __lastCaretPosition.get
+    }
+  }
+
+  private var __lastCaretPosition: Option[CaretPosition] = None
+  private var __lastTestName: Option[String] = None
   private var __testName: Option[String] = None
 
   override protected def runTest(testName: String, args: Args): Status = {

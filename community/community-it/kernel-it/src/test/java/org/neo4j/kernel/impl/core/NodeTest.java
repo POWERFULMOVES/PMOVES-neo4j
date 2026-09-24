@@ -19,12 +19,12 @@
  */
 package org.neo4j.kernel.impl.core;
 
-import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 import java.util.Iterator;
 import java.util.Map;
@@ -58,32 +58,32 @@ class NodeTest {
 
         // And given a transaction deleting just the node
 
-        ConstraintViolationException exception = assertThrows(ConstraintViolationException.class, () -> {
-            try (Transaction transaction = db.beginTx()) {
-                var node = transaction.getNodeById(nodeId);
-                node.delete();
-                transaction.commit();
-            }
-        });
-        assertThat(exception.getMessage())
-                .contains(
+        assertThatThrownBy(() -> {
+                    try (Transaction transaction = db.beginTx()) {
+                        var node = transaction.getNodeById(nodeId);
+                        node.delete();
+                        transaction.commit();
+                    }
+                })
+                .isInstanceOf(ConstraintViolationException.class)
+                .hasMessageContaining(
                         "Cannot delete node<" + nodeId
                                 + ">, because it still has relationships. To delete this node, you must first delete its relationships.");
     }
 
     @Test
     void testNodeCreateAndDelete() {
-        long nodeId;
+        String nodeId;
         try (Transaction transaction = db.beginTx()) {
             Node node = transaction.createNode();
-            nodeId = node.getId();
-            transaction.getNodeById(nodeId);
+            nodeId = node.getElementId();
+            transaction.getNodeByElementId(nodeId);
             node.delete();
             transaction.commit();
         }
         assertThrows(NotFoundException.class, () -> {
             try (Transaction transaction = db.beginTx()) {
-                transaction.getNodeById(nodeId);
+                transaction.getNodeByElementId(nodeId);
             }
         });
     }
@@ -159,9 +159,7 @@ class NodeTest {
             Node node1 = transaction.createNode();
             Node node2 = transaction.createNode();
 
-            if (node1.removeProperty(key1) != null) {
-                fail("Remove of non existing property should return null");
-            }
+            assertNull(node1.removeProperty(key1), () -> "Remove of non existing property should return null");
 
             node1.setProperty(key1, int1);
             node2.setProperty(key1, string1);
@@ -173,9 +171,7 @@ class NodeTest {
             assertEquals(string1, node2.removeProperty(key1));
             // test remove of non existing property
 
-            if (node2.removeProperty(key1) != null) {
-                fail("Remove of non existing property return null.");
-            }
+            assertNull(node2.removeProperty(key1), () -> "Remove of non existing property return null.");
         }
     }
 
@@ -263,12 +259,12 @@ class NodeTest {
             keys.next();
             keys.next();
             Map<String, Object> properties = node1.getAllProperties();
-            assertEquals(properties.get(key1), int1);
-            assertEquals(properties.get(key2), int2);
-            assertEquals(properties.get(key3), string);
+            assertEquals(int1, properties.get(key1));
+            assertEquals(int2, properties.get(key2));
+            assertEquals(string, properties.get(key3));
             properties = node1.getProperties(key1, key2);
-            assertEquals(properties.get(key1), int1);
-            assertEquals(properties.get(key2), int2);
+            assertEquals(int1, properties.get(key1));
+            assertEquals(int2, properties.get(key2));
             assertFalse(properties.containsKey(key3));
 
             properties = node1.getProperties();
@@ -277,7 +273,6 @@ class NodeTest {
             assertThrows(NullPointerException.class, () -> {
                 String[] names = null;
                 node1.getProperties(names);
-                fail();
             });
 
             assertThrows(NullPointerException.class, () -> {
@@ -294,15 +289,15 @@ class NodeTest {
 
     @Test
     void testAddPropertyThenDelete() {
-        long nodeId;
+        String nodeId;
         try (Transaction transaction = db.beginTx()) {
             var node = transaction.createNode();
             node.setProperty("test", "test");
-            nodeId = node.getId();
+            nodeId = node.getElementId();
             transaction.commit();
         }
         try (Transaction transaction = db.beginTx()) {
-            var node = transaction.getNodeById(nodeId);
+            var node = transaction.getNodeByElementId(nodeId);
             node.setProperty("test2", "test2");
             node.delete();
             transaction.commit();
@@ -311,15 +306,15 @@ class NodeTest {
 
     @Test
     void testChangeProperty() {
-        long nodeId;
+        String nodeId;
         try (Transaction transaction = db.beginTx()) {
             var node = transaction.createNode();
             node.setProperty("test", "test1");
-            nodeId = node.getId();
+            nodeId = node.getElementId();
             transaction.commit();
         }
         try (Transaction transaction = db.beginTx()) {
-            var node = transaction.getNodeById(nodeId);
+            var node = transaction.getNodeByElementId(nodeId);
             node.setProperty("test", "test2");
             node.removeProperty("test");
             node.setProperty("test", "test3");
@@ -329,36 +324,36 @@ class NodeTest {
             transaction.commit();
         }
         try (Transaction transaction = db.beginTx()) {
-            var node = transaction.getNodeById(nodeId);
+            var node = transaction.getNodeByElementId(nodeId);
             assertEquals("test4", node.getProperty("test"));
         }
     }
 
     @Test
     void testChangeProperty2() {
-        long nodeId;
+        String nodeId;
         try (Transaction transaction = db.beginTx()) {
             Node node = transaction.createNode();
             node.setProperty("test", "test1");
-            nodeId = node.getId();
+            nodeId = node.getElementId();
             transaction.commit();
         }
         try (Transaction transaction = db.beginTx()) {
-            Node node = transaction.getNodeById(nodeId);
+            Node node = transaction.getNodeByElementId(nodeId);
             node.removeProperty("test");
             node.setProperty("test", "test3");
             assertEquals("test3", node.getProperty("test"));
             transaction.commit();
         }
         try (Transaction transaction = db.beginTx()) {
-            Node node = transaction.getNodeById(nodeId);
+            Node node = transaction.getNodeByElementId(nodeId);
             assertEquals("test3", node.getProperty("test"));
             node.removeProperty("test");
             node.setProperty("test", "test4");
             transaction.commit();
         }
         try (Transaction transaction = db.beginTx()) {
-            Node node = transaction.getNodeById(nodeId);
+            Node node = transaction.getNodeByElementId(nodeId);
             assertEquals("test4", node.getProperty("test"));
         }
     }

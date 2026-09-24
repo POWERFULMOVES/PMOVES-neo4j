@@ -21,19 +21,22 @@ package org.neo4j.dbms.diagnostics.profile;
 
 import static org.apache.commons.lang3.SystemUtils.IS_OS_WINDOWS;
 import static org.neo4j.configuration.SettingValueParsers.DURATION;
-import static org.neo4j.dbms.archive.StandardCompressionFormat.GZIP;
 
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.time.Duration;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 import org.neo4j.cli.AbstractAdminCommand;
 import org.neo4j.cli.CommandFailedException;
 import org.neo4j.cli.Converters;
 import org.neo4j.cli.ExecutionContext;
 import org.neo4j.configuration.Config;
-import org.neo4j.dbms.archive.Dumper;
+import org.neo4j.dbms.archive.Manifest;
+import org.neo4j.dbms.archive.StandardCompressionFormat;
+import org.neo4j.dbms.archive.Tarball;
 import org.neo4j.dbms.diagnostics.jmx.JMXDumper;
 import org.neo4j.dbms.diagnostics.jmx.JmxDump;
 import org.neo4j.internal.helpers.collection.Iterators;
@@ -167,14 +170,19 @@ public class ProfileCommand extends AbstractAdminCommand {
                         }
 
                         if (!skipCompression) {
-                            Path archive = output.resolve(String.format("profile-%s.gzip", clock.instant()));
-                            ctx.out().printf("%nCompressing result into %s", archive.getFileName());
-                            Dumper dumper = new Dumper(ctx.fs(), ctx.out());
-                            dumper.dump(
-                                    output, output, dumper.openForDump(archive), GZIP, path -> path.equals(archive));
-                            for (Path path : fs.listFiles(output, fs::isDirectory)) {
-                                fs.deleteRecursively(path);
-                            }
+                            var now = clock.instant();
+                            String filename = String.format("profile-%s.tar.gz", now);
+
+                            ctx.out().printf("%nCompressing result into %s", filename);
+                            // Moves all files into a .tar.gz archive, by first generating the artifact and then
+                            // deleting everything else.
+                            var archive = output.resolve(filename);
+                            Manifest manifest =
+                                    Manifest.builder().addContentsOf(output).build();
+                            Tarball.tarball(
+                                    output, filename, StandardCompressionFormat.GZIP, FileTime.from(now), manifest);
+                            Predicate<Path> skipArchive = path -> !path.equals(archive);
+                            fs.deleteRecursively(output, skipArchive);
                         }
                     }
                 }

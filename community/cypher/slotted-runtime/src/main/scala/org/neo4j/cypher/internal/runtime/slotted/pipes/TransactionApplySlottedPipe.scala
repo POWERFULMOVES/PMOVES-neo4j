@@ -19,7 +19,7 @@
  */
 package org.neo4j.cypher.internal.runtime.slotted.pipes
 
-import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour
+import org.neo4j.cypher.internal.logical.plans.TransactionalPlan.RecoveryMode
 import org.neo4j.cypher.internal.physicalplanning.LongSlot
 import org.neo4j.cypher.internal.physicalplanning.RefSlot
 import org.neo4j.cypher.internal.physicalplanning.Slot
@@ -32,6 +32,7 @@ import org.neo4j.cypher.internal.runtime.interpreted.pipes.AbstractTransactionAp
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.Pipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.QueryState
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.TransactionForeachPipe.toStatusMap
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.TransactionRetryPolicy
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.TransactionStatus
 import org.neo4j.cypher.internal.util.attribution.Id
 import org.neo4j.kernel.impl.util.collection.EagerBuffer
@@ -41,11 +42,13 @@ case class TransactionApplySlottedPipe(
   source: Pipe,
   inner: Pipe,
   batchSize: Expression,
-  onErrorBehaviour: InTransactionsOnErrorBehaviour,
+  recoveryMode: RecoveryMode,
   nullableSlots: Set[Slot],
   statusSlot: Option[Slot],
-  argumentSize: SlotConfiguration.Size
-)(val id: Id = Id.INVALID_ID) extends AbstractTransactionApplyPipe(source, inner, batchSize, onErrorBehaviour) {
+  argumentSize: SlotConfiguration.Size,
+  retryPolicy: TransactionRetryPolicy
+)(val id: Id = Id.INVALID_ID)
+    extends AbstractTransactionApplyPipe(source, inner, batchSize, recoveryMode, retryPolicy) {
 
   private[this] val nullableLongOffsets =
     nullableSlots.toArray.collect { case LongSlot(offset, _, _) if offset >= argumentSize.nLongs => offset }

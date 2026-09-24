@@ -21,6 +21,7 @@ package org.neo4j.memory;
 
 class MemoryPoolTracker implements MemoryTracker {
     private final ScopedMemoryPool pool;
+    private volatile boolean trackingOnly;
 
     MemoryPoolTracker(ScopedMemoryPool pool) {
         this.pool = pool;
@@ -38,7 +39,11 @@ class MemoryPoolTracker implements MemoryTracker {
 
     @Override
     public void allocateNative(long bytes) {
-        pool.reserveNative(bytes);
+        if (trackingOnly) {
+            pool.reserveNativeNoThrow(bytes);
+        } else {
+            pool.reserveNative(bytes);
+        }
     }
 
     @Override
@@ -48,7 +53,16 @@ class MemoryPoolTracker implements MemoryTracker {
 
     @Override
     public void allocateHeap(long bytes) {
-        pool.reserveHeap(bytes);
+        if (trackingOnly) {
+            pool.reserveHeapNoThrow(bytes);
+        } else {
+            pool.reserveHeap(bytes);
+        }
+    }
+
+    @Override
+    public void allocateHeapNoThrow(long bytes) {
+        pool.reserveHeapNoThrow(bytes);
     }
 
     @Override
@@ -62,10 +76,17 @@ class MemoryPoolTracker implements MemoryTracker {
     }
 
     @Override
-    public void reset() {}
+    public void reset() {
+        trackingOnly = false;
+    }
+
+    @Override
+    public void setTrackingOnly(boolean trackingOnly) {
+        this.trackingOnly = trackingOnly;
+    }
 
     @Override
     public MemoryTracker getScopedMemoryTracker() {
-        return new DefaultScopedMemoryTracker(this);
+        return new DefaultScopedMemoryTracker(this, getHeapEstimatorCache());
     }
 }

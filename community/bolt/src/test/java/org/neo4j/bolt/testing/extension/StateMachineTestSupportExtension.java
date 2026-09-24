@@ -25,7 +25,7 @@ import java.util.stream.Stream;
 import org.junit.jupiter.api.extension.ExtensionContext;
 import org.junit.jupiter.api.extension.TestTemplateInvocationContext;
 import org.junit.jupiter.api.extension.TestTemplateInvocationContextProvider;
-import org.neo4j.bolt.negotiation.ProtocolVersion;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 import org.neo4j.bolt.testing.annotation.Version;
 import org.neo4j.bolt.testing.annotation.fsm.StateMachineTest;
 import org.neo4j.bolt.testing.annotation.fsm.StateMachineTestExtension;
@@ -88,10 +88,12 @@ public class StateMachineTestSupportExtension implements TestTemplateInvocationC
         var until = convertVersion(annotation.until());
 
         if (since.major() != 0) {
-            return includedVersions.filter(version -> version.version().compareTo(since) >= 0);
+            includedVersions =
+                    includedVersions.filter(version -> version.version().isAtLeast(since));
         }
         if (until.major() != ProtocolVersion.MAX_MINOR_BIT) {
-            return includedVersions.filter(version -> version.version().compareTo(until) < 0);
+            includedVersions =
+                    includedVersions.filter(version -> version.version().isAtMost(until));
         }
 
         if (annotation.include().length != 0) {

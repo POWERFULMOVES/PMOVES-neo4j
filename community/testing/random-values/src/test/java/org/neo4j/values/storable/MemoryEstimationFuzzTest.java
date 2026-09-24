@@ -20,7 +20,6 @@
 package org.neo4j.values.storable;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.neo4j.values.virtual.VirtualValues.fromArray;
 
 import java.util.Arrays;
@@ -66,9 +65,9 @@ class MemoryEstimationFuzzTest {
                 ArrayValue a = (ArrayValue) random.nextValueOfType(type);
                 ArrayValue b = (ArrayValue) random.nextValueOfType(type);
                 if (a.intSize() < b.intSize()) {
-                    assertTrue(a.estimatedHeapUsage() <= b.estimatedHeapUsage());
+                    assertThat(a.estimatedHeapUsage()).isLessThanOrEqualTo(b.estimatedHeapUsage());
                 } else {
-                    assertTrue(a.estimatedHeapUsage() >= b.estimatedHeapUsage());
+                    assertThat(a.estimatedHeapUsage()).isGreaterThanOrEqualTo(b.estimatedHeapUsage());
                 }
             }
         }
@@ -81,9 +80,9 @@ class MemoryEstimationFuzzTest {
                 ListValue a = fromArray((ArrayValue) random.nextValueOfType(type));
                 ListValue b = fromArray((ArrayValue) random.nextValueOfType(type));
                 if (a.intSize() < b.intSize()) {
-                    assertTrue(a.estimatedHeapUsage() <= b.estimatedHeapUsage());
+                    assertThat(a.estimatedHeapUsage()).isLessThanOrEqualTo(b.estimatedHeapUsage());
                 } else {
-                    assertTrue(a.estimatedHeapUsage() >= b.estimatedHeapUsage());
+                    assertThat(a.estimatedHeapUsage()).isGreaterThanOrEqualTo(b.estimatedHeapUsage());
                 }
             }
         }
@@ -93,11 +92,12 @@ class MemoryEstimationFuzzTest {
         // For strings the size of the individual elements will vary
         // and it is not always true that a bigger array uses more memory
         // than a smaller one
-        return () -> Arrays.stream(ValueType.arrayTypes())
+        return () -> Arrays.stream(ValueType.ARRAY_TYPES)
                 .filter(t -> t != ValueType.STRING_ARRAY
                         && t != ValueType.STRING_ALPHANUMERIC_ARRAY
                         && t != ValueType.STRING_ASCII_ARRAY
-                        && t != ValueType.STRING_BMP_ARRAY)
+                        && t != ValueType.STRING_BMP_ARRAY
+                        && t != ValueType.VECTOR_ARRAY)
                 .iterator();
     }
 }

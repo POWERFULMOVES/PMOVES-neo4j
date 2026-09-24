@@ -33,16 +33,14 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.neo4j.io.ByteUnit.kibiBytes;
+import static org.neo4j.io.fs.ChannelNativeAccessor.EMPTY_ACCESSOR;
+import static org.neo4j.io.fs.ReadableChannel.BASE_TERM;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
 import static org.neo4j.io.pagecache.tracing.PageCacheTracer.NULL;
 import static org.neo4j.kernel.database.DatabaseIdFactory.from;
-import static org.neo4j.kernel.impl.transaction.log.ChannelNativeAccessor.EMPTY_ACCESSOR;
-import static org.neo4j.kernel.impl.transaction.log.LogIndexEncoding.encodeLogIndex;
-import static org.neo4j.kernel.impl.transaction.log.entry.LogEntryFactory.newCommitEntry;
-import static org.neo4j.kernel.impl.transaction.log.entry.LogEntryFactory.newStartEntry;
-import static org.neo4j.kernel.impl.transaction.log.entry.LogFormat.writeLogHeader;
-import static org.neo4j.kernel.impl.transaction.log.entry.LogSegments.UNKNOWN_LOG_SEGMENT_SIZE;
-import static org.neo4j.kernel.impl.transaction.log.entry.v57.DetachedCheckpointLogEntrySerializerV5_7.RECORD_LENGTH_BYTES;
+import static org.neo4j.kernel.recovery.IncompleteTransactionAction.ROLLBACK;
+import static org.neo4j.kernel.recovery.IncompleteTransactionAction.STOP;
 import static org.neo4j.kernel.recovery.RecoveryStartInformation.NO_RECOVERY_REQUIRED;
 import static org.neo4j.kernel.recovery.RecoveryStartInformationProvider.NO_MONITOR;
 import static org.neo4j.kernel.recovery.RecoveryStartupChecker.EMPTY_CHECKER;
@@ -50,19 +48,28 @@ import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
 import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_CHECKSUM;
 import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_COMMIT_TIMESTAMP;
 import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_CONSENSUS_INDEX;
+import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_TX_SEQUENCE_NUMBER;
 import static org.neo4j.test.LatestVersions.LATEST_KERNEL_VERSION;
 import static org.neo4j.test.LatestVersions.LATEST_LOG_FORMAT;
+import static org.neo4j.wal.LogIndexEncoding.encodeLogIndex;
+import static org.neo4j.wal.checkpoint.CheckpointLogSerializationHelper.getExpectedPositionAfterOneCheckpoint;
+import static org.neo4j.wal.entry.LogEntryFactory.newCommitEntry;
+import static org.neo4j.wal.entry.LogEntryFactory.newStartEntry;
+import static org.neo4j.wal.entry.LogFormat.writeLogHeader;
+import static org.neo4j.wal.entry.LogHeader.UNSPECIFIED_CREATION_TIME;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseInternalSettings;
+import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.dbms.database.DatabaseStartAbortedException;
 import org.neo4j.internal.helpers.collection.Visitor;
 import org.neo4j.internal.helpers.progress.ProgressMonitorFactory;
@@ -71,40 +78,24 @@ import org.neo4j.io.ByteUnit;
 import org.neo4j.io.fs.DefaultFileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.kernel.database.DatabaseStartupController;
+import org.neo4j.kernel.impl.api.ChunkedTransactionTracker;
 import org.neo4j.kernel.impl.api.TestCommandReaderFactory;
 import org.neo4j.kernel.impl.transaction.CommittedCommandBatchRepresentation;
 import org.neo4j.kernel.impl.transaction.CompleteBatchRepresentation;
-import org.neo4j.kernel.impl.transaction.SimpleAppendIndexProvider;
 import org.neo4j.kernel.impl.transaction.SimpleLogVersionRepository;
 import org.neo4j.kernel.impl.transaction.SimpleTransactionIdStore;
-import org.neo4j.kernel.impl.transaction.log.FlushableLogPositionAwareChannel;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
-import org.neo4j.kernel.impl.transaction.log.LogPositionAwareChannel;
-import org.neo4j.kernel.impl.transaction.log.LogPositionMarker;
-import org.neo4j.kernel.impl.transaction.log.LogicalTransactionStore;
-import org.neo4j.kernel.impl.transaction.log.PhysicalFlushableLogPositionAwareChannel;
-import org.neo4j.kernel.impl.transaction.log.PhysicalLogVersionedStoreChannel;
-import org.neo4j.kernel.impl.transaction.log.PhysicalLogicalTransactionStore;
-import org.neo4j.kernel.impl.transaction.log.TransactionMetadataCache;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.DetachedCheckpointAppender;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntry;
-import org.neo4j.kernel.impl.transaction.log.entry.LogEntryWriter;
-import org.neo4j.kernel.impl.transaction.log.entry.LogHeader;
-import org.neo4j.kernel.impl.transaction.log.files.LogFile;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
-import org.neo4j.kernel.impl.transaction.log.files.LogFilesBuilder;
 import org.neo4j.kernel.impl.transaction.tracing.DatabaseTracer;
-import org.neo4j.kernel.impl.transaction.tracing.LogCheckPointEvent;
 import org.neo4j.kernel.lifecycle.LifeSupport;
 import org.neo4j.kernel.lifecycle.Lifecycle;
 import org.neo4j.kernel.lifecycle.LifecycleAdapter;
 import org.neo4j.logging.InternalLog;
 import org.neo4j.monitoring.Monitors;
-import org.neo4j.storageengine.AppendIndexProvider;
-import org.neo4j.storageengine.api.LogVersionRepository;
 import org.neo4j.storageengine.api.StorageEngine;
+import org.neo4j.storageengine.api.StorageFilesState;
 import org.neo4j.storageengine.api.StoreId;
+import org.neo4j.storageengine.api.StoreIdentifier;
 import org.neo4j.storageengine.api.TransactionApplicationMode;
 import org.neo4j.storageengine.api.TransactionId;
 import org.neo4j.storageengine.api.TransactionIdStore;
@@ -114,6 +105,23 @@ import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.Neo4jLayoutExtension;
 import org.neo4j.test.utils.TestDirectory;
 import org.neo4j.time.Clocks;
+import org.neo4j.wal.FlushableLogPositionAwareChannel;
+import org.neo4j.wal.LogFile;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.LogPosition;
+import org.neo4j.wal.LogPositionAwareChannel;
+import org.neo4j.wal.LogPositionMarker;
+import org.neo4j.wal.LogicalTransactionStore;
+import org.neo4j.wal.PhysicalFlushableLogPositionAwareChannel;
+import org.neo4j.wal.PhysicalLogVersionedStoreChannel;
+import org.neo4j.wal.PhysicalLogicalTransactionStore;
+import org.neo4j.wal.TransactionMetadataCache;
+import org.neo4j.wal.checkpoint.DetachedCheckpointAppender;
+import org.neo4j.wal.checkpoint.LogCheckPointEvent;
+import org.neo4j.wal.entry.LogEntry;
+import org.neo4j.wal.entry.LogEntryWriter;
+import org.neo4j.wal.entry.LogHeader;
+import org.neo4j.wal.files.LogFilesBuilder;
 
 @Neo4jLayoutExtension
 class TransactionLogsRecoveryTest {
@@ -126,8 +134,6 @@ class TransactionLogsRecoveryTest {
     @Inject
     private TestDirectory testDirectory;
 
-    private final AppendIndexProvider appendIndexProvider = new SimpleAppendIndexProvider();
-    private final LogVersionRepository logVersionRepository = new SimpleLogVersionRepository();
     private final StoreId storeId = new StoreId(1, 2, "engine-1", "format-1", 3, 4);
     private final TransactionIdStore transactionIdStore = new SimpleTransactionIdStore(
             5L, 6L, LATEST_KERNEL_VERSION, 0, BASE_TX_COMMIT_TIMESTAMP, UNKNOWN_CONSENSUS_INDEX, 0, 0);
@@ -175,9 +181,10 @@ class TransactionLogsRecoveryTest {
             channel.getCurrentLogPosition(marker);
             LogPosition lastCommittedTxPosition = marker.newPosition();
             byte[] headerData = encodeLogIndex(1);
-            writer.writeStartEntry(LATEST_KERNEL_VERSION, 2L, 3L, 4L, previousChecksum, headerData);
+            writer.writeStartEntry(
+                    LATEST_KERNEL_VERSION, 2L, 3L, 4L, UNKNOWN_TX_SEQUENCE_NUMBER, previousChecksum, headerData);
             lastCommittedTxStartEntry = newStartEntry(
-                    LATEST_KERNEL_VERSION, 2L, 3L, 4L, previousChecksum, headerData, lastCommittedTxPosition);
+                    LATEST_KERNEL_VERSION, 2L, 3L, 4L, UNKNOWN_TX_SEQUENCE_NUMBER, previousChecksum, headerData);
             previousChecksum = writer.writeCommitEntry(LATEST_KERNEL_VERSION, 4L, 5L);
             lastCommittedTxCommitEntry = newCommitEntry(LATEST_KERNEL_VERSION, 4L, 5L, previousChecksum);
 
@@ -188,6 +195,7 @@ class TransactionLogsRecoveryTest {
                     LogCheckPointEvent.NULL,
                     new TransactionId(4L, 7L, LATEST_KERNEL_VERSION, 2, 5L, 6L),
                     5L,
+                    UNKNOWN_CONSENSUS_INDEX,
                     LATEST_KERNEL_VERSION,
                     lastCommittedTxPosition,
                     lastCommittedTxPosition,
@@ -196,9 +204,10 @@ class TransactionLogsRecoveryTest {
 
             // tx committed after checkpoint
             channel.getCurrentLogPosition(marker);
-            writer.writeStartEntry(LATEST_KERNEL_VERSION, 6L, 4L, 5L, previousChecksum, headerData);
+            writer.writeStartEntry(
+                    LATEST_KERNEL_VERSION, 6L, 4L, 5L, UNKNOWN_TX_SEQUENCE_NUMBER, previousChecksum, headerData);
             expectedStartEntry = newStartEntry(
-                    LATEST_KERNEL_VERSION, 6L, 4L, 5L, previousChecksum, headerData, marker.newPosition());
+                    LATEST_KERNEL_VERSION, 6L, 4L, 5L, UNKNOWN_TX_SEQUENCE_NUMBER, previousChecksum, headerData);
 
             previousChecksum = writer.writeCommitEntry(LATEST_KERNEL_VERSION, 5L, 7L);
             expectedCommitEntry = newCommitEntry(LATEST_KERNEL_VERSION, 5L, 7L, previousChecksum);
@@ -217,13 +226,20 @@ class TransactionLogsRecoveryTest {
 
             TransactionMetadataCache metadataCache = new TransactionMetadataCache();
             LogicalTransactionStore txStore = new PhysicalLogicalTransactionStore(
-                    recoveryLogFiles, metadataCache, TestCommandReaderFactory.INSTANCE, monitors, false, config);
+                    recoveryLogFiles,
+                    metadataCache,
+                    TestCommandReaderFactory.INSTANCE,
+                    monitors,
+                    false,
+                    config,
+                    INSTANCE);
             CorruptedLogsTruncator logPruner =
                     new CorruptedLogsTruncator(storeDir, recoveryLogFiles, fileSystem, INSTANCE);
             monitors.addMonitorListener(monitor);
             life.add(new TransactionLogsRecovery(
                     logFiles,
                     LatestVersions.LATEST_KERNEL_VERSION_PROVIDER,
+                    LatestVersions.LATEST_LOG_FORMAT_PROVIDER,
                     new DefaultRecoveryService(
                             storageEngine,
                             transactionIdStore,
@@ -231,10 +247,13 @@ class TransactionLogsRecoveryTest {
                             versionRepository,
                             recoveryLogFiles,
                             LatestVersions.LATEST_KERNEL_VERSION_PROVIDER,
+                            LatestVersions.LATEST_LOG_FORMAT_PROVIDER,
                             NO_MONITOR,
                             mock(InternalLog.class),
                             false,
-                            contextFactory) {
+                            contextFactory,
+                            recovering -> StorageFilesState.recoveredState(),
+                            config) {
                         private int nr;
 
                         @Override
@@ -280,13 +299,16 @@ class TransactionLogsRecoveryTest {
                     monitor,
                     ProgressMonitorFactory.NONE,
                     false,
+                    false,
                     EMPTY_CHECKER,
                     RecoveryPredicate.ALL,
-                    false,
+                    ROLLBACK,
                     contextFactory,
                     Clocks.systemClock(),
                     LatestVersions.BINARY_VERSIONS,
-                    RecoveryMode.FULL));
+                    RecoveryMode.FULL,
+                    new ChunkedTransactionTracker(),
+                    false));
 
             life.start();
 
@@ -310,7 +332,8 @@ class TransactionLogsRecoveryTest {
 
             // last committed tx
             channel.getCurrentLogPosition(marker);
-            writer.writeStartEntry(LATEST_KERNEL_VERSION, 2L, 3L, 4L, BASE_TX_CHECKSUM, EMPTY_BYTE_ARRAY);
+            writer.writeStartEntry(
+                    LATEST_KERNEL_VERSION, 2L, 3L, 4L, UNKNOWN_TX_SEQUENCE_NUMBER, BASE_TX_CHECKSUM, EMPTY_BYTE_ARRAY);
             writer.writeCommitEntry(LATEST_KERNEL_VERSION, 4L, 5L);
 
             // check point
@@ -321,6 +344,223 @@ class TransactionLogsRecoveryTest {
                     LogCheckPointEvent.NULL,
                     transactionId,
                     transactionId.id() + 7,
+                    UNKNOWN_CONSENSUS_INDEX,
+                    LATEST_KERNEL_VERSION,
+                    marker.newPosition(),
+                    marker.newPosition(),
+                    Instant.now(),
+                    "test");
+            return true;
+        });
+        // The logs have been changed, let's reinitialize to get the latest state
+        life.shutdown();
+        setUp();
+
+        LifeSupport life = new LifeSupport();
+        RecoveryMonitor monitor = mock(RecoveryMonitor.class);
+        try {
+            StorageEngine storageEngine = mock(StorageEngine.class);
+            Config config = Config.defaults();
+
+            TransactionMetadataCache metadataCache = new TransactionMetadataCache();
+            LogicalTransactionStore txStore = new PhysicalLogicalTransactionStore(
+                    logFiles, metadataCache, TestCommandReaderFactory.INSTANCE, monitors, false, config, INSTANCE);
+            CorruptedLogsTruncator logPruner = new CorruptedLogsTruncator(storeDir, logFiles, fileSystem, INSTANCE);
+            monitors.addMonitorListener(new RecoveryMonitor() {
+                @Override
+                public void recoveryRequired(RecoveryStartInformation recoveryStartInfo) {
+                    fail("Recovery should not be required");
+                }
+            });
+            life.add(new TransactionLogsRecovery(
+                    logFiles,
+                    LatestVersions.LATEST_KERNEL_VERSION_PROVIDER,
+                    LatestVersions.LATEST_LOG_FORMAT_PROVIDER,
+                    new DefaultRecoveryService(
+                            storageEngine,
+                            transactionIdStore,
+                            txStore,
+                            versionRepository,
+                            logFiles,
+                            LatestVersions.LATEST_KERNEL_VERSION_PROVIDER,
+                            LatestVersions.LATEST_LOG_FORMAT_PROVIDER,
+                            NO_MONITOR,
+                            mock(InternalLog.class),
+                            false,
+                            contextFactory,
+                            recovering -> StorageFilesState.recoveredState(),
+                            config),
+                    logPruner,
+                    schemaLife,
+                    monitor,
+                    ProgressMonitorFactory.NONE,
+                    false,
+                    false,
+                    EMPTY_CHECKER,
+                    RecoveryPredicate.ALL,
+                    STOP,
+                    contextFactory,
+                    Clocks.systemClock(),
+                    LatestVersions.BINARY_VERSIONS,
+                    RecoveryMode.FULL,
+                    new ChunkedTransactionTracker(),
+                    false));
+
+            life.start();
+
+            verifyNoInteractions(monitor);
+        } finally {
+            life.shutdown();
+        }
+    }
+
+    @Test
+    void shouldSeeThatMissingStoreFilesBeforeForwardRecoveryShouldBeUnrecoverable() throws Exception {
+        var contextFactory = new CursorContextFactory(NULL, EMPTY_CONTEXT_SUPPLIER);
+        LogFile logFile = logFiles.getLogFile();
+        Path file = logFile.getLogFileForVersion(logVersion);
+
+        writeSomeData(file, dataWriters -> {
+            LogEntryWriter<?> writer = dataWriters.writer();
+            LogPositionAwareChannel channel = dataWriters.channel();
+            LogPositionMarker marker = new LogPositionMarker();
+
+            // last committed tx
+            int previousChecksum = BASE_TX_CHECKSUM;
+            channel.getCurrentLogPosition(marker);
+            LogPosition lastCommittedTxPosition = marker.newPosition();
+            byte[] headerData = encodeLogIndex(1);
+            writer.writeStartEntry(
+                    LATEST_KERNEL_VERSION, 2L, 3L, 4L, UNKNOWN_TX_SEQUENCE_NUMBER, previousChecksum, headerData);
+            lastCommittedTxStartEntry = newStartEntry(
+                    LATEST_KERNEL_VERSION, 2L, 3L, 4L, UNKNOWN_TX_SEQUENCE_NUMBER, previousChecksum, headerData);
+            previousChecksum = writer.writeCommitEntry(LATEST_KERNEL_VERSION, 4L, 5L);
+            lastCommittedTxCommitEntry = newCommitEntry(LATEST_KERNEL_VERSION, 4L, 5L, previousChecksum);
+
+            // checkpoint pointing to the previously committed transaction
+            var checkpointFile = logFiles.getCheckpointFile();
+            var checkpointAppender = checkpointFile.getCheckpointAppender();
+            checkpointAppender.checkPoint(
+                    LogCheckPointEvent.NULL,
+                    new TransactionId(4L, 7L, LATEST_KERNEL_VERSION, 2, 5L, 6L),
+                    5L,
+                    UNKNOWN_CONSENSUS_INDEX,
+                    LATEST_KERNEL_VERSION,
+                    lastCommittedTxPosition,
+                    lastCommittedTxPosition,
+                    Instant.now(),
+                    "test");
+
+            // tx committed after checkpoint
+            channel.getCurrentLogPosition(marker);
+            writer.writeStartEntry(
+                    LATEST_KERNEL_VERSION, 6L, 4L, 5L, UNKNOWN_TX_SEQUENCE_NUMBER, previousChecksum, headerData);
+            expectedStartEntry = newStartEntry(
+                    LATEST_KERNEL_VERSION, 6L, 4L, 5L, UNKNOWN_TX_SEQUENCE_NUMBER, previousChecksum, headerData);
+
+            previousChecksum = writer.writeCommitEntry(LATEST_KERNEL_VERSION, 5L, 7L);
+            expectedCommitEntry = newCommitEntry(LATEST_KERNEL_VERSION, 5L, 7L, previousChecksum);
+
+            return true;
+        });
+
+        LifeSupport life = new LifeSupport();
+        LogsRecoveryMonitor monitor = new LogsRecoveryMonitor();
+        try {
+            var recoveryLogFiles = buildLogFiles();
+            life.add(recoveryLogFiles);
+            StorageEngine storageEngine = mock(StorageEngine.class);
+            when(storageEngine.createStorageCursors(any())).thenReturn(mock(StoreCursors.class));
+            Config config = Config.defaults();
+
+            TransactionMetadataCache metadataCache = new TransactionMetadataCache();
+            LogicalTransactionStore txStore = new PhysicalLogicalTransactionStore(
+                    recoveryLogFiles,
+                    metadataCache,
+                    TestCommandReaderFactory.INSTANCE,
+                    monitors,
+                    false,
+                    config,
+                    INSTANCE);
+            CorruptedLogsTruncator logPruner =
+                    new CorruptedLogsTruncator(storeDir, recoveryLogFiles, fileSystem, INSTANCE);
+            monitors.addMonitorListener(monitor);
+            life.add(new TransactionLogsRecovery(
+                    logFiles,
+                    LatestVersions.LATEST_KERNEL_VERSION_PROVIDER,
+                    LatestVersions.LATEST_LOG_FORMAT_PROVIDER,
+                    new DefaultRecoveryService(
+                            storageEngine,
+                            transactionIdStore,
+                            txStore,
+                            versionRepository,
+                            recoveryLogFiles,
+                            LatestVersions.LATEST_KERNEL_VERSION_PROVIDER,
+                            LatestVersions.LATEST_LOG_FORMAT_PROVIDER,
+                            NO_MONITOR,
+                            mock(InternalLog.class),
+                            false,
+                            contextFactory,
+                            recovering -> StorageFilesState.unrecoverableState(
+                                    List.of(new StoreFile(Path.of("store_file_should_be_here")))),
+                            config),
+                    logPruner,
+                    schemaLife,
+                    monitor,
+                    ProgressMonitorFactory.NONE,
+                    false,
+                    false,
+                    EMPTY_CHECKER,
+                    RecoveryPredicate.ALL,
+                    STOP,
+                    contextFactory,
+                    Clocks.systemClock(),
+                    LatestVersions.BINARY_VERSIONS,
+                    RecoveryMode.FULL,
+                    new ChunkedTransactionTracker(),
+                    false));
+
+            life.start();
+
+            assertThat(monitor.isRecoveryRequired()).isTrue();
+            assertThat(monitor.throwable)
+                    .isNotNull()
+                    .hasMessageContainingAll(
+                            "Store file",
+                            "store_file_should_be_here",
+                            "missing and recovery is not possible",
+                            "Please restore from a consistent backup");
+        } finally {
+            life.shutdown();
+        }
+    }
+
+    @Test
+    void shouldSeeThatMissingStoreFilesShouldBeUnrecoverableWithNoLogChanges() throws Exception {
+        Path file = logFiles.getLogFile().getLogFileForVersion(logVersion);
+        var contextFactory = new CursorContextFactory(NULL, EMPTY_CONTEXT_SUPPLIER);
+
+        LogPositionMarker marker = new LogPositionMarker();
+        writeSomeData(file, dataWriters -> {
+            LogEntryWriter<?> writer = dataWriters.writer();
+            LogPositionAwareChannel channel = dataWriters.channel();
+            TransactionId transactionId = new TransactionId(4L, 7L, LATEST_KERNEL_VERSION, BASE_TX_CHECKSUM, 5L, 6L);
+
+            // last committed tx
+            channel.getCurrentLogPosition(marker);
+            writer.writeStartEntry(
+                    LATEST_KERNEL_VERSION, 2L, 3L, 4L, UNKNOWN_TX_SEQUENCE_NUMBER, BASE_TX_CHECKSUM, EMPTY_BYTE_ARRAY);
+            writer.writeCommitEntry(LATEST_KERNEL_VERSION, 4L, 5L);
+
+            // check point
+            channel.getCurrentLogPosition(marker);
+            var checkpointFile = logFiles.getCheckpointFile();
+            var checkpointAppender = checkpointFile.getCheckpointAppender();
+            checkpointAppender.checkPoint(
+                    LogCheckPointEvent.NULL,
+                    transactionId,
+                    transactionId.id() + 7,
+                    UNKNOWN_CONSENSUS_INDEX,
                     LATEST_KERNEL_VERSION,
                     marker.newPosition(),
                     marker.newPosition(),
@@ -337,17 +577,13 @@ class TransactionLogsRecoveryTest {
 
             TransactionMetadataCache metadataCache = new TransactionMetadataCache();
             LogicalTransactionStore txStore = new PhysicalLogicalTransactionStore(
-                    logFiles, metadataCache, TestCommandReaderFactory.INSTANCE, monitors, false, config);
+                    logFiles, metadataCache, TestCommandReaderFactory.INSTANCE, monitors, false, config, INSTANCE);
             CorruptedLogsTruncator logPruner = new CorruptedLogsTruncator(storeDir, logFiles, fileSystem, INSTANCE);
-            monitors.addMonitorListener(new RecoveryMonitor() {
-                @Override
-                public void recoveryRequired(RecoveryStartInformation recoveryStartInfo) {
-                    fail("Recovery should not be required");
-                }
-            });
+            monitors.addMonitorListener(monitor);
             life.add(new TransactionLogsRecovery(
                     logFiles,
                     LatestVersions.LATEST_KERNEL_VERSION_PROVIDER,
+                    LatestVersions.LATEST_LOG_FORMAT_PROVIDER,
                     new DefaultRecoveryService(
                             storageEngine,
                             transactionIdStore,
@@ -355,26 +591,36 @@ class TransactionLogsRecoveryTest {
                             versionRepository,
                             logFiles,
                             LatestVersions.LATEST_KERNEL_VERSION_PROVIDER,
+                            LatestVersions.LATEST_LOG_FORMAT_PROVIDER,
                             NO_MONITOR,
                             mock(InternalLog.class),
                             false,
-                            contextFactory),
+                            contextFactory,
+                            recovering -> StorageFilesState.unrecoverableState(
+                                    List.of(new StoreFile(Path.of("store_file_should_be_here")))),
+                            config),
                     logPruner,
                     schemaLife,
                     monitor,
                     ProgressMonitorFactory.NONE,
                     false,
+                    false,
                     EMPTY_CHECKER,
                     RecoveryPredicate.ALL,
-                    false,
+                    STOP,
                     contextFactory,
                     Clocks.systemClock(),
                     LatestVersions.BINARY_VERSIONS,
-                    RecoveryMode.FULL));
+                    RecoveryMode.FULL,
+                    new ChunkedTransactionTracker(),
+                    false));
 
-            life.start();
-
-            verifyNoInteractions(monitor);
+            assertThatThrownBy(life::start)
+                    .hasMessageContainingAll(
+                            "Store file",
+                            "store_file_should_be_here",
+                            "missing and recovery is not possible",
+                            "Please restore from a consistent backup");
         } finally {
             life.shutdown();
         }
@@ -392,7 +638,7 @@ class TransactionLogsRecoveryTest {
 
             // incomplete tx
             channel.getCurrentLogPosition(marker); // <-- marker has the last good position
-            writer.writeStartEntry(LATEST_KERNEL_VERSION, 5L, 4L, 78, 9, EMPTY_BYTE_ARRAY);
+            writer.writeStartEntry(LATEST_KERNEL_VERSION, 5L, 4L, 4L, UNKNOWN_TX_SEQUENCE_NUMBER, 9, EMPTY_BYTE_ARRAY);
             channel.putChecksum();
 
             return true;
@@ -413,7 +659,8 @@ class TransactionLogsRecoveryTest {
         writeSomeData(file, dataWriters -> {
             LogEntryWriter<?> writer = dataWriters.writer();
             LogPositionAwareChannel channel = dataWriters.channel();
-            writer.writeStartEntry(LATEST_KERNEL_VERSION, 1L, 1L, 2L, BASE_TX_CHECKSUM, EMPTY_BYTE_ARRAY);
+            writer.writeStartEntry(
+                    LATEST_KERNEL_VERSION, 1L, 1L, 4L, UNKNOWN_TX_SEQUENCE_NUMBER, BASE_TX_CHECKSUM, EMPTY_BYTE_ARRAY);
             TransactionId transactionId = new TransactionId(1L, 5L, LATEST_KERNEL_VERSION, BASE_TX_CHECKSUM, 2L, 4L);
 
             writer.writeCommitEntry(LATEST_KERNEL_VERSION, 1L, 2L);
@@ -424,6 +671,7 @@ class TransactionLogsRecoveryTest {
                     LogCheckPointEvent.NULL,
                     transactionId,
                     transactionId.id() + 7,
+                    UNKNOWN_CONSENSUS_INDEX,
                     LATEST_KERNEL_VERSION,
                     marker.newPosition(),
                     marker.newPosition(),
@@ -431,7 +679,7 @@ class TransactionLogsRecoveryTest {
                     "test");
 
             // write incomplete tx to trigger recovery
-            writer.writeStartEntry(LATEST_KERNEL_VERSION, 5L, 4L, 28, 2, EMPTY_BYTE_ARRAY);
+            writer.writeStartEntry(LATEST_KERNEL_VERSION, 5L, 4L, 5L, UNKNOWN_TX_SEQUENCE_NUMBER, 2, EMPTY_BYTE_ARRAY);
             writer.getChannel().putChecksum();
             return true;
         });
@@ -439,7 +687,7 @@ class TransactionLogsRecoveryTest {
 
         assertThat(file).hasSize(marker.getByteOffset());
         assertEquals(
-                LATEST_LOG_FORMAT.getHeaderSize() + RECORD_LENGTH_BYTES /* one checkpoint */,
+                getExpectedPositionAfterOneCheckpoint() /* one checkpoint */,
                 ((DetachedCheckpointAppender) logFiles.getCheckpointFile().getCheckpointAppender())
                         .getCurrentPosition());
 
@@ -449,7 +697,7 @@ class TransactionLogsRecoveryTest {
                     Files.size(logFiles.getCheckpointFile().getCurrentFile()));
         } else {
             assertEquals(
-                    LATEST_LOG_FORMAT.getHeaderSize() + RECORD_LENGTH_BYTES /* one checkpoint */,
+                    getExpectedPositionAfterOneCheckpoint() /* one checkpoint */,
                     Files.size(logFiles.getCheckpointFile().getCurrentFile()));
         }
     }
@@ -461,7 +709,8 @@ class TransactionLogsRecoveryTest {
         writeSomeData(file, dataWriters -> {
             LogEntryWriter<?> writer = dataWriters.writer();
             LogPositionAwareChannel channel = dataWriters.channel();
-            writer.writeStartEntry(LATEST_KERNEL_VERSION, 1L, 1L, 2L, BASE_TX_CHECKSUM, EMPTY_BYTE_ARRAY);
+            writer.writeStartEntry(
+                    LATEST_KERNEL_VERSION, 1L, 1L, 4L, UNKNOWN_TX_SEQUENCE_NUMBER, BASE_TX_CHECKSUM, EMPTY_BYTE_ARRAY);
             writer.writeCommitEntry(LATEST_KERNEL_VERSION, 1L, 2L);
             TransactionId transactionId = new TransactionId(1L, 4L, LATEST_KERNEL_VERSION, BASE_TX_CHECKSUM, 2L, 3L);
 
@@ -472,6 +721,7 @@ class TransactionLogsRecoveryTest {
                     LogCheckPointEvent.NULL,
                     transactionId,
                     transactionId.id() + 7,
+                    UNKNOWN_CONSENSUS_INDEX,
                     LATEST_KERNEL_VERSION,
                     marker.newPosition(),
                     marker.newPosition(),
@@ -481,6 +731,7 @@ class TransactionLogsRecoveryTest {
                     LogCheckPointEvent.NULL,
                     transactionId,
                     transactionId.id() + 7,
+                    UNKNOWN_CONSENSUS_INDEX,
                     LATEST_KERNEL_VERSION,
                     new LogPosition(marker.getLogVersion() + 1, marker.getByteOffset()),
                     new LogPosition(marker.getLogVersion() + 1, marker.getByteOffset()),
@@ -488,14 +739,15 @@ class TransactionLogsRecoveryTest {
                     "invalid checkpoint");
 
             // incomplete tx
-            writer.writeStartEntry(LATEST_KERNEL_VERSION, 5L, 4L, 27, 1, EMPTY_BYTE_ARRAY);
+            writer.writeStartEntry(LATEST_KERNEL_VERSION, 5L, 4L, 5L, UNKNOWN_TX_SEQUENCE_NUMBER, 1, EMPTY_BYTE_ARRAY);
+            writer.getChannel().putChecksum();
             return true;
         });
         assertTrue(recovery(storeDir));
 
         assertEquals(marker.getByteOffset(), Files.size(file));
         assertEquals(
-                LATEST_LOG_FORMAT.getHeaderSize() + RECORD_LENGTH_BYTES /* one checkpoint */,
+                getExpectedPositionAfterOneCheckpoint() /* one checkpoint */,
                 Files.size(logFiles.getCheckpointFile().getCurrentFile()));
     }
 
@@ -511,12 +763,15 @@ class TransactionLogsRecoveryTest {
 
             // last committed tx
             int previousChecksum = BASE_TX_CHECKSUM;
-            writer.writeStartEntry(LATEST_KERNEL_VERSION, 2L, 3L, 4L, previousChecksum, EMPTY_BYTE_ARRAY);
+            writer.writeStartEntry(
+                    LATEST_KERNEL_VERSION, 2L, 3L, 4L, UNKNOWN_TX_SEQUENCE_NUMBER, previousChecksum, EMPTY_BYTE_ARRAY);
             previousChecksum = writer.writeCommitEntry(LATEST_KERNEL_VERSION, 4L, 5L);
 
             // incomplete tx
             channel.getCurrentLogPosition(marker); // <-- marker has the last good position
-            writer.writeStartEntry(LATEST_KERNEL_VERSION, 5L, 4L, 4L, previousChecksum, EMPTY_BYTE_ARRAY);
+            writer.writeStartEntry(
+                    LATEST_KERNEL_VERSION, 5L, 4L, 5L, UNKNOWN_TX_SEQUENCE_NUMBER, previousChecksum, EMPTY_BYTE_ARRAY);
+            writer.getChannel().putChecksum();
 
             return true;
         });
@@ -543,7 +798,14 @@ class TransactionLogsRecoveryTest {
             LogPositionAwareChannel channel = dataWriters.channel();
 
             // last committed tx
-            writer.writeStartEntry(LATEST_KERNEL_VERSION, 2L, 3L, 4L, BASE_TX_CHECKSUM, additionalHeaderData);
+            writer.writeStartEntry(
+                    LATEST_KERNEL_VERSION,
+                    2L,
+                    3L,
+                    4L,
+                    UNKNOWN_TX_SEQUENCE_NUMBER,
+                    BASE_TX_CHECKSUM,
+                    additionalHeaderData);
             writer.writeCommitEntry(LATEST_KERNEL_VERSION, transactionId, commitTimestamp);
             channel.getCurrentLogPosition(marker);
 
@@ -555,7 +817,7 @@ class TransactionLogsRecoveryTest {
 
         // THEN
         assertTrue(recoveryRequired);
-        var lastClosedTransaction = transactionIdStore.getLastClosedTransaction();
+        var lastClosedTransaction = transactionIdStore.getHighestGapFreeClosedTransaction();
         LogPosition logPosition = lastClosedTransaction.logPosition();
         assertEquals(transactionId, lastClosedTransaction.transactionId().id());
         assertEquals(
@@ -579,19 +841,23 @@ class TransactionLogsRecoveryTest {
         TransactionLogsRecovery logsRecovery = new TransactionLogsRecovery(
                 logFiles,
                 LatestVersions.LATEST_KERNEL_VERSION_PROVIDER,
+                LatestVersions.LATEST_LOG_FORMAT_PROVIDER,
                 recoveryService,
                 logPruner,
                 schemaLife,
                 monitor,
                 ProgressMonitorFactory.NONE,
                 true,
+                false,
                 EMPTY_CHECKER,
                 RecoveryPredicate.ALL,
-                false,
+                STOP,
                 contextFactory,
                 Clocks.systemClock(),
                 LatestVersions.BINARY_VERSIONS,
-                RecoveryMode.FULL);
+                RecoveryMode.FULL,
+                new ChunkedTransactionTracker(),
+                false);
 
         logsRecovery.init();
 
@@ -611,7 +877,8 @@ class TransactionLogsRecoveryTest {
             LogPositionAwareChannel channel = writers.channel();
 
             // last committed tx
-            writer.writeStartEntry(LATEST_KERNEL_VERSION, 2L, 3L, 4L, BASE_TX_CHECKSUM, EMPTY_BYTE_ARRAY);
+            writer.writeStartEntry(
+                    LATEST_KERNEL_VERSION, 2L, 3L, 4L, UNKNOWN_TX_SEQUENCE_NUMBER, BASE_TX_CHECKSUM, EMPTY_BYTE_ARRAY);
             writer.writeCommitEntry(LATEST_KERNEL_VERSION, transactionId, commitTimestamp);
             channel.getCurrentLogPosition(marker);
 
@@ -657,12 +924,13 @@ class TransactionLogsRecoveryTest {
 
             TransactionMetadataCache metadataCache = new TransactionMetadataCache();
             LogicalTransactionStore txStore = new PhysicalLogicalTransactionStore(
-                    logFiles, metadataCache, TestCommandReaderFactory.INSTANCE, monitors, false, config);
+                    logFiles, metadataCache, TestCommandReaderFactory.INSTANCE, monitors, false, config, INSTANCE);
             CorruptedLogsTruncator logPruner = new CorruptedLogsTruncator(storeDir, logFiles, fileSystem, INSTANCE);
             monitors.addMonitorListener(monitor);
             life.add(new TransactionLogsRecovery(
                     logFiles,
                     LatestVersions.LATEST_KERNEL_VERSION_PROVIDER,
+                    LatestVersions.LATEST_LOG_FORMAT_PROVIDER,
                     new DefaultRecoveryService(
                             storageEngine,
                             transactionIdStore,
@@ -670,22 +938,28 @@ class TransactionLogsRecoveryTest {
                             versionRepository,
                             logFiles,
                             LatestVersions.LATEST_KERNEL_VERSION_PROVIDER,
+                            LatestVersions.LATEST_LOG_FORMAT_PROVIDER,
                             NO_MONITOR,
                             mock(InternalLog.class),
                             false,
-                            contextFactory),
+                            contextFactory,
+                            recovering -> StorageFilesState.recoveredState(),
+                            config),
                     logPruner,
                     schemaLife,
                     monitor,
                     ProgressMonitorFactory.NONE,
                     false,
+                    false,
                     startupChecker,
                     RecoveryPredicate.ALL,
-                    true,
+                    ROLLBACK,
                     contextFactory,
                     Clocks.systemClock(),
                     LatestVersions.BINARY_VERSIONS,
-                    RecoveryMode.FULL));
+                    RecoveryMode.FULL,
+                    new ChunkedTransactionTracker(),
+                    false));
 
             life.start();
         } finally {
@@ -695,44 +969,40 @@ class TransactionLogsRecoveryTest {
     }
 
     private void writeSomeData(Path file, Visitor<DataWriters, IOException> visitor) throws IOException {
-
+        LogHeader logHeader = LATEST_LOG_FORMAT.newHeader(
+                logVersion,
+                3L,
+                BASE_TERM,
+                StoreIdentifier.newStoreIdentifier(storeId),
+                LATEST_LOG_FORMAT.getDefaultSegmentBlockSize(),
+                BASE_TX_CHECKSUM,
+                LATEST_KERNEL_VERSION,
+                UNSPECIFIED_CREATION_TIME);
         try (var versionedStoreChannel = new PhysicalLogVersionedStoreChannel(
-                        fileSystem.write(file),
-                        logVersion,
-                        LATEST_LOG_FORMAT,
-                        file,
-                        EMPTY_ACCESSOR,
-                        DatabaseTracer.NULL);
-                var writableLogChannel =
-                        new PhysicalFlushableLogPositionAwareChannel(versionedStoreChannel, null, INSTANCE)) {
-            writeLogHeader(
-                    versionedStoreChannel,
-                    LATEST_LOG_FORMAT.newHeader(
-                            logVersion,
-                            3L,
-                            LogHeader.UNKNOWN_TERM,
-                            storeId,
-                            UNKNOWN_LOG_SEGMENT_SIZE,
-                            BASE_TX_CHECKSUM,
-                            LATEST_KERNEL_VERSION),
-                    INSTANCE);
-            writableLogChannel.beginChecksumForWriting();
-            LogEntryWriter<?> first = new LogEntryWriter<>(writableLogChannel, LatestVersions.BINARY_VERSIONS);
-            visitor.visit(new DataWriters(first, writableLogChannel));
+                fileSystem.write(file), logVersion, LATEST_LOG_FORMAT, file, EMPTY_ACCESSOR, DatabaseTracer.NULL)) {
+            writeLogHeader(versionedStoreChannel, logHeader, INSTANCE);
+            try (var writableLogChannel =
+                    new PhysicalFlushableLogPositionAwareChannel(versionedStoreChannel, logHeader, INSTANCE)) {
+                LogEntryWriter<?> first = new LogEntryWriter<>(writableLogChannel, LatestVersions.BINARY_VERSIONS);
+                visitor.visit(new DataWriters(first, writableLogChannel));
+            }
         }
     }
 
     private record DataWriters(LogEntryWriter<?> writer, FlushableLogPositionAwareChannel channel) {}
 
     private LogFiles buildLogFiles() throws IOException {
-        return LogFilesBuilder.builder(databaseLayout, fileSystem, LatestVersions.LATEST_KERNEL_VERSION_PROVIDER)
-                .withLogVersionRepository(logVersionRepository)
+        return LogFilesBuilder.writeableBuilder(
+                        databaseLayout,
+                        fileSystem,
+                        LatestVersions.LATEST_KERNEL_VERSION_PROVIDER,
+                        LatestVersions.LATEST_LOG_FORMAT_PROVIDER)
                 .withTransactionIdStore(transactionIdStore)
-                .withAppendIndexProvider(appendIndexProvider)
                 .withCommandReaderFactory(TestCommandReaderFactory.INSTANCE)
                 .withStoreId(storeId)
                 .withConfig(Config.newBuilder()
                         .set(GraphDatabaseInternalSettings.fail_on_corrupted_log_files, false)
+                        .set(GraphDatabaseSettings.logical_log_rotation_threshold, kibiBytes(256))
                         .build())
                 .build();
     }
@@ -740,6 +1010,7 @@ class TransactionLogsRecoveryTest {
     private static final class LogsRecoveryMonitor implements RecoveryMonitor {
         private int batchCounter;
         private boolean recoveryRequired;
+        private Throwable throwable;
 
         @Override
         public void batchRecovered(CommittedCommandBatchRepresentation committedBatch) {
@@ -757,6 +1028,11 @@ class TransactionLogsRecoveryTest {
 
         public int recoveredBatches() {
             return batchCounter;
+        }
+
+        @Override
+        public void failToRecoverTransactionsAfterPosition(Throwable t, LogPosition recoveryFromPosition) {
+            throwable = t;
         }
     }
 }

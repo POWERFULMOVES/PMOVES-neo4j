@@ -33,13 +33,14 @@ import org.neo4j.internal.id.BufferedIdController;
 import org.neo4j.internal.id.BufferingIdGeneratorFactory;
 import org.neo4j.internal.id.IdController;
 import org.neo4j.internal.id.IdGeneratorFactory;
+import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.recordstorage.RecordDatabaseLayout;
-import org.neo4j.kernel.impl.transaction.log.files.TransactionLogFilesHelper;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.Neo4jLayoutExtension;
 import org.neo4j.test.utils.TestDirectory;
+import org.neo4j.wal.files.TransactionLogFilesHelper;
 
 @Neo4jLayoutExtension
 class CommunityEditionModuleIntegrationTest {
@@ -51,27 +52,33 @@ class CommunityEditionModuleIntegrationTest {
 
     @Test
     void createBufferedIdComponentsByDefault() {
-        DatabaseManagementService managementService =
-                new TestDatabaseManagementServiceBuilder(testDirectory.homePath()).build();
-        GraphDatabaseAPI database = (GraphDatabaseAPI) managementService.database(DEFAULT_DATABASE_NAME);
-        try {
+        try (DatabaseManagementService managementService =
+                new TestDatabaseManagementServiceBuilder(testDirectory.homePath()).build()) {
+            GraphDatabaseAPI database = (GraphDatabaseAPI) managementService.database(DEFAULT_DATABASE_NAME);
             DependencyResolver dependencyResolver = database.getDependencyResolver();
             IdController idController = dependencyResolver.resolveDependency(IdController.class);
             IdGeneratorFactory idGeneratorFactory = dependencyResolver.resolveDependency(IdGeneratorFactory.class);
 
             assertThat(idController).isInstanceOf(BufferedIdController.class);
             assertThat(idGeneratorFactory).isInstanceOf(BufferingIdGeneratorFactory.class);
-        } finally {
-            managementService.shutdown();
         }
     }
 
     @Test
     void fileWatcherFileNameFilter() {
         Predicate<String> filter = ModularDatabaseCreationContext.defaultFileWatcherFilter();
-        assertFalse(filter.test(databaseLayout.metadataStore().getFileName().toString()));
-        assertFalse(filter.test(databaseLayout.nodeStore().getFileName().toString()));
+        assertFalse(
+                filter.test(databaseLayout.metadataStore().storeBaseFileName().toString()));
+        assertFalse(filter.test(databaseLayout.nodeStore().storeBaseFileName().toString()));
         assertTrue(filter.test(TransactionLogFilesHelper.DEFAULT_NAME + ".1"));
         assertTrue(filter.test(TransactionLogFilesHelper.CHECKPOINT_FILE_PREFIX + ".1"));
+    }
+
+    @Test
+    void ignoresTmpFiles() {
+        var filter = ModularDatabaseCreationContext.defaultFileWatcherFilter();
+        assertThat(filter.test(FileSystemAbstraction.DEFAULT_TMP_SUFFIX)).isTrue();
+        assertThat(filter.test("some-file" + FileSystemAbstraction.DEFAULT_TMP_SUFFIX))
+                .isTrue();
     }
 }

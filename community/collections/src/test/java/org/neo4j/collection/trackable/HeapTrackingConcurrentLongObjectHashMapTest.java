@@ -32,6 +32,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongFunction;
 import org.eclipse.collections.impl.list.Interval;
 import org.eclipse.collections.impl.parallel.ParallelIterate;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
 import org.neo4j.memory.EmptyMemoryTracker;
@@ -40,23 +41,30 @@ import org.neo4j.memory.EmptyMemoryTracker;
 public class HeapTrackingConcurrentLongObjectHashMapTest {
     public volatile long volatileLong = 0L;
 
+    private final ExecutorService executor = Executors.newFixedThreadPool(20);
+
+    @AfterEach
+    void tearDown() {
+        executor.shutdown();
+    }
+
     @Test
-    public void putIfAbsent() {
+    void putIfAbsent() {
         HeapTrackingConcurrentLongObjectHashMap<Integer> map = newMapWithKeysValues(1, 1, 2, 2);
-        assertThat(map.putIfAbsent(1, 1)).isEqualTo(1);
+        assertThat(map.putIfAbsent(1, 1)).isOne();
         assertThat(map.putIfAbsent(3, 3)).isNull();
     }
 
     @Test
-    public void replace() {
+    void replace() {
         HeapTrackingConcurrentLongObjectHashMap<Integer> map = newMapWithKeysValues(1, 1, 2, 2);
-        assertThat(map.replace(1, 7)).isEqualTo(1);
+        assertThat(map.replace(1, 7)).isOne();
         assertThat(map.get(1)).isEqualTo(7);
         assertThat(map.replace(3, 3)).isNull();
     }
 
     @Test
-    public void replaceWithOldValue() {
+    void replaceWithOldValue() {
         HeapTrackingConcurrentLongObjectHashMap<Integer> map = newMapWithKeysValues(1, 1, 2, 2);
 
         assertThat(map.replace(1, 1, 7)).isTrue();
@@ -65,7 +73,7 @@ public class HeapTrackingConcurrentLongObjectHashMapTest {
     }
 
     @Test
-    public void removeWithKeyValue() {
+    void removeWithKeyValue() {
         HeapTrackingConcurrentLongObjectHashMap<Integer> map = newMapWithKeysValues(1, 1, 2, 2);
 
         assertThat(map.remove(1, 1)).isTrue();
@@ -74,7 +82,7 @@ public class HeapTrackingConcurrentLongObjectHashMapTest {
 
     @SuppressWarnings("RedundantCollectionOperation")
     @RepeatedTest(100)
-    public void concurrentPutGetPutRemoveContainsKeyContainsValueGetIfAbsentPutTest() {
+    void concurrentPutGetPutRemoveContainsKeyContainsValueGetIfAbsentPutTest() {
         HeapTrackingConcurrentLongObjectHashMap<Integer> map1 =
                 HeapTrackingConcurrentLongObjectHashMap.newMap(EmptyMemoryTracker.INSTANCE);
         HeapTrackingConcurrentLongObjectHashMap<Integer> map2 =
@@ -106,14 +114,13 @@ public class HeapTrackingConcurrentLongObjectHashMapTest {
                     assertThat(map2.putIfAbsent(each, each)).isNull();
                 },
                 1,
-                executor());
-        assertThat(map1).isEqualTo(map2);
-        assertThat(map1).hasSameHashCodeAs(map2);
+                executor);
+        assertThat(map1).isEqualTo(map2).hasSameHashCodeAs(map2);
     }
 
     @SuppressWarnings("RedundantCollectionOperation")
     @RepeatedTest(10)
-    public void concurrentSlowComputeIfAbsentTest() {
+    void concurrentSlowComputeIfAbsentTest() {
         ThreadLocalRandom random = ThreadLocalRandom.current();
 
         HeapTrackingConcurrentLongObjectHashMap<Integer> map1 =
@@ -154,13 +161,12 @@ public class HeapTrackingConcurrentLongObjectHashMapTest {
                     assertThat(map2.putIfAbsent(each, each)).isNull();
                 },
                 1,
-                executor());
-        assertThat(map1).isEqualTo(map2);
-        assertThat(map1).hasSameHashCodeAs(map2);
+                executor);
+        assertThat(map1).isEqualTo(map2).hasSameHashCodeAs(map2);
     }
 
     @Test
-    public void concurrentClear() {
+    void concurrentClear() {
         HeapTrackingConcurrentLongObjectHashMap<Integer> map =
                 HeapTrackingConcurrentLongObjectHashMap.newMap(EmptyMemoryTracker.INSTANCE);
         ParallelIterate.forEach(
@@ -172,12 +178,12 @@ public class HeapTrackingConcurrentLongObjectHashMapTest {
                     map.clear();
                 },
                 1,
-                executor());
+                executor);
         assertThat(map.isEmpty()).isTrue();
     }
 
     @Test
-    public void concurrentRemoveAndPutIfAbsent() {
+    void concurrentRemoveAndPutIfAbsent() {
         HeapTrackingConcurrentLongObjectHashMap<Integer> map =
                 HeapTrackingConcurrentLongObjectHashMap.newMap(EmptyMemoryTracker.INSTANCE);
         ParallelIterate.forEach(
@@ -203,7 +209,7 @@ public class HeapTrackingConcurrentLongObjectHashMapTest {
                     }
                 },
                 1,
-                executor());
+                executor);
     }
 
     @RepeatedTest(100)
@@ -216,35 +222,36 @@ public class HeapTrackingConcurrentLongObjectHashMapTest {
         ThreadLocalRandom random = ThreadLocalRandom.current();
 
         int threads = random.nextInt(1, 2 * Runtime.getRuntime().availableProcessors());
-        var executor = Executors.newFixedThreadPool(threads);
+        try (var executor = Executors.newFixedThreadPool(threads)) {
 
-        var computeFailed = new AtomicBoolean(false);
-        var iteratorFailed = new AtomicReference<String>(null);
-        var replaceFailed = new AtomicBoolean(false);
-        var putFailed = new AtomicBoolean(false);
+            var computeFailed = new AtomicBoolean(false);
+            var iteratorFailed = new AtomicReference<String>(null);
+            var replaceFailed = new AtomicBoolean(false);
+            var putFailed = new AtomicBoolean(false);
 
-        int max = end + (threads - 1) * offset;
-        for (int i = 0; i < threads; i++) {
-            executor.submit(new ComputeContestant(map, start, end, computeFailed));
-            executor.submit(new IteratorContestant(map, start, end, max, iteratorFailed));
-            executor.submit(new ReplaceContestant(map, start, end, replaceFailed));
-            executor.submit(new IteratorContestant(map, start, end, max, iteratorFailed));
-            executor.submit(new PutContestant(map, start, end, putFailed));
-            executor.submit(new IteratorContestant(map, start, end, max, iteratorFailed));
-            start += offset;
-            end += offset;
-        }
-        executor.shutdown();
-        assertThat(end).isEqualTo(max + offset);
-        assertThat(computeFailed.get()).isFalse();
-        assertThat(iteratorFailed.get()).isNull();
-        assertThat(replaceFailed.get()).isFalse();
-        assertThat(putFailed.get()).isFalse();
-        assertThat(executor.awaitTermination(1, TimeUnit.MINUTES)).isTrue();
-        assertThat(map.size()).isEqualTo(max);
-        for (int i = 0; i < max; i++) {
-            Integer actual = map.get(i);
-            assertThat(actual).isEqualTo(i);
+            int max = end + (threads - 1) * offset;
+            for (int i = 0; i < threads; i++) {
+                executor.submit(new ComputeContestant(map, start, end, computeFailed));
+                executor.submit(new IteratorContestant(map, start, end, max, iteratorFailed));
+                executor.submit(new ReplaceContestant(map, start, end, replaceFailed));
+                executor.submit(new IteratorContestant(map, start, end, max, iteratorFailed));
+                executor.submit(new PutContestant(map, start, end, putFailed));
+                executor.submit(new IteratorContestant(map, start, end, max, iteratorFailed));
+                start += offset;
+                end += offset;
+            }
+            executor.shutdown();
+            assertThat(end).isEqualTo(max + offset);
+            assertThat(computeFailed.get()).isFalse();
+            assertThat(iteratorFailed.get()).isNull();
+            assertThat(replaceFailed.get()).isFalse();
+            assertThat(putFailed.get()).isFalse();
+            assertThat(executor.awaitTermination(1, TimeUnit.MINUTES)).isTrue();
+            assertThat(map.size()).isEqualTo(max);
+            for (int i = 0; i < max; i++) {
+                Integer actual = map.get(i);
+                assertThat(actual).isEqualTo(i);
+            }
         }
     }
 
@@ -255,42 +262,43 @@ public class HeapTrackingConcurrentLongObjectHashMapTest {
         ThreadLocalRandom random = ThreadLocalRandom.current();
 
         int threads = random.nextInt(1, 2 * Runtime.getRuntime().availableProcessors());
-        var executor = Executors.newFixedThreadPool(threads);
-        int key = 42;
-        int value = 1337;
+        try (var executor = Executors.newFixedThreadPool(threads)) {
+            int key = 42;
+            int value = 1337;
 
-        final AtomicBoolean hasBeenCalledMultipleTimes = new AtomicBoolean(false);
-        var callOnce = new LongFunction<Integer>() {
-            private final AtomicBoolean hasBeenCalled = new AtomicBoolean(false);
+            final AtomicBoolean hasBeenCalledMultipleTimes = new AtomicBoolean(false);
+            var callOnce = new LongFunction<Integer>() {
+                private final AtomicBoolean hasBeenCalled = new AtomicBoolean(false);
 
-            @Override
-            public Integer apply(long aLong) {
-                if (hasBeenCalled.compareAndSet(false, true)) {
-                    try {
-                        Thread.sleep(10);
-                    } catch (InterruptedException e) {
-                        throw new RuntimeException(e);
+                @Override
+                public Integer apply(long aLong) {
+                    if (hasBeenCalled.compareAndSet(false, true)) {
+                        try {
+                            Thread.sleep(10);
+                        } catch (InterruptedException e) {
+                            throw new RuntimeException(e);
+                        }
+                    } else {
+                        hasBeenCalledMultipleTimes.set(true);
                     }
-                } else {
-                    hasBeenCalledMultipleTimes.set(true);
+
+                    return value;
                 }
-
-                return value;
+            };
+            var getFailed = new AtomicBoolean(false);
+            executor.submit(new GetContestant(map, key, value, getFailed));
+            for (int i = 0; i < threads; i++) {
+                executor.submit(() -> {
+                    map.computeIfAbsent(key, callOnce);
+                });
             }
-        };
-        var getFailed = new AtomicBoolean(false);
-        executor.submit(new GetContestant(map, key, value, getFailed));
-        for (int i = 0; i < threads; i++) {
-            executor.submit(() -> {
-                map.computeIfAbsent(key, callOnce);
-            });
-        }
 
-        executor.shutdown();
-        assertThat(executor.awaitTermination(1, TimeUnit.MINUTES)).isTrue();
-        assertThat(map.size()).isEqualTo(1);
-        assertThat(hasBeenCalledMultipleTimes.get()).isFalse();
-        assertThat(getFailed.get()).isFalse();
+            executor.shutdown();
+            assertThat(executor.awaitTermination(1, TimeUnit.MINUTES)).isTrue();
+            assertThat(map.size()).isOne();
+            assertThat(hasBeenCalledMultipleTimes.get()).isFalse();
+            assertThat(getFailed.get()).isFalse();
+        }
     }
 
     private record GetContestant(
@@ -440,9 +448,5 @@ public class HeapTrackingConcurrentLongObjectHashMapTest {
         map.put(key1, value1);
         map.put(key2, value2);
         return map;
-    }
-
-    private ExecutorService executor() {
-        return Executors.newFixedThreadPool(20);
     }
 }

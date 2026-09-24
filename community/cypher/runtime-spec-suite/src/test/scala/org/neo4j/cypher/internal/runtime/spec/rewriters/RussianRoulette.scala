@@ -24,13 +24,13 @@ import org.neo4j.cypher.internal.expressions.DecimalDoubleLiteral
 import org.neo4j.cypher.internal.expressions.Divide
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
-import org.neo4j.cypher.internal.expressions.FunctionName
 import org.neo4j.cypher.internal.expressions.LessThan
 import org.neo4j.cypher.internal.expressions.SignedDecimalIntegerLiteral
 import org.neo4j.cypher.internal.expressions.True
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 import org.neo4j.cypher.internal.logical.plans.Selection
 import org.neo4j.cypher.internal.runtime.spec.rewriters.PlanRewriterContext.pos
+import org.neo4j.cypher.internal.util.FunctionName
 import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.attribution.IdGen
 
@@ -38,28 +38,34 @@ import scala.util.Random
 
 /**
  * Randomly inserts plans that will cause runtime exceptions.
- * 
+ *
  * @param bangProbability probability of runtime failure for the inserted plans
  * @param rouletteProbability probability of inserting a sometimes failing plan at a certain point
  * @param idGen id generator
+ * @param random source of randomness for deciding where to insert failing plans
+ * @param bangFunction name of the nullary function returning a value in [0, 1) that decides whether an inserted
+ *                     plan fails for a given row. Defaults to the builtin, non-deterministic `rand()`. Tests that
+ *                     need reproducible failures can pass the name of a seeded user function instead.
  */
 case class RussianRoulette(
   bangProbability: Double,
   rouletteProbability: Double,
   idGen: IdGen,
-  random: Random = Random
+  random: Random,
+  bangFunction: String = "rand"
 ) extends Rewriter {
 
   private val rouletteRewriter: Rewriter = TestPlanRewriterTemplates.everywhere(
     rouletteProbability,
     (plan: LogicalPlan) => {
       Selection(Seq(russianRouletteExpression()), plan)(idGen)
-    }
+    },
+    random
   )
 
   private def russianRouletteExpression(): Expression = {
     val isBulletInChamber = LessThan(
-      FunctionInvocation(FunctionName("rand")(pos), distinct = false, IndexedSeq.empty)(pos),
+      FunctionInvocation(FunctionName(bangFunction)(pos), distinct = false, IndexedSeq.empty)(pos),
       DecimalDoubleLiteral(bangProbability.toString)(pos)
     )(pos)
     val bang = Divide(SignedDecimalIntegerLiteral("1")(pos), SignedDecimalIntegerLiteral("0")(pos))(pos)

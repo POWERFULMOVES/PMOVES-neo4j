@@ -21,7 +21,7 @@ package org.neo4j.cypher.internal.plandescription
 
 import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ExecutionPlan
-import org.neo4j.cypher.internal.RuntimeName
+import org.neo4j.cypher.internal.ast.semantics.scoping.WorkingScope
 import org.neo4j.cypher.internal.frontend.PlannerName
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 import org.neo4j.cypher.internal.plandescription.Arguments.BatchSize
@@ -34,6 +34,9 @@ import org.neo4j.cypher.internal.planner.spi.ImmutablePlanningAttributes
 import org.neo4j.cypher.internal.util.attribution.Id
 import org.neo4j.cypher.result.OperatorProfile
 import org.neo4j.cypher.result.QueryProfile
+import org.neo4j.kernel.api.query.RuntimeName
+
+import scala.util.chaining.scalaUtilChainingOps
 
 object PlanDescriptionBuilder {
 
@@ -44,13 +47,16 @@ object PlanDescriptionBuilder {
     effectiveCardinalities: ImmutablePlanningAttributes.EffectiveCardinalities,
     withRawCardinalities: Boolean,
     withDistinctness: Boolean,
+    renderNestedPlanExpressions: Boolean,
     providedOrders: ImmutablePlanningAttributes.ProvidedOrders,
     executionPlan: ExecutionPlan,
     renderPlanDescription: Boolean,
-    cypherVersion: CypherVersion
+    cypherVersion: CypherVersion,
+    explainScopeOpt: Option[WorkingScope],
+    cypherPlannerVersion: Option[String]
   ): PlanDescriptionBuilder = {
     // NOTE: We should not keep a reference to the ExecutionPlan in the PlanDescriptionBuilder since it can end up in long-lived caches, e.g. RecentQueryBuffer
-    val batchSize = executionPlan.batchSize
+    val batchSize = executionPlan.maybeBatchSize
     val runtimeName = executionPlan.runtimeName
     val runtimeMetadata = executionPlan.metadata
     val runtimeOperatorMetadata = executionPlan.operatorMetadata
@@ -63,6 +69,7 @@ object PlanDescriptionBuilder {
       effectiveCardinalities,
       withRawCardinalities,
       withDistinctness,
+      renderNestedPlanExpressions,
       providedOrders,
       runtimeName,
       runtimeMetadata,
@@ -70,7 +77,9 @@ object PlanDescriptionBuilder {
       internalPlanDescriptionRewriter,
       batchSize,
       renderPlanDescription,
-      cypherVersion
+      cypherVersion,
+      explainScopeOpt,
+      cypherPlannerVersion
     )
   }
 }
@@ -82,6 +91,7 @@ class PlanDescriptionBuilder(
   effectiveCardinalities: ImmutablePlanningAttributes.EffectiveCardinalities,
   withRawCardinalities: Boolean,
   withDistinctness: Boolean,
+  renderNestedPlanExpressions: Boolean,
   providedOrders: ImmutablePlanningAttributes.ProvidedOrders,
   runtimeName: RuntimeName,
   runtimeMetadata: Seq[Argument],
@@ -89,8 +99,17 @@ class PlanDescriptionBuilder(
   internalPlanDescriptionRewriter: Option[InternalPlanDescriptionRewriter],
   batchSize: Option[Int],
   includeStringRepresentation: Boolean,
-  cypherVersion: CypherVersion
+  cypherVersion: CypherVersion,
+  explainScopeOpt: Option[WorkingScope],
+  cypherPlannerVersion: Option[String]
 ) {
+
+  def scope(): InternalPlanDescription = {
+    if (explainScopeOpt.nonEmpty)
+      WorkingScope2PlanDescription(explainScopeOpt.get)
+    else
+      explain()
+  }
 
   def explain(): InternalPlanDescription = {
     val description =
@@ -102,14 +121,16 @@ class PlanDescriptionBuilder(
           effectiveCardinalities,
           withRawCardinalities,
           withDistinctness,
+          renderNestedPlanExpressions,
           providedOrders,
           runtimeOperatorMetadata,
-          cypherVersion
+          cypherVersion,
+          cypherPlannerVersion
         )
         .addArgument(Runtime(runtimeName.toTextOutput))
-        .addArgument(RuntimeImpl(runtimeName.name))
+        .addArgument(RuntimeImpl(runtimeName.toTextOutput))
 
-    val withMetaData = (runtimeMetadata ++ batchSize.map(BatchSize)).foldLeft(description)((plan, metadata) =>
+    val withMetaData = (runtimeMetadata ++ batchSize.map(BatchSize.apply)).foldLeft(description)((plan, metadata) =>
       plan.addArgument(metadata)
     )
 
@@ -123,20 +144,29 @@ class PlanDescriptionBuilder(
   def profile(queryProfile: QueryProfile): InternalPlanDescription = {
 
     val planDescription = BuildPlanDescription(explain())
-      .addArgument(Arguments.GlobalMemory, queryProfile.maxAllocatedMemory())
-      .addArgument(Arguments.AvailableWorkers, queryProfile.numberOfAvailableWorkers())
-      .addArgument(Arguments.AvailableProcessors, queryProfile.numberOfAvailableProcessors())
+      .addArgument(Arguments.GlobalMemory.apply, queryProfile.maxAllocatedMemory())
+      .addArgument(Arguments.AvailableWorkers.apply, queryProfile.numberOfAvailableWorkers())
+      .addArgument(Arguments.AvailableProcessors.apply, queryProfile.numberOfAvailableProcessors())
       .plan
       .map { (input: InternalPlanDescription) =>
         val data = queryProfile.operatorProfile(input.id.x)
 
         BuildPlanDescription(input)
-          .addArgument(Arguments.Rows, data.rows)
-          .addArgument(Arguments.DbHits, data.dbHits)
-          .addArgument(Arguments.PageCacheHits, data.pageCacheHits)
-          .addArgument(Arguments.PageCacheMisses, data.pageCacheMisses)
-          .addArgument(Time, data.time())
-          .addArgument(Arguments.Memory, data.maxAllocatedMemory())
+          .addArgument(Arguments.Rows.apply, data.rows)
+          .addArgument(Arguments.DbHits.apply, data.dbHits)
+          .addArgument(Arguments.PageCacheHits.apply, data.pageCacheHits)
+          .addArgument(Arguments.PageCacheMisses.apply, data.pageCacheMisses)
+          .addArgument(Time.apply, data.time())
+          .addArgument(Arguments.Memory.apply, data.maxAllocatedMemory())
+          .pipe { plan =>
+            val indexes = data.indexesUsed().zip(data.indexUseCount())
+            if (indexes.nonEmpty) {
+              plan.addArgument(
+                Arguments.UsedIndexes.apply,
+                indexes.map { case (idx, count) => idx.getName -> count }.toMap
+              )
+            } else plan
+          }
           .plan
       }
 

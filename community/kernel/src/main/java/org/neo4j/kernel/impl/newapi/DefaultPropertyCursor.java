@@ -19,20 +19,11 @@
  */
 package org.neo4j.kernel.impl.newapi;
 
-import static org.neo4j.kernel.api.StatementConstants.NO_SUCH_ENTITY;
-import static org.neo4j.storageengine.api.LongReference.NULL_REFERENCE;
-import static org.neo4j.storageengine.api.PropertySelection.ALL_PROPERTIES;
-import static org.neo4j.token.api.TokenConstants.NO_TOKEN;
-
 import java.util.Iterator;
 import java.util.function.BiConsumer;
-import java.util.function.Supplier;
-import org.neo4j.internal.kernel.api.PropertyCursor;
+import java.util.function.IntPredicate;
+import org.neo4j.internal.helpers.collection.Iterables;
 import org.neo4j.internal.kernel.api.Read;
-import org.neo4j.internal.kernel.api.RelTypeSupplier;
-import org.neo4j.internal.kernel.api.TokenSet;
-import org.neo4j.internal.kernel.api.security.AccessMode;
-import org.neo4j.internal.kernel.api.security.ReadSecurityPropertyProvider;
 import org.neo4j.kernel.api.AccessModeProvider;
 import org.neo4j.kernel.api.txstate.TxStateHolder;
 import org.neo4j.storageengine.api.LongReference;
@@ -40,34 +31,30 @@ import org.neo4j.storageengine.api.PropertySelection;
 import org.neo4j.storageengine.api.Reference;
 import org.neo4j.storageengine.api.StorageProperty;
 import org.neo4j.storageengine.api.StoragePropertyCursor;
+import org.neo4j.storageengine.api.StorageRelationshipCursor;
 import org.neo4j.storageengine.api.txstate.EntityState;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.ValueGroup;
 
-public class DefaultPropertyCursor extends TraceableCursorImpl<DefaultPropertyCursor>
-        implements PropertyCursor, Supplier<TokenSet>, RelTypeSupplier {
-    private static final int NODE = -2;
+public class DefaultPropertyCursor extends TraceableCursorImpl<TraceablePropertyCursor>
+        implements TraceablePropertyCursor {
     final StoragePropertyCursor storeCursor;
     private final InternalCursorFactory internalCursors;
     private final boolean applyAccessModeToTxState;
+
     private Read read;
-    private AccessModeProvider accessModeProvider;
-    private StoragePropertyCursor securityPropertyCursor;
-    private FullAccessNodeCursor securityNodeCursor;
-    private FullAccessRelationshipScanCursor securityRelCursor;
     private EntityState propertiesState;
     private Iterator<StorageProperty> txStateChangedProperties;
     private StorageProperty txStateValue;
-    private long entityReference = LongReference.NULL;
-    private TokenSet labels;
-    // stores relationship type or NODE if not a relationship
-    private int type = NO_TOKEN;
-    private boolean addedInTx;
+    private boolean addedInChunk;
     private PropertySelection selection;
-    private ReadSecurityPropertyProvider securityPropertyProvider;
+
+    private IntPredicate securityPredicate;
+    private AccessControlDataProvider accessControlDataProvider;
+    private BiConsumer<StoragePropertyCursor, PropertySelection> securityPropertyInitializer;
 
     DefaultPropertyCursor(
-            CursorPool<DefaultPropertyCursor> pool,
+            CursorPool<TraceablePropertyCursor> pool,
             StoragePropertyCursor storeCursor,
             InternalCursorFactory internalCursors,
             boolean applyAccessModeToTxState) {
@@ -86,13 +73,18 @@ public class DefaultPropertyCursor extends TraceableCursorImpl<DefaultPropertyCu
             AccessModeProvider accessModeProvider) {
         assert nodeReference != LongReference.NULL;
 
-        init(selection, read, accessModeProvider);
-        this.type = NODE;
+        init(selection, read);
         initializeNodeTransactionState(nodeReference, txStateHolder);
         storeCursor.initNodeProperties(reference, filterSelectionForTxState(selection));
-        initSecurityPropertyProvision(
-                (propertyCursor, propertySelection) -> propertyCursor.initNodeProperties(reference, propertySelection));
-        this.entityReference = nodeReference;
+
+        securityPropertyInitializer =
+                (propertyCursor, propertySelection) -> propertyCursor.initNodeProperties(reference, propertySelection);
+        securityPredicate = accessModeProvider
+                .getAccessMode()
+                .allowedToReadNodeProperties(
+                        () -> this.getSelectedPropertiesProvider().getLabels(nodeReference),
+                        this::getSelectedPropertiesProvider,
+                        selection);
     }
 
     void initNode(
@@ -102,23 +94,32 @@ public class DefaultPropertyCursor extends TraceableCursorImpl<DefaultPropertyCu
             boolean initStoreCursor,
             TxStateHolder txStateHolder,
             AccessModeProvider accessModeProvider) {
-        entityReference = nodeCursor.nodeReference();
-        assert entityReference != LongReference.NULL;
+        long nodeReference = nodeCursor.nodeReference();
+        assert nodeReference != LongReference.NULL;
 
-        init(selection, read, accessModeProvider);
-        this.type = NODE;
-        this.addedInTx = nodeCursor.currentNodeIsAddedInTx();
-        initializeNodeTransactionState(entityReference, txStateHolder);
-        if (!addedInTx || applyAccessModeToTxState) {
+        init(selection, read);
+        this.addedInChunk = nodeCursor.currentNodeIsAddedInChunk();
+        initializeNodeTransactionState(nodeReference, txStateHolder);
+        if (!addedInChunk) {
             if (initStoreCursor) {
+                nodeCursor.storeCursor.check();
                 storeCursor.initNodeProperties(nodeCursor.storeCursor, filterSelectionForTxState(selection));
-            } // else it has already been externally initialized
-            initSecurityPropertyProvision((propertyCursor, propertySelection) ->
-                    propertyCursor.initNodeProperties(nodeCursor.storeCursor, propertySelection));
+            }
         } else {
             storeCursor.reset();
-            securityPropertyProvider = null;
         }
+
+        securityPropertyInitializer = (propertyCursor, propertySelection) -> {
+            if (nodeCursor.storeCursor.entityReference() != LongReference.NULL) {
+                propertyCursor.initNodeProperties(nodeCursor.storeCursor, propertySelection);
+            }
+        };
+        securityPredicate = accessModeProvider
+                .getAccessMode()
+                .allowedToReadNodeProperties(
+                        () -> this.getSelectedPropertiesProvider().getLabels(nodeReference),
+                        this::getSelectedPropertiesProvider,
+                        selection);
     }
 
     /**
@@ -131,43 +132,14 @@ public class DefaultPropertyCursor extends TraceableCursorImpl<DefaultPropertyCu
         // this created selection is kept around in a larger context. But here it isn't.
         return propertiesState == null || propertiesState == EntityState.EMPTY
                 ? selection
-                : selection.excluding(k -> propertiesState.isPropertyChangedOrRemoved(k));
-    }
-
-    void initSecurityPropertyProvision(BiConsumer<StoragePropertyCursor, PropertySelection> initNodeProperties) {
-        AccessMode accessMode = accessModeProvider.getAccessMode();
-        securityPropertyProvider = null;
-        if (internalCursors == null || !accessMode.hasPropertyReadRules()) {
-            return;
-        }
-        // We have property read rules
-        PropertySelection securityProperties = accessMode.getSecurityPropertySelection(selection);
-        if (securityProperties == null) {
-            // The property read rules were not relevant to this `selection`.
-            return;
-        }
-        // We have RELEVANT property read rules (i.e. they pertain to the `selection`)
-        initNodeProperties.accept(lazyInitAndGetSecurityPropertyCursor(), securityProperties);
-        securityPropertyProvider = new ReadSecurityPropertyProvider.LazyReadSecurityPropertyProvider(
-                securityPropertyCursor,
-                applyAccessModeToTxState && this.propertiesState != null
-                        ? this.propertiesState.addedAndChangedProperties()
-                        : null,
-                securityProperties);
-    }
-
-    private StoragePropertyCursor lazyInitAndGetSecurityPropertyCursor() {
-        if (securityPropertyCursor == null) {
-            securityPropertyCursor = internalCursors.allocateStoragePropertyCursor();
-        }
-        return securityPropertyCursor;
+                : selection.excluding(propertiesState.changedOrRemovedPropertyKeys());
     }
 
     private void initializeNodeTransactionState(long nodeReference, TxStateHolder txStateHolder) {
         if (txStateHolder.hasTxStateWithChanges()) {
             this.propertiesState = txStateHolder.txState().getNodeState(nodeReference);
             this.txStateChangedProperties =
-                    this.propertiesState.addedAndChangedProperties().iterator();
+                    this.propertiesState.addedProperties().iterator();
         } else {
             this.propertiesState = null;
             this.txStateChangedProperties = null;
@@ -176,6 +148,7 @@ public class DefaultPropertyCursor extends TraceableCursorImpl<DefaultPropertyCu
 
     void initRelationship(
             long relationshipReference,
+            int type,
             Reference reference,
             PropertySelection selection,
             Read read,
@@ -183,83 +156,74 @@ public class DefaultPropertyCursor extends TraceableCursorImpl<DefaultPropertyCu
             AccessModeProvider accessModeProvider) {
         assert relationshipReference != LongReference.NULL;
 
-        init(selection, read, accessModeProvider);
+        init(selection, read);
         initializeRelationshipTransactionState(relationshipReference, txStateHolder);
         storeCursor.initRelationshipProperties(reference, filterSelectionForTxState(selection));
-        this.entityReference = relationshipReference;
+
+        securityPropertyInitializer = (propertyCursor, propertySelection) ->
+                propertyCursor.initRelationshipProperties(reference, propertySelection);
+        securityPredicate = accessModeProvider
+                .getAccessMode()
+                .allowedToReadRelationshipProperties(() -> type, this::getSelectedPropertiesProvider, selection);
     }
 
     void initRelationship(
-            DefaultRelationshipCursor relationshipCursor,
+            int type,
             PropertySelection selection,
             Read read,
             TxStateHolder txStateHolder,
-            AccessModeProvider accessModeProvider) {
-        entityReference = relationshipCursor.relationshipReference();
-        assert entityReference != LongReference.NULL;
+            AccessModeProvider accessModeProvider,
+            StorageRelationshipCursor storageRelationshipCursor,
+            boolean addedInChunk,
+            long relationshipReference) {
+        assert relationshipReference != LongReference.NULL;
 
-        init(selection, read, accessModeProvider);
-        initializeRelationshipTransactionState(entityReference, txStateHolder);
-        this.addedInTx = relationshipCursor.currentRelationshipIsAddedInTx();
-        if (!addedInTx || applyAccessModeToTxState) {
-            storeCursor.initRelationshipProperties(
-                    relationshipCursor.storeCursor, filterSelectionForTxState(selection));
+        init(selection, read);
+        initializeRelationshipTransactionState(relationshipReference, txStateHolder);
+        this.addedInChunk = addedInChunk;
+        if (!this.addedInChunk) {
+            storeCursor.initRelationshipProperties(storageRelationshipCursor, filterSelectionForTxState(selection));
         } else {
             storeCursor.reset();
         }
+
+        securityPropertyInitializer = (propertyCursor, propertySelection) ->
+                propertyCursor.initRelationshipProperties(storageRelationshipCursor, propertySelection);
+        securityPredicate = accessModeProvider
+                .getAccessMode()
+                .allowedToReadRelationshipProperties(() -> type, this::getSelectedPropertiesProvider, selection);
     }
 
     private void initializeRelationshipTransactionState(long relationshipReference, TxStateHolder txStateHolder) {
-        // Transaction state
         if (txStateHolder.hasTxStateWithChanges()) {
             this.propertiesState = txStateHolder.txState().getRelationshipState(relationshipReference);
             this.txStateChangedProperties =
-                    this.propertiesState.addedAndChangedProperties().iterator();
+                    this.propertiesState.addedProperties().iterator();
         } else {
             this.propertiesState = null;
             this.txStateChangedProperties = null;
         }
     }
 
-    void initEmptyRelationship() {
-        init(ALL_PROPERTIES, null, null);
-        storeCursor.initRelationshipProperties(NULL_REFERENCE, ALL_PROPERTIES);
-        this.entityReference = NO_SUCH_ENTITY;
-
-        this.propertiesState = null;
-        this.txStateChangedProperties = null;
-    }
-
-    private void init(PropertySelection selection, Read read, AccessModeProvider accessModeProvider) {
+    private void init(PropertySelection selection, Read read) {
         this.selection = selection;
         this.read = read;
-        this.accessModeProvider = accessModeProvider;
-        this.labels = null;
-        this.type = NO_TOKEN;
     }
 
-    boolean allowed(int[] propertyKeys, int[] labels) {
-        AccessMode accessMode = accessModeProvider.getAccessMode();
-        if (isNode()) {
-            return accessMode.allowsReadNodeProperties(
-                    () -> Labels.from(labels), propertyKeys, securityPropertyProvider);
+    private AccessControlDataProvider getSelectedPropertiesProvider() {
+        if (accessControlDataProvider == null) {
+            accessControlDataProvider = new AccessControlDataProvider(
+                    () -> securityPropertyInitializer,
+                    internalCursors,
+                    applyAccessModeToTxState,
+                    this::txStateProperties,
+                    () -> read);
         }
-
-        for (int propertyKey : propertyKeys) {
-            if (!accessMode.allowsReadRelationshipProperty(this, propertyKey)) {
-                return false;
-            }
-        }
-        return true;
+        return accessControlDataProvider;
     }
 
-    protected boolean allowed(int propertyKey) {
-        AccessMode accessMode = accessModeProvider.getAccessMode();
-        if (isNode()) {
-            return accessMode.allowsReadNodeProperty(this, propertyKey, securityPropertyProvider);
-        } else {
-            return accessMode.allowsReadRelationshipProperty(this, propertyKey);
-        }
+    private Iterable<StorageProperty> txStateProperties() {
+        return this.propertiesState != null ? this.propertiesState.addedProperties() : Iterables.empty();
     }
 
     @Override
@@ -268,13 +232,9 @@ public class DefaultPropertyCursor extends TraceableCursorImpl<DefaultPropertyCu
             while (txStateChangedProperties.hasNext()) {
                 txStateValue = txStateChangedProperties.next();
                 int propertyKey = txStateValue.propertyKeyId();
-                if (selection.test(propertyKey)) {
-                    if (!applyAccessModeToTxState || allowed(propertyKey)) {
-                        if (tracer != null) {
-                            tracer.onProperty(propertyKey);
-                        }
-                        return true;
-                    }
+                if (selection.test(propertyKey) && txStateEntryAllowed(propertyKey)) {
+                    trace(propertyKey);
+                    return true;
                 }
             }
             txStateChangedProperties = null;
@@ -284,13 +244,25 @@ public class DefaultPropertyCursor extends TraceableCursorImpl<DefaultPropertyCu
         while (storeCursor.next()) {
             int propertyKey = storeCursor.propertyKey();
             if (allowed(propertyKey)) {
-                if (tracer != null) {
-                    tracer.onProperty(propertyKey);
-                }
+                trace(propertyKey);
                 return true;
             }
         }
         return false;
+    }
+
+    protected boolean txStateEntryAllowed(int propertyKey) {
+        return !applyAccessModeToTxState || allowed(propertyKey);
+    }
+
+    protected boolean allowed(int propertyKey) {
+        return securityPredicate.test(propertyKey);
+    }
+
+    private void trace(int propertyKey) {
+        if (tracer != null) {
+            tracer.onProperty(propertyKey);
+        }
     }
 
     @Override
@@ -300,12 +272,12 @@ public class DefaultPropertyCursor extends TraceableCursorImpl<DefaultPropertyCu
             txStateChangedProperties = null;
             txStateValue = null;
             read = null;
-            accessModeProvider = null;
             storeCursor.reset();
-            if (securityPropertyCursor != null) {
-                securityPropertyCursor.reset();
+            if (accessControlDataProvider != null) {
+                accessControlDataProvider.close();
+                accessControlDataProvider = null;
             }
-            securityPropertyProvider = null;
+            securityPropertyInitializer = null;
         }
         super.closeInternal();
     }
@@ -331,7 +303,6 @@ public class DefaultPropertyCursor extends TraceableCursorImpl<DefaultPropertyCu
         if (txStateValue != null) {
             return txStateValue.value();
         }
-
         return storeCursor.propertyValue();
     }
 
@@ -344,52 +315,8 @@ public class DefaultPropertyCursor extends TraceableCursorImpl<DefaultPropertyCu
     public String toString() {
         if (isClosed()) {
             return "PropertyCursor[closed state]";
-        } else {
-            return "PropertyCursor[id=" + propertyKey() + ", " + storeCursor + " ]";
         }
-    }
-
-    /**
-     * Gets the label while ignoring removes in the tx state. Implemented as a Supplier so that we don't need additional
-     * allocations.
-     *
-     * Only used for security checks
-     */
-    @Override
-    public TokenSet get() {
-        assert isNode();
-
-        if (labels == null) {
-            if (securityNodeCursor == null) {
-                securityNodeCursor = internalCursors.allocateFullAccessNodeCursor();
-            }
-            read.singleNode(entityReference, securityNodeCursor);
-            securityNodeCursor.next();
-            if (applyAccessModeToTxState) {
-                labels = securityNodeCursor.labels();
-            } else {
-                labels = securityNodeCursor.labelsIgnoringTxStateSetRemove();
-            }
-        }
-        return labels;
-    }
-
-    /**
-     * Only used for security checks
-     */
-    @Override
-    public int getRelType() {
-        assert isRelationship();
-
-        if (type < 0) {
-            if (securityRelCursor == null) {
-                securityRelCursor = internalCursors.allocateFullAccessRelationshipScanCursor();
-            }
-            read.singleRelationship(entityReference, securityRelCursor);
-            securityRelCursor.next();
-            this.type = securityRelCursor.type();
-        }
-        return type;
+        return "PropertyCursor[id=" + propertyKey() + ", " + storeCursor + " ]";
     }
 
     @Override
@@ -397,27 +324,11 @@ public class DefaultPropertyCursor extends TraceableCursorImpl<DefaultPropertyCu
         if (storeCursor != null) {
             storeCursor.close();
         }
-        if (securityPropertyCursor != null) {
-            securityPropertyCursor.close();
-            securityPropertyCursor = null;
+        if (accessControlDataProvider != null) {
+            accessControlDataProvider.close();
+            accessControlDataProvider.release();
+            accessControlDataProvider = null;
         }
-        if (securityNodeCursor != null) {
-            securityNodeCursor.close();
-            securityNodeCursor.release();
-            securityNodeCursor = null;
-        }
-        if (securityRelCursor != null) {
-            securityRelCursor.close();
-            securityRelCursor.release();
-            securityRelCursor = null;
-        }
-    }
-
-    private boolean isNode() {
-        return type == NODE;
-    }
-
-    private boolean isRelationship() {
-        return type != NODE;
+        securityPropertyInitializer = null;
     }
 }

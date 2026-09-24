@@ -88,10 +88,6 @@ public enum NotificationCodeWithDescription {
             Status.Procedure.ProcedureWarning,
             GqlStatusInfoCodes.STATUS_01N62,
             "The query used a procedure that generated a warning. (%s)"),
-    DEPRECATED_PROCEDURE_RETURN_FIELD(
-            Status.Statement.FeatureDeprecationWarning,
-            GqlStatusInfoCodes.STATUS_01N03,
-            "The query used a deprecated field from a procedure. (%s)"),
     DEPRECATED_PROCEDURE_FIELD(
             Status.Statement.FeatureDeprecationWarning,
             GqlStatusInfoCodes.STATUS_01N00,
@@ -100,6 +96,18 @@ public enum NotificationCodeWithDescription {
             Status.Statement.FeatureDeprecationWarning,
             GqlStatusInfoCodes.STATUS_01N00,
             "The function has a deprecated field. (%s)"),
+    DEPRECATED_PROCEDURE_NAMESPACE(
+            Status.Statement.FeatureDeprecationWarning,
+            GqlStatusInfoCodes.STATUS_01N00,
+            "The namespace of the called user-defined procedure is deprecated. (%s)"),
+    DEPRECATED_FUNCTION_NAMESPACE(
+            Status.Statement.FeatureDeprecationWarning,
+            GqlStatusInfoCodes.STATUS_01N00,
+            "The namespace of the invoked user-defined function is deprecated. (%s)"),
+    SHADOWING_INTERNAL_FUNCTION(
+            Status.Statement.FeatureDeprecationWarning,
+            GqlStatusInfoCodes.STATUS_01N00,
+            "The namespace of the invoked user-defined function is deprecated and the function is shadowing an internal function. (%s)"),
     DEPRECATED_RELATIONSHIP_TYPE_SEPARATOR(
             Status.Statement.FeatureDeprecationWarning,
             GqlStatusInfoCodes.STATUS_01N01,
@@ -130,9 +138,10 @@ public enum NotificationCodeWithDescription {
     DEPRECATED_TEXT_INDEX_PROVIDER(
             Status.Statement.FeatureDeprecationWarning,
             GqlStatusInfoCodes.STATUS_01N01,
-            "The `" + AllIndexProviderDescriptors.TEXT_V1_DESCRIPTOR.name()
-                    + "` provider for text indexes is deprecated and will be removed in a future version. "
-                    + "Please use `" + AllIndexProviderDescriptors.TEXT_V2_DESCRIPTOR.name() + "` instead."),
+            "`" + AllIndexProviderDescriptors.TEXT_V1_DESCRIPTOR.name()
+                    + "`, `" + AllIndexProviderDescriptors.TEXT_V2_DESCRIPTOR.name()
+                    + "` providers for text indexes are deprecated and will be removed in a future version. "
+                    + "Please use `" + AllIndexProviderDescriptors.TEXT_V3_DESCRIPTOR.name() + "` instead."),
 
     DEPRECATED_INDEX_PROVIDER_OPTION(
             Status.Statement.FeatureDeprecationWarning,
@@ -151,6 +160,7 @@ public enum NotificationCodeWithDescription {
             GqlStatusInfoCodes.STATUS_01N00,
             "The character with the Unicode representation `%s` is deprecated for unescaped identifiers and will not be supported in the future. "
                     + "To continue using it, escape the identifier by adding backticks around the identifier `%s`."),
+
     EAGER_LOAD_CSV(
             Status.Statement.EagerOperator,
             GqlStatusInfoCodes.STATUS_03N94,
@@ -158,10 +168,20 @@ public enum NotificationCodeWithDescription {
                     + "Eager operator could potentially consume a lot of memory and is likely to not perform well. "
                     + "See the Neo4j Manual entry on the Eager operator for more information and hints on "
                     + "how problems could be avoided."),
+    VIRTUAL_GRAPH_POST_PROCESSING(
+            Status.Statement.VirtualGraphPostProcessing,
+            GqlStatusInfoCodes.STATUS_03N97,
+            GqlStatusInfoCodes.STATUS_03N97.getTemplate()),
     DEPRECATED_FORMAT(
             Status.Request.DeprecatedFormat,
             GqlStatusInfoCodes.STATUS_01N01,
             "The requested format has been deprecated. (%s)"),
+
+    DEPRECATED_REQUESTED_FEATURE(
+            Status.Request.FeatureDeprecationWarning,
+            GqlStatusInfoCodes.STATUS_01N01,
+            "%s is deprecated. It is replaced by %s."),
+
     LARGE_LABEL_LOAD_CSV(
             Status.Statement.NoApplicableIndex,
             GqlStatusInfoCodes.STATUS_03N93,
@@ -205,7 +225,7 @@ public enum NotificationCodeWithDescription {
             Status.Statement.SubqueryVariableShadowing,
             GqlStatusInfoCodes.STATUS_03N60,
             "Variable in subquery is shadowing a variable with the same name from the outer scope. "
-                    + "If you want to use that variable instead, it must be imported into the subquery using importing WITH clause. (%s)"),
+                    + "If you want to use that variable instead, it must be imported into the subquery using a variable scope clause. (%s)"),
     REDUNDANT_OPTIONAL_PROCEDURE(
             Status.Statement.RedundantOptionalProcedure,
             GqlStatusInfoCodes.STATUS_03N61,
@@ -217,7 +237,19 @@ public enum NotificationCodeWithDescription {
     DEPRECATED_IMPORTING_WITH_IN_SUBQUERY_CALL(
             Status.Statement.FeatureDeprecationWarning,
             GqlStatusInfoCodes.STATUS_01N00,
-            "CALL subquery without a variable scope clause is now deprecated. " + "Use CALL (%s) { ... }"),
+            "%s subquery without a variable scope clause is deprecated. " + "Use %s (%s) { ... }"),
+    DEPRECATED_COMPLEX_SUBCLAUSE_EXPRESSION(
+            Status.Statement.FeatureDeprecationWarning,
+            GqlStatusInfoCodes.STATUS_01N01,
+            "The subclause expression `%s` contains a reference to the complex projection item expression `%s` and is deprecated. It is replaced by referencing the projection item expression by an alias."),
+    DEPRECATED_AMBIGUOUS_SUBCLAUSE_EXPRESSION(
+            Status.Statement.FeatureDeprecationWarning,
+            GqlStatusInfoCodes.STATUS_01N01,
+            "The subclause expression `%s` contains an ambiguous reference to variable `%s` and is deprecated. It is replaced by referencing the projection item expression by an alias or using the `GROUP BY` clause."),
+    DEPRECATED_AMBIGUOUS_AND_COMPLEX_SUBCLAUSE_EXPRESSION(
+            Status.Statement.FeatureDeprecationWarning,
+            GqlStatusInfoCodes.STATUS_01N01,
+            "The subclause expression `%s` contains an ambiguous reference to variable `%s` and a reference to the complex projection item expression `%s` and is deprecated. It is replaced by referencing the projection item expression by an alias or using the `GROUP BY` clause."),
     DEPRECATED_WHERE_VARIABLE_IN_NODE_PATTERN(
             Status.Statement.FeatureDeprecationWarning,
             GqlStatusInfoCodes.STATUS_01N01,
@@ -238,11 +270,14 @@ public enum NotificationCodeWithDescription {
             Status.Database.HomeDatabaseNotFound,
             GqlStatusInfoCodes.STATUS_00N50,
             "The home database provided does not currently exist in the DBMS. This command will not take effect until this database is created. (%s)"),
-    DEPRECATED_DATABASE_NAME(
+    DEPRECATED_QUOTED_GRAPH_REFERENCE(
             Status.Statement.FeatureDeprecationWarning,
             GqlStatusInfoCodes.STATUS_01N00,
-            "Databases and aliases with unescaped `.` are deprecated unless to indicate that they belong to a composite database. "
-                    + "Names containing `.` should be escaped. (%s)"),
+            "Graph references with separately backticked name parts (%s) are deprecated. In future Cypher versions, use parameters or backtick the entire name (%s)."),
+    DEPRECATED_QUOTED_GRAPH_BY_NAME_ARGUMENT(
+            Status.Statement.FeatureDeprecationWarning,
+            GqlStatusInfoCodes.STATUS_01N00,
+            "Graph references with separately backticked name parts (%s) are deprecated. In future Cypher versions, remove the backticks (%s)."),
     UNSATISFIABLE_RELATIONSHIP_TYPE_EXPRESSION(
             Status.Statement.UnsatisfiableRelationshipTypeExpression,
             GqlStatusInfoCodes.STATUS_01N61,
@@ -264,6 +299,19 @@ public enum NotificationCodeWithDescription {
                     + "The product's default behavior of using a cost-based IDP search algorithm when combining sub-plans will be kept. "
                     + "For more information, see Cypher Manual -> Cypher planner."),
 
+    DEPRECATED_EAGER_ANALYZER_PRE_PARSER_OPTION(
+            Status.Statement.FeatureDeprecationWarning,
+            GqlStatusInfoCodes.STATUS_01N02,
+            "The Cypher query option `eagerAnalyzer` is deprecated. "
+                    + "It will be removed without a replacement. "
+                    + "The option is ignored, eagerness analysis is systematically performed on the logical plan "
+                    + "regardless of the value provided."),
+
+    RETIRED_PLANNER_VERSION_PRE_PARSER_OPTION(
+            Status.Statement.PlannerVersionUnsupportedWarning,
+            GqlStatusInfoCodes.STATUS_01N84,
+            "The Cypher planner version %s is no longer supported. The default planner version is used instead."),
+
     COMMAND_HAS_NO_EFFECT_ASSIGN_PRIVILEGE(
             Status.Security.CommandHasNoEffect,
             GqlStatusInfoCodes.STATUS_00N70,
@@ -284,6 +332,16 @@ public enum NotificationCodeWithDescription {
             GqlStatusInfoCodes.STATUS_00N71,
             "The user does not have the role. See Status Codes documentation for more information."),
 
+    COMMAND_HAS_NO_EFFECT_GRANT_ROLE_TO_AUTH_RULE(
+            Status.Security.CommandHasNoEffect,
+            GqlStatusInfoCodes.STATUS_00N70,
+            "The auth rule already has the role. See Status Codes documentation for more information."),
+
+    COMMAND_HAS_NO_EFFECT_REVOKE_ROLE_TO_AUTH_RULE(
+            Status.Security.CommandHasNoEffect,
+            GqlStatusInfoCodes.STATUS_00N71,
+            "The auth rule does not have the role. See Status Codes documentation for more information."),
+
     AUTH_PROVIDER_NOT_DEFINED(
             Status.Security.AuthProviderNotDefined,
             GqlStatusInfoCodes.STATUS_00N72,
@@ -300,6 +358,16 @@ public enum NotificationCodeWithDescription {
             Status.Security.ExternalAuthNotEnabled,
             GqlStatusInfoCodes.STATUS_01N71,
             "Use setting `dbms.security.require_local_user` to enable external auth."),
+
+    SHARDED_PRIVILEGE_PERFORMANCE(
+            Status.Security.ShardedPrivilegePerformance,
+            GqlStatusInfoCodes.STATUS_01N73,
+            "This specified privilege severely reduces the performance of queries run on sharded databases. Consider excluding sharded databases for now."),
+
+    OIDC_CREDENTIAL_FORWARDING_NOT_ENABLED(
+            Status.Security.OidcCredentialForwardingNotEnabled,
+            GqlStatusInfoCodes.STATUS_01N74,
+            "Use setting `dbms.security.allow_oidc_credential_forwarding_enabled` to enable OIDC credential forwarding."),
 
     SERVER_ALREADY_ENABLED(
             Status.Cluster.ServerAlreadyEnabled,
@@ -332,6 +400,11 @@ public enum NotificationCodeWithDescription {
     INDEX_OR_CONSTRAINT_DOES_NOT_EXIST(
             Status.Schema.IndexOrConstraintDoesNotExist, GqlStatusInfoCodes.STATUS_00NA1, "`%s` does not exist."),
 
+    VECTOR_INDEX_DIMENSIONS_NOT_SPECIFIED(
+            Status.Schema.VectorIndexDimensionsNotSpecified,
+            GqlStatusInfoCodes.STATUS_00NA2,
+            "When creating a vector index, `vector.dimensions` should be specified. Omitting it is allowed, but specifying dimensions ensures that only vectors of that size are indexed and makes dimension mismatches fail clearly at query time. For example, set `OPTIONS { indexConfig: { `vector.dimensions`: 1536 } }` when creating the index."),
+
     AGGREGATION_SKIPPED_NULL(
             Status.Statement.AggregationSkippedNull,
             GqlStatusInfoCodes.STATUS_01G11,
@@ -350,10 +423,47 @@ public enum NotificationCodeWithDescription {
             Status.Statement.FeatureDeprecationWarning,
             GqlStatusInfoCodes.STATUS_01N02,
             "`%s` is deprecated. Credentials are now supplied via the cloud provider mechanisms."),
+    DEPRECATED_EXISTING_DATA_OPTION(
+            Status.Statement.FeatureDeprecationWarning,
+            GqlStatusInfoCodes.STATUS_01N02,
+            "`%s` is deprecated. Use of existing data is implicit with seeding."),
     DEPRECATED_STORE_FORMAT(
             Status.Statement.FeatureDeprecationWarning,
             GqlStatusInfoCodes.STATUS_01N00,
-            DeprecatedFormatWarning.getTargetFormatWarning("%s"));
+            DeprecatedFormatWarning.getTargetFormatWarning("%s")),
+
+    WAIT_SERVER_UNAVAILABLE(
+            Status.Cluster.ServerNotAvailable, GqlStatusInfoCodes.STATUS_01N82, "Server `%s` is not available."),
+
+    WAIT_SERVER_CATCHING_UP(
+            Status.Cluster.ServerCatchingUp,
+            GqlStatusInfoCodes.STATUS_01N81,
+            "Server `%s` at address `%s` is still catching up."),
+
+    WAIT_SERVER_FAILED(
+            Status.Cluster.ServerFailed, GqlStatusInfoCodes.STATUS_01N80, "Server `%s` at address `%s` failed: %s"),
+
+    WAIT_SERVER_CAUGHT_UP(
+            Status.Cluster.ServerCaughtUp,
+            GqlStatusInfoCodes.STATUS_03N85,
+            "Server `%s` at address `%s` has caught up."),
+
+    UNSUPPORTED_TYPE(
+            Status.Request.UnsupportedType,
+            GqlStatusInfoCodes.STATUS_01N83,
+            "One or more values returned could not be handled by this version of the client "
+                    + "and were replaced with placeholder map values. Please upgrade your client."),
+
+    IDENTIFIER_SHADOWING_VARIABLE(
+            Status.Statement.IdentifierShadowingVariable,
+            GqlStatusInfoCodes.STATUS_03N63,
+            "The identifier `%s` in the `%s` clause has the same name as a variable in scope. "
+                    + "Regardless of what the variable evaluates to, it is the literal `%s` that will be used."),
+
+    CALLABLE_SHADOWING(
+            Status.Statement.CallableShadowing,
+            GqlStatusInfoCodes.STATUS_03N64,
+            "Local %s `%s` shadows a built-in or external %s with the same name.");
 
     private final Status status;
     private final GqlStatusInfoCodes gqlStatusInfo;
@@ -449,8 +559,9 @@ public enum NotificationCodeWithDescription {
 
     public static NotificationImplementation deprecatedProcedureReturnField(
             InputPosition position, String param, String procedure, String field) {
-        return DEPRECATED_PROCEDURE_RETURN_FIELD.notificationWithParameters(
-                position, new String[] {param}, new String[] {field, procedure});
+        return DEPRECATED_PROCEDURE_FIELD.notificationWithParameters(position, new String[] {param}, new String[] {
+            String.format("`%s` returned by the procedure `%s` is deprecated.", field, procedure)
+        });
     }
 
     public static NotificationImplementation deprecatedProcedureField(
@@ -464,6 +575,28 @@ public enum NotificationCodeWithDescription {
             InputPosition position, String param, String function, String field) {
         return DEPRECATED_FUNCTION_FIELD.notificationWithParameters(position, new String[] {param}, new String[] {
             String.format("`%s` used by the function `%s` is deprecated.", field, function)
+        });
+    }
+
+    public static NotificationImplementation deprecatedFunctionNamespace(InputPosition position, String callable) {
+        return DEPRECATED_FUNCTION_NAMESPACE.notificationWithParameters(
+                position, new String[] {callable}, new String[] {
+                    String.format("The namespace used by the user-defined function `%s` is deprecated.", callable)
+                });
+    }
+
+    public static NotificationImplementation deprecatedProcedureNamespace(InputPosition position, String callable) {
+        return DEPRECATED_PROCEDURE_NAMESPACE.notificationWithParameters(
+                position, new String[] {callable}, new String[] {
+                    String.format("The namespace used by the user-defined procedure `%s` is deprecated.", callable)
+                });
+    }
+
+    public static NotificationImplementation shadowingInternalFunction(InputPosition position, String callable) {
+        return SHADOWING_INTERNAL_FUNCTION.notificationWithParameters(position, new String[] {callable}, new String[] {
+            String.format(
+                    "The namespace of the invoked user-defined function `%s` is deprecated and the function is shadowing an internal function.",
+                    callable)
         });
     }
 
@@ -547,28 +680,42 @@ public enum NotificationCodeWithDescription {
         return EAGER_LOAD_CSV.notification(position);
     }
 
+    public static NotificationImplementation graphEngineFallbackPostProcessing() {
+        return VIRTUAL_GRAPH_POST_PROCESSING.notification(InputPosition.empty);
+    }
+
     public static NotificationImplementation deprecatedFormat(
             InputPosition position, String oldDetail, String deprecatedFormat, String newFormat) {
         return DEPRECATED_FORMAT.notificationWithParameters(
                 position, new String[] {oldDetail}, new String[] {deprecatedFormat, newFormat});
     }
 
+    public static NotificationImplementation deprecatedRequestedFeature(
+            InputPosition position, String deprecated, String replacement) {
+        return DEPRECATED_REQUESTED_FEATURE.notificationWithParameters(
+                position, new String[] {deprecated, replacement}, new String[] {deprecated, replacement});
+    }
+
     public static NotificationImplementation largeLabelLoadCsv(InputPosition position, String labelName) {
         return LARGE_LABEL_LOAD_CSV.notificationWithParameters(position, new String[] {}, new String[] {labelName});
     }
 
-    public static NotificationImplementation missingLabel(InputPosition position, String oldDetail, String labelName) {
-        return MISSING_LABEL.notificationWithParameters(position, new String[] {oldDetail}, new String[] {labelName});
+    public static NotificationImplementation missingLabel(
+            InputPosition position, String oldDetail, String labelName, String db) {
+        return MISSING_LABEL.notificationWithParameters(
+                position, new String[] {oldDetail}, new String[] {labelName, db});
     }
 
-    public static NotificationImplementation missingRelType(InputPosition position, String oldDetail, String relType) {
-        return MISSING_REL_TYPE.notificationWithParameters(position, new String[] {oldDetail}, new String[] {relType});
+    public static NotificationImplementation missingRelType(
+            InputPosition position, String oldDetail, String relType, String db) {
+        return MISSING_REL_TYPE.notificationWithParameters(
+                position, new String[] {oldDetail}, new String[] {relType, db});
     }
 
     public static NotificationImplementation missingPropertyName(
-            InputPosition position, String oldDetails, String property) {
+            InputPosition position, String oldDetails, String property, String db) {
         return MISSING_PROPERTY_NAME.notificationWithParameters(
-                position, new String[] {oldDetails}, new String[] {property});
+                position, new String[] {oldDetails}, new String[] {property, db});
     }
 
     public static NotificationImplementation unboundedShortestPath(InputPosition position, String pattern) {
@@ -590,17 +737,16 @@ public enum NotificationCodeWithDescription {
     public static NotificationImplementation codeGenerationFailed(
             InputPosition position, String failingRuntimeConf, String fallbackRuntimeConf, String cause) {
         final var oldDetails = new String[] {cause};
+        final boolean operatorFellBack = fallbackRuntimeConf.contains("operatorEngine=interpreted")
+                && failingRuntimeConf.contains("operatorEngine=");
+        final boolean expressionFellBack = fallbackRuntimeConf.contains("expressionEngine=interpreted")
+                && failingRuntimeConf.contains("expressionEngine=");
         final String failingEngine;
-        if (failingRuntimeConf.contains("operatorEngine=compiled")
-                && fallbackRuntimeConf.contains("operatorEngine=interpreted")
-                && failingRuntimeConf.contains("expressionEngine=compiled")
-                && fallbackRuntimeConf.contains("expressionEngine=interpreted")) {
+        if (operatorFellBack && expressionFellBack) {
             failingEngine = "operator and expression";
-        } else if (failingRuntimeConf.contains("operatorEngine=compiled")
-                && fallbackRuntimeConf.contains("operatorEngine=interpreted")) {
+        } else if (operatorFellBack) {
             failingEngine = "operator";
-        } else if (failingRuntimeConf.contains("expressionEngine=compiled")
-                && fallbackRuntimeConf.contains("expressionEngine=interpreted")) {
+        } else if (expressionFellBack) {
             failingEngine = "expression";
         } else {
             failingEngine = ""; // should not happen
@@ -610,9 +756,9 @@ public enum NotificationCodeWithDescription {
     }
 
     public static NotificationImplementation subqueryVariableShadowing(
-            InputPosition position, String oldDetail, String variable) {
+            InputPosition position, String oldDetail, String subqueryType, String variable) {
         return SUBQUERY_VARIABLE_SHADOWING.notificationWithParameters(
-                position, new String[] {oldDetail}, new String[] {variable, variable});
+                position, new String[] {oldDetail}, new String[] {variable, subqueryType, variable});
     }
 
     public static NotificationImplementation redundantOptionalProcedure(InputPosition position, String proc) {
@@ -624,13 +770,46 @@ public enum NotificationCodeWithDescription {
         return REDUNDANT_OPTIONAL_SUBQUERY.notificationWithParameters(position, new String[] {}, new String[] {});
     }
 
-    public static NotificationImplementation deprecatedImportingWithInSubqueryCall(
-            InputPosition position, String variable) {
-        return DEPRECATED_IMPORTING_WITH_IN_SUBQUERY_CALL.notificationWithParameters(
-                position, new String[] {variable}, new String[] {
+    public static NotificationImplementation deprecatedComplexSubclauseExpression(
+            InputPosition position, String subclauseExpr, String groupingExpr) {
+        return DEPRECATED_COMPLEX_SUBCLAUSE_EXPRESSION.notificationWithParameters(
+                position, new String[] {subclauseExpr, groupingExpr}, new String[] {
                     String.format(
-                            "CALL subquery without a variable scope clause is deprecated. Use CALL (%s) { ... }",
-                            variable)
+                            "The subclause expression `%s` contains a reference to the complex projection item expression `%s` and",
+                            subclauseExpr, groupingExpr),
+                    "referencing the projection item expression by an alias"
+                });
+    }
+
+    public static NotificationImplementation deprecatedAmbiguousSubclauseExpression(
+            InputPosition position, String subclauseExpr, String variable) {
+        return DEPRECATED_AMBIGUOUS_SUBCLAUSE_EXPRESSION.notificationWithParameters(
+                position, new String[] {subclauseExpr, variable}, new String[] {
+                    String.format(
+                            "The subclause expression `%s` contains an ambiguous reference to variable `%s` and",
+                            subclauseExpr, variable),
+                    "referencing the projection item expression by an alias or using the `GROUP BY` clause"
+                });
+    }
+
+    public static NotificationImplementation deprecatedAmbiguousAndComplexSubclauseExpression(
+            InputPosition position, String subclauseExpr, String variable, String groupingExpr) {
+        return DEPRECATED_AMBIGUOUS_AND_COMPLEX_SUBCLAUSE_EXPRESSION.notificationWithParameters(
+                position, new String[] {subclauseExpr, variable, groupingExpr}, new String[] {
+                    String.format(
+                            "The subclause expression `%s` contains an ambiguous reference to variable `%s` and a reference to the complex projection item expression `%s` and",
+                            subclauseExpr, variable, groupingExpr),
+                    "referencing the projection item expression by an alias or using the `GROUP BY` clause"
+                });
+    }
+
+    public static NotificationImplementation deprecatedImportingWithInSubqueryCall(
+            InputPosition position, String subqueryType, String variable) {
+        return DEPRECATED_IMPORTING_WITH_IN_SUBQUERY_CALL.notificationWithParameters(
+                position, new String[] {subqueryType, subqueryType, variable}, new String[] {
+                    String.format(
+                            "%s subquery without a variable scope clause is deprecated. Use %s (%s) { ... }",
+                            subqueryType, subqueryType, variable)
                 });
     }
 
@@ -680,12 +859,21 @@ public enum NotificationCodeWithDescription {
                 position, new String[] {oldDetail}, new String[] {missingDb});
     }
 
-    public static NotificationImplementation deprecatedDatabaseName(InputPosition position, String param) {
-        return DEPRECATED_DATABASE_NAME.notificationWithParameters(position, new String[] {param}, new String[] {
-            String.format(
-                    "Databases and aliases with unescaped `.` are deprecated unless they belong to a composite database. Names containing `.` should be escaped. (%s)",
-                    param)
-        });
+    public static NotificationImplementation deprecatedGraphReferenceNotification(
+            String quotedGraphName, String futureGraphName, InputPosition position) {
+        return DEPRECATED_QUOTED_GRAPH_REFERENCE.notificationWithParameters(
+                position, new String[] {quotedGraphName, futureGraphName}, new String[] {
+                    DEPRECATED_QUOTED_GRAPH_REFERENCE.descriptionTemplate.formatted(quotedGraphName, futureGraphName),
+                });
+    }
+
+    public static NotificationImplementation deprecatedQuotedGraphByNameArgument(
+            InputPosition position, String quotedGraphName, String futureGraphName) {
+        return DEPRECATED_QUOTED_GRAPH_BY_NAME_ARGUMENT.notificationWithParameters(
+                position, new String[] {quotedGraphName, futureGraphName}, new String[] {
+                    DEPRECATED_QUOTED_GRAPH_BY_NAME_ARGUMENT.descriptionTemplate.formatted(
+                            quotedGraphName, futureGraphName),
+                });
     }
 
     public static NotificationImplementation unsatisfiableRelationshipTypeExpression(
@@ -711,6 +899,17 @@ public enum NotificationCodeWithDescription {
                 position, new String[] {}, new String[] {"connectComponentsPlanner"});
     }
 
+    public static NotificationImplementation deprecatedEagerAnalyzerPreParserOption(InputPosition position) {
+        return DEPRECATED_EAGER_ANALYZER_PRE_PARSER_OPTION.notificationWithParameters(
+                position, new String[] {}, new String[] {"eagerAnalyzer"});
+    }
+
+    public static NotificationImplementation retiredPlannerVersionPreParserOption(
+            InputPosition position, String version) {
+        return RETIRED_PLANNER_VERSION_PRE_PARSER_OPTION.notificationWithParameters(
+                position, new String[] {version}, new String[] {version});
+    }
+
     public static NotificationImplementation authProviderNotDefined(InputPosition position, String provider) {
         return AUTH_PROVIDER_NOT_DEFINED.notificationWithParameters(
                 position, new String[] {provider, provider}, new String[] {provider, provider});
@@ -718,6 +917,10 @@ public enum NotificationCodeWithDescription {
 
     public static NotificationImplementation externalAuthNotEnabled(InputPosition position) {
         return EXTERNAL_AUTH_NOT_ENABLED.notification(position);
+    }
+
+    public static NotificationImplementation oidcCredentialForwardingNotEnabled(InputPosition position) {
+        return OIDC_CREDENTIAL_FORWARDING_NOT_ENABLED.notification(position);
     }
 
     public static NotificationImplementation commandHasNoEffectAssignPrivilege(
@@ -742,10 +945,26 @@ public enum NotificationCodeWithDescription {
                 position, titleParam, new String[] {}, new String[] {titleParam});
     }
 
+    public static NotificationImplementation commandHasNoEffectGrantRoleToAuthRule(
+            InputPosition position, String titleParam) {
+        return COMMAND_HAS_NO_EFFECT_GRANT_ROLE_TO_AUTH_RULE.notificationWithTitleAndDescriptionDetails(
+                position, titleParam, new String[] {}, new String[] {titleParam});
+    }
+
+    public static NotificationImplementation commandHasNoEffectRevokeRoleToAuthRule(
+            InputPosition position, String titleParam) {
+        return COMMAND_HAS_NO_EFFECT_REVOKE_ROLE_TO_AUTH_RULE.notificationWithTitleAndDescriptionDetails(
+                position, titleParam, new String[] {}, new String[] {titleParam});
+    }
+
     public static NotificationImplementation impossibleRevokeCommand(
             InputPosition position, String titleParam, String descriptionParam) {
         return IMPOSSIBLE_REVOKE_COMMAND.notificationWithTitleAndDescriptionDetails(
                 position, titleParam, new String[] {descriptionParam}, new String[] {titleParam, descriptionParam});
+    }
+
+    public static NotificationImplementation shardedPerformance() {
+        return SHARDED_PRIVILEGE_PERFORMANCE.notification(InputPosition.empty);
     }
 
     public static NotificationImplementation serverAlreadyEnabled(InputPosition position, String server) {
@@ -799,6 +1018,10 @@ public enum NotificationCodeWithDescription {
                 position, titleParam, new String[] {descriptionParam}, new String[] {titleParam, descriptionParam});
     }
 
+    public static NotificationImplementation vectorIndexDimensionsNotSpecified(InputPosition position) {
+        return VECTOR_INDEX_DIMENSIONS_NOT_SPECIFIED.notification(position);
+    }
+
     public static NotificationImplementation deprecatedOptionInOptionMap(String oldOption, String newOption) {
         return DEPRECATED_OPTION_IN_OPTION_MAP.notificationWithParameters(
                 InputPosition.empty, new String[] {oldOption, newOption}, new String[] {oldOption, newOption});
@@ -809,11 +1032,57 @@ public enum NotificationCodeWithDescription {
                 InputPosition.empty, new String[] {oldOption}, new String[] {oldOption});
     }
 
+    public static NotificationImplementation deprecatedExistingDataOption() {
+        return DEPRECATED_EXISTING_DATA_OPTION.notificationWithParameters(
+                InputPosition.empty, new String[] {"existingData"}, new String[] {"existingData"});
+    }
+
     public static NotificationImplementation deprecatedStoreFormat(String format) {
         return DEPRECATED_STORE_FORMAT.notificationWithParameters(
                 InputPosition.empty,
                 new String[] {format},
                 new String[] {DeprecatedFormatWarning.getTargetFormatWarning(format)});
+    }
+
+    public static NotificationImplementation waitServerUnavailable(String serverName) {
+        return WAIT_SERVER_UNAVAILABLE.notificationWithParameters(
+                InputPosition.empty, new String[] {serverName}, new String[] {serverName});
+    }
+
+    public static NotificationImplementation waitServerCatchingUp(String serverName, String boltAddress) {
+        return WAIT_SERVER_CATCHING_UP.notificationWithParameters(
+                InputPosition.empty, new String[] {serverName, boltAddress}, new String[] {serverName, boltAddress});
+    }
+
+    public static NotificationImplementation waitServerFailed(String serverName, String boltAddress, String message) {
+        return WAIT_SERVER_FAILED.notificationWithParameters(
+                InputPosition.empty,
+                new String[] {serverName, boltAddress, message},
+                new String[] {serverName, boltAddress, message});
+    }
+
+    public static NotificationImplementation clientDoesNotSupportType(String type) {
+        return UNSUPPORTED_TYPE.notificationWithParameters(
+                InputPosition.empty, new String[] {type}, new String[] {type});
+    }
+
+    public static NotificationImplementation identifierShadowingVariable(
+            InputPosition position, String identifier, String clause) {
+        return IDENTIFIER_SHADOWING_VARIABLE.notificationWithParameters(
+                position, new String[] {identifier, clause, identifier}, new String[] {identifier, clause, identifier});
+    }
+
+    public static NotificationImplementation waitServerCaughtUp(String serverName, String boltAddress) {
+        return WAIT_SERVER_CAUGHT_UP.notificationWithParameters(
+                InputPosition.empty, new String[] {serverName, boltAddress}, new String[] {serverName, boltAddress});
+    }
+
+    public static NotificationImplementation callableShadowing(
+            InputPosition position, String callableKind, String callableName) {
+        return CALLABLE_SHADOWING.notificationWithParameters(
+                position,
+                new String[] {callableKind, callableName, callableKind},
+                new String[] {callableKind, callableName, callableKind});
     }
 
     private NotificationImplementation notification(InputPosition position) {

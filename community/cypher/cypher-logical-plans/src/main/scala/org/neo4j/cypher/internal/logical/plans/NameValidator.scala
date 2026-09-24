@@ -34,8 +34,9 @@ object NameValidator {
   private val reservedRoleName = "PUBLIC"
 
   def assertValidUsername(name: String): Boolean = {
-    if (name == null || name.isEmpty)
-      throw new InvalidArgumentException("The provided username is empty.")
+    if (name == null || name.isEmpty) {
+      throw InvalidArgumentException.providedStringEmpty("Username")
+    }
     if (!usernamePattern.matcher(name).matches)
       throw InvalidArgumentException.inputContainsInvalidCharacters(
         name,
@@ -47,8 +48,9 @@ object NameValidator {
   }
 
   def assertValidRoleName(name: String): Boolean = {
-    if (name == null || name.isEmpty)
-      throw new InvalidArgumentException("The provided role name is empty.")
+    if (name == null || name.isEmpty) {
+      throw InvalidArgumentException.providedStringEmpty("Role name")
+    }
     if (!roleNamePattern.matcher(name).matches)
       throw InvalidArgumentException.inputContainsInvalidCharacters(
         name,
@@ -59,34 +61,54 @@ object NameValidator {
     true
   }
 
+  def assertValidAuthRuleName(name: String): Boolean = {
+    if (name == null || name.isEmpty) {
+      throw InvalidArgumentException.providedStringEmpty("Auth rule name")
+    }
+    if (!usernamePattern.matcher(name).matches)
+      throw InvalidArgumentException.inputContainsInvalidCharacters(
+        name,
+        "auth rule name",
+        s"""Auth rule name '$name' contains illegal characters.
+           |Use ascii characters that are not ',', ':' or whitespaces.""".stripMargin
+      )
+    true
+  }
+
   def assertValidAliasName(name: String): Boolean = {
-    if (name == null || name.isEmpty)
-      throw new InvalidArgumentException("The provided alias is empty.")
+    if (name == null || name.isEmpty) {
+      throw InvalidArgumentException.providedStringEmpty("Alias name", "Alias")
+    }
     if (name.length > 65534)
       throw InvalidArgumentException.aliasTooLong(name)
     if (name.startsWith("system")) {
-      throw new InvalidArgumentException("Alias name '" + name + "' is invalid, due to the prefix 'system'.")
+      throw InvalidArgumentException.invalidPrefixSystem("Alias name", name)
     }
     true
   }
 
   def assertValidTargetName(name: String): Boolean = {
-    if (name == null || name.isEmpty)
-      throw new InvalidArgumentException("The provided target database name is empty.")
+    if (name == null || name.isEmpty) {
+      throw InvalidArgumentException.providedStringEmpty("Target database name")
+    }
     if (name.length > 65534)
       throw InvalidArgumentException.dbNameTooLong(name)
     if (name.startsWith("system")) {
-      throw new InvalidArgumentException("Target database name '" + name + "' is invalid, due to the prefix 'system'.")
+      throw InvalidArgumentException.invalidPrefixSystem("Target database name", name)
     }
     true
   }
 
   def assertUnreservedRoleName(verb: String, name: String, newName: Option[String] = None): Boolean =
     if (reservedRoleName.equals(name)) {
-      throw new InvalidArgumentException(s"Failed to $verb the specified role '$name': '$name' is a reserved role.")
-    } else if (newName.isDefined && reservedRoleName.equals(newName.get)) {
-      throw new InvalidArgumentException(
-        s"Failed to $verb the specified role '$name' to '${newName.get}': '${newName.get}' is a reserved role."
+      throw InvalidArgumentException.failedActionReservedRole(
+        s"$verb the specified role '$name'",
+        reservedRoleName
+      )
+    } else if (newName.contains(reservedRoleName)) {
+      throw InvalidArgumentException.failedActionReservedRole(
+        s"$verb the specified role '$name' to '${newName.get}'",
+        reservedRoleName
       )
     } else {
       true

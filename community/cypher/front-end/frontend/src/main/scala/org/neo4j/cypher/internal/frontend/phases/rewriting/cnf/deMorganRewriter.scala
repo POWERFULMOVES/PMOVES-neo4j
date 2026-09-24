@@ -27,7 +27,6 @@ import org.neo4j.cypher.internal.rewriting.conditions.AndsAboveOrs
 import org.neo4j.cypher.internal.rewriting.conditions.NoInequalityInsideNot
 import org.neo4j.cypher.internal.rewriting.conditions.NoXorOperators
 import org.neo4j.cypher.internal.rewriting.conditions.NotsBelowBooleanOperators
-import org.neo4j.cypher.internal.rewriting.conditions.SemanticInfoAvailable
 import org.neo4j.cypher.internal.rewriting.rewriters.copyVariables
 import org.neo4j.cypher.internal.rewriting.rewriters.repeatWithSizeLimit
 import org.neo4j.cypher.internal.util.Rewriter
@@ -53,7 +52,7 @@ case class deMorganRewriter()(implicit monitor: AstRewritingMonitor) extends Rew
   private val instance: Rewriter = repeatWithSizeLimit(bottomUp(step))(monitor)
 }
 
-case object deMorganRewriter extends CnfPhase {
+case object deMorganRewriter extends CnfPhaseRewriter {
 
   override def instance(from: BaseState, context: BaseContext): Rewriter = {
     implicit val monitor: AstRewritingMonitor = context.monitors.newMonitor[AstRewritingMonitor]()
@@ -65,7 +64,7 @@ case object deMorganRewriter extends CnfPhase {
   override def postConditions: Set[StepSequencer.Condition] = Set(NotsBelowBooleanOperators, NoXorOperators)
 
   override def invalidatedConditions: Set[StepSequencer.Condition] =
-    SemanticInfoAvailable ++ Set(
+    super.invalidatedConditions ++ Set(
       AndsAboveOrs,
       NoInequalityInsideNot
     )

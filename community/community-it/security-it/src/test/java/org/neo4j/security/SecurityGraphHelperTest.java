@@ -23,13 +23,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
+import static org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_CREDENTIALS_EXPIRED_PROPERTY;
+import static org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_CREDENTIALS_PROPERTY;
+import static org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_ID_PROPERTY;
+import static org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_LABEL;
+import static org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_NAME_PROPERTY;
 import static org.neo4j.kernel.database.NamedDatabaseId.SYSTEM_DATABASE_NAME;
 import static org.neo4j.server.security.systemgraph.SecurityGraphHelper.NATIVE_AUTH;
-import static org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.USER_CREDENTIALS;
-import static org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.USER_EXPIRED;
-import static org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.USER_ID;
-import static org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.USER_LABEL;
-import static org.neo4j.server.security.systemgraph.versions.KnownCommunitySecurityComponentVersion.USER_NAME;
 
 import java.util.Set;
 import org.junit.jupiter.api.BeforeEach;
@@ -48,7 +49,7 @@ import org.neo4j.test.extension.ImpermanentDbmsExtension;
 import org.neo4j.test.extension.Inject;
 
 @ImpermanentDbmsExtension()
-public class SecurityGraphHelperTest {
+class SecurityGraphHelperTest {
     @Inject
     private DatabaseManagementService dbms;
 
@@ -62,17 +63,18 @@ public class SecurityGraphHelperTest {
         securityLog = mock(AbstractSecurityLog.class);
         securityGraphHelper =
                 new SecurityGraphHelper(Suppliers.lazySingleton(() -> system), new SecureHasher(), securityLog);
+        when(securityLog.isDebugEnabled()).thenReturn(true);
     }
 
     @Test
-    void getUserByIdShouldReturnNullUserIdIsNull() {
+    void getUserByNameShouldReturnNullUserIdIsNull() {
         // WHEN
-        User result = securityGraphHelper.getUserById(null);
+        User result = securityGraphHelper.getUserByName(null);
 
         // THEN
         assertThat(result).isNull();
-        verify(securityLog).debug("Looking up user with id 'null'");
-        verify(securityLog).debug("Cannot look up user with id = null");
+        verify(securityLog).debug("Looking up user '%s'", (Object[]) null);
+        verify(securityLog).debug("Cannot look up user 'null'");
         verifyNoMoreInteractions(securityLog);
     }
 
@@ -83,16 +85,14 @@ public class SecurityGraphHelperTest {
         createUser(new User("alice", "userId", credential, false, false));
 
         // WHEN
-        User result = securityGraphHelper.getUserById("userId");
+        User result = securityGraphHelper.getUserByName("alice");
 
         // THEN
         assertThat(result.id()).isEqualTo("userId");
         assertThat(result.name()).isEqualTo("alice");
-        assertThat(result.auth()).isEqualTo(Set.of(new User.Auth(NATIVE_AUTH, "userId")));
-        verify(securityLog).debug("Looking up user with id 'userId'");
-        verify(securityLog)
-                .debug(
-                        "Found user: User[name=alice, id=userId, credential=*****, passwordChangeRequired=false, suspended=false, auth=[Auth[provider=native, id=userId]]]");
+        assertThat(result.auth()).hasSameElementsAs(Set.of(new User.Auth(NATIVE_AUTH, "userId")));
+        verify(securityLog).debug("Looking up user '%s'", "alice");
+        verify(securityLog).debug("Found user: %s", result);
         verifyNoMoreInteractions(securityLog);
     }
 
@@ -102,39 +102,38 @@ public class SecurityGraphHelperTest {
         createUser(new User("alice", "userId", null, false, false));
 
         // WHEN
-        User result = securityGraphHelper.getUserById("userId");
+        User result = securityGraphHelper.getUserByName("alice");
 
         // THEN
         assertThat(result.id()).isEqualTo("userId");
         assertThat(result.name()).isEqualTo("alice");
-        assertThat(result.auth()).isEqualTo(Set.of());
-        verify(securityLog).debug("Looking up user with id 'userId'");
-        verify(securityLog)
-                .debug(
-                        "Found user: User[name=alice, id=userId, credential=null, passwordChangeRequired=false, suspended=false, auth=[]]");
+        assertThat(result.auth()).hasSameElementsAs(Set.of());
+        verify(securityLog).debug("Looking up user '%s'", "alice");
+        verify(securityLog).debug("Found user: %s", result);
         verifyNoMoreInteractions(securityLog);
     }
 
     @Test
     void getUserByIdShouldReturnNullWhenUserDoesNotExist() {
         // WHEN
-        User result = securityGraphHelper.getUserById("userId");
+        User result = securityGraphHelper.getUserByName("alice");
 
         // THEN
         assertThat(result).isNull();
-        verify(securityLog).debug("Looking up user with id 'userId'");
-        verify(securityLog).debug("User with id 'userId' not found");
+        verify(securityLog).debug("Looking up user '%s'", "alice");
+        verify(securityLog).debug("User '%s' not found", "alice");
         verifyNoMoreInteractions(securityLog);
     }
 
     void createUser(User user) {
         try (var tx = system.beginTx()) {
             Node userNode = tx.createNode(USER_LABEL);
-            userNode.setProperty(USER_NAME, user.name());
-            userNode.setProperty(USER_ID, user.id());
+            userNode.setProperty(USER_NAME_PROPERTY, user.name());
+            userNode.setProperty(USER_ID_PROPERTY, user.id());
             if (user.credential() != null && user.credential().value() != null) {
-                userNode.setProperty(USER_CREDENTIALS, user.credential().value().serialize());
-                userNode.setProperty(USER_EXPIRED, user.passwordChangeRequired());
+                userNode.setProperty(
+                        USER_CREDENTIALS_PROPERTY, user.credential().value().serialize());
+                userNode.setProperty(USER_CREDENTIALS_EXPIRED_PROPERTY, user.passwordChangeRequired());
             }
             tx.commit();
         }

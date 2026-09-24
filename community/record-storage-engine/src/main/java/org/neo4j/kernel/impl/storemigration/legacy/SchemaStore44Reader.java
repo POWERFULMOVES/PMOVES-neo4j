@@ -24,7 +24,6 @@ import static org.neo4j.internal.recordstorage.RecordCursorTypes.SCHEMA_CURSOR;
 import static org.neo4j.kernel.impl.store.record.Record.NO_NEXT_PROPERTY;
 
 import java.nio.file.OpenOption;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -40,11 +39,12 @@ import org.neo4j.internal.schema.IndexConfig;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexProviderDescriptor;
 import org.neo4j.internal.schema.SchemaDescriptor;
-import org.neo4j.internal.schema.SchemaDescriptorImplementationNode;
+import org.neo4j.internal.schema.SchemaDescriptorImplementation;
 import org.neo4j.internal.schema.SchemaPatternMatchingType;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.impl.store.CommonAbstractStore;
@@ -117,8 +117,8 @@ public class SchemaStore44Reader implements AutoCloseable {
             PropertyStore propertyStore,
             TokenHolders tokenHolders,
             KernelVersion kernelVersion,
-            Path schemaStoreLocation,
-            Path idFile,
+            StoreFile storeFile,
+            StoreFile idStoreFile,
             Config conf,
             IdType idType,
             IdGeneratorFactory idGeneratorFactory,
@@ -134,8 +134,8 @@ public class SchemaStore44Reader implements AutoCloseable {
         this.kernelVersion = kernelVersion;
         this.schemaStore = new SchemaStore44(
                 fileSystem,
-                schemaStoreLocation,
-                idFile,
+                storeFile,
+                idStoreFile,
                 conf,
                 idType,
                 idGeneratorFactory,
@@ -198,7 +198,8 @@ public class SchemaStore44Reader implements AutoCloseable {
                         storeCursors.readCursor(PROPERTY_CURSOR),
                         memoryTracker);
             } catch (InvalidRecordException e) {
-                throw new MalformedSchemaRuleException(
+                throw MalformedSchemaRuleException.internalError(
+                        this.getClass().getSimpleName(),
                         "Cannot read schema rule because it is referencing a property record (id " + nextProp
                                 + ") that is invalid: " + propRecord,
                         e);
@@ -222,7 +223,8 @@ public class SchemaStore44Reader implements AutoCloseable {
             props.put(propertyKeyTokenName.name(), propertyKeyValue.value());
         } catch (TokenNotFoundException | InvalidRecordException e) {
             int id = propertyKeyValue.propertyKeyId();
-            throw new MalformedSchemaRuleException(
+            throw MalformedSchemaRuleException.internalError(
+                    SchemaStore44Reader.class.getSimpleName(),
                     "Cannot read schema rule because it is referring to a property key token (id " + id
                             + ") that does not exist.",
                     e);
@@ -238,8 +240,9 @@ public class SchemaStore44Reader implements AutoCloseable {
         return switch (schemaRuleType) {
             case "INDEX" -> buildIndexRule(ruleId, props);
             case "CONSTRAINT" -> buildConstraintRule(ruleId, props);
-            default -> throw new MalformedSchemaRuleException(
-                    "Can not create a schema rule of type: " + schemaRuleType);
+            default ->
+                throw MalformedSchemaRuleException.internalError(
+                        this.getClass().getSimpleName(), "Can not create a schema rule of type: " + schemaRuleType);
         };
     }
 
@@ -312,7 +315,10 @@ public class SchemaStore44Reader implements AutoCloseable {
         return switch (indexRuleType) {
             case "NON_UNIQUE" -> false;
             case "UNIQUE" -> true;
-            default -> throw new MalformedSchemaRuleException("Did not recognize index rule type: " + indexRuleType);
+            default ->
+                throw MalformedSchemaRuleException.internalError(
+                        SchemaStore44Reader.class.getSimpleName(),
+                        "Did not recognize index rule type: " + indexRuleType);
         };
     }
 
@@ -324,7 +330,7 @@ public class SchemaStore44Reader implements AutoCloseable {
         int[] entityIds = getIntArray(PROP_SCHEMA_DESCRIPTOR_ENTITY_IDS, props);
         int[] propertyIds = getIntArray(PROP_SCHEMA_DESCRIPTOR_PROPERTY_IDS, props);
 
-        return new SchemaDescriptorImplementationNode(entityType, schemaPatternMatchingType, entityIds, propertyIds);
+        return new SchemaDescriptorImplementation(entityType, schemaPatternMatchingType, entityIds, propertyIds);
     }
 
     private static IndexConfig extractIndexConfig(Map<String, Value> props) {
@@ -345,7 +351,8 @@ public class SchemaStore44Reader implements AutoCloseable {
         try {
             return SchemaRule44.IndexType.valueOf(indexType);
         } catch (Exception e) {
-            throw new MalformedSchemaRuleException("Did not recognize index type: " + indexType, e);
+            throw MalformedSchemaRuleException.internalError(
+                    SchemaStore44Reader.class.getSimpleName(), "Did not recognize index type: " + indexType, e);
         }
     }
 
@@ -354,7 +361,10 @@ public class SchemaStore44Reader implements AutoCloseable {
         try {
             return SchemaRule44.ConstraintRuleType.valueOf(constraintRuleType);
         } catch (Exception e) {
-            throw new MalformedSchemaRuleException("Did not recognize constraint rule type: " + constraintRuleType, e);
+            throw MalformedSchemaRuleException.internalError(
+                    SchemaStore44Reader.class.getSimpleName(),
+                    "Did not recognize constraint rule type: " + constraintRuleType,
+                    e);
         }
     }
 
@@ -363,8 +373,10 @@ public class SchemaStore44Reader implements AutoCloseable {
         try {
             return SchemaPatternMatchingType.valueOf(schemaPatternMatchingType);
         } catch (Exception e) {
-            throw new MalformedSchemaRuleException(
-                    "Did not recognize schema pattern matching type: " + schemaPatternMatchingType, e);
+            throw MalformedSchemaRuleException.internalError(
+                    SchemaStore44Reader.class.getSimpleName(),
+                    "Did not recognize schema pattern matching type: " + schemaPatternMatchingType,
+                    e);
         }
     }
 
@@ -372,7 +384,8 @@ public class SchemaStore44Reader implements AutoCloseable {
         try {
             return EntityType.valueOf(entityType);
         } catch (Exception e) {
-            throw new MalformedSchemaRuleException("Did not recognize entity type: " + entityType, e);
+            throw MalformedSchemaRuleException.internalError(
+                    SchemaStore44Reader.class.getSimpleName(), "Did not recognize entity type: " + entityType, e);
         }
     }
 
@@ -381,7 +394,7 @@ public class SchemaStore44Reader implements AutoCloseable {
         if (value instanceof IntArray) {
             return (int[]) value.asObject();
         }
-        throw new MalformedSchemaRuleException("Expected property " + property + " to be a IntArray but was " + value);
+        throw MalformedSchemaRuleException.propertyTypeMismatch(property, value, IntArray.class);
     }
 
     private static long getLong(String property, Map<String, Value> props) throws MalformedSchemaRuleException {
@@ -389,7 +402,7 @@ public class SchemaStore44Reader implements AutoCloseable {
         if (value instanceof LongValue) {
             return ((LongValue) value).value();
         }
-        throw new MalformedSchemaRuleException("Expected property " + property + " to be a LongValue but was " + value);
+        throw MalformedSchemaRuleException.propertyTypeMismatch(property, value, LongValue.class);
     }
 
     private static Long getOptionalLong(String property, Map<String, Value> props) {
@@ -405,7 +418,7 @@ public class SchemaStore44Reader implements AutoCloseable {
         if (value instanceof TextValue) {
             return ((TextValue) value).stringValue();
         }
-        throw new MalformedSchemaRuleException("Expected property " + property + " to be a TextValue but was " + value);
+        throw MalformedSchemaRuleException.propertyTypeMismatch(property, value, TextValue.class);
     }
 
     private static String getOptionalString(String property, Map<String, Value> map) {
@@ -429,8 +442,8 @@ public class SchemaStore44Reader implements AutoCloseable {
 
         SchemaStore44(
                 FileSystemAbstraction fileSystem,
-                Path path,
-                Path idFile,
+                StoreFile storeFile,
+                StoreFile idStoreFile,
                 Config conf,
                 IdType idType,
                 IdGeneratorFactory idGeneratorFactory,
@@ -443,8 +456,8 @@ public class SchemaStore44Reader implements AutoCloseable {
                 ImmutableSet<OpenOption> openOptions) {
             super(
                     fileSystem,
-                    path,
-                    idFile,
+                    storeFile,
+                    idStoreFile,
                     conf,
                     idType,
                     idGeneratorFactory,

@@ -25,7 +25,8 @@ import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPromise;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
-import org.neo4j.bolt.testing.client.error.BoltTestClientException;
+import org.neo4j.bolt.testing.client.error.BoltTestClientClosedException;
+import org.neo4j.bolt.testing.client.error.BoltTestClientConnectionTimeoutException;
 
 public class TestChannelInitializer extends ChannelInitializer<Channel> {
     private final Function<Channel, ChannelPromise> initializer;
@@ -43,8 +44,12 @@ public class TestChannelInitializer extends ChannelInitializer<Channel> {
         }
 
         if (!future.await(30, TimeUnit.SECONDS)) {
-            throw new BoltTestClientException(
+            throw new BoltTestClientConnectionTimeoutException(
                     "Failed to establish connection: Timed out while waiting for channel initializers");
+        }
+
+        if (!future.isSuccess()) {
+            throw new BoltTestClientClosedException("Failed to establish connection.", future.cause());
         }
     }
 

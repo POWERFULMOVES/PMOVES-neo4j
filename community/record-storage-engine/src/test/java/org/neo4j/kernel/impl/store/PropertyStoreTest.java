@@ -30,19 +30,26 @@ import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.imme
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
 import static org.neo4j.kernel.impl.store.record.RecordLoad.FORCE;
+import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
 import static org.neo4j.test.utils.PageCacheConfig.config;
 
 import java.io.IOException;
-import java.nio.file.Path;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.neo4j.configuration.Config;
+import org.neo4j.exceptions.FeatureUnsupportedOnStoreFormatException;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.internal.id.DefaultIdGeneratorFactory;
 import org.neo4j.io.fs.EphemeralFileSystemAbstraction;
 import org.neo4j.io.layout.recordstorage.RecordDatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.impl.store.format.RecordFormatSelector;
 import org.neo4j.kernel.impl.store.record.DynamicRecord;
@@ -55,6 +62,8 @@ import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.test.extension.EphemeralNeo4jLayoutExtension;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.pagecache.PageCacheSupportExtension;
+import org.neo4j.values.storable.Value;
+import org.neo4j.values.storable.Values;
 
 @EphemeralNeo4jLayoutExtension
 class PropertyStoreTest {
@@ -68,8 +77,8 @@ class PropertyStoreTest {
     @Inject
     private RecordDatabaseLayout databaseLayout;
 
-    private Path storeFile;
-    private Path idFile;
+    private StoreFile storeFile;
+    private StoreFile idFile;
 
     @BeforeEach
     void setup() {
@@ -137,6 +146,30 @@ class PropertyStoreTest {
                 verify(stringPropertyStore).updateRecord(eq(dynamicRecord), any(), any(), any(), any());
             }
         }
+    }
+
+    @ParameterizedTest
+    @MethodSource("vectors")
+    void cannotStoreVectors(Value vector) {
+        PropertyBlock block = new PropertyBlock();
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> PropertyStore.encodeValue(
+                        block, 1, vector, null, null, NULL_CONTEXT, INSTANCE, "db-format-2000"))
+                .isInstanceOf(FeatureUnsupportedOnStoreFormatException.class)
+                .hasMessageContaining(
+                        "storing properties of type vector is not supported in db-format-2000 store format")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_51N77)
+                .hasStatusDescription(
+                        "error: system configuration or operation exception - not supported in this store format. storing properties of type vector is not supported in db-format-2000 store format.");
+    }
+
+    private static Stream<Value> vectors() {
+        return Stream.of(
+                Values.int8Vector((byte) 1, (byte) 2),
+                Values.int16Vector((short) 1, (short) 2),
+                Values.int32Vector(1, 2),
+                Values.int64Vector(1, 2),
+                Values.float32Vector(1f, 2f),
+                Values.float64Vector(1d, 2d));
     }
 
     private static DynamicRecord dynamicRecord() {

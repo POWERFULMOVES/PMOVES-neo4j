@@ -21,7 +21,9 @@ package org.neo4j.cypher.internal.runtime.interpreted
 
 import org.neo4j.configuration.Config
 import org.neo4j.csv.reader.CharReadable
-import org.neo4j.cypher.internal.runtime.debug.DebugSupport
+import org.neo4j.cypher.internal.runtime.QueryRuntimeConfig
+import org.neo4j.cypher.internal.runtime.debug.events.Debug
+import org.neo4j.cypher.internal.runtime.interpreted.debug.events.TransactionalContext.CloseWithSelf
 import org.neo4j.cypher.internal.util.CancellationChecker
 import org.neo4j.graphdb.Entity
 import org.neo4j.internal.kernel.api.CursorFactory
@@ -52,6 +54,7 @@ import org.neo4j.kernel.impl.query.ConstituentTransactionFactory
 import org.neo4j.kernel.impl.query.QueryExecutionConfiguration
 import org.neo4j.kernel.impl.query.TransactionalContext
 import org.neo4j.kernel.impl.query.statistic.StatisticProvider
+import org.neo4j.memory.HeapEstimatorCacheConfig
 import org.neo4j.memory.MemoryTracker
 import org.neo4j.values.ElementIdMapper
 import org.neo4j.values.ValueMapper
@@ -59,14 +62,15 @@ import org.neo4j.values.ValueMapper
 import java.net.URI
 
 class ParallelTransactionalContextWrapper(
-  private[this] val tc: TransactionalContext
+  private[this] val tc: TransactionalContext,
+  queryConfig: QueryRuntimeConfig
 ) extends TransactionalContextWrapper {
 
   // NOTE: We want all methods going through kernelExecutionContext instead of through tc.kernelTransaction, which is not thread-safe
   private[this] val _kernelExecutionContext: ExecutionContext = {
     val ktx = tc.kernelTransaction()
     ktx.assertOpen()
-    ktx.createExecutionContext()
+    ktx.createExecutionContext(queryConfig.heapEstimatorCacheConfig)
   }
 
   private[this] val _statisticsProvider = new StatisticProvider {
@@ -103,7 +107,7 @@ class ParallelTransactionalContextWrapper(
 
   override def token: Token = unsupported()
 
-  override def schemaRead: SchemaRead = unsupported()
+  override def schemaRead: SchemaRead = _kernelExecutionContext.schemaRead()
 
   override def schemaWrite: SchemaWrite = unsupported()
 
@@ -123,14 +127,7 @@ class ParallelTransactionalContextWrapper(
   override def queryExecutingConfiguration: QueryExecutionConfiguration = tc.queryExecutingConfiguration()
 
   override def close(): Unit = {
-    if (DebugSupport.DEBUG_TRANSACTIONAL_CONTEXT) {
-      DebugSupport.TRANSACTIONAL_CONTEXT.log(
-        "%s.close(): %s thread=%s",
-        this.getClass.getSimpleName,
-        this,
-        Thread.currentThread().getName
-      )
-    }
+    Debug.log(CloseWithSelf(this))
     _kernelExecutionContext.complete()
     _kernelExecutionContext.close()
   }
@@ -160,8 +157,9 @@ class ParallelTransactionalContextWrapper(
     throw new UnsupportedOperationException("Not supported in parallel runtime.")
   }
 
-  override def createParallelTransactionalContext(): ParallelTransactionalContextWrapper = {
-    new ParallelTransactionalContextWrapper(kernelTransactionalContext)
+  override def createParallelTransactionalContext(queryConfig: QueryRuntimeConfig)
+    : ParallelTransactionalContextWrapper = {
+    new ParallelTransactionalContextWrapper(kernelTransactionalContext, queryConfig)
   }
 
   override def elementIdMapper(): ElementIdMapper = tc.elementIdMapper()
@@ -187,5 +185,8 @@ class ParallelTransactionalContextWrapper(
 
   override def constituentTransactionFactory: ConstituentTransactionFactory = ConstituentTransactionFactory.throwing()
 
-  override def createExecutionContextMemoryTracker(): MemoryTracker = unsupported()
+  override def createExecutionContextMemoryTracker(heapEstimatorCacheConfig: HeapEstimatorCacheConfig): MemoryTracker =
+    unsupported()
+
+  override def registerTransactionResource(resource: AutoCloseable): Unit = unsupported()
 }

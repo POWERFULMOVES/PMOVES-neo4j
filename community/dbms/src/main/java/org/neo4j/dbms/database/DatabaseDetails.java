@@ -19,9 +19,12 @@
  */
 package org.neo4j.dbms.database;
 
+import java.time.ZonedDateTime;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import org.neo4j.configuration.helpers.SocketAddress;
+import org.neo4j.cypher.internal.CypherVersion;
 import org.neo4j.dbms.identity.ServerId;
 import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel;
 import org.neo4j.kernel.database.NamedDatabaseId;
@@ -36,29 +39,42 @@ public record DatabaseDetails(
         Optional<SocketAddress> boltAddress,
         Optional<String> role,
         boolean writer,
-        String status,
+        String actualStatus,
         String statusMessage,
-        Optional<Long> lastCommittedTxId,
-        Optional<Long> txCommitLag,
+        OptionalLong lastCommittedTxId,
+        OptionalLong txCommitLag,
+        OptionalLong shardCommitLag,
         // database level values - will be the same for all members
         NamedDatabaseId namedDatabaseId,
+        String requestedStatus,
         String type,
-        Map<String, String> options,
+        Map<String, Object> options,
         Optional<StoreId> storeId,
         Optional<ExternalStoreId> externalStoreId,
-        int actualPrimariesCount,
-        int actualSecondariesCount) {
+        Integer requestedPrimariesCount,
+        Integer actualPrimariesCount,
+        Integer requestedSecondariesCount,
+        Integer actualSecondariesCount,
+        Optional<ZonedDateTime> creationTime,
+        Optional<ZonedDateTime> lastStartTime,
+        Optional<ZonedDateTime> lastStopTime,
+        Optional<CypherVersion> cypherVersion) {
 
     public static final String ROLE_PRIMARY = "primary";
     public static final String ROLE_SECONDARY = "secondary";
 
     public static final String STATUS_UNKNOWN = "unknown";
+    public static final String STATUS_MIXED = "mixed";
     public static final String STATUS_MESSAGE_UNKNOWN = "Server is unavailable";
     public static final String STATUS_MESSAGE_ORPHANED = "Database not currently allocated to any servers";
 
     public static final String TYPE_SYSTEM = "system";
     public static final String TYPE_STANDARD = "standard";
     public static final String TYPE_COMPOSITE = "composite";
+    public static final String TYPE_GRAPH_SHARD = "graph shard";
+    public static final String TYPE_PROPERTY_SHARD = "property shard";
+    public static final String TYPE_MIRROR = "replica";
+    public static final String TYPE_GRAPH_ENGINE = "virtual graph";
 
     public String databaseType() {
         return type;

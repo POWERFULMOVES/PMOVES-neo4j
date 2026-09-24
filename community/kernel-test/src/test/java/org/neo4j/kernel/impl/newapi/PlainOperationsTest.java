@@ -25,7 +25,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -58,22 +57,26 @@ import java.util.Iterator;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
+import org.mockito.stubbing.Answer;
 import org.neo4j.configuration.Config;
 import org.neo4j.dbms.DbmsRuntimeVersionProvider;
 import org.neo4j.exceptions.KernelException;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.internal.helpers.collection.Iterables;
 import org.neo4j.internal.helpers.collection.Iterators;
 import org.neo4j.internal.kernel.api.PropertyCursor;
 import org.neo4j.internal.kernel.api.TokenSet;
 import org.neo4j.internal.kernel.api.exceptions.EntityNotFoundException;
+import org.neo4j.internal.kernel.api.exceptions.TransactionFailureException;
 import org.neo4j.internal.kernel.api.exceptions.schema.ConstraintValidationException;
+import org.neo4j.internal.kernel.api.exceptions.schema.CreateConstraintFailureException;
 import org.neo4j.internal.kernel.api.helpers.StubNodeCursor;
 import org.neo4j.internal.kernel.api.helpers.TestRelationshipChain;
-import org.neo4j.internal.kernel.api.security.AccessMode;
-import org.neo4j.internal.kernel.api.security.AccessMode.Static;
 import org.neo4j.internal.kernel.api.security.CommunitySecurityLog;
 import org.neo4j.internal.kernel.api.security.SecurityAuthorizationHandler;
 import org.neo4j.internal.kernel.api.security.SecurityContext;
+import org.neo4j.internal.kernel.api.security.StaticAccessMode;
 import org.neo4j.internal.schema.AllIndexProviderDescriptors;
 import org.neo4j.internal.schema.ConstraintDescriptor;
 import org.neo4j.internal.schema.IndexDescriptor;
@@ -89,12 +92,13 @@ import org.neo4j.internal.schema.constraints.IndexBackedConstraintDescriptor;
 import org.neo4j.internal.schema.constraints.KeyConstraintDescriptor;
 import org.neo4j.internal.schema.constraints.UniquenessConstraintDescriptor;
 import org.neo4j.kernel.KernelVersion;
+import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.api.exceptions.schema.AlreadyConstrainedException;
 import org.neo4j.kernel.api.index.IndexProvider;
 import org.neo4j.kernel.api.txstate.TransactionState;
 import org.neo4j.kernel.impl.api.KernelTransactionImplementation;
 import org.neo4j.kernel.impl.api.index.IndexProxy;
-import org.neo4j.kernel.impl.api.index.IndexingProvidersService;
+import org.neo4j.kernel.impl.api.index.IndexingService;
 import org.neo4j.kernel.impl.api.state.ConstraintIndexCreator;
 import org.neo4j.kernel.impl.constraints.ConstraintSemantics;
 import org.neo4j.kernel.impl.locking.LockManager;
@@ -279,8 +283,7 @@ public class PlainOperationsTest extends OperationsTest {
     void shouldAcquireEntityWriteLockBeforeSettingPropertyOnNode() throws Exception {
         // given
         when(nodeCursor.next()).thenReturn(true);
-        when(nodeCursor.labelsAndProperties(any(PropertyCursor.class), any(PropertySelection.class)))
-                .thenReturn(TokenSet.NONE);
+        when(nodeCursor.labels()).thenReturn(TokenSet.NONE);
         int propertyKeyId = 8;
         Value value = Values.of(9);
         when(propertyCursor.next()).thenReturn(true);
@@ -304,8 +307,7 @@ public class PlainOperationsTest extends OperationsTest {
         when(nodeCursor.next()).thenReturn(true);
         TokenSet tokenSet = mock(TokenSet.class);
         when(tokenSet.all()).thenReturn(new int[] {relatedLabelId});
-        when(nodeCursor.labelsAndProperties(any(PropertyCursor.class), any(PropertySelection.class)))
-                .thenReturn(tokenSet);
+        when(nodeCursor.labels()).thenReturn(tokenSet);
         Value value = Values.of(9);
         when(propertyCursor.next()).thenReturn(true);
         when(propertyCursor.propertyKey()).thenReturn(propertyKeyId);
@@ -337,8 +339,7 @@ public class PlainOperationsTest extends OperationsTest {
         // then
         order.verify(locks).acquireExclusive(LockTracer.NONE, ResourceType.RELATIONSHIP, 123);
         order.verify(txState)
-                .relationshipDoReplaceProperty(
-                        eq(123L), anyInt(), anyLong(), anyLong(), eq(propertyKeyId), eq(NO_VALUE), eq(value));
+                .relationshipDoAddProperty(eq(123L), anyInt(), anyLong(), anyLong(), eq(propertyKeyId), eq(value));
     }
 
     @Test
@@ -376,8 +377,7 @@ public class PlainOperationsTest extends OperationsTest {
         // then
         verify(locks, never()).acquireExclusive(LockTracer.NONE, ResourceType.RELATIONSHIP, 123);
         order.verify(txState)
-                .relationshipDoReplaceProperty(
-                        eq(123L), anyInt(), anyLong(), anyLong(), eq(propertyKeyId), eq(NO_VALUE), eq(value));
+                .relationshipDoAddProperty(eq(123L), anyInt(), anyLong(), anyLong(), eq(propertyKeyId), eq(value));
     }
 
     @Test
@@ -594,7 +594,10 @@ public class PlainOperationsTest extends OperationsTest {
 
         // then
         order.verify(locks).acquireExclusive(LockTracer.NONE, ResourceType.LABEL, schema.getLabelId());
-        order.verify(txState).constraintDoAdd(ConstraintDescriptorFactory.uniqueForSchema(schema), constraintIndex);
+        order.verify(txState)
+                .constraintDoAdd(
+                        ConstraintDescriptorFactory.uniqueForSchema(schema).withName("constraint name"),
+                        constraintIndex);
     }
 
     @Test
@@ -608,13 +611,9 @@ public class PlainOperationsTest extends OperationsTest {
         when(tokenHolders.propertyKeyTokens().getTokenById(propertyId)).thenReturn(new NamedToken("prop", labelId));
 
         // when
-        try {
-            operations.uniquePropertyConstraintCreate(
-                    IndexPrototype.uniqueForSchema(schema).withName("constraint name"));
-            fail("Expected an exception because this schema should already be constrained.");
-        } catch (AlreadyConstrainedException ignore) {
-            // Good.
-        }
+        assertThatThrownBy(() -> operations.uniquePropertyConstraintCreate(
+                        IndexPrototype.uniqueForSchema(schema).withName("constraint name")))
+                .isInstanceOf(AlreadyConstrainedException.class);
 
         // then
         order.verify(locks).acquireExclusive(LockTracer.NONE, ResourceType.LABEL, labelId);
@@ -633,13 +632,9 @@ public class PlainOperationsTest extends OperationsTest {
         when(tokenHolders.propertyKeyTokens().getTokenById(propertyId)).thenReturn(new NamedToken("prop", labelId));
 
         // when
-        try {
-            operations.keyConstraintCreate(
-                    IndexPrototype.uniqueForSchema(schema).withName("constraint name"));
-            fail("Expected an exception because this schema should already be constrained.");
-        } catch (AlreadyConstrainedException ignore) {
-            // Good.
-        }
+        assertThatThrownBy(() -> operations.keyConstraintCreate(
+                        IndexPrototype.uniqueForSchema(schema).withName("constraint name")))
+                .isInstanceOf(AlreadyConstrainedException.class);
 
         // then
         order.verify(locks).acquireExclusive(LockTracer.NONE, ResourceType.LABEL, labelId);
@@ -658,12 +653,8 @@ public class PlainOperationsTest extends OperationsTest {
         when(tokenHolders.propertyKeyTokens().getTokenById(propertyId)).thenReturn(new NamedToken("prop", labelId));
 
         // when
-        try {
-            operations.nodePropertyExistenceConstraintCreate(schema, "constraint name", false);
-            fail("Expected an exception because this schema should already be constrained.");
-        } catch (AlreadyConstrainedException ignore) {
-            // Good.
-        }
+        assertThatThrownBy(() -> operations.nodePropertyExistenceConstraintCreate(schema, "constraint name", false))
+                .isInstanceOf(AlreadyConstrainedException.class);
 
         // then
         order.verify(locks).acquireExclusive(LockTracer.NONE, ResourceType.LABEL, labelId);
@@ -708,12 +699,9 @@ public class PlainOperationsTest extends OperationsTest {
         when(storageReader.constraintsGetForRelationshipType(anyInt())).thenReturn(Collections.emptyIterator());
 
         // when
-        try {
-            operations.relationshipPropertyExistenceConstraintCreate(descriptor, "constraint name", false);
-            fail("Expected an exception because this schema should already be constrained.");
-        } catch (AlreadyConstrainedException ignore) {
-            // Good.
-        }
+        assertThatThrownBy(() ->
+                        operations.relationshipPropertyExistenceConstraintCreate(descriptor, "constraint name", false))
+                .isInstanceOf(AlreadyConstrainedException.class);
 
         // then
         order.verify(locks).acquireExclusive(LockTracer.NONE, ResourceType.RELATIONSHIP_TYPE, relTypeId);
@@ -873,7 +861,7 @@ public class PlainOperationsTest extends OperationsTest {
         TokenSet labels = mock(TokenSet.class);
         when(labels.all()).thenReturn(new int[] {labelId1, labelId2});
         when(nodeCursor.labels()).thenReturn(labels);
-        when(propertyCursor.next()).thenReturn(true);
+        when(propertyCursor.next()).thenReturn(true, false);
         when(propertyCursor.propertyKey()).thenReturn(propertyKeyId);
         when(propertyCursor.propertyValue()).thenReturn(Values.of("abc"));
 
@@ -899,7 +887,7 @@ public class PlainOperationsTest extends OperationsTest {
         when(storageReader.indexGetForSchema(any())).thenReturn(Collections.emptyIterator());
         operations.indexCreate(IndexPrototype.forSchema(SchemaDescriptors.forLabel(1, 1)));
         operations.indexCreate(
-                IndexPrototype.forSchema(SchemaDescriptors.fulltext(NODE, new int[] {2, 3}, new int[] {1, 2}))
+                IndexPrototype.forSchema(SchemaDescriptors.forSemanticSearch(NODE, new int[] {2, 3}, new int[] {1, 2}))
                         .withIndexType(IndexType.FULLTEXT));
         operations.indexCreate(IndexPrototype.forSchema(SchemaDescriptors.forLabel(3, 1))
                 .withIndexProvider(operations.indexProviderByName("provider-1.0")));
@@ -920,13 +908,13 @@ public class PlainOperationsTest extends OperationsTest {
                 .isEqualTo(3L);
         assertThat(indexDescriptors[0].getName())
                 .as(indexDescriptors[0].toString())
-                .isEqualTo("index_b5ad8e5c");
+                .isEqualTo("index_c345e44b");
         assertThat(indexDescriptors[1].getName())
                 .as(indexDescriptors[1].toString())
-                .isEqualTo("index_2813986a");
+                .isEqualTo("index_9f96844d");
         assertThat(indexDescriptors[2].getName())
                 .as(indexDescriptors[2].toString())
-                .isEqualTo("index_b6cde845");
+                .isEqualTo("index_ef214dd5");
     }
 
     @Test
@@ -940,7 +928,7 @@ public class PlainOperationsTest extends OperationsTest {
                     IndexPrototype prototype = i.getArgument(2);
                     Optional<String> name = prototype.getName();
                     assertTrue(name.isPresent());
-                    assertThat(name.get()).isEqualTo(constraintName);
+                    assertThat(name).contains(constraintName);
                     return prototype.materialise(2);
                 });
         IndexPrototype prototype = IndexPrototype.uniqueForSchema(schema).withName(constraintName);
@@ -972,10 +960,10 @@ public class PlainOperationsTest extends OperationsTest {
                 mock(DefaultPooledCursors.class),
                 mock(ConstraintIndexCreator.class),
                 mock(ConstraintSemantics.class),
-                mock(IndexingProvidersService.class),
+                mock(IndexingService.class),
                 Config.defaults(),
                 EmptyMemoryTracker.INSTANCE,
-                () -> Static.FULL,
+                () -> StaticAccessMode.FULL,
                 TransactionStateBehaviour.DEFAULT_BEHAVIOUR);
 
         // when
@@ -1020,10 +1008,10 @@ public class PlainOperationsTest extends OperationsTest {
                 cursors,
                 mock(ConstraintIndexCreator.class),
                 mock(ConstraintSemantics.class),
-                mock(IndexingProvidersService.class),
+                mock(IndexingService.class),
                 Config.defaults(),
                 EmptyMemoryTracker.INSTANCE,
-                () -> Static.FULL,
+                () -> StaticAccessMode.FULL,
                 TransactionStateBehaviour.DEFAULT_BEHAVIOUR);
         operations.initialize(NULL_CONTEXT);
 
@@ -1065,10 +1053,10 @@ public class PlainOperationsTest extends OperationsTest {
                 mock(DefaultPooledCursors.class),
                 mock(ConstraintIndexCreator.class),
                 mock(ConstraintSemantics.class),
-                mock(IndexingProvidersService.class),
+                mock(IndexingService.class),
                 Config.defaults(),
                 EmptyMemoryTracker.INSTANCE,
-                () -> Static.FULL,
+                () -> StaticAccessMode.FULL,
                 TransactionStateBehaviour.DEFAULT_BEHAVIOUR);
 
         // when
@@ -1094,11 +1082,10 @@ public class PlainOperationsTest extends OperationsTest {
         IndexProviderDescriptor indexProviderDescriptor = mock(IndexProviderDescriptor.class);
         IndexProvider indexProvider = mock(IndexProvider.class);
         when(indexProvider.getMinimumRequiredVersion()).thenReturn(KernelVersion.EARLIEST);
-        IndexingProvidersService indexingProvidersService = mock(IndexingProvidersService.class);
-        when(indexingProvidersService.getDefaultProvider()).thenReturn(indexProviderDescriptor);
-        when(indexingProvidersService.getIndexProvider(any())).thenReturn(indexProvider);
-        when(indexingProvidersService.validateIndexPrototype(any(IndexPrototype.class)))
-                .thenAnswer(i -> i.getArguments()[0]);
+        var indexingService = mock(IndexingService.class);
+        when(indexingService.getDefaultProvider()).thenReturn(indexProviderDescriptor);
+        when(indexingService.getIndexProvider(any())).thenReturn(indexProvider);
+        when(indexingService.validateIndexPrototype(any(IndexPrototype.class))).thenAnswer(i -> i.getArguments()[0]);
         KernelSchemaRead kernelSchemaRead = mock(KernelSchemaRead.class);
         when(kernelSchemaRead.index(any(), any())).thenReturn(IndexDescriptor.NO_INDEX);
         when(kernelSchemaRead.indexGetForName(any())).thenReturn(IndexDescriptor.NO_INDEX);
@@ -1117,10 +1104,10 @@ public class PlainOperationsTest extends OperationsTest {
                 mock(DefaultPooledCursors.class),
                 mock(ConstraintIndexCreator.class),
                 mock(ConstraintSemantics.class),
-                indexingProvidersService,
+                indexingService,
                 Config.defaults(),
                 EmptyMemoryTracker.INSTANCE,
-                () -> Static.FULL,
+                () -> StaticAccessMode.FULL,
                 TransactionStateBehaviour.DEFAULT_BEHAVIOUR);
 
         // when
@@ -1148,10 +1135,16 @@ public class PlainOperationsTest extends OperationsTest {
         when(indexingService.getIndexProxy(constraintIndex)).thenReturn(indexProxy);
         when(storageReader.constraintsGetForSchema(schema)).thenReturn(Collections.emptyIterator());
         when(storageReader.indexGetForSchema(schema)).thenReturn(Collections.emptyIterator());
+        when(tokenHolders.labelTokens().getTokenById(123)).thenReturn(new NamedToken("LabelA", 1));
+        when(tokenHolders.propertyKeyTokens().getTokenById(456)).thenReturn(new NamedToken("PropA", 1));
 
         // when
         var e = assertThrows(KernelException.class, () -> operations.uniquePropertyConstraintCreate(prototype));
         assertThat(e.getUserMessage(new InMemoryTokens())).contains("FULLTEXT");
+        ErrorGqlStatusObjectAssertions.assertThat(e)
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_50N11)
+                .hasStatusDescription(
+                        "error: general processing exception - constraint creation failed. Unable to create 'constraint name'.");
     }
 
     @Test
@@ -1159,8 +1152,8 @@ public class PlainOperationsTest extends OperationsTest {
         // given
         when(tokenHolders.labelTokens().getTokenById(anyInt())).thenReturn(new NamedToken("Label", 123));
         when(tokenHolders.propertyKeyTokens().getTokenById(anyInt())).thenReturn(new NamedToken("prop", 456));
-        SchemaDescriptor schema =
-                SchemaDescriptors.fulltext(NODE, this.schema.getEntityTokenIds(), this.schema.getPropertyIds());
+        SchemaDescriptor schema = SchemaDescriptors.forSemanticSearch(
+                NODE, this.schema.getEntityTokenIds(), this.schema.getPropertyIds());
         IndexPrototype prototype = IndexPrototype.uniqueForSchema(schema)
                 .withName("constraint name")
                 .withIndexProvider(AllIndexProviderDescriptors.RANGE_DESCRIPTOR);
@@ -1175,7 +1168,7 @@ public class PlainOperationsTest extends OperationsTest {
 
         // when
         var e = assertThrows(KernelException.class, () -> operations.uniquePropertyConstraintCreate(prototype));
-        assertThat(e.getUserMessage(tokenHolders)).contains("full-text schema");
+        assertThat(e.getUserMessage(tokenHolders)).contains("semantic search schema");
     }
 
     @Test
@@ -1224,33 +1217,85 @@ public class PlainOperationsTest extends OperationsTest {
     }
 
     @Test
+    void uniquePropertyConstraintCreateShouldNotWrapTransientFailureAsConstraintCreationFailed() throws Exception {
+        // given the inner index-creation transaction fails with a transient error (here
+        // LeaseExpired) — drivers retry transient errors, so it should reach them as such, not be
+        // re-classified as a non-retryable database error (KRNL-1585).
+        when(tokenHolders.labelTokens().getTokenById(anyInt())).thenReturn(new NamedToken("Label", 123));
+        when(tokenHolders.propertyKeyTokens().getTokenById(anyInt())).thenReturn(new NamedToken("prop", 456));
+        IndexPrototype prototype = IndexPrototype.uniqueForSchema(schema)
+                .withName("constraint name")
+                .withIndexProvider(AllIndexProviderDescriptors.RANGE_DESCRIPTOR);
+        when(storageReader.constraintsGetForSchema(schema)).thenReturn(Collections.emptyIterator());
+        when(storageReader.indexGetForSchema(schema)).thenReturn(Collections.emptyIterator());
+
+        TransactionFailureException transientFailure = TransactionFailureException.leaseExpired(1, 0);
+        when(constraintIndexCreator.createUniquenessConstraintIndex(any(), any(), any(), any()))
+                .thenThrow(transientFailure);
+
+        // when
+        TransactionFailureException thrown = assertThrows(
+                TransactionFailureException.class, () -> operations.uniquePropertyConstraintCreate(prototype));
+
+        // then — surface the original transient status so drivers can retry
+        assertThat(thrown.status().code().classification()).isEqualTo(Status.Classification.TransientError);
+        assertThat(thrown).isSameAs(transientFailure);
+    }
+
+    @Test
+    void uniquePropertyConstraintCreateShouldWrapNonTransientTransactionFailure() throws Exception {
+        // given a non-transient TransactionFailureException — only transient errors should be
+        // allowed to propagate; the rest stay wrapped as CreateConstraintFailureException.
+        when(tokenHolders.labelTokens().getTokenById(anyInt())).thenReturn(new NamedToken("Label", 123));
+        when(tokenHolders.propertyKeyTokens().getTokenById(anyInt())).thenReturn(new NamedToken("prop", 456));
+        IndexPrototype prototype = IndexPrototype.uniqueForSchema(schema)
+                .withName("constraint name")
+                .withIndexProvider(AllIndexProviderDescriptors.RANGE_DESCRIPTOR);
+        when(storageReader.constraintsGetForSchema(schema)).thenReturn(Collections.emptyIterator());
+        when(storageReader.indexGetForSchema(schema)).thenReturn(Collections.emptyIterator());
+
+        TransactionFailureException nonTransientFailure =
+                TransactionFailureException.unknownError(new RuntimeException("boom"));
+        when(constraintIndexCreator.createUniquenessConstraintIndex(any(), any(), any(), any()))
+                .thenThrow(nonTransientFailure);
+
+        // when
+        CreateConstraintFailureException thrown = assertThrows(
+                CreateConstraintFailureException.class, () -> operations.uniquePropertyConstraintCreate(prototype));
+
+        // then
+        assertThat(nonTransientFailure.status().code().classification()).isEqualTo(Status.Classification.DatabaseError);
+        assertThat(thrown.getCause()).isSameAs(nonTransientFailure);
+    }
+
+    @Test
     void nodeAddLabelShouldSucceedWriteOnly() throws Exception {
-        runForSecurityLevel(() -> operations.nodeAddLabel(1L, 2), AccessMode.Static.WRITE_ONLY, true);
+        runForSecurityLevel(() -> operations.nodeAddLabel(1L, 2), StaticAccessMode.WRITE_ONLY, true);
     }
 
     @Test
     void nodeAddLabelShouldSucceedWrite() throws Exception {
-        runForSecurityLevel(() -> operations.nodeAddLabel(1L, 2), AccessMode.Static.WRITE, true);
+        runForSecurityLevel(() -> operations.nodeAddLabel(1L, 2), StaticAccessMode.WRITE, true);
     }
 
     @Test
     void nodeAddLabelShouldSucceedWriteFull() throws Exception {
-        runForSecurityLevel(() -> operations.nodeAddLabel(1L, 2), AccessMode.Static.FULL, true);
+        runForSecurityLevel(() -> operations.nodeAddLabel(1L, 2), StaticAccessMode.FULL, true);
     }
 
     @Test
     void nodeRemoveLabelShouldSucceedWriteOnly() throws Exception {
-        runForSecurityLevel(() -> operations.nodeRemoveLabel(1L, 3), AccessMode.Static.WRITE_ONLY, true);
+        runForSecurityLevel(() -> operations.nodeRemoveLabel(1L, 3), StaticAccessMode.WRITE_ONLY, true);
     }
 
     @Test
     void nodeRemoveLabelShouldSucceedWrite() throws Exception {
-        runForSecurityLevel(() -> operations.nodeRemoveLabel(1L, 3), AccessMode.Static.WRITE, true);
+        runForSecurityLevel(() -> operations.nodeRemoveLabel(1L, 3), StaticAccessMode.WRITE, true);
     }
 
     @Test
     void nodeRemoveLabelShouldSucceedWriteFull() throws Exception {
-        runForSecurityLevel(() -> operations.nodeRemoveLabel(1L, 3), AccessMode.Static.FULL, true);
+        runForSecurityLevel(() -> operations.nodeRemoveLabel(1L, 3), StaticAccessMode.FULL, true);
     }
 
     private static Iterator<ConstraintDescriptor> asIterator(ConstraintDescriptor constraint) {
@@ -1258,7 +1303,8 @@ public class PlainOperationsTest extends OperationsTest {
     }
 
     private void storageReaderWithConstraints(ConstraintDescriptor constraint) {
-        when(storageReader.constraintsGetForSchema(constraint.schema())).thenReturn(asIterator(constraint));
+        when(storageReader.constraintsGetForSchema(constraint.schema()))
+                .thenAnswer((Answer) invocationOnMock -> asIterator(constraint));
         when(storageReader.constraintExists(constraint)).thenReturn(true);
     }
 

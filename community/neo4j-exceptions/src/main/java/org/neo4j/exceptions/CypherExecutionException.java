@@ -37,13 +37,28 @@ public class CypherExecutionException extends Neo4jException {
         super(gqlStatusObject, message, cause);
     }
 
-    @Deprecated
-    public CypherExecutionException(String message) {
-        super(message);
+    protected CypherExecutionException(ErrorGqlStatusObject gqlStatusObject, String message) {
+        super(gqlStatusObject, message);
     }
 
-    public CypherExecutionException(ErrorGqlStatusObject gqlStatusObject, String message) {
-        super(gqlStatusObject, message);
+    private <EX extends Throwable & ErrorGqlStatusObject> CypherExecutionException(EX cause) {
+        super(cause, cause.legacyMessage(), cause);
+    }
+
+    public static <EX extends Throwable & ErrorGqlStatusObject> CypherExecutionException wrapError(EX e) {
+        if (e.gqlStatusObject() != null) {
+            return new CypherExecutionException(e);
+        }
+        // This case can be removed once all instances of ProcedureException has been ported to GQLSTATUS
+        return new CypherExecutionException(GqlHelper.getDefaultObject(), e.getMessage(), e);
+    }
+
+    public static CypherExecutionException wrapKernelException(String msg, KernelException e) {
+        if (e.gqlStatusObject() != null) {
+            return new CypherExecutionException(e, msg, e);
+        }
+        // This case can be removed once all instances of KernelException has been ported to GQLSTATUS
+        return new CypherExecutionException(GqlHelper.getDefaultObject(), msg, e);
     }
 
     public static CypherExecutionException csvBufferSizeOverflow(Throwable cause) {
@@ -51,21 +66,32 @@ public class CypherExecutionException extends Neo4jException {
                 .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N49)
                         .build())
                 .build();
-        return new CypherExecutionException(
-                gql,
-                """
+        return new CypherExecutionException(gql, """
                 Tried to read a field larger than the current buffer size.
                  Make sure that the field doesn't have an unterminated quote,
-                 if it doesn't you can try increasing the buffer size via `dbms.import.csv.buffer_size`.""",
-                cause);
+                 if it doesn't you can try increasing the buffer size via `dbms.import.csv.buffer_size`.""", cause);
+    }
+
+    public static CypherExecutionException internalError(String msgTitle, String msg) {
+        var gql = GqlHelper.get50N00(msgTitle, msg);
+        return new CypherExecutionException(gql, msg);
     }
 
     public static CypherExecutionException internalError(String msgTitle, String msg, Throwable cause) {
-        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_50N00)
-                .withParam(GqlParams.StringParam.msgTitle, msgTitle)
-                .withParam(GqlParams.StringParam.msg, msg)
-                .build();
+        var gql = GqlHelper.get50N00(msgTitle, msg);
         return new CypherExecutionException(gql, msg, cause);
+    }
+
+    public static CypherExecutionException queryExecutionFailed(Throwable cause) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_50N42)
+                .build();
+        return new CypherExecutionException(gql, "Query execution failed", cause);
+    }
+
+    public static CypherExecutionException unknownError(Throwable cause) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_50N42)
+                .build();
+        return new CypherExecutionException(gql, cause.getMessage(), cause);
     }
 
     public static CypherExecutionException unexpectedError(Throwable cause) {
@@ -88,127 +114,139 @@ public class CypherExecutionException extends Neo4jException {
                 gql, "Unable to execute procedure, because it requires an unrecognized execution mode: " + mode, null);
     }
 
+    public static CypherExecutionException unrecognisedCypherType(String input) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42001)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N52)
+                        .withParam(GqlParams.StringParam.input, input)
+                        .build())
+                .build();
+        return new CypherExecutionException(
+                gql, "Unable to execute procedure, because the signature has an unrecognized type: " + input, null);
+    }
+
+    public static CypherExecutionException genericAdministrationException(String msg, Throwable cause) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N41)
+                .withParam(GqlParams.StringParam.msg, msg)
+                .build();
+        return new CypherExecutionException(gql, msg, cause);
+    }
+
     public static CypherExecutionException failedCopyPrivileges(String to, String from, Throwable cause) {
         var msg = String.format("Failed to create role '%s' as copy of '%s': Failed to copy privileges.", to, from);
-        var gql = GqlHelper.get50N00(CypherExecutionException.class.getSimpleName(), msg);
-        return new CypherExecutionException(gql, msg, cause);
+        return genericAdministrationException(msg, cause);
     }
 
     public static CypherExecutionException failedToAlterDb(String dbName, Throwable cause) {
         var msg = String.format("Failed to alter the specified database '%s'.", dbName);
-        var gql = GqlHelper.get50N00(CypherExecutionException.class.getSimpleName(), msg);
-        return new CypherExecutionException(gql, msg, cause);
-    }
-
-    public static CypherExecutionException createEntity(String entity, String name) {
-        var msg = String.format("Failed to create the specified %s '%s'", entity, name);
-        var gql = GqlHelper.get50N00(CypherExecutionException.class.getSimpleName(), msg);
-        return new CypherExecutionException(gql, msg);
+        return genericAdministrationException(msg, cause);
     }
 
     public static CypherExecutionException createEntityCause(String entity, String name, Throwable cause) {
         var msg = String.format("Failed to create the specified %s '%s'", entity, name);
-        var gql = GqlHelper.get50N00(CypherExecutionException.class.getSimpleName(), msg);
-        return new CypherExecutionException(gql, msg, cause);
+        return genericAdministrationException(msg, cause);
     }
 
     public static CypherExecutionException deleteEntityCause(String entity, String name, Throwable cause) {
         var msg = String.format("Failed to delete the specified %s '%s'", entity, name);
-        var gql = GqlHelper.get50N00(CypherExecutionException.class.getSimpleName(), msg);
-        return new CypherExecutionException(gql, msg, cause);
+        return genericAdministrationException(msg, cause);
     }
 
     public static CypherExecutionException alterEntityCause(String entity, String name, Throwable cause) {
         var msg = String.format("Failed to alter the specified %s '%s'", entity, name);
-        var gql = GqlHelper.get50N00(CypherExecutionException.class.getSimpleName(), msg);
-        return new CypherExecutionException(gql, msg, cause);
-    }
-
-    public static CypherExecutionException renameEntityCauseNoTargetName(
-            String entity, String oldName, Throwable cause) {
-        var msg = String.format("Failed to rename the specified %s '%s'.", entity, oldName);
-        var gql = GqlHelper.get50N00(CypherExecutionException.class.getSimpleName(), msg);
-        return new CypherExecutionException(gql, msg, cause);
+        return genericAdministrationException(msg, cause);
     }
 
     public static CypherExecutionException renameEntityCause(
             String entity, String oldName, String newName, Throwable cause) {
         var msg = String.format("Failed to rename the specified %s '%s' to '%s'.", entity, oldName, newName);
-        var gql = GqlHelper.get50N00(CypherExecutionException.class.getSimpleName(), msg);
-        return new CypherExecutionException(gql, msg, cause);
+        return genericAdministrationException(msg, cause);
     }
 
     public static CypherExecutionException createRoleCopyCause(String role, Throwable cause) {
         var msg = String.format("Failed to create a role as copy of '%s'", role);
-        var gql = GqlHelper.get50N00(CypherExecutionException.class.getSimpleName(), msg);
-        return new CypherExecutionException(gql, msg, cause);
+        return genericAdministrationException(msg, cause);
     }
 
     public static CypherExecutionException dbStart(String dbName, Throwable cause) {
         var msg = String.format("Failed to start the specified database '%s'.", dbName);
-        var gql = GqlHelper.get50N00(CypherExecutionException.class.getSimpleName(), msg);
-        return new CypherExecutionException(gql, msg, cause);
+        return genericAdministrationException(msg, cause);
     }
 
     public static CypherExecutionException dbStop(String dbName, Throwable cause) {
         var msg = String.format("Failed to stop the specified database '%s'.", dbName);
-        var gql = GqlHelper.get50N00(CypherExecutionException.class.getSimpleName(), msg);
-        return new CypherExecutionException(gql, msg, cause);
+        return genericAdministrationException(msg, cause);
     }
 
     public static CypherExecutionException enableServer(String server, Throwable cause) {
         var msg = String.format("Failed to enable the specified server '%s'.", server);
-        var gql = GqlHelper.get50N00(CypherExecutionException.class.getSimpleName(), msg);
-        return new CypherExecutionException(gql, msg, cause);
+        return genericAdministrationException(msg, cause);
     }
 
     public static CypherExecutionException reallocateDbs(Throwable cause) {
         var msg = String.format("Failed to reallocate databases: %s", cause.getMessage());
-        var gql = GqlHelper.get50N00(CypherExecutionException.class.getSimpleName(), msg);
-        return new CypherExecutionException(gql, msg, cause);
+        return genericAdministrationException(msg, cause);
     }
 
     public static CypherExecutionException deallocateServers(String names, Throwable cause) {
         var msg = String.format("Failed to deallocate the specified server(s) '%s'.", names);
-        var gql = GqlHelper.get50N00(CypherExecutionException.class.getSimpleName(), msg);
-        return new CypherExecutionException(gql, msg, cause);
+        return genericAdministrationException(msg, cause);
     }
 
     public static CypherExecutionException grantRole(String role, String userName, Throwable cause) {
         var msg = String.format("Failed to grant role '%s' to user '%s'.", role, userName);
-        var gql = GqlHelper.get50N00(CypherExecutionException.class.getSimpleName(), msg);
-        return new CypherExecutionException(gql, msg, cause);
+        return genericAdministrationException(msg, cause);
+    }
+
+    public static CypherExecutionException grantRoleToAuthRule(String role, String userName, Throwable cause) {
+        var msg = String.format("Failed to grant role '%s' to auth rule '%s'.", role, userName);
+        return genericAdministrationException(msg, cause);
     }
 
     public static CypherExecutionException revokeRole(String role, String userName, Throwable cause) {
         var msg = String.format("Failed to revoke role '%s' from user '%s'.", role, userName);
-        var gql = GqlHelper.get50N00(CypherExecutionException.class.getSimpleName(), msg);
-        return new CypherExecutionException(gql, msg, cause);
+        return genericAdministrationException(msg, cause);
     }
 
-    public static CypherExecutionException grantOrDenyExecutionPlan(String msg, Throwable cause) {
-        var gql = GqlHelper.get50N00(CypherExecutionException.class.getSimpleName(), msg);
-        return new CypherExecutionException(gql, msg, cause);
+    public static CypherExecutionException revokeRoleFromAuthRule(String role, String userName, Throwable cause) {
+        var msg = String.format("Failed to revoke role '%s' from auth rule '%s'.", role, userName);
+        return genericAdministrationException(msg, cause);
     }
 
-    public static CypherExecutionException makeOrRevoke(String msg, Throwable cause) {
-        var gql = GqlHelper.get50N00(CypherExecutionException.class.getSimpleName(), msg);
-        return new CypherExecutionException(gql, msg, cause);
+    public static CypherExecutionException grantOrDenyPrivilege(
+            String type, String action, String role, Throwable cause) {
+        var msg = String.format("Failed to %s %s privilege to role '%s'.", type, action, role);
+        return genericAdministrationException(msg, cause);
+    }
+
+    public static CypherExecutionException revokePrivilege(String action, String role, Throwable cause) {
+        var msg = String.format("Failed to revoke %s privilege from role '%s'.", action, role);
+        return genericAdministrationException(msg, cause);
     }
 
     public static CypherExecutionException alterOwnPassword(String userName, Throwable cause) {
         var msg = String.format("User '%s' failed to alter their own password.", userName);
-        var gql = GqlHelper.get50N00(CypherExecutionException.class.getSimpleName(), msg);
-        return new CypherExecutionException(gql, msg, cause);
+        return genericAdministrationException(msg, cause);
+    }
+
+    public static CypherExecutionException entityFromOtherDb(String elementId, String currentDb, String expectedDb) {
+        var legacyMsg = "Can not use an entity from another database. Entity element id: "
+                + elementId + ", entity database: "
+                + currentDb + ", expected database: "
+                + expectedDb + ".";
+
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22000)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N04)
+                        .withParam(GqlParams.StringParam.db1, expectedDb)
+                        .withParam(GqlParams.StringParam.db2, currentDb)
+                        .withParam(GqlParams.StringParam.db3, expectedDb)
+                        .build())
+                .build();
+
+        return new CypherExecutionException(gql, legacyMsg);
     }
 
     @Override
     public Status status() {
-        Throwable cause = getCause();
-        if (cause instanceof Status.HasStatus) {
-            return ((Status.HasStatus) cause).status();
-        } else {
-            return Status.Statement.ExecutionFailed;
-        }
+        return getCause() instanceof Status.HasStatus st ? st.status() : Status.Statement.ExecutionFailed;
     }
 }

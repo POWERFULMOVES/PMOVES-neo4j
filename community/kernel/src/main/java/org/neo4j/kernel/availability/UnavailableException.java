@@ -21,20 +21,25 @@ package org.neo4j.kernel.availability;
 
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.gqlstatus.GqlException;
+import org.neo4j.gqlstatus.GqlHelper;
 import org.neo4j.kernel.api.exceptions.Status;
 
 public class UnavailableException extends GqlException implements Status.HasStatus {
 
-    public UnavailableException(String message) {
-        super(message);
-    }
-
-    public UnavailableException(ErrorGqlStatusObject gqlStatusObject, String message) {
-        super(gqlStatusObject, message);
+    private UnavailableException(ErrorGqlStatusObject gqlStatusObject, String message, Throwable cause) {
+        super(gqlStatusObject, message, cause);
     }
 
     @Override
     public Status status() {
         return Status.General.DatabaseUnavailable;
+    }
+
+    public static UnavailableException databaseUnavailable(String databaseName, String legacyMessage) {
+        return databaseUnavailable(databaseName, legacyMessage, null);
+    }
+
+    public static UnavailableException databaseUnavailable(String databaseName, String legacyMessage, Throwable cause) {
+        return new UnavailableException(GqlHelper.getGql08N09(databaseName), legacyMessage, cause);
     }
 }

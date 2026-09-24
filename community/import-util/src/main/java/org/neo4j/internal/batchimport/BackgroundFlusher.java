@@ -25,51 +25,75 @@ import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
 
 public class BackgroundFlusher implements AutoCloseable {
-    private volatile boolean enabled;
+    private volatile boolean resumed;
     private volatile boolean halted;
+    private volatile boolean singleFlush;
     private final Thread flusher;
 
-    public BackgroundFlusher(PageCache pageCache, long frequencyMillis) {
-        this.flusher = new Thread(() -> {
-            while (!halted) {
-                try {
-                    if (!enabled) {
-                        Thread.sleep(100);
-                        continue;
+    public BackgroundFlusher(PageCache pageCache, long frequencyMillis, boolean enabled) {
+        if (enabled) {
+            this.flusher = new Thread(() -> {
+                while (!halted) {
+                    try {
+                        if (!resumed) {
+                            Thread.sleep(100);
+                            continue;
+                        }
+                        long end = System.currentTimeMillis() + frequencyMillis;
+                        for (int i = 0; i < 100 && System.currentTimeMillis() < end && resumed && !halted; i++) {
+                            Thread.sleep(100);
+                        }
+                        if (resumed && !halted) {
+                            boolean singleFlush = this.singleFlush;
+                            this.singleFlush = false;
+                            pageCache.flush(DatabaseFlushEvent.NULL);
+                            if (singleFlush) {
+                                resumed = false;
+                            }
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    } catch (IOException e) {
+                        throw new UncheckedIOException(e);
                     }
-                    long end = System.currentTimeMillis() + frequencyMillis;
-                    for (int i = 0; i < 100 && System.currentTimeMillis() < end && enabled && !halted; i++) {
-                        Thread.sleep(100);
-                    }
-                    if (enabled && !halted) {
-                        pageCache.flush(DatabaseFlushEvent.NULL);
-                    }
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    return;
-                } catch (IOException e) {
-                    throw new UncheckedIOException(e);
                 }
-            }
-        });
-        this.flusher.start();
+            });
+            this.flusher.start();
+        } else {
+            this.flusher = null;
+        }
     }
 
-    public void enable() {
-        enabled = true;
+    /**
+     * Enables continuous {@link PageCache#flush(DatabaseFlushEvent)} in the background thread
+     * that this instance manages.
+     */
+    public void resume() {
+        resumed = true;
     }
 
-    public void disable() {
-        enabled = false;
+    /**
+     * Enables a single {@link PageCache#flush(DatabaseFlushEvent)} in the background thread
+     * that this instance manages.
+     */
+    public void resumeSingle() {
+        singleFlush = true;
+        resumed = true;
     }
 
+    /**
+     * Awaits any current flush and stopping of the background thread.
+     */
     @Override
     public void close() {
         halted = true;
-        try {
-            flusher.join();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+        if (flusher != null) {
+            try {
+                flusher.join();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 }

@@ -27,13 +27,13 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.neo4j.internal.kernel.api.connectioninfo.ClientConnectionInfo;
-import org.neo4j.internal.kernel.api.security.AccessMode;
 import org.neo4j.internal.kernel.api.security.AuthSubject;
 import org.neo4j.internal.kernel.api.security.AuthenticationResult;
 import org.neo4j.internal.kernel.api.security.SecurityContext;
+import org.neo4j.internal.kernel.api.security.StaticAccessMode;
 import org.neo4j.server.security.auth.AuthProcedures.UserResult;
 
-public class AuthProceduresTest {
+class AuthProceduresTest {
     private AuthProcedures procedures;
 
     @BeforeEach
@@ -43,7 +43,7 @@ public class AuthProceduresTest {
         when(subject.getAuthenticationResult()).thenReturn(AuthenticationResult.SUCCESS);
 
         SecurityContext ctx = new SecurityContext(
-                subject, AccessMode.Static.FULL, ClientConnectionInfo.EMBEDDED_CONNECTION, "database");
+                subject, StaticAccessMode.FULL, ClientConnectionInfo.EMBEDDED_CONNECTION, "database");
 
         procedures = new AuthProcedures();
         procedures.securityContext = ctx;
@@ -52,7 +52,7 @@ public class AuthProceduresTest {
     @Test
     void shouldReturnSecurityContext() {
         List<UserResult> infoList = procedures.showCurrentUser().toList();
-        assertThat(infoList.size()).isEqualTo(1);
+        assertThat(infoList).hasSize(1);
 
         UserResult row = infoList.get(0);
         assertThat(row.username).isEqualTo("pearl");

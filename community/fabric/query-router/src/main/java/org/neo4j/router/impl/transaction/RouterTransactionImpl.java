@@ -46,7 +46,7 @@ import org.neo4j.fabric.transaction.parent.CompoundTransaction;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
 import org.neo4j.gqlstatus.GqlStatusInfoCodes;
-import org.neo4j.graphdb.TransactionTerminatedException;
+import org.neo4j.graphdb.TransactionTerminatedHelper;
 import org.neo4j.kernel.api.TerminationMark;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.impl.api.transaction.trace.TraceProvider;
@@ -56,7 +56,6 @@ import org.neo4j.kernel.impl.query.ConstituentTransactionFactory;
 import org.neo4j.router.QueryRouterException;
 import org.neo4j.router.impl.query.StatementType;
 import org.neo4j.router.impl.transaction.database.LocalDatabaseTransaction;
-import org.neo4j.router.location.LocationService;
 import org.neo4j.router.query.Query;
 import org.neo4j.router.transaction.DatabaseTransaction;
 import org.neo4j.router.transaction.DatabaseTransactionFactory;
@@ -126,12 +125,13 @@ public class RouterTransactionImpl implements CompoundTransaction<DatabaseTransa
     }
 
     @Override
-    public DatabaseTransaction transactionFor(
-            Location location, TransactionMode mode, LocationService locationService) {
+    public DatabaseTransaction transactionFor(Location location, TransactionMode mode) {
+        // If we are in the local DB and we see a VirtualSPD reference, we need to resolve it to the graph shard and
+        // that will always exist here because VirtualSPDs are only created on the same servers as graph shards.
+        // but we dont have to do it here because the ids are the same and we only use the id here.
         var tx = databaseTransactions.computeIfAbsent(
                 location.databaseReference().id(),
-                ref -> registerNewChildTransaction(
-                        location, mode, () -> createTransactionFor(location, locationService)));
+                ref -> registerNewChildTransaction(location, mode, () -> createTransactionFor(location)));
         if (mode == TransactionMode.DEFINITELY_WRITE) {
             upgradeToWritingTransaction(tx);
         }
@@ -143,7 +143,7 @@ public class RouterTransactionImpl implements CompoundTransaction<DatabaseTransa
         this.constituentTransactionFactory = constituentTransactionFactory;
     }
 
-    private DatabaseTransaction createTransactionFor(Location location, LocationService locationService) {
+    private DatabaseTransaction createTransactionFor(Location location) {
         if (location instanceof Location.Local local) {
             return localDatabaseTransactionFactory.beginTransaction(
                     local,
@@ -221,11 +221,11 @@ public class RouterTransactionImpl implements CompoundTransaction<DatabaseTransa
             if (state.get() == State.TERMINATED) {
                 // Wait for all children to be rolled back. Ignore errors
                 doRollbackAndIgnoreErrors();
-                throw new TransactionTerminatedException(terminationMark.getReason());
+                throw TransactionTerminatedHelper.transactionTerminated(terminationMark.getReason());
             }
 
             if (state.get() == State.CLOSED) {
-                throw new QueryRouterException(TransactionCommitFailed, "Trying to commit closed transaction");
+                throw QueryRouterException.transactionCommitFailed();
             }
         }
 
@@ -471,9 +471,7 @@ public class RouterTransactionImpl implements CompoundTransaction<DatabaseTransa
         }
 
         // 2. The user is really trying to write to two different databases.
-        return new QueryRouterException(
-                Status.Statement.AccessMode,
-                "Writing to more than one database per transaction is not allowed. Attempted write to %s, currently writing to %s",
+        return QueryRouterException.writingToMultipleGraphs(
                 attempt.databaseReference().toPrettyString(),
                 current.databaseReference().toPrettyString());
     }
@@ -485,7 +483,7 @@ public class RouterTransactionImpl implements CompoundTransaction<DatabaseTransa
     @Override
     public void throwIfTerminatedOrClosed(Supplier<String> closedExceptionMessage) {
         if (terminationMark != null) {
-            throw new TransactionTerminatedException(terminationMark.getReason());
+            throw TransactionTerminatedHelper.transactionTerminated(terminationMark.getReason());
         }
 
         if (state.get() == State.CLOSED) {
@@ -499,14 +497,14 @@ public class RouterTransactionImpl implements CompoundTransaction<DatabaseTransa
 
         // preserve the original exception if possible
         // or try to preserve  at least the original status
-        if (t instanceof Status.HasStatus) {
-            if (t instanceof RuntimeException) {
-                return (RuntimeException) t;
+        if (t instanceof Status.HasStatus s) {
+            if (t instanceof RuntimeException re) {
+                return re;
             }
             if (t instanceof ErrorGqlStatusObject gqlStatusObjectOfT) {
-                return new QueryRouterException(gqlStatusObjectOfT, ((Status.HasStatus) t).status(), message, t);
+                return new QueryRouterException(gqlStatusObjectOfT, s.status(), message, t);
             }
-            return new QueryRouterException(((Status.HasStatus) t).status(), message, t);
+            return new QueryRouterException(fallbackGqlStatusObject, s.status(), message, t);
         }
 
         return new QueryRouterException(fallbackGqlStatusObject, defaultStatus, message, t);

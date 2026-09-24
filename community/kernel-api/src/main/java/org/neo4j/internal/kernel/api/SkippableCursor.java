@@ -20,6 +20,7 @@
 package org.neo4j.internal.kernel.api;
 
 import org.neo4j.kernel.api.StatementConstants;
+import org.neo4j.lang.CloseListener;
 
 public interface SkippableCursor extends ReferenceCursor {
     /**
@@ -66,10 +67,10 @@ public interface SkippableCursor extends ReferenceCursor {
         public void setCloseListener(CloseListener closeListener) {}
 
         @Override
-        public void setToken(int token) {}
+        public void setTrackingHandle(int handle) {}
 
         @Override
-        public int getToken() {
+        public int getTrackingHandle() {
             return 0;
         }
     };

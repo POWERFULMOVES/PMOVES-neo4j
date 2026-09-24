@@ -22,12 +22,13 @@ package org.neo4j.bolt.struct;
 import static org.neo4j.bolt.testing.assertions.BoltConnectionAssertions.assertThat;
 
 import io.netty.buffer.ByteBuf;
-import java.io.IOException;
-import java.util.Map;
 import java.util.function.Consumer;
-import org.neo4j.bolt.testing.assertions.BoltConnectionAssertions;
+import org.neo4j.bolt.testing.assertions.DiagnosticRecordAssertions;
+import org.neo4j.bolt.testing.assertions.FailureCauseAssertions;
+import org.neo4j.bolt.testing.assertions.FailureMetadataAssertions;
 import org.neo4j.bolt.testing.client.BoltTestConnection;
 import org.neo4j.bolt.testing.messages.BoltV40Wire;
+import org.neo4j.gqlstatus.ErrorClassification;
 import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.packstream.io.PackstreamBuf;
@@ -35,41 +36,66 @@ import org.neo4j.packstream.struct.StructHeader;
 
 public abstract class AbstractStructArgumentIT {
 
-    protected void testFailureWithUnpackableValueV40(
-            BoltTestConnection connection, Consumer<PackstreamBuf> packer, String expectedMessage) throws IOException {
-        connection.send(createRunWith(packer));
-
-        assertThat(connection).receivesFailureV40(Status.Request.Invalid, expectedMessage);
-    }
-
     protected void testFailureWithUnpackableValue(
-            BoltTestConnection connection, Consumer<PackstreamBuf> packer, String expectedMessage) throws IOException {
+            BoltTestConnection connection, Consumer<PackstreamBuf> packer, String expectedMessage) {
         connection.send(createRunWith(packer));
 
         assertThat(connection)
-                .receivesFailure(
-                        Status.Request.Invalid,
-                        expectedMessage,
-                        GqlStatusInfoCodes.STATUS_08N06.getGqlStatus(),
-                        "error: connection exception - protocol error. General network protocol error.");
+                .receivesFailure(FailureMetadataAssertions.create()
+                        .hasLegacyStatus(Status.Request.Invalid)
+                        .hasLegacyMessage(expectedMessage)
+                        .hasStatus(GqlStatusInfoCodes.STATUS_08N07)
+                        .hasDescription(
+                                "error: connection exception - protocol error. General network protocol error"));
     }
 
     protected void testFailureWithUnpackableValue(
             BoltTestConnection connection,
             Consumer<PackstreamBuf> packer,
             String expectedMessage,
-            Consumer<Map<String, Object>> causeAssertion)
-            throws IOException {
+            FailureCauseAssertions causeAssertion) {
         connection.send(createRunWith(packer));
 
         assertThat(connection)
-                .receivesFailureWithCause(
-                        Status.Request.Invalid,
-                        expectedMessage,
-                        GqlStatusInfoCodes.STATUS_08N06.getGqlStatus(),
-                        "error: connection exception - protocol error. General network protocol error.",
-                        BoltConnectionAssertions.assertErrorClassificationOnDiagnosticRecord("CLIENT_ERROR"),
-                        causeAssertion);
+                .receivesFailure(FailureMetadataAssertions.create()
+                        .hasLegacyStatus(Status.Request.Invalid)
+                        .hasLegacyMessage(expectedMessage)
+                        .hasStatus(GqlStatusInfoCodes.STATUS_08N06)
+                        .hasDescription("error: connection exception - protocol error. General network protocol error.")
+                        .hasDiagnosticRecord(
+                                DiagnosticRecordAssertions.create().hasClassification(ErrorClassification.CLIENT_ERROR))
+                        .hasCause(causeAssertion));
+    }
+
+    protected void testFailureWithUnknownStruct(
+            BoltTestConnection connection,
+            Consumer<PackstreamBuf> packer,
+            String expectedMessage,
+            String description,
+            FailureCauseAssertions causeAssertion) {
+        connection.send(createRunWith(packer));
+
+        var assertion = FailureMetadataAssertions.create()
+                .hasLegacyStatus(Status.Request.Invalid)
+                .hasLegacyMessage(expectedMessage)
+                .hasStatus(GqlStatusInfoCodes.STATUS_08N06)
+                .hasDiagnosticRecord(
+                        DiagnosticRecordAssertions.create().hasClassification(ErrorClassification.CLIENT_ERROR))
+                .hasCause(causeAssertion);
+
+        if (description != null) {
+            assertion = assertion.hasDescription(description);
+        }
+
+        assertThat(connection).receivesFailure(assertion);
+    }
+
+    protected void testFailureWithUnknownStruct(
+            BoltTestConnection connection,
+            Consumer<PackstreamBuf> packer,
+            String expectedMessage,
+            FailureCauseAssertions causeAssertion) {
+        testFailureWithUnknownStruct(connection, packer, expectedMessage, null, causeAssertion);
     }
 
     protected ByteBuf createRunWith(Consumer<PackstreamBuf> packer) {
@@ -82,6 +108,6 @@ public abstract class AbstractStructArgumentIT {
         packer.accept(buf);
 
         return buf.writeMapHeader(0) // extra
-                .getTarget();
+                .raw();
     }
 }

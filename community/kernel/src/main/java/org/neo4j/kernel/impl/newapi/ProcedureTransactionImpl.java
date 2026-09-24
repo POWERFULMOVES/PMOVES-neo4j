@@ -19,6 +19,7 @@
  */
 package org.neo4j.kernel.impl.newapi;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -36,13 +37,14 @@ import org.neo4j.graphdb.StringSearchMode;
 import org.neo4j.graphdb.schema.Schema;
 import org.neo4j.graphdb.traversal.BidirectionalTraversalDescription;
 import org.neo4j.graphdb.traversal.TraversalDescription;
-import org.neo4j.internal.kernel.api.RelationshipDataAccessor;
+import org.neo4j.internal.kernel.api.RelationshipCursor;
 import org.neo4j.internal.kernel.api.connectioninfo.ClientConnectionInfo;
 import org.neo4j.internal.kernel.api.connectioninfo.RoutingInfo;
 import org.neo4j.internal.kernel.api.security.SecurityContext;
 import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.impl.coreapi.InternalTransaction;
+import org.neo4j.monitoring.ExceptionHandlerService;
 import org.neo4j.values.ElementIdMapper;
 
 public class ProcedureTransactionImpl implements InternalTransaction {
@@ -63,8 +65,13 @@ public class ProcedureTransactionImpl implements InternalTransaction {
     }
 
     @Override
-    public void commit(KernelTransaction.KernelTransactionMonitor monitor) {
+    public void commit(KernelTransaction.Monitor monitor) {
         commit();
+    }
+
+    @Override
+    public ExceptionHandlerService exceptionHandlerService() {
+        return transaction.exceptionHandlerService();
     }
 
     @Override
@@ -295,6 +302,11 @@ public class ProcedureTransactionImpl implements InternalTransaction {
     }
 
     @Override
+    public List<String> bookmarks() {
+        return transaction.bookmarks();
+    }
+
+    @Override
     public KernelTransaction.Revertable overrideWith(SecurityContext context) {
         return transaction.overrideWith(context);
     }
@@ -360,7 +372,7 @@ public class ProcedureTransactionImpl implements InternalTransaction {
     }
 
     @Override
-    public Relationship newRelationshipEntity(RelationshipDataAccessor cursor) {
+    public Relationship newRelationshipEntity(RelationshipCursor cursor) {
         return transaction.newRelationshipEntity(cursor);
     }
 

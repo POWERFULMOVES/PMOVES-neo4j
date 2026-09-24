@@ -20,19 +20,20 @@
 package org.neo4j.storageengine.api;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.Collection;
 import java.util.List;
 import org.neo4j.configuration.Config;
 import org.neo4j.counts.CountsStore;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.internal.diagnostics.DiagnosticsLogger;
+import org.neo4j.io.async.AsyncBlockAccessor;
 import org.neo4j.io.pagecache.OutOfDiskSpaceException;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
 import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.impl.store.stats.StoreEntityCounters;
 import org.neo4j.kernel.lifecycle.Lifecycle;
-import org.neo4j.lock.LockGroup;
 import org.neo4j.lock.LockService;
 import org.neo4j.lock.LockTracer;
 import org.neo4j.lock.ResourceLocker;
@@ -45,6 +46,7 @@ import org.neo4j.storageengine.api.txstate.ReadableTransactionState;
 import org.neo4j.storageengine.api.txstate.TransactionStateBehaviour;
 import org.neo4j.storageengine.api.txstate.TxStateVisitor.Decorator;
 import org.neo4j.storageengine.api.txstate.validation.TransactionValidatorFactory;
+import org.neo4j.wal.entry.LogFormat;
 
 /**
  * A StorageEngine provides the functionality to durably store data, and read it back.
@@ -65,7 +67,7 @@ public interface StorageEngine extends ReadableStorageEngine, Lifecycle {
      * {@link #createCommands(ReadableTransactionState, StorageReader, CommandCreationContext, LockTracer, Decorator, CursorContext, StoreCursors, MemoryTracker)}.
      * Must be {@link CommandCreationContext#close() closed} after used, before being discarded.
      */
-    CommandCreationContext newCommandCreationContext(boolean multiVersioned);
+    CommandCreationContext newCommandCreationContext(boolean multiVersioned, MemoryTracker memoryTracker);
 
     /**
      * Create multi versioned stores transaction validator factory. Validator factory produces noop validators in all other engines.
@@ -76,7 +78,7 @@ public interface StorageEngine extends ReadableStorageEngine, Lifecycle {
 
     /**
      * Adds an {@link IndexUpdateListener} which will receive streams of index updates from changes that gets
-     * {@link #apply(StorageEngineTransaction, TransactionApplicationMode) applied} to this storage engine.
+     * {@link #apply(StorageEngineTransaction, TransactionApplicationMode, MemoryTracker) applied} to this storage engine.
      * @param indexUpdateListener {@link IndexUpdateListener} to add.
      */
     void addIndexUpdateListener(IndexUpdateListener indexUpdateListener);
@@ -85,7 +87,7 @@ public interface StorageEngine extends ReadableStorageEngine, Lifecycle {
      * Generates a list of {@link StorageCommand commands} representing the changes in the given transaction state
      * ({@code state}.
      * The returned commands can be used to form {@link StorageEngineTransaction} batches, which can be applied to this
-     * storage using {@link #apply(StorageEngineTransaction, TransactionApplicationMode)}.
+     * storage using {@link #apply(StorageEngineTransaction, TransactionApplicationMode, MemoryTracker)}.
      * The reason this is separated like this is that the generated commands can be used for other things
      * than applying to storage, f.ex replicating to another storage engine.
      * @param state {@link ReadableTransactionState} representing logical store changes to generate commands for.
@@ -109,6 +111,15 @@ public interface StorageEngine extends ReadableStorageEngine, Lifecycle {
             throws KernelException;
 
     /**
+     * Creates a {@link StorageCommand.VersionUpgradeCommand} representing a kernel version upgrade.
+     * @param from the current kernel version
+     * @param to the target kernel version
+     * @return the storage-engine specific upgrade command
+     */
+    StorageCommand.VersionUpgradeCommand createUpgradeCommand(
+            KernelVersion from, KernelVersion to, LogFormat logFormatTo);
+
+    /**
      * The storage-engine specific mechanism for creating {@link EnrichmentCommand}s.
      * NB The created command will have no interactions with the stores.
      * @param kernelVersion the transaction's {@link KernelVersion}
@@ -123,11 +134,9 @@ public interface StorageEngine extends ReadableStorageEngine, Lifecycle {
      *
      * @param commands whose records may need locking for safe parallel recovery.
      * @param lockService used to acquire locks on records during recovery
-     * @param lockGroup collection of acquired locks
      * @param mode used in this case to distinguish between RECOVERY and REVERSE_RECOVERY
      */
-    void lockRecoveryCommands(
-            CommandBatch commands, LockService lockService, LockGroup lockGroup, TransactionApplicationMode mode)
+    void lockRecoveryCommands(CommandBatch commands, LockService.Client lockService, TransactionApplicationMode mode)
             throws IOException;
 
     /**
@@ -135,9 +144,12 @@ public interface StorageEngine extends ReadableStorageEngine, Lifecycle {
      *
      * @param batch batch of groups of commands to apply to storage.
      * @param mode {@link TransactionApplicationMode} when applying.
+     * @param memoryTracker memory tracker of the transaction the batch belongs to, where memory allocated while
+     * applying the batch is registered.
      * @throws Exception if an error occurs during application.
      */
-    void apply(StorageEngineTransaction batch, TransactionApplicationMode mode) throws Exception;
+    void apply(StorageEngineTransaction batch, TransactionApplicationMode mode, MemoryTracker memoryTracker)
+            throws Exception;
 
     /**
      * Called for a transaction to release any storage engine resources on close
@@ -153,11 +165,20 @@ public interface StorageEngine extends ReadableStorageEngine, Lifecycle {
 
     /**
      * Checkpoints underlying storage. Leaves no guarantee that files are flushed to persistable storage afterwards
-     * @param flushEvent flush event from checkpoint
-     * @param cursorContext underlying page cursor context
+     *
+     * @param flushEvent         flush event from checkpoint
+     * @param asyncBlockAccessor async block accessor of current checkpoint
+     * @param cursorContext      underlying page cursor context
      * @throws IOException on I/O error.
      */
-    void checkpoint(DatabaseFlushEvent flushEvent, CursorContext cursorContext) throws IOException;
+    void checkpoint(DatabaseFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext)
+            throws IOException;
+
+    default long compact(
+            DatabaseFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext)
+            throws IOException {
+        return 0;
+    }
 
     /**
      * Dump diagnostics about the storage.
@@ -175,28 +196,21 @@ public interface StorageEngine extends ReadableStorageEngine, Lifecycle {
     void shutdown();
 
     /**
-     * Lists storage files into one of the two provided collections.
-     * @param atomic will contain files that must be copied under a lock where no checkpoint can happen concurrently.
-     * @param replayable will contain files not sensitive to the checkpoint constraint of those in the {@code atomic} collection.
+     * Lists storage files that makes up this storage engine, consulting open stores and in-memory stage.
      */
-    void listStorageFiles(Collection<StoreFileMetadata> atomic, Collection<StoreFileMetadata> replayable);
-
-    /**
-     * Add id files into the provided collection.
-     */
-    void listIdFiles(Collection<StoreFileMetadata> target);
-
-    StoreId retrieveStoreId();
+    Collection<Path> listStorageFiles(StorageFileSelection selection);
 
     /**
      * The life cycle that is used for initialising the token holders, and filling the schema cache.
      */
-    Lifecycle schemaAndTokensLifecycle();
+    Lifecycle schemaAndTokensLifecycle(boolean ignoreUnreadable);
 
     /**
      * @return a {@link MetadataProvider}, provides access to underlying storage metadata information.
      */
     MetadataProvider metadataProvider();
+
+    LogMetadataProvider logMetadataProvider();
 
     CountsStore countsAccessor();
 
@@ -204,11 +218,6 @@ public interface StorageEngine extends ReadableStorageEngine, Lifecycle {
      * @return a {@link StoreEntityCounters}, providing access to underlying store entity counters.
      */
     StoreEntityCounters storeEntityCounters();
-
-    /**
-     * @return a {@link InternalErrorTracer}, providing trace information on internal errors.
-     */
-    InternalErrorTracer internalErrorTracer();
 
     /**
      * @return specific behaviour of transaction state that is optimal for this storage engine.
@@ -245,4 +254,10 @@ public interface StorageEngine extends ReadableStorageEngine, Lifecycle {
     default long estimateAvailableReservedSpace() {
         return 0L;
     }
+
+    /**
+     * @return potentially a more specific {@link CommandReaderFactory} than that of
+     * {@link StorageEngineFactory#commandReaderFactory()}.
+     */
+    CommandReaderFactory commandReaderFactory();
 }

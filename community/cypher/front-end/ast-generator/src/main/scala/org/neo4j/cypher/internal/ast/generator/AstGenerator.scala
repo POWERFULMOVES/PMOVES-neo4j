@@ -20,10 +20,13 @@ import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.Access
 import org.neo4j.cypher.internal.ast.AccessDatabaseAction
 import org.neo4j.cypher.internal.ast.ActionResourceBase
+import org.neo4j.cypher.internal.ast.AddTags
+import org.neo4j.cypher.internal.ast.AdditiveProjection
 import org.neo4j.cypher.internal.ast.AdministrationCommand
 import org.neo4j.cypher.internal.ast.AdministrationCommand.NATIVE_AUTH
 import org.neo4j.cypher.internal.ast.AliasedReturnItem
 import org.neo4j.cypher.internal.ast.AllAliasManagementActions
+import org.neo4j.cypher.internal.ast.AllAuthRuleActions
 import org.neo4j.cypher.internal.ast.AllConstraintActions
 import org.neo4j.cypher.internal.ast.AllConstraints
 import org.neo4j.cypher.internal.ast.AllDatabaseAction
@@ -42,10 +45,16 @@ import org.neo4j.cypher.internal.ast.AllPrivilegeActions
 import org.neo4j.cypher.internal.ast.AllPropertyResource
 import org.neo4j.cypher.internal.ast.AllQualifier
 import org.neo4j.cypher.internal.ast.AllRoleActions
+import org.neo4j.cypher.internal.ast.AllSecretManagementActions
 import org.neo4j.cypher.internal.ast.AllTokenActions
 import org.neo4j.cypher.internal.ast.AllTransactionActions
 import org.neo4j.cypher.internal.ast.AllUserActions
+import org.neo4j.cypher.internal.ast.AllUserMetadataActions
 import org.neo4j.cypher.internal.ast.AlterAliasAction
+import org.neo4j.cypher.internal.ast.AlterAuthRule
+import org.neo4j.cypher.internal.ast.AlterAuthRuleAction
+import org.neo4j.cypher.internal.ast.AlterCompositeDatabaseAction
+import org.neo4j.cypher.internal.ast.AlterCurrentGraphType
 import org.neo4j.cypher.internal.ast.AlterDatabase
 import org.neo4j.cypher.internal.ast.AlterDatabaseAction
 import org.neo4j.cypher.internal.ast.AlterLocalDatabaseAlias
@@ -53,22 +62,32 @@ import org.neo4j.cypher.internal.ast.AlterRemoteDatabaseAlias
 import org.neo4j.cypher.internal.ast.AlterServer
 import org.neo4j.cypher.internal.ast.AlterUser
 import org.neo4j.cypher.internal.ast.AlterUserAction
+import org.neo4j.cypher.internal.ast.AlterUsers
 import org.neo4j.cypher.internal.ast.AscSortItem
 import org.neo4j.cypher.internal.ast.AssignPrivilegeAction
 import org.neo4j.cypher.internal.ast.AssignRoleAction
+import org.neo4j.cypher.internal.ast.AstHint
 import org.neo4j.cypher.internal.ast.Auth
 import org.neo4j.cypher.internal.ast.AuthId
+import org.neo4j.cypher.internal.ast.AuthRuleCondition
+import org.neo4j.cypher.internal.ast.AuthRuleEnabled
 import org.neo4j.cypher.internal.ast.BuiltInFunctions
 import org.neo4j.cypher.internal.ast.CascadeAliases
 import org.neo4j.cypher.internal.ast.CatalogName
 import org.neo4j.cypher.internal.ast.Clause
 import org.neo4j.cypher.internal.ast.CollectExpression
+import org.neo4j.cypher.internal.ast.CommaSeparatedNames
 import org.neo4j.cypher.internal.ast.CommandClause
+import org.neo4j.cypher.internal.ast.CommandClauseNames
 import org.neo4j.cypher.internal.ast.CommandResultItem
 import org.neo4j.cypher.internal.ast.CompositeDatabaseManagementActions
+import org.neo4j.cypher.internal.ast.ConditionalQueryBranch
+import org.neo4j.cypher.internal.ast.ConditionalQueryWhen
 import org.neo4j.cypher.internal.ast.CountExpression
 import org.neo4j.cypher.internal.ast.Create
 import org.neo4j.cypher.internal.ast.CreateAliasAction
+import org.neo4j.cypher.internal.ast.CreateAuthRule
+import org.neo4j.cypher.internal.ast.CreateAuthRuleAction
 import org.neo4j.cypher.internal.ast.CreateCompositeDatabase
 import org.neo4j.cypher.internal.ast.CreateCompositeDatabaseAction
 import org.neo4j.cypher.internal.ast.CreateConstraint
@@ -83,23 +102,30 @@ import org.neo4j.cypher.internal.ast.CreateNodeLabelAction
 import org.neo4j.cypher.internal.ast.CreatePropertyKeyAction
 import org.neo4j.cypher.internal.ast.CreateRelationshipTypeAction
 import org.neo4j.cypher.internal.ast.CreateRemoteDatabaseAlias
+import org.neo4j.cypher.internal.ast.CreateReplicaDatabase
 import org.neo4j.cypher.internal.ast.CreateRole
 import org.neo4j.cypher.internal.ast.CreateRoleAction
 import org.neo4j.cypher.internal.ast.CreateUser
 import org.neo4j.cypher.internal.ast.CreateUserAction
 import org.neo4j.cypher.internal.ast.CurrentUser
 import org.neo4j.cypher.internal.ast.DatabaseAction
+import org.neo4j.cypher.internal.ast.DatabaseAndDbmsAction
 import org.neo4j.cypher.internal.ast.DatabaseName
+import org.neo4j.cypher.internal.ast.DatabasePrivilege
 import org.neo4j.cypher.internal.ast.DatabasePrivilegeQualifier
 import org.neo4j.cypher.internal.ast.DbmsAction
+import org.neo4j.cypher.internal.ast.DbmsPrivilege
 import org.neo4j.cypher.internal.ast.DeallocateServers
 import org.neo4j.cypher.internal.ast.DefaultDatabaseScope
+import org.neo4j.cypher.internal.ast.DefaultWith
 import org.neo4j.cypher.internal.ast.Delete
 import org.neo4j.cypher.internal.ast.DeleteElementAction
 import org.neo4j.cypher.internal.ast.DenyPrivilege
 import org.neo4j.cypher.internal.ast.DescSortItem
 import org.neo4j.cypher.internal.ast.DestroyData
 import org.neo4j.cypher.internal.ast.DropAliasAction
+import org.neo4j.cypher.internal.ast.DropAuthRule
+import org.neo4j.cypher.internal.ast.DropAuthRuleAction
 import org.neo4j.cypher.internal.ast.DropCompositeDatabaseAction
 import org.neo4j.cypher.internal.ast.DropConstraintAction
 import org.neo4j.cypher.internal.ast.DropConstraintOnName
@@ -114,8 +140,13 @@ import org.neo4j.cypher.internal.ast.DropServer
 import org.neo4j.cypher.internal.ast.DropUser
 import org.neo4j.cypher.internal.ast.DropUserAction
 import org.neo4j.cypher.internal.ast.DumpData
+import org.neo4j.cypher.internal.ast.EdgeType
+import org.neo4j.cypher.internal.ast.EdgeTypeReferenceByIdentifyingLabel
+import org.neo4j.cypher.internal.ast.EdgeTypeReferenceByLabel
+import org.neo4j.cypher.internal.ast.EdgeTypeReferenceByVariable
 import org.neo4j.cypher.internal.ast.ElementQualifier
 import org.neo4j.cypher.internal.ast.ElementsAllQualifier
+import org.neo4j.cypher.internal.ast.EmptyNodeTypeReference
 import org.neo4j.cypher.internal.ast.EnableServer
 import org.neo4j.cypher.internal.ast.ExecuteAdminProcedureAction
 import org.neo4j.cypher.internal.ast.ExecuteBoostedFunctionAction
@@ -123,18 +154,39 @@ import org.neo4j.cypher.internal.ast.ExecuteBoostedProcedureAction
 import org.neo4j.cypher.internal.ast.ExecuteFunctionAction
 import org.neo4j.cypher.internal.ast.ExecuteProcedureAction
 import org.neo4j.cypher.internal.ast.ExistsExpression
+import org.neo4j.cypher.internal.ast.ExpandHintAll
+import org.neo4j.cypher.internal.ast.ExpandHintInto
+import org.neo4j.cypher.internal.ast.ExpandStep
+import org.neo4j.cypher.internal.ast.ExplicitGroupingElements
+import org.neo4j.cypher.internal.ast.ExpressionBody
+import org.neo4j.cypher.internal.ast.ExpressionNames
 import org.neo4j.cypher.internal.ast.FileResource
 import org.neo4j.cypher.internal.ast.Finish
 import org.neo4j.cypher.internal.ast.Foreach
+import org.neo4j.cypher.internal.ast.FreeProjection
 import org.neo4j.cypher.internal.ast.FulltextIndexes
 import org.neo4j.cypher.internal.ast.FunctionQualifier
 import org.neo4j.cypher.internal.ast.GrantPrivilege
+import org.neo4j.cypher.internal.ast.GrantRolesToAuthRules
 import org.neo4j.cypher.internal.ast.GrantRolesToUsers
 import org.neo4j.cypher.internal.ast.GraphAction
 import org.neo4j.cypher.internal.ast.GraphDirectReference
 import org.neo4j.cypher.internal.ast.GraphFunctionReference
+import org.neo4j.cypher.internal.ast.GraphPrivilege
 import org.neo4j.cypher.internal.ast.GraphPrivilegeQualifier
-import org.neo4j.cypher.internal.ast.Hint
+import org.neo4j.cypher.internal.ast.GraphType
+import org.neo4j.cypher.internal.ast.GraphTypeConstraint.ExistenceConstraint
+import org.neo4j.cypher.internal.ast.GraphTypeConstraint.GraphTypeConstraintBody
+import org.neo4j.cypher.internal.ast.GraphTypeConstraint.KeyConstraint
+import org.neo4j.cypher.internal.ast.GraphTypeConstraint.PropertyTypeConstraint
+import org.neo4j.cypher.internal.ast.GraphTypeConstraint.UniquenessConstraint
+import org.neo4j.cypher.internal.ast.GraphTypeConstraintDefinition
+import org.neo4j.cypher.internal.ast.GraphTypeConstraintName
+import org.neo4j.cypher.internal.ast.GraphTypeElementReference
+import org.neo4j.cypher.internal.ast.GroupBy
+import org.neo4j.cypher.internal.ast.GroupingAll
+import org.neo4j.cypher.internal.ast.GroupingElements
+import org.neo4j.cypher.internal.ast.GroupingNone
 import org.neo4j.cypher.internal.ast.HomeDatabaseScope
 import org.neo4j.cypher.internal.ast.HomeGraphScope
 import org.neo4j.cypher.internal.ast.IfExistsDo
@@ -165,6 +217,10 @@ import org.neo4j.cypher.internal.ast.LoadPrivilege
 import org.neo4j.cypher.internal.ast.LoadPrivilegeQualifier
 import org.neo4j.cypher.internal.ast.LoadUrlAction
 import org.neo4j.cypher.internal.ast.LoadUrlQualifier
+import org.neo4j.cypher.internal.ast.LocalCallableDefinition
+import org.neo4j.cypher.internal.ast.LocalFieldSignature
+import org.neo4j.cypher.internal.ast.LocalFunctionDefinition
+import org.neo4j.cypher.internal.ast.LocalProcedureDefinition
 import org.neo4j.cypher.internal.ast.LookupIndexes
 import org.neo4j.cypher.internal.ast.Match
 import org.neo4j.cypher.internal.ast.MatchAction
@@ -174,21 +230,37 @@ import org.neo4j.cypher.internal.ast.MergeAdminAction
 import org.neo4j.cypher.internal.ast.NamedDatabasesScope
 import org.neo4j.cypher.internal.ast.NamedGraphsScope
 import org.neo4j.cypher.internal.ast.NamespacedName
+import org.neo4j.cypher.internal.ast.NextStatement
+import org.neo4j.cypher.internal.ast.NoNames
 import org.neo4j.cypher.internal.ast.NoOptions
 import org.neo4j.cypher.internal.ast.NoWait
+import org.neo4j.cypher.internal.ast.Node
 import org.neo4j.cypher.internal.ast.NodeAllExistsConstraints
 import org.neo4j.cypher.internal.ast.NodeKeyConstraints
 import org.neo4j.cypher.internal.ast.NodePropExistsConstraints
 import org.neo4j.cypher.internal.ast.NodePropTypeConstraints
+import org.neo4j.cypher.internal.ast.NodeType
+import org.neo4j.cypher.internal.ast.NodeTypeReference
+import org.neo4j.cypher.internal.ast.NodeTypeReferenceByIdentifyingLabel
+import org.neo4j.cypher.internal.ast.NodeTypeReferenceByLabel
+import org.neo4j.cypher.internal.ast.NodeTypeReferenceByVariable
 import org.neo4j.cypher.internal.ast.NodeUniqueConstraints
+import org.neo4j.cypher.internal.ast.OidcCredentialForwarding
 import org.neo4j.cypher.internal.ast.OnCreate
 import org.neo4j.cypher.internal.ast.OnMatch
 import org.neo4j.cypher.internal.ast.Options
 import org.neo4j.cypher.internal.ast.OptionsMap
 import org.neo4j.cypher.internal.ast.OptionsParam
 import org.neo4j.cypher.internal.ast.OrderBy
+import org.neo4j.cypher.internal.ast.OrderByOrPaginationWithType
 import org.neo4j.cypher.internal.ast.ParameterName
+import org.neo4j.cypher.internal.ast.ParsedAsFilter
+import org.neo4j.cypher.internal.ast.ParsedAsLet
+import org.neo4j.cypher.internal.ast.ParsedAsLimit
+import org.neo4j.cypher.internal.ast.ParsedAsOrderBy
+import org.neo4j.cypher.internal.ast.ParsedAsSkip
 import org.neo4j.cypher.internal.ast.ParsedAsYield
+import org.neo4j.cypher.internal.ast.PartQuery
 import org.neo4j.cypher.internal.ast.Password
 import org.neo4j.cypher.internal.ast.PasswordChange
 import org.neo4j.cypher.internal.ast.PatternQualifier
@@ -201,10 +273,17 @@ import org.neo4j.cypher.internal.ast.ProcedureResultItem
 import org.neo4j.cypher.internal.ast.PropExistsConstraints
 import org.neo4j.cypher.internal.ast.PropTypeConstraints
 import org.neo4j.cypher.internal.ast.PropertiesResource
+import org.neo4j.cypher.internal.ast.PropertyType
+import org.neo4j.cypher.internal.ast.PropertyType.PropertyInlineConstraintBody
+import org.neo4j.cypher.internal.ast.PropertyType.PropertyInlineKeyConstraint
+import org.neo4j.cypher.internal.ast.PropertyType.PropertyInlineUniquenessConstraint
 import org.neo4j.cypher.internal.ast.Query
+import org.neo4j.cypher.internal.ast.QueryBody
+import org.neo4j.cypher.internal.ast.QueryWithLocalDefinitions
 import org.neo4j.cypher.internal.ast.RangeIndexes
 import org.neo4j.cypher.internal.ast.ReadAction
 import org.neo4j.cypher.internal.ast.ReadOnlyAccess
+import org.neo4j.cypher.internal.ast.ReadSecretsAction
 import org.neo4j.cypher.internal.ast.ReadWriteAccess
 import org.neo4j.cypher.internal.ast.ReallocateDatabases
 import org.neo4j.cypher.internal.ast.RelAllExistsConstraints
@@ -212,10 +291,15 @@ import org.neo4j.cypher.internal.ast.RelKeyConstraints
 import org.neo4j.cypher.internal.ast.RelPropExistsConstraints
 import org.neo4j.cypher.internal.ast.RelPropTypeConstraints
 import org.neo4j.cypher.internal.ast.RelUniqueConstraints
+import org.neo4j.cypher.internal.ast.Relationship
 import org.neo4j.cypher.internal.ast.RelationshipAllQualifier
 import org.neo4j.cypher.internal.ast.RelationshipQualifier
+import org.neo4j.cypher.internal.ast.RemoteAliasCredentials
+import org.neo4j.cypher.internal.ast.RemoteAliasStoredCredentials
 import org.neo4j.cypher.internal.ast.Remove
+import org.neo4j.cypher.internal.ast.RemoveAllTags
 import org.neo4j.cypher.internal.ast.RemoveAuth
+import org.neo4j.cypher.internal.ast.RemoveDynamicPropertyItem
 import org.neo4j.cypher.internal.ast.RemoveHomeDatabaseAction
 import org.neo4j.cypher.internal.ast.RemoveItem
 import org.neo4j.cypher.internal.ast.RemoveLabelAction
@@ -223,6 +307,9 @@ import org.neo4j.cypher.internal.ast.RemoveLabelItem
 import org.neo4j.cypher.internal.ast.RemovePrivilegeAction
 import org.neo4j.cypher.internal.ast.RemovePropertyItem
 import org.neo4j.cypher.internal.ast.RemoveRoleAction
+import org.neo4j.cypher.internal.ast.RemoveTags
+import org.neo4j.cypher.internal.ast.RenameAuthRule
+import org.neo4j.cypher.internal.ast.RenameAuthRuleAction
 import org.neo4j.cypher.internal.ast.RenameRole
 import org.neo4j.cypher.internal.ast.RenameRoleAction
 import org.neo4j.cypher.internal.ast.RenameServer
@@ -236,14 +323,20 @@ import org.neo4j.cypher.internal.ast.RevokeBothType
 import org.neo4j.cypher.internal.ast.RevokeDenyType
 import org.neo4j.cypher.internal.ast.RevokeGrantType
 import org.neo4j.cypher.internal.ast.RevokePrivilege
+import org.neo4j.cypher.internal.ast.RevokeRolesFromAuthRules
 import org.neo4j.cypher.internal.ast.RevokeRolesFromUsers
 import org.neo4j.cypher.internal.ast.RevokeType
 import org.neo4j.cypher.internal.ast.SchemaCommand
 import org.neo4j.cypher.internal.ast.ScopeClauseSubqueryCall
+import org.neo4j.cypher.internal.ast.Search
+import org.neo4j.cypher.internal.ast.SecretAllQualifier
+import org.neo4j.cypher.internal.ast.SecretQualifier
 import org.neo4j.cypher.internal.ast.ServerManagementAction
 import org.neo4j.cypher.internal.ast.SetAuthAction
 import org.neo4j.cypher.internal.ast.SetClause
 import org.neo4j.cypher.internal.ast.SetDatabaseAccessAction
+import org.neo4j.cypher.internal.ast.SetDatabaseDefaultLanguageAction
+import org.neo4j.cypher.internal.ast.SetDynamicPropertyItem
 import org.neo4j.cypher.internal.ast.SetExactPropertiesFromMapItem
 import org.neo4j.cypher.internal.ast.SetHomeDatabaseAction
 import org.neo4j.cypher.internal.ast.SetIncludingPropertiesFromMapItem
@@ -254,17 +347,24 @@ import org.neo4j.cypher.internal.ast.SetOwnPassword
 import org.neo4j.cypher.internal.ast.SetPasswordsAction
 import org.neo4j.cypher.internal.ast.SetPropertyAction
 import org.neo4j.cypher.internal.ast.SetPropertyItem
+import org.neo4j.cypher.internal.ast.SetTags
 import org.neo4j.cypher.internal.ast.SetUserHomeDatabaseAction
+import org.neo4j.cypher.internal.ast.SetUserMetadataAction
 import org.neo4j.cypher.internal.ast.SetUserStatusAction
 import org.neo4j.cypher.internal.ast.SettingQualifier
+import org.neo4j.cypher.internal.ast.ShardDefinition
 import org.neo4j.cypher.internal.ast.ShowAliasAction
 import org.neo4j.cypher.internal.ast.ShowAliases
 import org.neo4j.cypher.internal.ast.ShowAllPrivileges
+import org.neo4j.cypher.internal.ast.ShowAuthRuleAction
+import org.neo4j.cypher.internal.ast.ShowAuthRules
+import org.neo4j.cypher.internal.ast.ShowAuthRulesPrivileges
 import org.neo4j.cypher.internal.ast.ShowConstraintAction
 import org.neo4j.cypher.internal.ast.ShowConstraintType
 import org.neo4j.cypher.internal.ast.ShowConstraintsClause
+import org.neo4j.cypher.internal.ast.ShowCurrentGraphTypeClause
 import org.neo4j.cypher.internal.ast.ShowCurrentUser
-import org.neo4j.cypher.internal.ast.ShowDatabase
+import org.neo4j.cypher.internal.ast.ShowDatabasesClause
 import org.neo4j.cypher.internal.ast.ShowFunctionsClause
 import org.neo4j.cypher.internal.ast.ShowIndexAction
 import org.neo4j.cypher.internal.ast.ShowIndexType
@@ -276,6 +376,7 @@ import org.neo4j.cypher.internal.ast.ShowProceduresClause
 import org.neo4j.cypher.internal.ast.ShowRoleAction
 import org.neo4j.cypher.internal.ast.ShowRoles
 import org.neo4j.cypher.internal.ast.ShowRolesPrivileges
+import org.neo4j.cypher.internal.ast.ShowSecretsAction
 import org.neo4j.cypher.internal.ast.ShowServerAction
 import org.neo4j.cypher.internal.ast.ShowServers
 import org.neo4j.cypher.internal.ast.ShowSettingAction
@@ -284,6 +385,7 @@ import org.neo4j.cypher.internal.ast.ShowSupportedPrivilegeCommand
 import org.neo4j.cypher.internal.ast.ShowTransactionAction
 import org.neo4j.cypher.internal.ast.ShowTransactionsClause
 import org.neo4j.cypher.internal.ast.ShowUserAction
+import org.neo4j.cypher.internal.ast.ShowUserMetadataAction
 import org.neo4j.cypher.internal.ast.ShowUserPrivileges
 import org.neo4j.cypher.internal.ast.ShowUsers
 import org.neo4j.cypher.internal.ast.ShowUsersPrivileges
@@ -298,17 +400,24 @@ import org.neo4j.cypher.internal.ast.StopDatabase
 import org.neo4j.cypher.internal.ast.StopDatabaseAction
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsBatchParameters
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsConcurrencyParameters
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsDisjointByMode
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsDisjointByParameters
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsErrorParameters
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorBreak
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorContinue
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorFail
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorRetryThenBreak
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorRetryThenContinue
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorRetryThenFail
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsParameters
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsReportParameters
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsRetryParameters
 import org.neo4j.cypher.internal.ast.TerminateTransactionAction
 import org.neo4j.cypher.internal.ast.TerminateTransactionsClause
 import org.neo4j.cypher.internal.ast.TextIndexes
 import org.neo4j.cypher.internal.ast.TimeoutAfter
+import org.neo4j.cypher.internal.ast.TopLevelBraces
 import org.neo4j.cypher.internal.ast.Topology
 import org.neo4j.cypher.internal.ast.TransactionManagementAction
 import org.neo4j.cypher.internal.ast.TraverseAction
@@ -325,6 +434,8 @@ import org.neo4j.cypher.internal.ast.UserAllQualifier
 import org.neo4j.cypher.internal.ast.UserDefinedFunctions
 import org.neo4j.cypher.internal.ast.UserOptions
 import org.neo4j.cypher.internal.ast.UserQualifier
+import org.neo4j.cypher.internal.ast.UserTagsAction
+import org.neo4j.cypher.internal.ast.UsingExpandHint
 import org.neo4j.cypher.internal.ast.UsingIndexHint
 import org.neo4j.cypher.internal.ast.UsingIndexHint.SeekOnly
 import org.neo4j.cypher.internal.ast.UsingIndexHint.SeekOrScan
@@ -335,10 +446,12 @@ import org.neo4j.cypher.internal.ast.UsingIndexHint.UsingTextIndexType
 import org.neo4j.cypher.internal.ast.UsingJoinHint
 import org.neo4j.cypher.internal.ast.UsingScanHint
 import org.neo4j.cypher.internal.ast.VectorIndexes
+import org.neo4j.cypher.internal.ast.VectorValueConstructor
 import org.neo4j.cypher.internal.ast.WaitUntilComplete
 import org.neo4j.cypher.internal.ast.Where
 import org.neo4j.cypher.internal.ast.With
 import org.neo4j.cypher.internal.ast.WriteAction
+import org.neo4j.cypher.internal.ast.WriteSecretsAction
 import org.neo4j.cypher.internal.ast.Yield
 import org.neo4j.cypher.internal.ast.YieldOrWhere
 import org.neo4j.cypher.internal.ast.generator.AstGenerator.boolean
@@ -351,6 +464,7 @@ import org.neo4j.cypher.internal.ast.generator.AstGenerator.zeroOrMore
 import org.neo4j.cypher.internal.expressions.Add
 import org.neo4j.cypher.internal.expressions.AllIterablePredicate
 import org.neo4j.cypher.internal.expressions.AllPropertiesSelector
+import org.neo4j.cypher.internal.expressions.AllReducePredicate
 import org.neo4j.cypher.internal.expressions.And
 import org.neo4j.cypher.internal.expressions.Ands
 import org.neo4j.cypher.internal.expressions.AnonymousPatternPart
@@ -370,12 +484,13 @@ import org.neo4j.cypher.internal.expressions.EntityType
 import org.neo4j.cypher.internal.expressions.Equals
 import org.neo4j.cypher.internal.expressions.ExplicitParameter
 import org.neo4j.cypher.internal.expressions.Expression
+import org.neo4j.cypher.internal.expressions.ExtractMapEntriesScope
+import org.neo4j.cypher.internal.expressions.ExtractMapScope
 import org.neo4j.cypher.internal.expressions.ExtractScope
 import org.neo4j.cypher.internal.expressions.False
 import org.neo4j.cypher.internal.expressions.FilterScope
 import org.neo4j.cypher.internal.expressions.FixedQuantifier
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
-import org.neo4j.cypher.internal.expressions.FunctionName
 import org.neo4j.cypher.internal.expressions.GraphPatternQuantifier
 import org.neo4j.cypher.internal.expressions.GreaterThan
 import org.neo4j.cypher.internal.expressions.GreaterThanOrEqual
@@ -407,6 +522,8 @@ import org.neo4j.cypher.internal.expressions.ListLiteral
 import org.neo4j.cypher.internal.expressions.ListSlice
 import org.neo4j.cypher.internal.expressions.Literal
 import org.neo4j.cypher.internal.expressions.LiteralEntry
+import org.neo4j.cypher.internal.expressions.MapComprehension
+import org.neo4j.cypher.internal.expressions.MapEntriesComprehension
 import org.neo4j.cypher.internal.expressions.MapExpression
 import org.neo4j.cypher.internal.expressions.MapProjection
 import org.neo4j.cypher.internal.expressions.MapProjectionElement
@@ -421,7 +538,6 @@ import org.neo4j.cypher.internal.expressions.NFKDNormalForm
 import org.neo4j.cypher.internal.expressions.NODE_TYPE
 import org.neo4j.cypher.internal.expressions.NaN
 import org.neo4j.cypher.internal.expressions.NamedPatternPart
-import org.neo4j.cypher.internal.expressions.Namespace
 import org.neo4j.cypher.internal.expressions.NodePattern
 import org.neo4j.cypher.internal.expressions.NonPrefixedPatternPart
 import org.neo4j.cypher.internal.expressions.NoneIterablePredicate
@@ -433,6 +549,11 @@ import org.neo4j.cypher.internal.expressions.Or
 import org.neo4j.cypher.internal.expressions.Parameter
 import org.neo4j.cypher.internal.expressions.PathConcatenation
 import org.neo4j.cypher.internal.expressions.PathFactor
+import org.neo4j.cypher.internal.expressions.PathLengthQuantifier
+import org.neo4j.cypher.internal.expressions.PathMode
+import org.neo4j.cypher.internal.expressions.PathMode.Acyclic
+import org.neo4j.cypher.internal.expressions.PathMode.Trail
+import org.neo4j.cypher.internal.expressions.PathMode.Walk
 import org.neo4j.cypher.internal.expressions.PathPatternPart
 import org.neo4j.cypher.internal.expressions.Pattern
 import org.neo4j.cypher.internal.expressions.PatternComprehension
@@ -445,12 +566,11 @@ import org.neo4j.cypher.internal.expressions.PatternPart.AnyPath
 import org.neo4j.cypher.internal.expressions.PatternPart.AnyShortestPath
 import org.neo4j.cypher.internal.expressions.PatternPart.Selector
 import org.neo4j.cypher.internal.expressions.PatternPart.ShortestGroups
-import org.neo4j.cypher.internal.expressions.PatternPartWithSelector
 import org.neo4j.cypher.internal.expressions.PlusQuantifier
 import org.neo4j.cypher.internal.expressions.Pow
-import org.neo4j.cypher.internal.expressions.ProcedureName
-import org.neo4j.cypher.internal.expressions.ProcedureOutput
+import org.neo4j.cypher.internal.expressions.PrefixedPatternPart
 import org.neo4j.cypher.internal.expressions.Property
+import org.neo4j.cypher.internal.expressions.PropertyExists
 import org.neo4j.cypher.internal.expressions.PropertyKeyName
 import org.neo4j.cypher.internal.expressions.PropertySelector
 import org.neo4j.cypher.internal.expressions.QuantifiedPath
@@ -476,6 +596,7 @@ import org.neo4j.cypher.internal.expressions.SimplePattern
 import org.neo4j.cypher.internal.expressions.SingleIterablePredicate
 import org.neo4j.cypher.internal.expressions.StarQuantifier
 import org.neo4j.cypher.internal.expressions.StartsWith
+import org.neo4j.cypher.internal.expressions.StringInterpolation
 import org.neo4j.cypher.internal.expressions.StringLiteral
 import org.neo4j.cypher.internal.expressions.Subtract
 import org.neo4j.cypher.internal.expressions.True
@@ -494,14 +615,36 @@ import org.neo4j.cypher.internal.label_expressions.LabelExpression.DynamicLeaf
 import org.neo4j.cypher.internal.label_expressions.LabelExpression.Leaf
 import org.neo4j.cypher.internal.label_expressions.LabelExpression.Negation
 import org.neo4j.cypher.internal.label_expressions.LabelExpression.Wildcard
+import org.neo4j.cypher.internal.label_expressions.LabelExpressionPredicate
+import org.neo4j.cypher.internal.util.FunctionName
 import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.cypher.internal.util.Namespace
+import org.neo4j.cypher.internal.util.NonEmptyList
+import org.neo4j.cypher.internal.util.ProcedureName
+import org.neo4j.cypher.internal.util.ProcedureOutput
 import org.neo4j.cypher.internal.util.symbols.AnyType
+import org.neo4j.cypher.internal.util.symbols.CTFloat
+import org.neo4j.cypher.internal.util.symbols.CTFloat32
 import org.neo4j.cypher.internal.util.symbols.CTInteger
+import org.neo4j.cypher.internal.util.symbols.CTInteger16
+import org.neo4j.cypher.internal.util.symbols.CTInteger32
+import org.neo4j.cypher.internal.util.symbols.CTInteger8
 import org.neo4j.cypher.internal.util.symbols.CTMap
 import org.neo4j.cypher.internal.util.symbols.CTString
 import org.neo4j.cypher.internal.util.symbols.ClosedDynamicUnionType
 import org.neo4j.cypher.internal.util.symbols.CypherType
+import org.neo4j.cypher.internal.util.symbols.Float32Type
+import org.neo4j.cypher.internal.util.symbols.FloatType
+import org.neo4j.cypher.internal.util.symbols.Integer16Type
+import org.neo4j.cypher.internal.util.symbols.Integer32Type
+import org.neo4j.cypher.internal.util.symbols.Integer8Type
+import org.neo4j.cypher.internal.util.symbols.IntegerType
 import org.neo4j.cypher.internal.util.symbols.ListType
+import org.neo4j.cypher.internal.util.symbols.PropertyValueCypher5Type
+import org.neo4j.cypher.internal.util.symbols.PropertyValueType
+import org.neo4j.cypher.internal.util.symbols.UUIDType
+import org.neo4j.cypher.internal.util.symbols.VectorType
+import org.neo4j.util.UnicodeHelper
 import org.reflections.Reflections
 import org.scalacheck.Arbitrary
 import org.scalacheck.Gen
@@ -522,7 +665,9 @@ import org.scalacheck.Gen.some
 import org.scalacheck.util.Buildable
 
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.atomic.AtomicLong
 
+import scala.collection.immutable.ArraySeq
 import scala.jdk.CollectionConverters.SetHasAsScala
 import scala.util.Random
 
@@ -560,8 +705,13 @@ object AstGenerator {
 
   // It is difficult to randomly generate a valid unicode string, so this rejects any string
   // that may contain a unicode looking sequence to avoid parser errors.
-  def validString: Gen[String] =
-    nonEmptyListOf(char).map(_.mkString).suchThat(!_.matches("^.*\\\\[u,U].*$"))
+  def validString: Gen[String] = oneOf(
+    alphaLowerChar.map(_.toString),
+    nonEmptyListOf(char).map(_.mkString).suchThat { chars =>
+      // Is isIdentifier really neeed, isn't that handled by the prettifier?
+      !chars.contains("\\u") && UnicodeHelper.isIdentifierInAllVersions(chars)
+    }
+  )
 
   def acceptedChar(c: Char): Boolean = {
     val DEL_ERROR = '\ufdea'
@@ -610,21 +760,31 @@ object AstGenerator {
  * Random query generation
  * Implements instances of Gen[T] for all query ast nodes
  * Generated queries are syntactically (but not semantically) valid
+ *
+ * Limits AST depth with the size parameter to try to avoid stack overflows.
  */
 //noinspection ScalaWeakerAccess
 class AstGenerator(
   simpleStrings: Boolean = true,
   allowedVarNames: Option[Seq[String]] = None,
-  whenAstDifferUseCypherVersion: CypherVersion = CypherVersion.Default
+  allowedParamNames: Option[Seq[String]] = None,
+  val whenAstDifferUseCypherVersion: CypherVersion = CypherVersion.Legacy.legacyVersion()
 ) {
   // HELPERS
   // ==========================================================================
 
-  protected val pos: InputPosition = InputPosition.NONE
+  private val anonVarNameCount = new AtomicLong()
+
+  protected val pos: InputPosition.Range = InputPosition.NONE
+
+  private val usesCypher5 = whenAstDifferUseCypherVersion == CypherVersion.Cypher5
 
   def string: Gen[String] =
     if (simpleStrings) alphaLowerChar.map(_.toString)
     else validString
+
+  def anonVariable(): Variable =
+    Variable("anonVariableWithReallyUniqueName" + anonVarNameCount.getAndIncrement())(pos, false)
 
   // IDENTIFIERS
   // ==========================================================================
@@ -657,6 +817,12 @@ class AstGenerator(
   def _stringLit: Gen[StringLiteral] =
     string.flatMap(StringLiteral(_)(pos.withInputLength(0)))
 
+  def _stringInterpolation: Gen[StringInterpolation] = for {
+    nExpressions <- Gen.choose(1, 3)
+    parts <- Gen.listOfN(nExpressions + 1, _stringLit)
+    exprs <- Gen.listOfN(nExpressions, Gen.resize(1, _expression))
+  } yield StringInterpolation(parts, exprs)(pos)
+
   def _sensitiveStringLiteral: Gen[SensitiveStringLiteral] =
     // Needs to be '******' since all sensitive strings get rendered as such
     // Would normally get rewritten as SensitiveAutoParameter which can be generated as parameter when needed
@@ -682,6 +848,9 @@ class AstGenerator(
     sig = if (neg) "-" else ""
   } yield List(sig, str).mkString
 
+  def _pathLengthQuantifier: Gen[PathLengthQuantifier] =
+    _unsignedIntString("", 10).map(PathLengthQuantifier(_)(pos))
+
   def _unsignedDecIntLit: Gen[UnsignedDecimalIntegerLiteral] =
     _unsignedIntString("", 10).map(UnsignedDecimalIntegerLiteral(_)(pos))
 
@@ -697,8 +866,16 @@ class AstGenerator(
   def _doubleLit: Gen[DecimalDoubleLiteral] =
     Arbitrary.arbDouble.arbitrary.map(_.toString).map(DecimalDoubleLiteral(_)(pos))
 
-  def _parameter: Gen[Parameter] =
-    _identifier.map(ExplicitParameter(_, AnyType(isNullable = true)(pos))(pos))
+  def _parameter: Gen[Parameter] = {
+    val nameGen = allowedParamNames match {
+      case None        => _identifier
+      case Some(Seq()) => const("").suchThat(_ => false)
+      case Some(names) => oneOf(names)
+    }
+    for {
+      name <- nameGen
+    } yield ExplicitParameter(name, AnyType(isNullable = true)(pos))(pos)
+  }
 
   def _stringParameter: Gen[Parameter] = _identifier.map(ExplicitParameter(_, CTString)(pos))
 
@@ -777,15 +954,22 @@ class AstGenerator(
     r <- _expression
     typeName <- _cypherTypeName
     normalForm <- _normalForm
-    res <- oneOf(
+    containsIs <- boolean
+    dynamicLabelsAllowed <- boolean
+    labelExpression <- _labelExpression(None, containsIs, dynamicLabelsAllowed)
+    propertyKey <- _propertyKeyName
+    baseUnary = Seq(
       Not(r)(pos),
       IsNull(r)(pos),
       IsNotNull(r)(pos),
       IsTyped(r, typeName)(pos, IsTyped.withDoubleColonOnlyDefault),
       IsNotTyped(r, typeName)(pos),
       IsNormalized(r, normalForm)(pos),
-      IsNotNormalized(r, normalForm)(pos)
+      IsNotNormalized(r, normalForm)(pos),
+      LabelExpressionPredicate(r, labelExpression)(pos, isParenthesized = usesCypher5)
     )
+    res <- if (usesCypher5) oneOf(baseUnary)
+    else oneOf(oneOf(baseUnary), for { v <- _variable } yield PropertyExists(v, propertyKey)(pos))
   } yield res
 
   def _predicateBinary: Gen[Expression] = for {
@@ -848,8 +1032,8 @@ class AstGenerator(
 
   def _filterScope: Gen[FilterScope] = for {
     variable <- _variable
-    innerPredicate <- option(_expression)
-  } yield FilterScope(variable, innerPredicate)(pos)
+    innerPredicate <- _expression
+  } yield FilterScope(variable, Some(innerPredicate))(pos)
 
   def _extractScope: Gen[ExtractScope] = for {
     variable <- _variable
@@ -861,6 +1045,37 @@ class AstGenerator(
     scope <- _extractScope
     expression <- _expression
   } yield ListComprehension(scope, expression)(pos)
+
+  def _extractMapScope: Gen[ExtractMapScope] = for {
+    variable <- _variable
+    innerPredicate <- option(_expression)
+    extractKeyExpression <- _expression
+    extractValueExpression <- _expression
+  } yield ExtractMapScope(variable, innerPredicate, extractKeyExpression, extractValueExpression)(pos)
+
+  def _mapComprehension: Gen[MapComprehension] = for {
+    scope <- _extractMapScope
+    expression <- _expression
+  } yield MapComprehension(scope, expression)(pos)
+
+  def _extractMapEntriesScope: Gen[ExtractMapEntriesScope] = for {
+    keyVariable <- _variable
+    valueVariable <- _variable
+    innerPredicate <- option(_expression)
+    extractKeyExpression <- _expression
+    extractValueExpression <- _expression
+  } yield ExtractMapEntriesScope(
+    keyVariable,
+    valueVariable,
+    innerPredicate,
+    extractKeyExpression,
+    extractValueExpression
+  )(pos)
+
+  def _mapEntriesComprehension: Gen[MapEntriesComprehension] = for {
+    scope <- _extractMapEntriesScope
+    expression <- _expression
+  } yield MapEntriesComprehension(scope, expression)(pos)
 
   def _iterablePredicate: Gen[IterablePredicateExpression] = for {
     scope <- _filterScope
@@ -884,6 +1099,25 @@ class AstGenerator(
     init <- _expression
     list <- _expression
   } yield ReduceExpression(scope, init, list)(pos)
+
+  def _allReducePredicate: Gen[AllReducePredicate] = for {
+    accumulator <- _variable
+    reductionStepVariable <- _variable
+    reductionStep <- _expression
+    predicate <- _expression
+    init <- _expression
+    list <- _expression
+  } yield {
+    AllReducePredicate(
+      accumulator = accumulator,
+      init = init,
+      reductionStepVariable = reductionStepVariable,
+      list = list,
+      reductionStep = reductionStep,
+      predicate = predicate,
+      pos = pos
+    )
+  }
 
   // Arithmetic
   // ----------------------------------
@@ -945,6 +1179,12 @@ class AstGenerator(
   def _countStar: Gen[CountStar] =
     const(CountStar()(pos))
 
+  def _vectorValueConstructor: Gen[VectorValueConstructor] = for {
+    vectorCandidate <- _expression
+    dimension <- _expression
+    cypherType <- _vectorCandidateType
+  } yield VectorValueConstructor(vectorCandidate, dimension, cypherType)(pos)
+
   // Patterns
   // ----------------------------------
 
@@ -990,53 +1230,107 @@ class AstGenerator(
     projection <- _expression
     introducedVariables <- zeroOrMore(_variable)
     scopeDependencies <- zeroOrMore(_variable)
-  } yield PatternComprehension(namedPath, pattern, predicate, projection)(pos, Some(introducedVariables.toSet), Some(scopeDependencies.toSet))
+  } yield PatternComprehension(namedPath, pattern, predicate, projection)(
+    pos,
+    Some(introducedVariables.toSet),
+    Some(scopeDependencies.toSet)
+  )
 
   // Expression
   // ----------------------------------
 
-  def _expression: Gen[Expression] =
-    frequency(
-      5 -> oneOf(
-        lzy(_nullLit),
-        lzy(_stringLit),
-        lzy(_booleanLit),
-        lzy(_signedDecIntLit),
-        lzy(_signedHexIntLit),
-        lzy(_signedOctIntLit),
-        lzy(_doubleLit),
-        lzy(_variable),
-        lzy(_parameter),
-        lzy(_infinityLit),
-        lzy(_nanLit)
-      ),
-      1 -> oneOf(
-        lzy(_predicateComparison),
-        lzy(_predicateUnary),
-        lzy(_predicateBinary),
-        lzy(_predicateComparisonChain),
-        lzy(_iterablePredicate),
-        lzy(_arithmeticUnary),
-        lzy(_arithmeticBinary),
-        lzy(_case),
-        lzy(_functionInvocation),
-        lzy(_countStar),
-        lzy(_reduceExpr),
-        lzy(_shortestPathExpr),
-        lzy(_patternExpr),
-        lzy(_map),
-        lzy(_mapProjection),
-        lzy(_property),
-        lzy(_list),
-        lzy(_listSlice),
-        lzy(_listComprehension),
-        lzy(_containerIndex),
-        lzy(_existsExpression),
-        lzy(_countExpression),
-        lzy(_collectExpression),
-        lzy(_patternComprehension)
-      )
-    )
+  def _shallowExpression: Gen[Expression] = oneOf(
+    lzy(_nullLit),
+    lzy(_stringLit),
+    lzy(_booleanLit),
+    lzy(_signedDecIntLit),
+    lzy(_signedHexIntLit),
+    lzy(_signedOctIntLit),
+    lzy(_doubleLit),
+    lzy(_variable),
+    lzy(_parameter),
+    lzy(_infinityLit),
+    lzy(_nanLit)
+  )
+
+  // This is now a frozen list
+  private def _deepExpressionCypher5: Gen[Expression] = oneOf(
+    lzy(_predicateComparison),
+    lzy(_predicateUnary),
+    lzy(_predicateBinary),
+    lzy(_predicateComparisonChain),
+    lzy(_iterablePredicate),
+    lzy(_arithmeticUnary),
+    lzy(_arithmeticBinary),
+    lzy(_case),
+    lzy(_functionInvocation),
+    lzy(_countStar),
+    lzy(_reduceExpr),
+    lzy(_shortestPathExpr),
+    lzy(_patternExpr),
+    lzy(_map),
+    lzy(_mapProjection),
+    lzy(_property),
+    lzy(_list),
+    lzy(_listSlice),
+    lzy(_listComprehension),
+    lzy(_containerIndex),
+    lzy(_existsExpression),
+    lzy(_countExpression),
+    lzy(_collectExpression),
+    lzy(_patternComprehension)
+  )
+
+  // For newer expressions
+  private def _deepExpression: Gen[Expression] = oneOf(
+    lzy(_predicateComparison),
+    lzy(_predicateUnary),
+    lzy(_predicateBinary),
+    lzy(_predicateComparisonChain),
+    lzy(_iterablePredicate),
+    lzy(_arithmeticUnary),
+    lzy(_arithmeticBinary),
+    lzy(_case),
+    lzy(_functionInvocation),
+    lzy(_countStar),
+    lzy(_reduceExpr),
+    lzy(_shortestPathExpr),
+    lzy(_patternExpr),
+    lzy(_map),
+    lzy(_mapProjection),
+    lzy(_property),
+    lzy(_list),
+    lzy(_listSlice),
+    lzy(_listComprehension),
+    lzy(_mapComprehension),
+    lzy(_mapEntriesComprehension),
+    lzy(_containerIndex),
+    lzy(_existsExpression),
+    lzy(_countExpression),
+    lzy(_collectExpression),
+    lzy(_patternComprehension),
+    lzy(_vectorValueConstructor),
+    lzy(_allReducePredicate),
+    lzy(_stringInterpolation)
+  )
+
+  def _expression: Gen[Expression] = Gen.sized { size =>
+    if (size <= 0) {
+      _shallowExpression
+    } else {
+      if (usesCypher5) {
+        frequency(
+          4 -> _shallowExpression,
+          1 -> Gen.resize(size - 1, _deepExpressionCypher5)
+        )
+      } else {
+        frequency(
+          4 -> _shallowExpression,
+          1 -> Gen.resize(size - 1, _deepExpression)
+        )
+      }
+    }
+  }
 
   def _labelCheckExpression(variable: Variable): Gen[Expression] = {
     def _hasLabels(): Gen[HasLabels] = for {
@@ -1176,8 +1470,8 @@ class AstGenerator(
   } yield NodePattern(variable, labelExpression, properties, predicate)(pos)
 
   def _range: Gen[Range] = for {
-    lower <- option(_unsignedDecIntLit)
-    upper <- option(_unsignedDecIntLit)
+    lower <- option(_pathLengthQuantifier)
+    upper <- option(_pathLengthQuantifier)
   } yield Range(lower, upper)(pos)
 
   def _semanticDirection: Gen[SemanticDirection] =
@@ -1216,12 +1510,12 @@ class AstGenerator(
   )
 
   def _generalQuantifier: Gen[IntervalQuantifier] = for {
-    lower <- option(_unsignedDecIntLit)
-    upper <- option(_unsignedDecIntLit)
+    lower <- option(_pathLengthQuantifier)
+    upper <- option(_pathLengthQuantifier)
   } yield IntervalQuantifier(lower, upper)(pos)
 
   def _fixedQuantifier: Gen[FixedQuantifier] = for {
-    value <- _unsignedDecIntLit
+    value <- _pathLengthQuantifier
   } yield FixedQuantifier(value)(pos)
 
   def _quantifier: Gen[GraphPatternQuantifier] = oneOf(
@@ -1251,8 +1545,22 @@ class AstGenerator(
     lzy(_pathConcatenation(dynamicLabelsAllowed))
   )
 
+  private def literalIntOrParam: Gen[Either[PathLengthQuantifier, Parameter]] = for {
+    int <- lzy(_pathLengthQuantifier)
+    param <- lzy(_parameter)
+    count <- oneOf(Left(int), Right(param))
+  } yield {
+    count
+  }
+
+  private def literalIntOnly: Gen[Either[PathLengthQuantifier, Parameter]] = for {
+    int <- lzy(_pathLengthQuantifier)
+  } yield {
+    Left(int)
+  }
+
   def _selector: Gen[Selector] = for {
-    count <- _unsignedDecIntLit
+    count <- if (usesCypher5) literalIntOnly else literalIntOrParam
     selector <- oneOf(
       lzy(AnyPath(count)(pos)),
       lzy(AllPaths()(pos)),
@@ -1282,14 +1590,26 @@ class AstGenerator(
       _namedPatternPart
     )
 
-  def _patternPartWithSelector: Gen[PatternPartWithSelector] =
+  def _prefixedPatternPart: Gen[PrefixedPatternPart] =
     for {
       part <- _nonPrefixedPatternPart
       selector <- _selector
-    } yield PatternPartWithSelector(selector, part)
+      pathMode <- _pathMode
+    } yield PrefixedPatternPart(selector, pathMode, part)
+
+  def _pathMode: Gen[PathMode] =
+    if (usesCypher5)
+      const(Walk(implicitlyCreated = true)(pos))
+    else
+      oneOf(
+        Walk(implicitlyCreated = true)(pos),
+        Walk()(pos),
+        Trail()(pos),
+        Acyclic()(pos)
+      )
 
   def _patternForMatch: Gen[Pattern.ForMatch] = for {
-    parts <- oneOrMore(_patternPartWithSelector)
+    parts <- oneOrMore(_prefixedPatternPart)
   } yield Pattern.ForMatch(parts)(pos)
 
   def _patternForUpdate: Gen[Pattern.ForUpdate] = for {
@@ -1352,14 +1672,32 @@ class AstGenerator(
   // CLAUSES
   // ==========================================================================
 
+  def _aliasedReturnItem: Gen[ReturnItem] = for {
+    expr <- _expression
+    variable <- _variable
+  } yield AliasedReturnItem(expr, variable)(pos, AliasedReturnItem.wasAutoAliasedDefault)
+
   def _returnItem: Gen[ReturnItem] = for {
     expr <- _expression
     variable <- _variable
     item <- oneOf(
       UnaliasedReturnItem(expr, "")(pos),
-      AliasedReturnItem(expr, variable)(pos)
+      AliasedReturnItem(expr, variable)(pos, AliasedReturnItem.wasAutoAliasedDefault)
     )
   } yield item
+
+  def _groupingElements: Gen[GroupingElements] = for {
+    expressions <- oneOrMore(_expression)
+    elements <- oneOf(
+      GroupingNone()(pos),
+      GroupingAll()(pos),
+      ExplicitGroupingElements(expressions)(pos)
+    )
+  } yield elements
+
+  def _groupBy: Gen[GroupBy] = for {
+    elements <- _groupingElements
+  } yield GroupBy(elements)(pos)
 
   def _sortItem: Gen[SortItem] = for {
     expr <- _expression
@@ -1382,30 +1720,83 @@ class AstGenerator(
   def _where: Gen[Where] =
     _expression.map(Where(_)(pos))
 
+  def _search: Gen[Search] = for {
+    variable <- _variable
+    score <- option(_variable)
+    indexType <- oneOf(Seq(Search.Fulltext, Search.Vector))
+    indexName <- _stringLiteralOrParameter
+    expr <- _expression
+    where <- option(_where)
+    analyzer <- option(_expression)
+    skip <- option(_skip)
+    limit <- _limit
+  } yield Search(variable, score, indexType, indexName, expr, where, analyzer, skip, limit)(pos)
+
   def _with: Gen[With] = for {
     distinct <- boolean
-    inclExisting <- boolean
+    projectionType <- oneOf(AdditiveProjection, FreeProjection)
     retItems <- oneOrMore(_returnItem)
+    groupBy <- if (usesCypher5) Gen.const(None) else option(_groupBy)
     orderBy <- option(_orderBy)
     skip <- option(_skip)
     limit <- option(_limit)
     where <- option(_where)
-  } yield With(distinct, ReturnItems(inclExisting, retItems)(pos), orderBy, skip, limit, where)(pos)
+  } yield With(distinct, ReturnItems(projectionType, retItems)(pos), groupBy, orderBy, skip, limit, where)(pos)
+
+  def _let: Gen[With] = for {
+    retItems <- oneOrMore(_aliasedReturnItem)
+  } yield With(
+    distinct = false,
+    ReturnItems(AdditiveProjection, retItems)(pos),
+    None,
+    None,
+    None,
+    None,
+    None,
+    ParsedAsLet
+  )(pos)
+
+  def _filter: Gen[With] =
+    _where.map(where =>
+      With(
+        distinct = false,
+        ReturnItems(AdditiveProjection, Seq.empty)(pos),
+        None,
+        None,
+        None,
+        None,
+        Some(where),
+        ParsedAsFilter
+      )(pos)
+    )
 
   def _orderByAndPageStatement: Gen[With] = for {
     orderBy <- option(_orderBy)
     skip <- option(_skip)
     limit <- option(_limit)
-  } yield With(distinct = false, ReturnItems(includeExisting = true, Seq.empty)(pos), orderBy, skip, limit, None)(pos)
+    withType <- orderBy.map(_ => ParsedAsOrderBy).orElse(skip.map(_ => ParsedAsSkip)).orElse(limit.map(_ =>
+      ParsedAsLimit
+    )).getOrElse(DefaultWith)
+  } yield With(
+    distinct = false,
+    ReturnItems(AdditiveProjection, Seq.empty)(pos),
+    None,
+    orderBy,
+    skip,
+    limit,
+    None,
+    withType
+  )(pos)
 
   def _return: Gen[Return] = for {
     distinct <- boolean
-    inclExisting <- boolean
+    projectionType <- oneOf(AdditiveProjection, FreeProjection)
     retItems <- oneOrMore(_returnItem)
+    groupBy <- if (usesCypher5) Gen.const(None) else option(_groupBy)
     orderBy <- option(_orderBy)
     skip <- option(_skip)
     limit <- option(_limit)
-  } yield Return(distinct, ReturnItems(inclExisting, retItems)(pos), orderBy, skip, limit)(pos)
+  } yield Return(distinct, ReturnItems(projectionType, retItems)(pos), groupBy, orderBy, skip, limit)(pos)
 
   def _finish: Gen[Finish] = const(Finish()(pos))
 
@@ -1415,7 +1806,7 @@ class AstGenerator(
     skip <- option(_signedDecIntLit.map(Skip(_)(pos)))
     limit <- option(_signedDecIntLit.map(Limit(_)(pos)))
     where <- option(_where)
-  } yield Yield(ReturnItems(includeExisting = false, retItems)(pos), orderBy, skip, limit, where)(pos)
+  } yield Yield(ReturnItems(FreeProjection, retItems)(pos), orderBy, skip, limit, where)(pos)
 
   def _yieldItem: Gen[ReturnItem] = for {
     var1 <- _variable
@@ -1428,7 +1819,8 @@ class AstGenerator(
     pattern <- _patternForMatch
     hints <- zeroOrMore(_hint)
     where <- option(_where)
-  } yield Match(optional, matchMode, pattern, hints, where)(pos)
+    search <- if (usesCypher5) const(None) else option(_search)
+  } yield Match(optional, matchMode, pattern, hints, where, search)(pos)
 
   def _matchMode: Gen[MatchMode] = oneOf(MatchMode.RepeatableElements()(pos), MatchMode.DifferentRelationships()(pos))
 
@@ -1443,18 +1835,21 @@ class AstGenerator(
   def _unwind: Gen[Unwind] = for {
     expression <- _expression
     variable <- _variable
-  } yield Unwind(expression, variable)(pos)
+    useForInSyntax <- if (usesCypher5) const(false) else frequency(2 -> const(false), 1 -> const(true))
+  } yield Unwind(expression, variable)(pos, useForInSyntax = useForInSyntax)
 
   def _setItem: Gen[SetItem] = for {
     variable <- _variable
     labels <- oneOrMore(_labelName)
     dynamicLabels <- oneOrMore(_expression)
     property <- _property
+    dynamicProperty <- _containerIndex
     expression <- _expression
     containsIs <- boolean
     item <- oneOf(
       SetLabelItem(variable, labels, dynamicLabels, containsIs)(pos),
       SetPropertyItem(property, expression)(pos),
+      SetDynamicPropertyItem(dynamicProperty, expression)(pos),
       SetExactPropertiesFromMapItem(variable, expression)(pos),
       SetIncludingPropertiesFromMapItem(variable, expression)(pos)
     )
@@ -1466,9 +1861,11 @@ class AstGenerator(
     dynamicLabels <- oneOrMore(_expression)
     containsIs <- boolean
     property <- _property
+    dynamicProperty <- _containerIndex
     item <- oneOf(
       RemoveLabelItem(variable, labels, dynamicLabels, containsIs)(pos),
-      RemovePropertyItem(property)
+      RemovePropertyItem(property)(pos),
+      RemoveDynamicPropertyItem(dynamicProperty)(pos)
     )
   } yield item
 
@@ -1498,10 +1895,6 @@ class AstGenerator(
     actions <- oneOrMore(_mergeAction)
   } yield Merge(pattern, actions)(pos)
 
-  def _procedureName: Gen[ProcedureName] = for {
-    name <- _identifier
-  } yield ProcedureName(name)(pos)
-
   def _procedureOutput: Gen[ProcedureOutput] = for {
     name <- _identifier
   } yield ProcedureOutput(name)(pos)
@@ -1517,18 +1910,18 @@ class AstGenerator(
   } yield ProcedureResult(items.toIndexedSeq, where)(pos)
 
   def _call: Gen[UnresolvedCall] = for {
-    procedureNamespace <- _namespace
-    procedureName <- _procedureName
+    namespace <- _namespace
+    procedureName <- _identifier
     declaredArguments <- option(zeroOrMore(_expression))
     declaredResult <- option(_procedureResult)
     yieldAll <- if (declaredResult.isDefined) const(false) else boolean // can't have both YIELD * and declare results
-  } yield UnresolvedCall(procedureNamespace, procedureName, declaredArguments, declaredResult, yieldAll)(pos)
+  } yield UnresolvedCall(ProcedureName(namespace, procedureName)(pos), declaredArguments, declaredResult, yieldAll)(pos)
 
   def _foreach: Gen[Foreach] = for {
     variable <- _variable
     expression <- _expression
     updates <- oneOrMore(_clause)
-  } yield Foreach(variable, expression, updates)(pos)
+  } yield Foreach(variable, expression, updateWithClauseWhenReparsingWouldChangeAstAndPrettifying(updates))(pos)
 
   def _loadCsv: Gen[LoadCSV] = for {
     withHeaders <- boolean
@@ -1550,17 +1943,44 @@ class AstGenerator(
 
   def _usingJoinHint: Gen[UsingJoinHint] = for {
     variables <- oneOrMore(_variable)
-  } yield UsingJoinHint(variables)(pos)
+  } yield UsingJoinHint(NonEmptyList.from(variables))(pos)
 
   def _usingScanHint: Gen[UsingScanHint] = for {
     variable <- _variable
     labelOrRelType <- _labelOrTypeName
   } yield UsingScanHint(variable, labelOrRelType)(pos)
 
-  def _hint: Gen[Hint] = oneOf(
+  def _expandStep: Gen[ExpandStep] = oneOf(
+    // Shape 1: endpoints only — FROM x TO y
+    for {
+      from <- _variable
+      to <- _variable
+      mode <- option(oneOf(ExpandHintAll, ExpandHintInto))
+    } yield ExpandStep(Some(from), Some(to), None, mode)(pos),
+    // Shape 2: endpoints + via — FROM x TO y VIA r
+    for {
+      from <- _variable
+      to <- _variable
+      via <- _variable
+      mode <- option(oneOf(ExpandHintAll, ExpandHintInto))
+    } yield ExpandStep(Some(from), Some(to), Some(via), mode)(pos),
+    // Shape 3: via only — VIA r
+    for {
+      via <- _variable
+      mode <- option(oneOf(ExpandHintAll, ExpandHintInto))
+    } yield ExpandStep(None, None, Some(via), mode)(pos)
+  )
+
+  def _usingExpandHint: Gen[UsingExpandHint] = for {
+    n <- choose(1, 3)
+    steps <- listOfN(n, _expandStep)
+  } yield UsingExpandHint(NonEmptyList.from(steps))(pos)
+
+  def _hint: Gen[AstHint] = oneOf(
     _usingIndexHint,
     _usingJoinHint,
-    _usingScanHint
+    _usingScanHint,
+    _usingExpandHint
   )
 
   // Queries
@@ -1569,9 +1989,10 @@ class AstGenerator(
   def _use: Gen[UseGraph] = for {
     names <- listOfN(1, _identifier)
     function <- _functionInvocation
+    cypherVersionFlag <- oneOf(true, false)
     graphRef <- oneOf(
-      GraphDirectReference(CatalogName(names))(pos),
-      GraphFunctionReference(function)(pos)
+      GraphDirectReference(CatalogName(names, cypherVersionFlag))(pos),
+      GraphFunctionReference(function, cypherVersionFlag)(pos)
     )
   } yield UseGraph(graphRef)(pos)
 
@@ -1593,43 +2014,176 @@ class AstGenerator(
     for {
       batchSize <- option(_expression)
       concurrency <- option(option(_expression))
-      onErrorBehaviour <- option(oneOf[InTransactionsOnErrorBehaviour](OnErrorContinue, OnErrorBreak, OnErrorFail))
+      onErrorBehaviour <- option(oneOf[InTransactionsOnErrorBehaviour](
+        Seq(
+          OnErrorContinue,
+          OnErrorBreak,
+          OnErrorFail,
+          OnErrorRetryThenContinue,
+          OnErrorRetryThenBreak,
+          OnErrorRetryThenFail
+        )
+      ))
+      retryParams <- option(_expression)
       reportAs <- option(string)
+      disjointByMode <- option(_inTransactionsDisjointByMode)
     } yield InTransactionsParameters(
       batchSize.map(InTransactionsBatchParameters(_)(pos)),
       concurrency.map(InTransactionsConcurrencyParameters(_)(pos)),
-      onErrorBehaviour.map(InTransactionsErrorParameters(_)(pos)),
-      reportAs.map(v => InTransactionsReportParameters(Variable(s"`$v`")(pos, Variable.isIsolatedDefault))(pos))
+      onErrorBehaviour.map {
+        case eb @ (OnErrorRetryThenContinue | OnErrorRetryThenBreak | OnErrorRetryThenFail) =>
+          InTransactionsErrorParameters(
+            eb,
+            retryParameters = retryParams.map(t => InTransactionsRetryParameters(Some(t))(pos))
+          )(pos)
+        case eb => InTransactionsErrorParameters(eb, None)(pos)
+      },
+      reportAs.map(v => InTransactionsReportParameters(Variable(s"`$v`")(pos, Variable.isIsolatedDefault))(pos)),
+      if (usesCypher5) None else disjointByMode.map(InTransactionsDisjointByParameters(_)(pos))
     )(pos)
 
-  def _clause: Gen[Clause] = oneOf(
-    lzy(_use),
-    lzy(_with),
-    lzy(_orderByAndPageStatement),
-    lzy(_return),
-    lzy(_finish),
-    lzy(_match),
-    lzy(_create),
-    lzy(_insert),
-    lzy(_unwind),
-    lzy(_set),
-    lzy(_remove),
-    lzy(_delete),
-    lzy(_merge),
-    lzy(_call),
-    lzy(_foreach),
-    lzy(_loadCsv),
-    lzy(_importingWithSubqueryCall),
-    lzy(_scopeClauseSubqueryCall)
-  )
+  private def _inTransactionsDisjointByMode: Gen[InTransactionsDisjointByMode] =
+    Gen.frequency(
+      1 -> Gen.const(InTransactionsDisjointByMode.DisjointByAuto),
+      1 -> Gen.const(InTransactionsDisjointByMode.DisjointByNone),
+      3 -> nonEmptyListOf(_expression).map(exprs => InTransactionsDisjointByMode.DisjointByExpressions(exprs))
+    )
+
+  private def _anyClause: Gen[Clause] =
+    if (usesCypher5) {
+      oneOf(
+        lzy(_use),
+        lzy(_with),
+        lzy(_orderByAndPageStatement),
+        lzy(_return),
+        lzy(_finish),
+        lzy(_match),
+        lzy(_create),
+        lzy(_insert),
+        lzy(_unwind),
+        lzy(_set),
+        lzy(_remove),
+        lzy(_delete),
+        lzy(_merge),
+        lzy(_call),
+        lzy(_loadCsv),
+        lzy(_foreach),
+        lzy(_importingWithSubqueryCall),
+        lzy(_scopeClauseSubqueryCall)
+      )
+    } else {
+      oneOf(
+        lzy(_use),
+        lzy(_with),
+        lzy(_let),
+        lzy(_filter),
+        lzy(_orderByAndPageStatement),
+        lzy(_return),
+        lzy(_finish),
+        lzy(_match),
+        lzy(_create),
+        lzy(_insert),
+        lzy(_unwind),
+        lzy(_set),
+        lzy(_remove),
+        lzy(_delete),
+        lzy(_merge),
+        lzy(_call),
+        lzy(_loadCsv),
+        lzy(_foreach),
+        lzy(_importingWithSubqueryCall),
+        lzy(_scopeClauseSubqueryCall),
+        lzy(commandClause)
+      )
+    }
+
+  private def _shallowClause: Gen[Clause] =
+    if (usesCypher5) {
+      oneOf(
+        lzy(_use),
+        lzy(_with),
+        lzy(_orderByAndPageStatement),
+        lzy(_return),
+        lzy(_finish),
+        lzy(_match),
+        lzy(_create),
+        lzy(_insert),
+        lzy(_unwind),
+        lzy(_set),
+        lzy(_remove),
+        lzy(_delete),
+        lzy(_merge),
+        lzy(_call),
+        lzy(_loadCsv)
+      )
+    } else {
+      oneOf(
+        lzy(_use),
+        lzy(_with),
+        lzy(_let),
+        lzy(_filter),
+        lzy(_orderByAndPageStatement),
+        lzy(_return),
+        lzy(_finish),
+        lzy(_match),
+        lzy(_create),
+        lzy(_insert),
+        lzy(_unwind),
+        lzy(_set),
+        lzy(_remove),
+        lzy(_delete),
+        lzy(_merge),
+        lzy(_call),
+        lzy(_loadCsv),
+        lzy(commandClause)
+      )
+    }
+
+  def _clause: Gen[Clause] = Gen.sized { size =>
+    if (size <= 0) {
+      _shallowClause
+    } else {
+      Gen.resize(size - 1, _anyClause)
+    }
+  }
+
+  private def updateWithClauseWhenReparsingWouldChangeAstAndPrettifying(clauses: List[Clause]): List[Clause] = {
+    // Generating an ast with a With parsed as yield or a default With followed by any
+    // With parsed as OrderBy, Skip or Limit will then be prettified and reparsed into a single With
+    // where the order by/skip/limit is part of the default/yield With instead
+    // which then fails the round trip check (as that get different indentations when prettified again)
+    // For example:
+    // SingleQuery(Seq(
+    //   With(ReturnItems(AdditiveProjection, List.empty)(pos), DefaultWith)(pos),
+    //   With(distinct = false, ReturnItems(AdditiveProjection, List.empty)(pos), Some(OrderBy(List(AscSortItem(True()(pos))(pos)))(pos)), None, None, None, ParsedAsOrderBy)(pos))
+    // )(pos)
+    // |WITH *
+    // |ORDER BY true ASCENDING
+    // becomes
+    // SingleQuery(Seq(
+    //   With(distinct = false, ReturnItems(AdditiveProjection, List.empty)(pos), Some(OrderBy(List(AscSortItem(True()(pos))(pos)))(pos)), None, None, None, DefaultWith)(pos))
+    // )(pos)
+    // |WITH *
+    // |  ORDER BY true ASCENDING
+    clauses.foldLeft[List[Clause]](List.empty) {
+      case (init :+ (w1: With), w2: With)
+        if w1.withType == DefaultWith && w2.withType.isInstanceOf[OrderByOrPaginationWithType] =>
+        init :+ w1 :+ w2.copy(withType = DefaultWith)(w2.position)
+      // The With as part of a CommandClause is always ParsedAsYield, so we only need to check if it exists
+      case (init :+ (c: CommandClause), w: With)
+        if c.yieldWith.nonEmpty && w.withType.isInstanceOf[OrderByOrPaginationWithType] =>
+        init :+ c :+ w.copy(withType = DefaultWith)(w.position)
+      case (cs, c) => cs :+ c
+    }
+  }
 
   def _singleQuery: Gen[SingleQuery] = for {
     s <- choose(1, 1)
     clauses <- listOfN(s, _clause)
-  } yield SingleQuery(clauses)(pos)
+  } yield SingleQuery(updateWithClauseWhenReparsingWouldChangeAstAndPrettifying(clauses))(pos)
 
   def _union: Gen[Union] = for {
-    lhs <- _query
+    lhs <- _unionArgument
     rhs <- _singleQuery
     union <- oneOf(
       UnionDistinct(lhs, rhs)(pos),
@@ -1637,10 +2191,131 @@ class AstGenerator(
     )
   } yield union
 
-  def _query: Gen[Query] = frequency(
-    5 -> lzy(_singleQuery),
-    1 -> lzy(_union)
-  )
+  def _unionArgument: Gen[Query] = {
+    if (usesCypher5) frequency(
+      5 -> lzy(_singleQuery),
+      1 -> lzy(_union)
+    )
+    else frequency(
+      5 -> lzy(_singleQuery),
+      1 -> lzy(_union),
+      1 -> lzy(_topLevelBraces)
+    )
+  }
+
+  def _topLevelBraces: Gen[TopLevelBraces] = for {
+    inner <- _query
+    use <- option(_use)
+  } yield TopLevelBraces(inner, use)(pos)
+
+  def _when: Gen[ConditionalQueryWhen] = for {
+    branches <- oneOrMore(_branch)
+    default <- option[PartQuery](_partQuery)
+  } yield ConditionalQueryWhen(branches, default.map(x => ConditionalQueryBranch(None, x)(pos)))(pos)
+
+  def _branch: Gen[ConditionalQueryBranch] = for {
+    predicate <- _expression
+    query <- _partQuery
+  } yield ConditionalQueryBranch(Some(predicate), query)(pos)
+
+  def _partQuery: Gen[PartQuery] = for {
+    partQuery <- oneOf(_singleQuery, _topLevelBraces)
+  } yield partQuery
+
+  def _next: Gen[NextStatement] = for {
+    queries <- listOfN(2, _nextArgument)
+  } yield NextStatement(queries)(pos)
+
+  def _nextArgument: Gen[Query] =
+    frequency(
+      5 -> lzy(_singleQuery),
+      1 -> lzy(_union),
+      1 -> lzy(_topLevelBraces),
+      1 -> lzy(_when)
+    )
+
+  def _queryWithLocalDefinition: Gen[QueryWithLocalDefinitions] = for {
+    s <- choose(1, 1)
+    localDefinitions <- listOfN(s, _localDefinition)
+    query <- _queryWithLocalDefinitionArgument
+  } yield QueryWithLocalDefinitions(localDefinitions, query)(pos)
+
+  def _queryWithLocalDefinitionArgument: Gen[Query] =
+    frequency(
+      5 -> lzy(_singleQuery),
+      1 -> lzy(_union),
+      1 -> lzy(_topLevelBraces),
+      1 -> lzy(_when),
+      1 -> lzy(_next)
+    )
+
+  def _localDefinition: Gen[LocalCallableDefinition] = for {
+    definition <- oneOf(
+      _localProcedureDefinition,
+      _localFunctionDefinition
+    )
+  } yield definition
+
+  def _localProcedureDefinition: Gen[LocalProcedureDefinition] = for {
+    namespace <- _namespace
+    name <- _identifier
+    numInputFields <- choose(0, 3)
+    inputSignature <- listOfN(numInputFields, _optionalFieldSignature)
+    numOutputFields <- choose(1, 3)
+    outputSignature <- option(listOfN(numOutputFields, _mandatoryFieldSignature))
+    body <- _query
+  } yield LocalProcedureDefinition(ProcedureName(namespace, name)(pos), inputSignature, outputSignature, body)(pos)
+
+  def _localFunctionDefinition: Gen[LocalFunctionDefinition] = for {
+    namespace <- _namespace
+    name <- _identifier
+    numInputFields <- choose(0, 3)
+    inputSignature <- listOfN(numInputFields, _optionalFieldSignature)
+    outputSignature <- option(_cypherTypeName)
+    body <- oneOf(
+      _localFunctionQueryBody,
+      _localFunctionExpressionBody
+    )
+  } yield LocalFunctionDefinition(FunctionName(namespace, name)(pos), inputSignature, outputSignature, body)(pos)
+
+  def _localFunctionQueryBody: Gen[QueryBody] = for {
+    body <- _query
+  } yield QueryBody(body)(pos)
+
+  def _localFunctionExpressionBody: Gen[ExpressionBody] = for {
+    body <- _expression
+  } yield ExpressionBody(body)(pos)
+
+  def _mandatoryFieldSignature: Gen[LocalFieldSignature] = for {
+    name <- _identifier
+    typ <- option(_cypherTypeName)
+  } yield LocalFieldSignature(name, typ, None)(pos)
+
+  def _optionalFieldSignature: Gen[LocalFieldSignature] = for {
+    name <- _identifier
+    typ <- option(_cypherTypeName)
+    default <- option(_expression)
+  } yield LocalFieldSignature(name, typ, default)(pos)
+
+  def _query: Gen[Query] = Gen.sized { size =>
+    if (size <= 0) _singleQuery
+    else Gen.resize(size - 1, _anyQuery)
+  }
+
+  private def _anyQuery: Gen[Query] = {
+    if (usesCypher5) frequency(
+      5 -> lzy(_singleQuery),
+      1 -> lzy(_union)
+    )
+    else frequency(
+      5 -> lzy(_singleQuery),
+      1 -> lzy(_union),
+      1 -> lzy(_topLevelBraces),
+      1 -> lzy(_when),
+      1 -> lzy(_next),
+      1 -> lzy(_queryWithLocalDefinition)
+    )
+  }
 
   // Show commands
   // ----------------------------------
@@ -1666,7 +2341,7 @@ class AstGenerator(
   } yield types
 
   def _constraintType: Gen[ShowConstraintType] = for {
-    returnCypher5Values <- const(whenAstDifferUseCypherVersion.equals(CypherVersion.Cypher5))
+    returnCypher5Values <- const(usesCypher5)
     constraintType <- oneOf(
       AllConstraints,
       if (returnCypher5Values) UniqueConstraints.cypher5 else UniqueConstraints.cypher25,
@@ -1700,41 +2375,30 @@ class AstGenerator(
             indexType,
             Some(w),
             List.empty,
-            yieldAll = false
+            yieldAll = false,
+            None
           )(pos)
         )
-      case Some(Left((y, Some(r)))) =>
+      case Some(Left((y, r))) =>
         val (w, yi) = turnYieldToWith(y)
         Seq(
           ShowIndexesClause(
             indexType,
             None,
             yi,
-            yieldAll = false
-          )(pos),
-          w,
-          r
-        )
-      case Some(Left((y, None))) =>
-        val (w, yi) = turnYieldToWith(y)
-        Seq(
-          ShowIndexesClause(
-            indexType,
-            None,
-            yi,
-            yieldAll = false
-          )(pos),
-          w
-        )
+            yieldAll = false,
+            Some(w)
+          )(pos)
+        ) ++ r
       case _ if yieldAll =>
         Seq(
           ShowIndexesClause(
             indexType,
             None,
             List.empty,
-            yieldAll = true
-          )(pos),
-          getFullWithStarFromYield
+            yieldAll = true,
+            Some(getFullWithStarFromYield)
+          )(pos)
         )
       case _ =>
         Seq(
@@ -1742,7 +2406,8 @@ class AstGenerator(
             indexType,
             None,
             List.empty,
-            yieldAll = false
+            yieldAll = false,
+            None
           )(pos)
         )
     }
@@ -1758,46 +2423,44 @@ class AstGenerator(
   } yield {
     val showClauses = yields match {
       case Some(Right(w)) =>
-        Seq(
-          ShowConstraintsClause(
-            constraintType,
-            Some(w),
-            List.empty,
-            yieldAll = false
-          )(pos)
-        )
-      case Some(Left((y, Some(r)))) =>
+        Seq(ShowConstraintsClause(constraintType, Some(w), List.empty, yieldAll = false, None, usesCypher5)(pos))
+      case Some(Left((y, r))) =>
         val (w, yi) = turnYieldToWith(y)
-        Seq(
-          ShowConstraintsClause(constraintType, None, yi, yieldAll = false)(pos),
-          w,
-          r
-        )
-      case Some(Left((y, None))) =>
-        val (w, yi) = turnYieldToWith(y)
-        Seq(
-          ShowConstraintsClause(constraintType, None, yi, yieldAll = false)(pos),
-          w
-        )
+        Seq(ShowConstraintsClause(constraintType, None, yi, yieldAll = false, Some(w), usesCypher5)(pos)) ++ r
       case _ if yieldAll =>
         Seq(
           ShowConstraintsClause(
             constraintType,
             None,
             List.empty,
-            yieldAll = true
-          )(pos),
-          getFullWithStarFromYield
-        )
-      case _ =>
-        Seq(
-          ShowConstraintsClause(
-            constraintType,
-            None,
-            List.empty,
-            yieldAll = false
+            yieldAll = true,
+            Some(getFullWithStarFromYield),
+            usesCypher5
           )(pos)
         )
+      case _ =>
+        Seq(ShowConstraintsClause(constraintType, None, List.empty, yieldAll = false, None, usesCypher5)(pos))
+    }
+    val fullClauses = use.map(u => u +: showClauses).getOrElse(showClauses)
+    SingleQuery(fullClauses)(pos)
+  }
+
+  def _showCurrentGraphType: Gen[Query] = for {
+    use <- option(_use)
+    asGraph <- boolean
+    yields <- _eitherYieldOrWhere
+    yieldAll <- boolean
+  } yield {
+    val showClauses = yields match {
+      case Some(Right(w)) =>
+        Seq(ShowCurrentGraphTypeClause(asGraph, Some(w), List.empty, yieldAll = false, None)(pos))
+      case Some(Left((y, r))) =>
+        val (w, yi) = turnYieldToWith(y)
+        Seq(ShowCurrentGraphTypeClause(asGraph, None, yi, yieldAll = false, Some(w))(pos)) ++ r
+      case _ if yieldAll =>
+        Seq(ShowCurrentGraphTypeClause(asGraph, None, List.empty, yieldAll = true, Some(getFullWithStarFromYield))(pos))
+      case _ =>
+        Seq(ShowCurrentGraphTypeClause(asGraph, None, List.empty, yieldAll = false, None)(pos))
     }
     val fullClauses = use.map(u => u +: showClauses).getOrElse(showClauses)
     SingleQuery(fullClauses)(pos)
@@ -1805,24 +2468,21 @@ class AstGenerator(
 
   def _showProcedures: Gen[Query] = for {
     name <- _identifier
-    exec <- option(oneOf(CurrentUser, User(name)))
+    exec <- option(oneOf(CurrentUser, User(name)(pos)))
     yields <- _eitherYieldOrWhere
     yieldAll <- boolean
     use <- option(_use)
   } yield {
     val showClauses = yields match {
       case Some(Right(w)) =>
-        Seq(ShowProceduresClause(exec, Some(w), List.empty, yieldAll = false)(pos))
-      case Some(Left((y, Some(r)))) =>
+        Seq(ShowProceduresClause(exec, Some(w), List.empty, yieldAll = false, None)(pos))
+      case Some(Left((y, r))) =>
         val (w, yi) = turnYieldToWith(y)
-        Seq(ShowProceduresClause(exec, None, yi, yieldAll = false)(pos), w, r)
-      case Some(Left((y, None))) =>
-        val (w, yi) = turnYieldToWith(y)
-        Seq(ShowProceduresClause(exec, None, yi, yieldAll = false)(pos), w)
+        Seq(ShowProceduresClause(exec, None, yi, yieldAll = false, Some(w))(pos)) ++ r
       case _ if yieldAll =>
-        Seq(ShowProceduresClause(exec, None, List.empty, yieldAll = true)(pos), getFullWithStarFromYield)
+        Seq(ShowProceduresClause(exec, None, List.empty, yieldAll = true, Some(getFullWithStarFromYield))(pos))
       case _ =>
-        Seq(ShowProceduresClause(exec, None, List.empty, yieldAll = false)(pos))
+        Seq(ShowProceduresClause(exec, None, List.empty, yieldAll = false, None)(pos))
     }
     val fullClauses = use.map(u => u +: showClauses).getOrElse(showClauses)
     SingleQuery(fullClauses)(pos)
@@ -1831,24 +2491,21 @@ class AstGenerator(
   def _showFunctions: Gen[Query] = for {
     name <- _identifier
     funcType <- oneOf(AllFunctions, BuiltInFunctions, UserDefinedFunctions)
-    exec <- option(oneOf(CurrentUser, User(name)))
+    exec <- option(oneOf(CurrentUser, User(name)(pos)))
     yields <- _eitherYieldOrWhere
     yieldAll <- boolean
     use <- option(_use)
   } yield {
     val showClauses = yields match {
       case Some(Right(w)) =>
-        Seq(ShowFunctionsClause(funcType, exec, Some(w), List.empty, yieldAll = false)(pos))
-      case Some(Left((y, Some(r)))) =>
+        Seq(ShowFunctionsClause(funcType, exec, Some(w), List.empty, yieldAll = false, None)(pos))
+      case Some(Left((y, r))) =>
         val (w, yi) = turnYieldToWith(y)
-        Seq(ShowFunctionsClause(funcType, exec, None, yi, yieldAll = false)(pos), w, r)
-      case Some(Left((y, None))) =>
-        val (w, yi) = turnYieldToWith(y)
-        Seq(ShowFunctionsClause(funcType, exec, None, yi, yieldAll = false)(pos), w)
+        Seq(ShowFunctionsClause(funcType, exec, None, yi, yieldAll = false, Some(w))(pos)) ++ r
       case _ if yieldAll =>
-        Seq(ShowFunctionsClause(funcType, exec, None, List.empty, yieldAll = true)(pos), getFullWithStarFromYield)
+        Seq(ShowFunctionsClause(funcType, exec, None, List.empty, yieldAll = true, Some(getFullWithStarFromYield))(pos))
       case _ =>
-        Seq(ShowFunctionsClause(funcType, exec, None, List.empty, yieldAll = false)(pos))
+        Seq(ShowFunctionsClause(funcType, exec, None, List.empty, yieldAll = false, None)(pos))
     }
     val fullClauses = use.map(u => u +: showClauses).getOrElse(showClauses)
     SingleQuery(fullClauses)(pos)
@@ -1860,23 +2517,26 @@ class AstGenerator(
     yieldAll <- boolean
     use <- option(_use)
   } yield {
-    val returnCypher5Types = whenAstDifferUseCypherVersion.equals(CypherVersion.Cypher5)
+    val returnCypher5Types = usesCypher5
     val showClauses = yields match {
       case Some(Right(w)) =>
-        Seq(ShowTransactionsClause(ids, Some(w), List.empty, yieldAll = false, returnCypher5Types)(pos))
-      case Some(Left((y, Some(r)))) =>
+        Seq(ShowTransactionsClause(ids, Some(w), List.empty, yieldAll = false, None, returnCypher5Types)(pos))
+      case Some(Left((y, r))) =>
         val (w, yi) = turnYieldToWith(y)
-        Seq(ShowTransactionsClause(ids, None, yi, yieldAll = false, returnCypher5Types)(pos), w, r)
-      case Some(Left((y, None))) =>
-        val (w, yi) = turnYieldToWith(y)
-        Seq(ShowTransactionsClause(ids, None, yi, yieldAll = false, returnCypher5Types)(pos), w)
+        Seq(ShowTransactionsClause(ids, None, yi, yieldAll = false, Some(w), returnCypher5Types)(pos)) ++ r
       case _ if yieldAll =>
         Seq(
-          ShowTransactionsClause(ids, None, List.empty, yieldAll = true, returnCypher5Types)(pos),
-          getFullWithStarFromYield
+          ShowTransactionsClause(
+            ids,
+            None,
+            List.empty,
+            yieldAll = true,
+            Some(getFullWithStarFromYield),
+            returnCypher5Types
+          )(pos)
         )
       case _ =>
-        Seq(ShowTransactionsClause(ids, None, List.empty, yieldAll = false, returnCypher5Types)(pos))
+        Seq(ShowTransactionsClause(ids, None, List.empty, yieldAll = false, None, returnCypher5Types)(pos))
     }
     val fullClauses = use.map(u => u +: showClauses).getOrElse(showClauses)
     SingleQuery(fullClauses)(pos)
@@ -1890,15 +2550,12 @@ class AstGenerator(
     use <- option(_use)
   } yield {
     val terminateClauses = (yields, returns) match {
-      case (Some(y), Some(r)) =>
+      case (Some(y), r) =>
         val (w, yi) = turnYieldToWith(y)
-        Seq(TerminateTransactionsClause(ids, yi, yieldAll = false, None)(pos), w, r)
-      case (Some(y), None) =>
-        val (w, yi) = turnYieldToWith(y)
-        Seq(TerminateTransactionsClause(ids, yi, yieldAll = false, None)(pos), w)
+        Seq(TerminateTransactionsClause(ids, yi, yieldAll = false, Some(w), None)(pos)) ++ r
       case _ if yieldAll =>
-        Seq(TerminateTransactionsClause(ids, List.empty, yieldAll = true, None)(pos), getFullWithStarFromYield)
-      case _ => Seq(TerminateTransactionsClause(ids, List.empty, yieldAll = false, None)(pos))
+        Seq(TerminateTransactionsClause(ids, List.empty, yieldAll = true, Some(getFullWithStarFromYield), None)(pos))
+      case _ => Seq(TerminateTransactionsClause(ids, List.empty, yieldAll = false, None, None)(pos))
     }
     val fullClauses = use.map(u => u +: terminateClauses).getOrElse(terminateClauses)
     SingleQuery(fullClauses)(pos)
@@ -1911,16 +2568,13 @@ class AstGenerator(
     use <- option(_use)
   } yield {
     val showClauses = yields match {
-      case Some(Right(w)) => Seq(ShowSettingsClause(names, Some(w), List.empty, yieldAll = false)(pos))
-      case Some(Left((y, Some(r)))) =>
+      case Some(Right(w)) => Seq(ShowSettingsClause(names, Some(w), List.empty, yieldAll = false, None)(pos))
+      case Some(Left((y, r))) =>
         val (w, yi) = turnYieldToWith(y)
-        Seq(ShowSettingsClause(names, None, yi, yieldAll = false)(pos), w, r)
-      case Some(Left((y, None))) =>
-        val (w, yi) = turnYieldToWith(y)
-        Seq(ShowSettingsClause(names, None, yi, yieldAll = false)(pos), w)
+        Seq(ShowSettingsClause(names, None, yi, yieldAll = false, Some(w))(pos)) ++ r
       case _ if yieldAll =>
-        Seq(ShowSettingsClause(names, None, List.empty, yieldAll = true)(pos), getFullWithStarFromYield)
-      case _ => Seq(ShowSettingsClause(names, None, List.empty, yieldAll = false)(pos))
+        Seq(ShowSettingsClause(names, None, List.empty, yieldAll = true, Some(getFullWithStarFromYield))(pos))
+      case _ => Seq(ShowSettingsClause(names, None, List.empty, yieldAll = false, None)(pos))
     }
     val fullClauses = use.map(u => u +: showClauses).getOrElse(showClauses)
     SingleQuery(fullClauses)(pos)
@@ -1939,22 +2593,20 @@ class AstGenerator(
     val clauses =
       if (additionalShow.isEmpty && additionalTerminate.isEmpty) {
         // no additional clauses so take the two base ones
-        if (showFirst) show ++ terminate else terminate ++ show
+        if (showFirst) Seq(show, terminate) else Seq(terminate, show)
       } else if (additionalTerminate.isEmpty) {
         // Only additional show, make show only command
         // add base show to ensure at least 2 clauses
         // (can be a mix of different show commands)
-        show ++ additionalShow.flatten
+        show +: additionalShow
       } else if (additionalShow.isEmpty) {
         // Only additional terminate, make terminate only command
         // add base terminate to ensure at least 2 clauses
-        terminate ++ additionalTerminate.flatten
+        terminate +: additionalTerminate
       } else {
         // multiple additional clauses, add all together and mix the order they appear in
-        // (keeping the yield/with together with its respective clause)
-        val allPairs = Seq(show, terminate) ++ additionalShow ++ additionalTerminate
-        val scrambled = Random.shuffle(allPairs)
-        scrambled.flatten
+        val all = Seq(show, terminate) ++ additionalShow ++ additionalTerminate
+        Random.shuffle(all)
       }
 
     val clausesWithReturn = clauses :+ returns
@@ -1962,67 +2614,84 @@ class AstGenerator(
     SingleQuery(fullClauses)(pos)
   }
 
-  private def showAsPartOfCombined: Gen[Seq[Clause]] = for {
+  private def showAsPartOfCombined: Gen[Clause] = for {
     ids <- namesOrNameExpression
     constraintType <- _constraintType
     indexType <- _indexType
     funcType <- oneOf(AllFunctions, BuiltInFunctions, UserDefinedFunctions)
     name <- _identifier
-    exec <- option(oneOf(CurrentUser, User(name)))
+    exec <- option(oneOf(CurrentUser, User(name)(pos)))
+    dbName <- _databaseName
+    scope <- oneOf(
+      SingleNamedDatabaseScope(dbName)(pos),
+      AllDatabasesScope()(pos),
+      DefaultDatabaseScope()(pos),
+      HomeDatabaseScope()(pos)
+    )
+    asGraph <- boolean
     yields <- _yield
     yieldAll <- boolean
-    clause <- oneOf(
-      (item: List[CommandResultItem], all: Boolean) =>
-        ShowTransactionsClause(ids, None, item, all, whenAstDifferUseCypherVersion.equals(CypherVersion.Cypher5))(pos),
-      (item: List[CommandResultItem], all: Boolean) => ShowFunctionsClause(funcType, exec, None, item, all)(pos),
-      (item: List[CommandResultItem], all: Boolean) => ShowProceduresClause(exec, None, item, all)(pos),
-      (item: List[CommandResultItem], all: Boolean) => ShowSettingsClause(ids, None, item, all)(pos),
-      (item: List[CommandResultItem], all: Boolean) =>
-        ShowConstraintsClause(
-          constraintType,
-          None,
-          item,
-          all
-        )(pos),
-      (item: List[CommandResultItem], all: Boolean) =>
-        ShowIndexesClause(indexType, None, item, all)(pos)
+    clauseCypher5 <- const((item: List[CommandResultItem], all: Boolean, w: With) =>
+      ShowTransactionsClause(ids, None, item, all, Some(w), returnCypher5Types = true)(pos)
     )
+    clauseCypher25orAbove <- oneOf(
+      (item: List[CommandResultItem], all: Boolean, w: With) =>
+        ShowTransactionsClause(ids, None, item, all, Some(w), returnCypher5Types = false)(pos),
+      (item: List[CommandResultItem], all: Boolean, w: With) =>
+        ShowFunctionsClause(funcType, exec, None, item, all, Some(w))(pos),
+      (item: List[CommandResultItem], all: Boolean, w: With) =>
+        ShowProceduresClause(exec, None, item, all, Some(w))(pos),
+      (item: List[CommandResultItem], all: Boolean, w: With) => ShowSettingsClause(ids, None, item, all, Some(w))(pos),
+      (item: List[CommandResultItem], all: Boolean, w: With) =>
+        ShowConstraintsClause(constraintType, None, item, all, Some(w), returnCypher5Columns = false)(pos),
+      (item: List[CommandResultItem], all: Boolean, w: With) =>
+        ShowIndexesClause(indexType, None, item, all, Some(w))(pos),
+      (item: List[CommandResultItem], all: Boolean, w: With) =>
+        ShowCurrentGraphTypeClause(asGraph, None, item, all, Some(w))(pos),
+      (item: List[CommandResultItem], all: Boolean, w: With) =>
+        ShowDatabasesClause(scope, None, item, all, Some(w), cypher5ColumnsOnly = false)(pos)
+    )
+    clause = if (usesCypher5) clauseCypher5 else clauseCypher25orAbove
   } yield {
     val (withClause, items) = turnYieldToWith(yields)
-    if (yieldAll) Seq(clause(List.empty, true), getFullWithStarFromYield)
-    else Seq(clause(items, false), withClause)
+    if (yieldAll) clause(List.empty, true, getFullWithStarFromYield)
+    else clause(items, false, withClause)
   }
 
-  private def terminateAsPartOfCombined: Gen[Seq[Clause]] = for {
+  private def terminateAsPartOfCombined: Gen[Clause] = for {
     ids <- namesOrNameExpressionNonEmpty
     yields <- _yield
     yieldAll <- boolean
   } yield {
     val (withClause, items) = turnYieldToWith(yields)
     if (yieldAll)
-      Seq(TerminateTransactionsClause(ids, List.empty, yieldAll = true, None)(pos), getFullWithStarFromYield)
-    else Seq(TerminateTransactionsClause(ids, items, yieldAll = false, None)(pos), withClause)
+      TerminateTransactionsClause(ids, List.empty, yieldAll = true, Some(getFullWithStarFromYield), None)(pos)
+    else TerminateTransactionsClause(ids, items, yieldAll = false, Some(withClause), None)(pos)
   }
+
+  private def commandClause: Gen[Clause] = for {
+    show <- showAsPartOfCombined
+    terminate <- terminateAsPartOfCombined
+    clause <- oneOf(show, terminate)
+  } yield clause
 
   /* names for show commands:
    * - can be an expression or a list of strings
    * - a singular string is parsed as string expression
-   * - no names gives an empty list
-   * - two or more names give an name list
+   * - two or more names give a name list
    */
-  private def namesOrNameExpression: Gen[Either[List[String], Expression]] = for {
-    multiIdList <- twoOrMore(string)
-    idList <- oneOf(List.empty, multiIdList)
-    expr <- _expression
-    ids <- oneOf(Left(idList), Right(expr))
+  private def namesOrNameExpression: Gen[CommandClauseNames] = for {
+    nonEmptyIds <- namesOrNameExpressionNonEmpty
+    ids <- oneOf(nonEmptyIds, NoNames)
   } yield {
     ids
   }
 
-  private def namesOrNameExpressionNonEmpty: Gen[Either[List[String], Expression]] = for {
-    multiIdList <- twoOrMore(string)
+  private def namesOrNameExpressionNonEmpty: Gen[CommandClauseNames] = for {
+    multiIdStringList <- twoOrMore(_stringLit)
+    multiIdList <- const(ListLiteral(multiIdStringList)(pos))
     expr <- _expression
-    ids <- oneOf(Left(multiIdList), Right(expr))
+    ids <- oneOf(CommaSeparatedNames(multiIdList), ExpressionNames(expr))
   } yield {
     ids
   }
@@ -2039,7 +2708,8 @@ class AstGenerator(
     val (orderBy, where) = CommandClause.updateAliasedVariablesFromYieldInOrderByAndWhere(yieldClause)
     val withClause = With(
       distinct = false,
-      ReturnItems(includeExisting = true, Seq(), itemOrder)(returnItems.position),
+      ReturnItems(AdditiveProjection, Seq(), itemOrder)(returnItems.position),
+      None,
       orderBy,
       yieldClause.skip,
       yieldClause.limit,
@@ -2053,7 +2723,8 @@ class AstGenerator(
   private def getFullWithStarFromYield =
     With(
       distinct = false,
-      ReturnItems(includeExisting = true, Seq())(pos),
+      ReturnItems(AdditiveProjection, Seq())(pos),
+      None,
       None,
       None,
       None,
@@ -2061,19 +2732,39 @@ class AstGenerator(
       withType = ParsedAsYield
     )(pos)
 
-  def _showCommands: Gen[Query] = oneOf(
-    _showIndexes,
-    _showConstraints,
-    _showProcedures,
-    _showFunctions,
-    _showTransactions,
-    _terminateTransactions,
-    _showSettings,
-    _combinedCommands
-  )
+  def _showCommands: Gen[Query] = {
+    if (usesCypher5) {
+      oneOf(
+        _showIndexes,
+        _showConstraints,
+        _showProcedures,
+        _showFunctions,
+        _showTransactions,
+        _terminateTransactions,
+        _showSettings,
+        _showDatabases,
+        _combinedCommands
+      )
+    } else {
+      oneOf(
+        _showIndexes,
+        _showConstraints,
+        _showCurrentGraphType,
+        _showProcedures,
+        _showFunctions,
+        _showTransactions,
+        _terminateTransactions,
+        _showSettings,
+        _showDatabases,
+        _combinedCommands
+      )
+    }
+  }
 
   // Schema commands
   // ----------------------------------
+
+  // Index and constraint
 
   def _variableProperty: Gen[Property] = for {
     map <- _variable
@@ -2084,8 +2775,23 @@ class AstGenerator(
     props <- oneOrMore(_variableProperty)
   } yield props
 
+  def _maybeEmptyListOfProperties: Gen[List[Property]] = for {
+    props <- zeroOrMore(_variableProperty)
+  } yield props
+
   def _cypherTypeName: Gen[CypherType] = for {
     _type <- oneOf(allCypherTypeNamesFromReflection)
+  } yield _type
+
+  def _vectorCandidateType: Gen[CypherType] = for {
+    _type <- oneOf(
+      CTInteger.withIsNullable(false),
+      CTInteger32.withIsNullable(false),
+      CTInteger16.withIsNullable(false),
+      CTInteger8.withIsNullable(false),
+      CTFloat.withIsNullable(false),
+      CTFloat32.withIsNullable(false)
+    )
   } yield _type
 
   def _normalForm: Gen[NormalForm] = for {
@@ -2099,7 +2805,7 @@ class AstGenerator(
 
   private val allCypherTypeNamesFromReflection: Set[CypherType] = {
     val reflections = new Reflections("org.neo4j.cypher.internal.util.symbols")
-    val innerTypes = reflections.getSubTypesOf[CypherType](classOf[CypherType]).asScala.toSet
+    var innerTypes = reflections.getSubTypesOf[CypherType](classOf[CypherType]).asScala.toSet
       .flatMap((cls: Class[_ <: CypherType]) => {
         try {
           // NOTHING, NULL
@@ -2126,7 +2832,41 @@ class AstGenerator(
         }
       })
 
-    val supportedInnerTypes = innerTypes.filter(_.hasCypherParserSupport)
+    innerTypes = if (usesCypher5) {
+      innerTypes.filter {
+        case _: UUIDType          => false
+        case _: VectorType        => false
+        case _: PropertyValueType => false
+        case _                    => true
+      }
+    } else {
+      innerTypes.filter {
+        case _: PropertyValueCypher5Type => false
+        case _                           => true
+      }
+    }
+
+    val supportedInnerVectorTypes = Seq(
+      Some(IntegerType(isNullable = false)(pos)),
+      Some(Integer32Type(isNullable = false)(pos)),
+      Some(Integer16Type(isNullable = false)(pos)),
+      Some(Integer8Type(isNullable = false)(pos)),
+      Some(FloatType(isNullable = false)(pos)),
+      Some(Float32Type(isNullable = false)(pos)),
+      None
+    )
+
+    val vectorTypes: Set[CypherType] = if (!usesCypher5) supportedInnerVectorTypes.flatMap(inner => {
+      Set(
+        VectorType(inner, Some(1024), isNullable = true)(pos),
+        VectorType(inner, Some(1024), isNullable = false)(pos),
+        VectorType(inner, None, isNullable = true)(pos),
+        VectorType(inner, None, isNullable = false)(pos)
+      )
+    }).toSet
+    else Set.empty
+
+    val supportedInnerTypes = innerTypes.filter(_.hasCypherParserSupport) ++ vectorTypes
 
     val listTypes = supportedInnerTypes.flatMap(inner => {
       Set(
@@ -2162,15 +2902,34 @@ class AstGenerator(
     relType <- _relTypeName
     types <- _listOfRelTypes
     props <- _listOfProperties
-    name <- option(_nameAsEither)
+    additionalProps <- if (usesCypher5) const(List.empty) else _maybeEmptyListOfProperties
+    name <- option(_stringLiteralOrParameter)
     ifExistsDo <- _ifExistsDo
     options <- _optionsMapAsEitherOrNone
     fromDefault <- boolean
     use <- option(_use)
     rangeNodeIndex =
-      CreateIndex.createRangeNodeIndex(variable, labelName, props, name, ifExistsDo, options, fromDefault, use)(pos)
+      CreateIndex.createRangeNodeIndex(
+        variable,
+        labelName,
+        props,
+        name,
+        ifExistsDo,
+        options,
+        fromDefault,
+        use
+      )(pos)
     rangeRelIndex =
-      CreateIndex.createRangeRelationshipIndex(variable, relType, props, name, ifExistsDo, options, fromDefault, use)(
+      CreateIndex.createRangeRelationshipIndex(
+        variable,
+        relType,
+        props,
+        name,
+        ifExistsDo,
+        options,
+        fromDefault,
+        use
+      )(
         pos
       )
     lookupNodeIndex = CreateIndex.createLookupIndex(
@@ -2192,18 +2951,85 @@ class AstGenerator(
       use
     )(pos)
     fulltextNodeIndex =
-      CreateIndex.createFulltextNodeIndex(variable, labels, props, name, ifExistsDo, options, use)(pos)
+      CreateIndex.createFulltextNodeIndex(
+        variable,
+        labels,
+        props,
+        name,
+        ifExistsDo,
+        options,
+        use
+      )(pos)
     fulltextRelIndex =
-      CreateIndex.createFulltextRelationshipIndex(variable, types, props, name, ifExistsDo, options, use)(pos)
-    textNodeIndex = CreateIndex.createTextNodeIndex(variable, labelName, props, name, ifExistsDo, options, use)(pos)
+      CreateIndex.createFulltextRelationshipIndex(
+        variable,
+        types,
+        props,
+        name,
+        ifExistsDo,
+        options,
+        use
+      )(pos)
+    textNodeIndex = CreateIndex.createTextNodeIndex(
+      variable,
+      labelName,
+      props,
+      name,
+      ifExistsDo,
+      options,
+      use
+    )(pos)
     textRelIndex =
-      CreateIndex.createTextRelationshipIndex(variable, relType, props, name, ifExistsDo, options, use)(pos)
-    pointNodeIndex = CreateIndex.createPointNodeIndex(variable, labelName, props, name, ifExistsDo, options, use)(pos)
+      CreateIndex.createTextRelationshipIndex(
+        variable,
+        relType,
+        props,
+        name,
+        ifExistsDo,
+        options,
+        use
+      )(pos)
+    pointNodeIndex = CreateIndex.createPointNodeIndex(
+      variable,
+      labelName,
+      props,
+      name,
+      ifExistsDo,
+      options,
+      use
+    )(pos)
     pointRelIndex =
-      CreateIndex.createPointRelationshipIndex(variable, relType, props, name, ifExistsDo, options, use)(pos)
-    vectorNodeIndex = CreateIndex.createVectorNodeIndex(variable, labelName, props, name, ifExistsDo, options, use)(pos)
+      CreateIndex.createPointRelationshipIndex(
+        variable,
+        relType,
+        props,
+        name,
+        ifExistsDo,
+        options,
+        use
+      )(pos)
+    vectorNodeIndex =
+      CreateIndex.createVectorNodeIndex(
+        variable,
+        if (usesCypher5) List(labelName) else labels,
+        props,
+        additionalProps,
+        name,
+        ifExistsDo,
+        options,
+        use
+      )(pos)
     vectorRelIndex =
-      CreateIndex.createVectorRelationshipIndex(variable, relType, props, name, ifExistsDo, options, use)(pos)
+      CreateIndex.createVectorRelationshipIndex(
+        variable,
+        if (usesCypher5) List(relType) else types,
+        props,
+        additionalProps,
+        name,
+        ifExistsDo,
+        options,
+        use
+      )(pos)
     command <- oneOf(
       rangeNodeIndex,
       rangeRelIndex,
@@ -2221,7 +3047,7 @@ class AstGenerator(
   } yield command
 
   def _dropIndex: Gen[DropIndexOnName] = for {
-    name <- _nameAsEither
+    name <- _stringLiteralOrParameter
     ifExists <- boolean
     use <- option(_use)
   } yield DropIndexOnName(name, ifExists, use)(pos)
@@ -2233,7 +3059,7 @@ class AstGenerator(
     props <- _listOfProperties
     prop <- _variableProperty
     propType <- _cypherTypeName
-    name <- option(_nameAsEither)
+    name <- option(_stringLiteralOrParameter)
     ifExistsDo <- _ifExistsDo
     options <- _optionsMapAsEitherOrNone
     use <- option(_use)
@@ -2244,7 +3070,7 @@ class AstGenerator(
       name,
       ifExistsDo,
       options,
-      whenAstDifferUseCypherVersion.equals(CypherVersion.Cypher5),
+      usesCypher5,
       use
     )(pos)
     relKey = CreateConstraint.createRelationshipKeyConstraint(
@@ -2254,7 +3080,7 @@ class AstGenerator(
       name,
       ifExistsDo,
       options,
-      whenAstDifferUseCypherVersion.equals(CypherVersion.Cypher5),
+      usesCypher5,
       use
     )(pos)
     nodeUniqueness = CreateConstraint.createNodePropertyUniquenessConstraint(
@@ -2264,6 +3090,7 @@ class AstGenerator(
       name,
       ifExistsDo,
       options,
+      usesCypher5,
       use
     )(pos)
     compositeUniqueness = CreateConstraint.createNodePropertyUniquenessConstraint(
@@ -2273,6 +3100,7 @@ class AstGenerator(
       name,
       ifExistsDo,
       options,
+      usesCypher5,
       use
     )(pos)
     relUniqueness = CreateConstraint.createRelationshipPropertyUniquenessConstraint(
@@ -2282,6 +3110,7 @@ class AstGenerator(
       name,
       ifExistsDo,
       options,
+      usesCypher5,
       use
     )(pos)
     nodeExistence = CreateConstraint.createNodePropertyExistenceConstraint(
@@ -2336,7 +3165,7 @@ class AstGenerator(
   } yield command
 
   def _dropConstraint: Gen[DropConstraintOnName] = for {
-    name <- _nameAsEither
+    name <- _stringLiteralOrParameter
     ifExists <- boolean
     use <- option(_use)
   } yield DropConstraintOnName(name, ifExists, use)(pos)
@@ -2345,7 +3174,120 @@ class AstGenerator(
 
   def _constraintCommand: Gen[SchemaCommand] = oneOf(_createConstraint, _dropConstraint)
 
-  def _schemaCommand: Gen[SchemaCommand] = oneOf(_indexCommand, _constraintCommand)
+  // Graph Type
+
+  def _inlineConstraintBody: Gen[PropertyInlineConstraintBody] = for {
+    const <- oneOf(PropertyInlineKeyConstraint()(pos), PropertyInlineUniquenessConstraint()(pos))
+  } yield const
+
+  def _propertyType: Gen[PropertyType] = for {
+    keyName <- _propertyKeyName
+    propType <- _cypherTypeName
+    constraint <- option(_inlineConstraintBody)
+  } yield PropertyType(keyName, propType, constraint)(pos)
+
+  def _edgeNode: Gen[NodeTypeReference] = for {
+    ref <- _variable
+    label <- _labelName
+    optRef <- option(ref)
+    labelOrVar <- oneOf(
+      NodeTypeReferenceByVariable(ref)(pos),
+      NodeTypeReferenceByLabel(label)(pos),
+      NodeTypeReferenceByIdentifyingLabel(label, optRef)(pos),
+      EmptyNodeTypeReference()(pos)
+    )
+  } yield labelOrVar
+
+  def _edgeType: Gen[EdgeType] = for {
+    src <- _edgeNode
+    dest <- _edgeNode
+    variable <- option(_variable)
+    relType <- _relTypeName
+    propTypes <- zeroOrMore(_propertyType).map(_.distinctBy(_.name))
+    constraints <- variable.map(v => zeroOrMore(_graphTypeConstraintBody(v, inline = true))).getOrElse(const(Seq()))
+    options <- _optionsMapAsEitherOrNone
+    constraintsWithOptions = constraints.map((_, options)).toSet
+  } yield EdgeType(src, variable, relType, propTypes.toSet, dest, constraintsWithOptions)(pos)
+
+  def _nodeType: Gen[NodeType] = for {
+    label <- _labelName
+    variable <- option(_variable)
+    additionalLabels <- zeroOrMore(_labelName)
+    propTypes <- zeroOrMore(_propertyType).map(_.distinctBy(_.name))
+    constraints <- variable.map(v => zeroOrMore(_graphTypeConstraintBody(v, inline = true))).getOrElse(const(Seq()))
+    options <- _optionsMapAsEitherOrNone
+    constraintsWithOptions = constraints.map((_, options)).toSet
+  } yield NodeType(variable, label, additionalLabels.toSet, propTypes.toSet, constraintsWithOptions)(pos)
+
+  def _graphTypeElementReference(variable: Variable): Gen[GraphTypeElementReference] = for {
+    label <- _labelName
+    nodeLabRef = NodeTypeReferenceByLabel(label, Some(variable))(pos)
+    nodeLabIdentRef = NodeTypeReferenceByIdentifyingLabel(label, Some(variable))(pos)
+    nodeVarRef = NodeTypeReferenceByVariable(variable)(pos)
+    edgeVarRef = EdgeTypeReferenceByVariable(variable)(pos)
+    relType <- _relTypeName
+    relTypeRef = EdgeTypeReferenceByLabel(relType, Some(variable))(pos)
+    relTypeIdentRef = EdgeTypeReferenceByIdentifyingLabel(relType, Some(variable))(pos)
+    ref <- oneOf(nodeLabRef, nodeLabIdentRef, nodeVarRef, edgeVarRef, relTypeRef, relTypeIdentRef)
+  } yield ref
+
+  def _graphTypeConstraintProperty(alias: Variable): Gen[Property] = for {
+    pkn <- _propertyKeyName
+  } yield Property(alias, pkn)(pos)
+
+  def _graphTypeConstraintBody(alias: Variable, inline: Boolean): Gen[GraphTypeConstraintBody] = for {
+    props <- oneOrMore(_graphTypeConstraintProperty(alias))
+    oneProp <- _graphTypeConstraintProperty(alias)
+    ct <- _cypherTypeName
+    key = KeyConstraint(ArraySeq.from(props))(pos)
+    exists = ExistenceConstraint(ArraySeq(oneProp))(pos)
+    unique = UniquenessConstraint(ArraySeq.from(props))(pos)
+    typeConst = PropertyTypeConstraint(ArraySeq(oneProp), ct)(pos)
+    body <- oneOf(key, exists, unique, typeConst)
+    restrictedBody <- oneOf(key, unique)
+  } yield if (inline) restrictedBody else body
+
+  def _graphTypeConstraintDef: Gen[GraphTypeConstraintDefinition] = for {
+    name <- option(_identifier)
+    variable <- _variable
+    ref <- _graphTypeElementReference(variable)
+    options <- _optionsMapAsEitherOrNone
+    body <- _graphTypeConstraintBody(variable, inline = false)
+  } yield GraphTypeConstraintDefinition(name, ref, body, options)(pos)
+
+  def _graphTypeConstraintName: Gen[GraphTypeConstraintName] = for {
+    name <- _identifier
+  } yield GraphTypeConstraintName(name)(pos)
+
+  def _graphType(isDrop: Boolean): Gen[GraphType] = for {
+    nodeTypes <- oneOrMore(_nodeType).map(_.distinctBy(_.identifyingLabel).toSet)
+    edgeTypes <- oneOrMore(_edgeType).map(_.distinctBy(_.identifyingLabel).toSet)
+    constraintDefs <- zeroOrMore(_graphTypeConstraintDef)
+    constraintNames <- zeroOrMore(_graphTypeConstraintName)
+    constraints = if (isDrop) constraintNames else constraintDefs
+  } yield GraphType(nodeTypes ++ edgeTypes, constraints.toSet)(pos)
+
+  def _alterCurrentGraphTypeCommand: Gen[AlterCurrentGraphType] = for {
+    graphType <- _graphType(false)
+    graphTypeWithConstraintNames <- _graphType(true)
+    operation <- oneOf(
+      AlterCurrentGraphType.Set,
+      AlterCurrentGraphType.Add,
+      AlterCurrentGraphType.Alter,
+      AlterCurrentGraphType.Drop
+    )
+    gt = if (operation == AlterCurrentGraphType.Drop) graphTypeWithConstraintNames else graphType
+  } yield AlterCurrentGraphType(gt, operation)(pos)
+
+  // Top level schema command method
+
+  def _schemaCommand: Gen[SchemaCommand] = {
+    if (usesCypher5) {
+      oneOf(_indexCommand, _constraintCommand)
+    } else {
+      oneOf(_indexCommand, _constraintCommand, _alterCurrentGraphTypeCommand)
+    }
+  }
 
   // Administration commands
   // ----------------------------------
@@ -2371,18 +3313,19 @@ class AstGenerator(
   def _databaseNameNoNamespace: Gen[DatabaseName] = for {
     name <- listOfN(1, _identifier)
     param <- _stringParameter
-    finalName <- oneOf(NamespacedName(name)(pos), ParameterName(param)(pos))
+    finalName <- if (usesCypher5) oneOf(NamespacedName.apply(name)(pos), ParameterName(param)(pos))
+    else oneOf(NamespacedName(name, None)(pos), ParameterName(param)(pos))
   } yield finalName
 
   def _optionsMapAsEitherOrNone: Gen[Options] = for {
     map <- oneOrMore(tuple(_identifier, _expression)).map(_.toMap)
     param <- _mapParameter
-    finalMap <- oneOf(OptionsMap(map), OptionsParam(param), NoOptions)
+    finalMap <- oneOf(OptionsMap(map)(pos), OptionsParam(param)(pos), NoOptions)
   } yield finalMap
 
   def _optionsForAlterDatabaseOrNone: Gen[Options] = for {
     map <- oneOrMore(tuple(_identifier, _expression)).map(_.toMap)
-    finalMap <- oneOf(OptionsMap(map), NoOptions)
+    finalMap <- oneOf(OptionsMap(map)(pos), NoOptions)
   } yield finalMap
 
   def _optionsToRemove(hasSetClause: Boolean): Gen[Set[String]] =
@@ -2399,7 +3342,7 @@ class AstGenerator(
   def _optionsMapAsEither: Gen[Options] = for {
     map <- oneOrMore(tuple(_identifier, _expression)).map(_.toMap)
     param <- _mapParameter
-    finalMap <- oneOf(OptionsMap(map), OptionsParam(param))
+    finalMap <- oneOf(OptionsMap(map)(pos), OptionsParam(param)(pos))
   } yield finalMap
 
   def _optionalMapAsEither: Gen[Either[Map[String, Expression], Parameter]] = for {
@@ -2419,13 +3362,32 @@ class AstGenerator(
   def _password: Gen[Expression] =
     oneOf(_sensitiveStringParameter, _sensitiveAutoStringParameter, _sensitiveStringLiteral)
 
+  def _remoteAliasStoredCredentials: Gen[RemoteAliasStoredCredentials] = for {
+    username <- _stringLiteralOrParameter
+    password <- _password
+  } yield RemoteAliasStoredCredentials(username, password)(pos)
+
+  def _oidcCredentialForwarding: Gen[OidcCredentialForwarding] = OidcCredentialForwarding()(pos)
+
+  def _remoteAliasCredentials: Gen[RemoteAliasCredentials] =
+    if (usesCypher5) _remoteAliasStoredCredentials
+    else oneOf(_remoteAliasStoredCredentials, _oidcCredentialForwarding)
+
   def _ifExistsDo: Gen[IfExistsDo] =
     oneOf(IfExistsReplace, IfExistsDoNothing, IfExistsThrowError, IfExistsInvalidSyntax)
 
   def _namespacedName: Gen[NamespacedName] = for {
-    name <- listOfN(1, _identifier)
+    name <- if (usesCypher5) {
+      listOfN(1, _identifier)
+    } else {
+      listOfN(2, _identifier)
+    }
     namespace <- _identifier
-    maybeNamespace <- option(namespace)
+    maybeNamespace <- if (usesCypher5) {
+      option(namespace)
+    } else {
+      const(None)
+    }
   } yield NamespacedName(name, maybeNamespace)(pos)
 
   def _topology: Gen[Topology] = for {
@@ -2449,12 +3411,31 @@ class AstGenerator(
     secondaries <- oneOf(Left(intSecondaries), Right(paramSecondaries))
   } yield secondaries
 
+  def _replicas: Gen[Either[Int, Parameter]] = for {
+    intReplicas <- chooseNum[Int](1, Integer.MAX_VALUE)
+    paramReplicas <- _intParameter
+    replicas <- oneOf(Left(intReplicas), Right(paramReplicas))
+  } yield replicas
+
+  def _shardDef(isCreate: Boolean): Gen[ShardDefinition] = for {
+    shardCount <- if (isCreate) chooseNum[Int](1, Integer.MAX_VALUE) else const(0)
+    graphTopology <- option(_topology)
+    replicas: Option[Either[Int, Parameter]] <- if (graphTopology.nonEmpty) option(_replicas) else some(_replicas)
+  } yield ShardDefinition(shardCount, graphTopology, replicas)
+
+  def _defaultLanguage: Gen[CypherVersion] = oneOf(CypherVersion.values)
+
   // User commands
 
   def _showUsers: Gen[ShowUsers] = for {
     yields <- _eitherYieldOrWhere
     withAuth <- boolean
-  } yield ShowUsers(yields, withAuth)(pos)
+    asCommands <- boolean
+  } yield ShowUsers(
+    yields,
+    withAuth,
+    if (usesCypher5) false else asCommands
+  )(pos)
 
   def _showCurrentUser: Gen[ShowCurrentUser] = for {
     yields <- _eitherYieldOrWhere
@@ -2475,7 +3456,8 @@ class AstGenerator(
     suspended <- option(boolean)
     homeDatabase <- option(_setHomeDatabaseAction)
     ifExistsDo <- _ifExistsDo
-  } yield CreateUser(userName, UserOptions(suspended, homeDatabase), ifExistsDo, newAuths, oldNativeAuth)(pos)
+    tags <- if (usesCypher5) const(None) else option(_tagsValue.map(SetTags(_)(pos)))
+  } yield CreateUser(userName, UserOptions(suspended, homeDatabase), ifExistsDo, newAuths, oldNativeAuth, tags)(pos)
 
   def _renameUser: Gen[RenameUser] = for {
     fromUserName <- _stringLiteralOrParameter
@@ -2495,12 +3477,45 @@ class AstGenerator(
     newAuths <- _auths(mandatoryPassword = false, needsAuth = false)
     removeAuth <- _removeAuth()
     suspended <- option(boolean)
+    tags <- if (usesCypher5) const(Seq.empty[UserTagsAction]) else oneOf(const(Seq.empty), _alterUsersTags)
     // Need at least one SET or REMOVE clause
     homeDatabase <-
-      if (oldNativeAuth.isEmpty && newAuths.isEmpty && removeAuth.isEmpty && suspended.isEmpty)
+      if (oldNativeAuth.isEmpty && newAuths.isEmpty && removeAuth.isEmpty && suspended.isEmpty && tags.isEmpty)
         oneOf(some(_setHomeDatabaseAction), some(RemoveHomeDatabaseAction))
       else oneOf(option(_setHomeDatabaseAction), option(RemoveHomeDatabaseAction))
-  } yield AlterUser(userName, UserOptions(suspended, homeDatabase), ifExists, newAuths, oldNativeAuth, removeAuth)(pos)
+  } yield AlterUser(
+    userName,
+    UserOptions(suspended, homeDatabase),
+    ifExists,
+    newAuths,
+    oldNativeAuth,
+    removeAuth,
+    tags
+  )(pos)
+
+  def _tagsValue: Gen[Expression] = oneOf(
+    _stringLit,
+    _stringParameter,
+    _listOf(_stringLit)
+  )
+
+  def _alterUsersTags: Gen[Seq[UserTagsAction]] = oneOf(
+    _tagsValue.map(expr => Seq(SetTags(expr)(pos))),
+    _tagsValue.map(expr => Seq(AddTags(expr)(pos))),
+    for {
+      remove <- oneOf(
+        _tagsValue.map(expr => RemoveTags(expr)(pos): UserTagsAction),
+        const(RemoveAllTags()(pos): UserTagsAction)
+      )
+      maybeAdd <- option(_tagsValue.map(expr => AddTags(expr)(pos)))
+    } yield Seq(remove) ++ maybeAdd
+  )
+
+  def _alterUsers: Gen[AlterUsers] = for {
+    userNames <- oneOrMore(_stringLiteralOrParameter)
+    ifExists <- boolean
+    tags <- _alterUsersTags
+  } yield AlterUsers(userNames, ifExists, tags)(pos)
 
   def _passwordClause: Gen[Password] = for {
     password <- _password
@@ -2560,23 +3575,76 @@ class AstGenerator(
     oldPassword <- _password
   } yield SetOwnPassword(newPassword, oldPassword)(pos)
 
-  def _userCommand: Gen[AdministrationCommand] = oneOf(
-    _showUsers,
-    _showCurrentUser,
-    _createUser,
-    _renameUser,
-    _dropUser,
-    _alterUser,
-    _setOwnPassword
-  )
+  def _userCommand: Gen[AdministrationCommand] =
+    if (usesCypher5)
+      oneOf(_showUsers, _showCurrentUser, _createUser, _renameUser, _dropUser, _alterUser, _setOwnPassword)
+    else
+      oneOf(_showUsers, _showCurrentUser, _createUser, _renameUser, _dropUser, _alterUser, _alterUsers, _setOwnPassword)
+
+  // Auth rule commands
+
+  def _showAuthRules: Gen[ShowAuthRules] = for {
+    yields <- _eitherYieldOrWhere
+    asCommands <- boolean
+  } yield ShowAuthRules(yields, asCommands)(pos)
+
+  def _createAuthRule: Gen[CreateAuthRule] = for {
+    authRuleName <- _stringLiteralOrParameter
+    ifExistsDo <- _ifExistsDo
+    condition <- _authRuleCondition
+    enabled <- option(_AuthRuleEnabled)
+  } yield CreateAuthRule(authRuleName, ifExistsDo, List(condition) ++ enabled)(pos)
+
+  def _alterAuthRule: Gen[AlterAuthRule] = for {
+    authRuleName <- _stringLiteralOrParameter
+    ifExists <- boolean
+    condition <- option(_authRuleCondition)
+    enabled <- if (condition.isEmpty) some(_AuthRuleEnabled) else option(_AuthRuleEnabled)
+  } yield AlterAuthRule(authRuleName, ifExists, condition.toList ++ enabled)(pos)
+
+  def _renameAuthRule: Gen[RenameAuthRule] = for {
+    fromAuthRuleName <- _stringLiteralOrParameter
+    toAuthRuleName <- _stringLiteralOrParameter
+    ifExists <- boolean
+  } yield RenameAuthRule(fromAuthRuleName, toAuthRuleName, ifExists)(pos)
+
+  def _dropAuthRule: Gen[DropAuthRule] = for {
+    authRuleName <- _stringLiteralOrParameter
+    ifExists <- boolean
+  } yield DropAuthRule(authRuleName, ifExists)(pos)
+
+  def _authRuleCondition: Gen[AuthRuleCondition] = for {
+    expression <- _expression
+  } yield AuthRuleCondition(expression)(pos)
+
+  def _AuthRuleEnabled: Gen[AuthRuleEnabled] = for {
+    enabled <- boolean
+  } yield AuthRuleEnabled(enabled)(pos)
+
+  def _authRuleCommand: Gen[AdministrationCommand] =
+    oneOf(
+      _showAuthRules.filterNot(_ => usesCypher5),
+      _createAuthRule.filterNot(_ => usesCypher5),
+      _alterAuthRule.filterNot(_ => usesCypher5),
+      _renameAuthRule.filterNot(_ => usesCypher5),
+      _dropAuthRule.filterNot(_ => usesCypher5)
+    )
 
   // Role commands
 
   def _showRoles: Gen[ShowRoles] = for {
     withUsers <- boolean
+    withAuthRules <- boolean
+    asCommands <- boolean
     showAll <- boolean
     yields <- _eitherYieldOrWhere
-  } yield ShowRoles(withUsers, showAll, yields)(pos)
+  } yield ShowRoles(
+    withUsers,
+    if (withUsers || usesCypher5) false else withAuthRules,
+    showAll,
+    if (usesCypher5) false else asCommands,
+    yields
+  )(pos)
 
   def _createRole: Gen[CreateRole] = for {
     roleName <- _stringLiteralOrParameter
@@ -2596,15 +3664,35 @@ class AstGenerator(
     ifExists <- boolean
   } yield DropRole(roleName, ifExists)(pos)
 
-  def _grantRole: Gen[GrantRolesToUsers] = for {
+  def _grantRolesToUsers: Gen[GrantRolesToUsers] = for {
     roleNames <- _listOfStringLiteralOrParam
     userNames <- _listOfStringLiteralOrParam
   } yield GrantRolesToUsers(roleNames, userNames)(pos)
 
-  def _revokeRole: Gen[RevokeRolesFromUsers] = for {
+  def _grantRolesToAuthRules: Gen[GrantRolesToAuthRules] = for {
+    roleNames <- _listOfStringLiteralOrParam
+    ruleNames <- _listOfStringLiteralOrParam
+  } yield GrantRolesToAuthRules(roleNames, ruleNames)(pos)
+
+  def _grantRole: Gen[AdministrationCommand] = {
+    if (usesCypher5) _grantRolesToUsers
+    else oneOf(_grantRolesToUsers, _grantRolesToAuthRules)
+  }
+
+  def _revokeRolesFromUsers: Gen[RevokeRolesFromUsers] = for {
     roleNames <- _listOfStringLiteralOrParam
     userNames <- _listOfStringLiteralOrParam
   } yield RevokeRolesFromUsers(roleNames, userNames)(pos)
+
+  def _revokeRolesFromAuthRules: Gen[RevokeRolesFromAuthRules] = for {
+    roleNames <- _listOfStringLiteralOrParam
+    ruleNames <- _listOfStringLiteralOrParam
+  } yield RevokeRolesFromAuthRules(roleNames, ruleNames)(pos)
+
+  def _revokeRole: Gen[AdministrationCommand] = {
+    if (usesCypher5) _revokeRolesFromUsers
+    else oneOf(_revokeRolesFromUsers, _revokeRolesFromAuthRules)
+  }
 
   def _roleCommand: Gen[AdministrationCommand] = oneOf(
     _showRoles,
@@ -2619,7 +3707,7 @@ class AstGenerator(
 
   def _revokeType: Gen[RevokeType] = oneOf(RevokeGrantType()(pos), RevokeDenyType()(pos), RevokeBothType()(pos))
 
-  def _dbmsAction: Gen[DbmsAction] = oneOf(
+  def _dbmsAction: Gen[DbmsAction] = oneOf(Seq(
     AllDbmsAction,
     ExecuteProcedureAction,
     ExecuteBoostedProcedureAction,
@@ -2650,8 +3738,6 @@ class AstGenerator(
     DropDatabaseAction,
     DropCompositeDatabaseAction,
     CompositeDatabaseManagementActions,
-    AlterDatabaseAction,
-    SetDatabaseAccessAction,
     AllAliasManagementActions,
     CreateAliasAction,
     DropAliasAction,
@@ -2664,12 +3750,31 @@ class AstGenerator(
     ServerManagementAction,
     ShowServerAction,
     ShowSettingAction
-  )
+  ) ++ Seq(
+    AllAuthRuleActions,
+    CreateAuthRuleAction,
+    RenameAuthRuleAction,
+    AlterAuthRuleAction,
+    DropAuthRuleAction,
+    ShowAuthRuleAction,
+    AllUserMetadataActions,
+    ShowUserMetadataAction,
+    SetUserMetadataAction,
+    AllSecretManagementActions,
+    ReadSecretsAction,
+    WriteSecretsAction,
+    ShowSecretsAction
+  ) // Actions not available in Cypher 5
+    .filterNot(_ => usesCypher5))
 
   def _databaseAction: Gen[DatabaseAction] = oneOf(
     StartDatabaseAction,
     StopDatabaseAction,
     AllDatabaseAction,
+    AlterDatabaseAction(usesCypher5),
+    SetDatabaseAccessAction(usesCypher5),
+    SetDatabaseDefaultLanguageAction(usesCypher5),
+    AlterCompositeDatabaseAction(usesCypher5),
     AccessDatabaseAction,
     AllIndexActions,
     CreateIndexAction,
@@ -2718,6 +3823,12 @@ class AstGenerator(
         qualifier <- frequency(7 -> functions, 3 -> List(FunctionQualifier("*")(pos)))
       } yield qualifier
 
+    } else if (dbmsAction == ReadSecretsAction) {
+      // Secrets
+      for {
+        name <- _stringLiteralOrParameter
+        qualifier <- frequency(7 -> List(SecretQualifier(name)(pos)), 3 -> List(SecretAllQualifier()(pos)))
+      } yield qualifier
     } else if (dbmsAction == ShowSettingAction) {
       // Settings
       for {
@@ -2762,10 +3873,19 @@ class AstGenerator(
     multiQualifiers <- oneOrMore(_identifier)
     variable <- _variable
     expression <- _propertyRuleExpression(variable)
-    qualifier <- oneOf(
-      PatternQualifier(multiQualifiers.map(LabelQualifier(_)(pos)), Some(variable), expression),
-      PatternQualifier(List(LabelAllQualifier()(pos)), Some(variable), expression)
-    )
+    qualifier <- {
+      val nodePatternQualifiers = Seq(
+        PatternQualifier(multiQualifiers.map(LabelQualifier(_)(pos)), Some(variable), expression, Node),
+        PatternQualifier(List(LabelAllQualifier()(pos)), Some(variable), expression, Node)
+      )
+      val relPatternQualifiers = Seq(
+        PatternQualifier(multiQualifiers.map(RelationshipQualifier(_)(pos)), Some(variable), expression, Relationship),
+        PatternQualifier(List(RelationshipAllQualifier()(pos)), Some(variable), expression, Relationship)
+      )
+      oneOf(
+        nodePatternQualifiers ++ relPatternQualifiers
+      )
+    }
   } yield List(qualifier)
 
   def _propertyRuleExpression(variable: Variable): Gen[Expression] = for {
@@ -2799,8 +3919,11 @@ class AstGenerator(
     val predicates = Seq(
       Equals(l, r)(pos),
       NotEquals(l, r)(pos),
-      In(l, ListLiteral(Seq(r))(pos))(pos)
-    ) ++ _inequalitiesPredicate(l, r)
+      In(l, ListLiteral(Seq(r))(pos))(pos),
+      In(r, l)(pos),
+      Equals(r, l)(pos),
+      NotEquals(r, l)(pos)
+    ) ++ _inequalitiesPredicate(l, r) ++ _inequalitiesPredicate(r, l)
 
     oneOf(
       predicates ++ _notExpressions(predicates)
@@ -2889,8 +4012,11 @@ class AstGenerator(
     showRole = ShowRolesPrivileges(names)(pos)
     showUser1 = ShowUsersPrivileges(names)(pos)
     showUser2 = ShowUserPrivileges(None)(pos)
+    showAuthRule = ShowAuthRulesPrivileges(names)(pos)
     showAll = ShowAllPrivileges()(pos)
-    scope <- oneOf(showRole, showUser1, showUser2, showAll)
+    scopeCypher5 <- oneOf(showRole, showUser1, showUser2, showAll)
+    scopeCypher25 <- oneOf(showRole, showUser1, showUser2, showAuthRule, showAll)
+    scope = if (usesCypher5) scopeCypher5 else scopeCypher25
     yields <- _eitherYieldOrWhere
   } yield ShowPrivileges(scope, yields)(pos)
 
@@ -2899,11 +4025,14 @@ class AstGenerator(
     showRole = ShowRolesPrivileges(names)(pos)
     showUser1 = ShowUsersPrivileges(names)(pos)
     showUser2 = ShowUserPrivileges(None)(pos)
+    showAuthRule = ShowAuthRulesPrivileges(names)(pos)
     showAll = ShowAllPrivileges()(pos)
-    scope <- oneOf(showRole, showUser1, showUser2, showAll)
+    scopeCypher5 <- oneOf(showRole, showUser1, showUser2, showAll)
+    scopeCypher25 <- oneOf(showRole, showUser1, showUser2, showAuthRule, showAll)
+    scope = if (usesCypher5) scopeCypher5 else scopeCypher25
     asRevoke <- boolean
     yields <- _eitherYieldOrWhere
-  } yield ShowPrivilegeCommands(scope, asRevoke, yields)(pos)
+  } yield ShowPrivilegeCommands(scope, asRevoke, yields, usesCypher5)(pos)
 
   def _dbmsPrivilege: Gen[PrivilegeCommand] = for {
     dbmsAction <- _dbmsAction
@@ -2911,36 +4040,60 @@ class AstGenerator(
     roleNames <- _listOfStringLiteralOrParam
     revokeType <- _revokeType
     immutable <- boolean
-    dbmsGrant = GrantPrivilege.dbmsAction(dbmsAction, immutable, roleNames, qualifier)(pos)
-    dbmsDeny = DenyPrivilege.dbmsAction(dbmsAction, immutable, roleNames, qualifier)(pos)
-    dbmsRevoke = RevokePrivilege.dbmsAction(dbmsAction, immutable, roleNames, revokeType, qualifier)(pos)
+    dbmsGrant = GrantPrivilege(DbmsPrivilege(dbmsAction)(pos), immutable, None, qualifier, roleNames)(pos)
+    dbmsDeny = DenyPrivilege(DbmsPrivilege(dbmsAction)(pos), immutable, None, qualifier, roleNames)(pos)
+    dbmsRevoke = RevokePrivilege(
+      DbmsPrivilege(dbmsAction)(pos),
+      immutable,
+      None,
+      qualifier,
+      roleNames,
+      revokeType
+    )(pos)
     dbms <- oneOf(dbmsGrant, dbmsDeny, dbmsRevoke)
   } yield dbms
 
   def _databasePrivilege: Gen[PrivilegeCommand] = for {
     databaseAction <- _databaseAction
     dbNames <- oneOrMore(_databaseName)
-    databaseScope <- oneOf(
-      NamedDatabasesScope(dbNames)(pos),
-      AllDatabasesScope()(pos),
-      HomeDatabaseScope()(pos)
-    )
+    databaseScope <-
+      if (databaseAction.isInstanceOf[DatabaseAndDbmsAction] && usesCypher5) {
+        const(AllDatabasesScope()(pos))
+      } else {
+        oneOf(
+          NamedDatabasesScope(dbNames)(pos),
+          AllDatabasesScope()(pos),
+          HomeDatabaseScope()(pos)
+        )
+      }
     databaseQualifier <- _databaseQualifier(databaseAction.isInstanceOf[TransactionManagementAction])
     roleNames <- _listOfStringLiteralOrParam
     revokeType <- _revokeType
     immutable <- boolean
     databaseGrant =
-      GrantPrivilege.databaseAction(databaseAction, immutable, databaseScope, roleNames, databaseQualifier)(pos)
-    databaseDeny =
-      DenyPrivilege.databaseAction(databaseAction, immutable, databaseScope, roleNames, databaseQualifier)(pos)
-    databaseRevoke =
-      RevokePrivilege.databaseAction(
-        databaseAction,
+      GrantPrivilege(
+        DatabasePrivilege(databaseAction, databaseScope)(pos),
         immutable,
-        databaseScope,
+        None,
+        databaseQualifier,
+        roleNames
+      )(pos)
+    databaseDeny =
+      DenyPrivilege(
+        DatabasePrivilege(databaseAction, databaseScope)(pos),
+        immutable,
+        None,
+        databaseQualifier,
+        roleNames
+      )(pos)
+    databaseRevoke =
+      RevokePrivilege(
+        DatabasePrivilege(databaseAction, databaseScope)(pos),
+        immutable,
+        None,
+        databaseQualifier,
         roleNames,
-        revokeType,
-        databaseQualifier
+        revokeType
       )(pos)
     database <- oneOf(databaseGrant, databaseDeny, databaseRevoke)
   } yield database
@@ -2955,12 +4108,18 @@ class AstGenerator(
     revokeType <- _revokeType
     immutable <- boolean
     graphGrant =
-      GrantPrivilege.graphAction(graphAction, immutable, maybeResource, graphScope, qualifier, roleNames)(pos)
-    graphDeny = DenyPrivilege.graphAction(graphAction, immutable, maybeResource, graphScope, qualifier, roleNames)(pos)
+      GrantPrivilege(GraphPrivilege(graphAction, graphScope)(pos), immutable, maybeResource, qualifier, roleNames)(pos)
+    graphDeny =
+      DenyPrivilege(GraphPrivilege(graphAction, graphScope)(pos), immutable, maybeResource, qualifier, roleNames)(pos)
     graphRevoke =
-      RevokePrivilege.graphAction(graphAction, immutable, maybeResource, graphScope, qualifier, roleNames, revokeType)(
-        pos
-      )
+      RevokePrivilege(
+        GraphPrivilege(graphAction, graphScope)(pos),
+        immutable,
+        maybeResource,
+        qualifier,
+        roleNames,
+        revokeType
+      )(pos)
     graph <- oneOf(graphGrant, graphDeny, graphRevoke)
   } yield graph
 
@@ -2989,8 +4148,9 @@ class AstGenerator(
 
   // Database commands
 
-  def _showDatabase: Gen[ShowDatabase] = for {
+  def _showDatabases: Gen[SingleQuery] = for {
     dbName <- _databaseName
+    use <- option(_use)
     scope <- oneOf(
       SingleNamedDatabaseScope(dbName)(pos),
       AllDatabasesScope()(pos),
@@ -2998,22 +4158,59 @@ class AstGenerator(
       HomeDatabaseScope()(pos)
     )
     yields <- _eitherYieldOrWhere
-  } yield ShowDatabase(scope, yields)(pos)
+    yieldAll <- boolean
+  } yield {
+    val showClauses = yields match {
+      case Some(Right(w)) =>
+        Seq(ShowDatabasesClause(scope, Some(w), List.empty, yieldAll = false, None, usesCypher5)(pos))
+      case Some(Left((y, r))) =>
+        val (w, yi) = turnYieldToWith(y)
+        Seq(ShowDatabasesClause(scope, None, yi, yieldAll = false, Some(w), usesCypher5)(pos)) ++ r
+      case _ if yieldAll =>
+        Seq(ShowDatabasesClause(
+          scope,
+          None,
+          List.empty,
+          yieldAll = true,
+          Some(getFullWithStarFromYield),
+          usesCypher5
+        )(pos))
+      case _ =>
+        Seq(ShowDatabasesClause(scope, None, List.empty, yieldAll = false, None, usesCypher5)(pos))
+    }
+    SingleQuery(use.map(u => u +: showClauses).getOrElse(showClauses))(pos)
+  }
 
   def _createDatabase: Gen[CreateDatabase] = for {
     dbName <- _databaseNameNoNamespace
     ifExistsDo <- _ifExistsDo
     wait <- _waitUntilComplete
     options <- _optionsMapAsEitherOrNone
-    topology <- option(_topology)
-  } yield CreateDatabase(dbName, ifExistsDo, options, wait, topology)(pos)
+    topologyOption <- option(_topology)
+    defaultLanguageVersion <- option(_defaultLanguage)
+    shardDefOption <- option(_shardDef(isCreate = true))
+    (topology, shard) <- oneOf(const((topologyOption, None)), const((None, shardDefOption)))
+  } yield {
+    val shardDef = if (usesCypher5) None else shard
+    CreateDatabase(dbName, ifExistsDo, options, wait, topology, defaultLanguageVersion, shardDef)(pos)
+  }
 
   def _createCompositeDatabase: Gen[CreateCompositeDatabase] = for {
-    dbName <- _databaseName
+    dbName <- _databaseNameNoNamespace
     ifExistsDo <- _ifExistsDo
     options <- _optionsMapAsEitherOrNone
     wait <- _waitUntilComplete
-  } yield CreateCompositeDatabase(dbName, ifExistsDo, options, wait)(pos)
+    defaultLanguageVersion <- option(_defaultLanguage)
+  } yield CreateCompositeDatabase(dbName, ifExistsDo, options, wait, defaultLanguageVersion)(pos)
+
+  def _createReplicaDatabase: Gen[CreateReplicaDatabase] = for {
+    dbName <- _databaseNameNoNamespace
+    ifExistsDo <- _ifExistsDo
+    wait <- _waitUntilComplete
+    options <- _optionsMapAsEitherOrNone
+    topology <- option(_topology)
+    defaultLanguageVersion <- option(_defaultLanguage)
+  } yield CreateReplicaDatabase(dbName, ifExistsDo, options, wait, topology, defaultLanguageVersion)(pos)
 
   def _dropDatabase: Gen[DropDatabase] = for {
     dbName <- _databaseName
@@ -3030,11 +4227,27 @@ class AstGenerator(
     options <- _optionsForAlterDatabaseOrNone
     access <- option(_access)
     topology <- option(_topology)
+    defaultLanguageVersion <- option(_defaultLanguage)
+    shardDefinition <- if (usesCypher5) const(None) else option(_shardDef(isCreate = false))
+    replicas <- if (usesCypher5 || topology.nonEmpty) const(None) else option(_replicas)
     optionsToRemove <- _optionsToRemove(hasSetClause =
-      access.nonEmpty || topology.nonEmpty || (!options.equals(NoOptions))
+      access.nonEmpty || topology.nonEmpty || (!options.equals(
+        NoOptions
+      ) || defaultLanguageVersion.nonEmpty || shardDefinition.nonEmpty || replicas.nonEmpty)
     )
     wait <- _waitUntilComplete
-  } yield AlterDatabase(dbName, ifExists, access, topology, options, optionsToRemove, wait)(pos)
+  } yield AlterDatabase(
+    dbName,
+    ifExists,
+    access,
+    topology,
+    options,
+    optionsToRemove,
+    wait,
+    defaultLanguageVersion,
+    shardDefinition,
+    replicas
+  )(pos)
 
   def _startDatabase: Gen[StartDatabase] = for {
     dbName <- _databaseName
@@ -3046,23 +4259,35 @@ class AstGenerator(
     wait <- _waitUntilComplete
   } yield StopDatabase(dbName, wait)(pos)
 
-  def _multiDatabaseCommand: Gen[AdministrationCommand] = oneOf(
-    _showDatabase,
-    _createDatabase,
-    _createCompositeDatabase,
-    _dropDatabase,
-    _alterDatabase,
-    _startDatabase,
-    _stopDatabase
-  )
+  def _multiDatabaseCommand: Gen[AdministrationCommand] =
+    if (usesCypher5) {
+      oneOf(
+        _createDatabase,
+        _createCompositeDatabase,
+        _dropDatabase,
+        _alterDatabase,
+        _startDatabase,
+        _stopDatabase
+      )
+    } else {
+      oneOf(
+        _createDatabase,
+        _createCompositeDatabase,
+        _createReplicaDatabase,
+        _dropDatabase,
+        _alterDatabase,
+        _startDatabase,
+        _stopDatabase
+      )
+    }
 
   def _access: Gen[Access] = for {
     access <- oneOf(ReadOnlyAccess, ReadWriteAccess)
   } yield access
 
   def _waitUntilComplete: Gen[WaitUntilComplete] = for {
-    timeout <- posNum[Long]
-    wait <- oneOf(NoWait, IndefiniteWait, TimeoutAfter(timeout))
+    timeout <- posNum[Long].map(_.toString)
+    wait <- oneOf(NoWait()(pos), IndefiniteWait()(pos), TimeoutAfter(timeout)(pos))
   } yield wait
 
   def _createLocalDatabaseAlias: Gen[CreateLocalDatabaseAlias] = for {
@@ -3077,11 +4302,20 @@ class AstGenerator(
     targetName <- _databaseName
     ifExistsDo <- _ifExistsDo
     url <- _nameAsEither
-    username <- _stringLiteralOrParameter
-    password <- _password
+    remoteAliasCredentials <- _remoteAliasCredentials
     driverSettings <- option(_optionalMapAsEither)
     properties <- option(_optionalMapAsEither)
-  } yield CreateRemoteDatabaseAlias(aliasName, targetName, ifExistsDo, url, username, password, driverSettings, properties)(pos)
+    defaultLanguageVersion <- option(_defaultLanguage)
+  } yield CreateRemoteDatabaseAlias(
+    aliasName,
+    targetName,
+    ifExistsDo,
+    url,
+    remoteAliasCredentials,
+    driverSettings,
+    properties,
+    defaultLanguageVersion
+  )(pos)
 
   def _dropAlias: Gen[DropDatabaseAlias] = for {
     aliasName <- _databaseName
@@ -3104,19 +4338,32 @@ class AstGenerator(
     url <- if (targetName.nonEmpty) some(_nameAsEither) else const(None)
     username <- option(_stringLiteralOrParameter)
     password <- option(_password)
-    // All four are not allowed to be None
+    defaultLanguageVersion <- option(_defaultLanguage)
+    // All five are not allowed to be None
     driverSettings <-
-      if (url.isEmpty && username.isEmpty && password.isEmpty)
+      if (url.isEmpty && username.isEmpty && password.isEmpty && defaultLanguageVersion.isEmpty)
         some(_optionalMapAsEither)
       else
         option(_optionalMapAsEither)
     properties <- option(_optionalMapAsEither)
-  } yield AlterRemoteDatabaseAlias(aliasName, targetName, ifExists, url, username, password, driverSettings, properties)(pos)
+  } yield AlterRemoteDatabaseAlias(
+    aliasName,
+    targetName,
+    ifExists,
+    url,
+    username,
+    password,
+    driverSettings,
+    properties,
+    defaultLanguageVersion
+  )(pos)
 
   def _showAliases: Gen[ShowAliases] = for {
     dbName <- option(_databaseName)
     yields <- _eitherYieldOrWhere
-  } yield ShowAliases(dbName, yields)(pos)
+    // The test isn't run with the feature flag enabled, so having false here is fine
+    oidcCredentialForwardingEnabled <- const(false)
+  } yield ShowAliases(dbName, yields, usesCypher5, oidcCredentialForwardingEnabled)(pos)
 
   def _aliasCommands: Gen[AdministrationCommand] = oneOf(
     _createLocalDatabaseAlias,
@@ -3175,7 +4422,15 @@ class AstGenerator(
 
   def _adminCommand: Gen[AdministrationCommand] = for {
     command <-
-      oneOf(_userCommand, _roleCommand, _privilegeCommand, _multiDatabaseCommand, _aliasCommands, _serverCommand)
+      oneOf(
+        _userCommand,
+        _authRuleCommand,
+        _roleCommand,
+        _privilegeCommand,
+        _multiDatabaseCommand,
+        _aliasCommands,
+        _serverCommand
+      )
     use <- frequency(1 -> some(_use), 9 -> const(None))
   } yield command.withGraph(use)
 

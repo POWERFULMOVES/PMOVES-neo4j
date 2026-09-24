@@ -24,13 +24,15 @@ import static org.neo4j.kernel.impl.storemigration.FileOperation.MOVE;
 import static org.neo4j.kernel.impl.storemigration.StoreMigratorFileOperation.fileOperation;
 
 import java.io.IOException;
-import java.io.OutputStream;
 import java.io.PrintStream;
 import java.nio.file.Path;
-import java.util.Set;
-import org.eclipse.collections.api.factory.Sets;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.function.Supplier;
+import org.apache.logging.log4j.core.util.NullOutputStream;
 import org.neo4j.batchimport.api.AdditionalInitialIds;
 import org.neo4j.batchimport.api.BatchImporter;
+import org.neo4j.batchimport.api.BatchImporter.HardwareValidation;
 import org.neo4j.batchimport.api.Configuration;
 import org.neo4j.batchimport.api.IndexConfig;
 import org.neo4j.batchimport.api.IndexImporterFactory;
@@ -48,9 +50,10 @@ import org.neo4j.io.pagecache.ExternallyManagedPageCache;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.api.index.IndexDirectoryStructure;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
-import org.neo4j.kernel.impl.transaction.log.files.TransactionLogInitializer;
+import org.neo4j.kernel.api.index.IndexProvidersAccess;
+import org.neo4j.kernel.impl.index.schema.DefaultIndexProvidersAccess;
 import org.neo4j.logging.internal.LogService;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.scheduler.JobScheduler;
@@ -59,15 +62,16 @@ import org.neo4j.storageengine.api.StoreVersion;
 import org.neo4j.storageengine.api.format.Index44Compatibility;
 import org.neo4j.storageengine.migration.AbstractStoreMigrationParticipant;
 import org.neo4j.storageengine.migration.TokenIndexMigrator;
+import org.neo4j.wal.LogTailMetadata;
+import org.neo4j.wal.files.LogTailMetadataFactoryImpl;
+import org.neo4j.wal.files.TransactionLogInitializer;
 
 /**
  * Migrates a store from one storage engine to another by doing something close to what store copy does
- *
+ * <br>
  * All tokens aren't necessarily migrated, only the ones referenced in the data will be included.
  */
 public class AcrossEngineMigrationParticipant extends AbstractStoreMigrationParticipant {
-    public static final String NAME = "Store files";
-
     private final Config config;
     private final LogService logService;
     private final FileSystemAbstraction fileSystem;
@@ -80,6 +84,9 @@ public class AcrossEngineMigrationParticipant extends AbstractStoreMigrationPart
     private final StorageEngineFactory targetStorageEngine;
     private final boolean forceBtreeIndexesToRange;
     private final boolean keepNodeIds;
+    private final long maxOffHeapMemory;
+    private final PrintStream verboseProgressOutput;
+    private final boolean verboseOutput;
 
     public AcrossEngineMigrationParticipant(
             FileSystemAbstraction fileSystem,
@@ -93,8 +100,11 @@ public class AcrossEngineMigrationParticipant extends AbstractStoreMigrationPart
             StorageEngineFactory srcStorageEngine,
             StorageEngineFactory targetStorageEngine,
             boolean forceBtreeIndexesToRange,
-            boolean keepNodeIds) {
-        super(NAME);
+            boolean keepNodeIds,
+            long maxOffHeapMemory,
+            PrintStream verboseProgressOutput,
+            boolean verboseOutput) {
+        super(STORE_FILES_MIGRATOR_NAME);
         this.fileSystem = fileSystem;
         this.pageCache = pageCache;
         this.config = config;
@@ -107,6 +117,9 @@ public class AcrossEngineMigrationParticipant extends AbstractStoreMigrationPart
         this.targetStorageEngine = targetStorageEngine;
         this.forceBtreeIndexesToRange = forceBtreeIndexesToRange;
         this.keepNodeIds = keepNodeIds;
+        this.maxOffHeapMemory = maxOffHeapMemory;
+        this.verboseProgressOutput = verboseProgressOutput;
+        this.verboseOutput = verboseOutput;
     }
 
     @Override
@@ -123,14 +136,31 @@ public class AcrossEngineMigrationParticipant extends AbstractStoreMigrationPart
                 .fromConfig(config)
                 .set(GraphDatabaseSettings.db_format, toVersion.formatName())
                 .build();
-
         // Use the ids from the old logTail. This means that the importer will end up on the
         // same tx id as the logs migration
         AdditionalInitialIds additionalInitialIds = getInitialIds(tailMetadata);
+        Supplier<IndexProvidersAccess> indexProviders = () -> new DefaultIndexProvidersAccess(
+                targetStorageEngine, fileSystem, config, jobScheduler, logService, pageCacheTracer, contextFactory);
+
+        // The default progress output is a condensed and consolidated 0..100% progress,
+        // which (probably for legacy reasons) is done via the special VisibleMigrationProgressMonitorFactory.
+        // However, for greater insight into what goes on during migration across formats
+        // (which may be a large undertaking) then skip that condensed progress and instead show the real progress
+        // from the importer which contains a lot more details.
+        Monitor progressTrackingMonitor;
+        PrintStream progressOutput;
+        if (verboseOutput) {
+            progressTrackingMonitor = Monitor.NO_MONITOR;
+            progressOutput = verboseProgressOutput;
+        } else {
+            progressTrackingMonitor = progressTrackingMonitor(progressListener);
+            progressOutput = new PrintStream(NullOutputStream.nullOutputStream());
+        }
 
         BatchImporter importer = targetStorageEngine.batchImporter(
                 migrationLayoutArg,
                 fileSystem,
+                false,
                 pageCacheTracer,
                 // Creating both indexes here. The existing store we are migrating doesn't necessarily
                 // have both, and we could take that into account, but it is easiest to just assume
@@ -141,24 +171,47 @@ public class AcrossEngineMigrationParticipant extends AbstractStoreMigrationPart
                         return IndexConfig.create().withLabelIndex().withRelationshipTypeIndex();
                     }
 
+                    // These two methods below has logic for accommodating both the current behavior of
+                    // only providing max-off-heap-memory, and also the legacy behavior of passing in an
+                    // external page cache (which is mostly due the existence of migrate command --pagecache option).
+
                     @Override
                     public ExternallyManagedPageCache providedPageCache() {
-                        return new ExternallyManagedPageCache(pageCache);
+                        return maxOffHeapMemory == UNSPECIFIED_MAX_OFF_HEAP_MEMORY
+                                ? new ExternallyManagedPageCache(pageCache)
+                                : null;
+                    }
+
+                    @Override
+                    public long maxOffHeapMemory() {
+                        return maxOffHeapMemory == UNSPECIFIED_MAX_OFF_HEAP_MEMORY
+                                ? super.maxOffHeapMemory()
+                                : maxOffHeapMemory;
+                    }
+
+                    @Override
+                    public boolean enableInstrumentation() {
+                        return false;
                     }
                 },
                 logService,
-                // No progress printing or updating progressReporter right now. Probably should be..
-                new PrintStream(OutputStream.nullOutputStream()),
-                false,
+                progressOutput,
+                verboseOutput,
                 additionalInitialIds,
+                new LogTailMetadataFactoryImpl(fileSystem),
                 localConfig,
-                progressTrackingMonitor(progressListener),
+                progressTrackingMonitor,
                 jobScheduler,
                 Collector.EMPTY,
                 TransactionLogInitializer.getLogFilesInitializer(),
                 indexImporterFactory,
                 memoryTracker,
-                contextFactory);
+                contextFactory,
+                indexProviders,
+                0,
+                null,
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS,
+                HardwareValidation.NONE);
 
         // Do the copy
         try (Input fromInput = srcStorageEngine.asBatchImporterInput(
@@ -166,12 +219,16 @@ public class AcrossEngineMigrationParticipant extends AbstractStoreMigrationPart
                 fileSystem,
                 pageCache,
                 pageCacheTracer,
-                localConfig,
+                config,
                 memoryTracker,
                 ReadBehaviour.INCLUSIVE_STRICT,
                 !keepNodeIds,
                 contextFactory,
                 tailMetadata)) {
+            if (!targetStorageEngine.supportsVectorData() && fromInput.containsVectorData()) {
+                throw new UnsupportedOperationException("Provided input is known to contain vector value data, "
+                        + "which is not supported by the target storage engine.");
+            }
             importer.doImport(fromInput);
         }
 
@@ -215,50 +272,59 @@ public class AcrossEngineMigrationParticipant extends AbstractStoreMigrationPart
             StoreVersion versionToUpgradeTo,
             MemoryTracker memoryTracker)
             throws IOException {
-        DatabaseLayout mig = targetStorageEngine.formatSpecificDatabaseLayout(migrationLayoutArg);
-        DatabaseLayout dir = srcStorageEngine.formatSpecificDatabaseLayout(directoryLayoutArg);
+        DatabaseLayout migrationDatabaseLayout = targetStorageEngine.formatSpecificDatabaseLayout(migrationLayoutArg);
+        DatabaseLayout sourceDatabaseLayout = srcStorageEngine.formatSpecificDatabaseLayout(directoryLayoutArg);
 
         // Delete all old store files, indexes, profiles that belonged to the old store since the
         // engine probably has different files and move won't replace all
-        Path indexFolder = IndexDirectoryStructure.baseSchemaIndexFolder(dir.databaseDirectory());
+        Path indexFolder = IndexDirectoryStructure.baseSchemaIndexFolder(sourceDatabaseLayout.databaseDirectory());
         Path toplevelIndexFolder = indexFolder;
-        while (!toplevelIndexFolder.getParent().equals(dir.databaseDirectory())) {
+        while (!toplevelIndexFolder.getParent().equals(sourceDatabaseLayout.databaseDirectory())) {
             toplevelIndexFolder = toplevelIndexFolder.getParent();
         }
-        Path profiles = dir.databaseDirectory().resolve("profiles");
-        Set<Path> storeFiles = Sets.mutable.of(dir.storeFiles().toArray(new Path[] {}));
-        Set<Path> idFiles = dir.idFiles();
-        storeFiles.addAll(idFiles);
+        Path profiles = sourceDatabaseLayout.databaseDirectory().resolve("profiles");
+        Path vectors = sourceDatabaseLayout.vectorStoresDirectory();
+        Collection<Path> storeFiles =
+                new ArrayList<>(srcStorageEngine.listStorageFiles(fileSystem, sourceDatabaseLayout));
         storeFiles.add(toplevelIndexFolder);
+        storeFiles.add(vectors);
         storeFiles.add(profiles);
         // If migrating from <5 the legacy token indexes are not in the index folder
-        storeFiles.add(dir.file(TokenIndexMigrator.LEGACY_LABEL_INDEX_STORE));
-        storeFiles.add(dir.file(TokenIndexMigrator.LEGACY_RELATIONSHIP_TYPE_INDEX_STORE));
+        storeFiles.addAll(sourceDatabaseLayout
+                .file(TokenIndexMigrator.LEGACY_LABEL_INDEX_STORE)
+                .allSegments(fileSystem));
+        storeFiles.addAll(sourceDatabaseLayout
+                .file(TokenIndexMigrator.LEGACY_RELATIONSHIP_TYPE_INDEX_STORE)
+                .allSegments(fileSystem));
         fileOperation(
                 DELETE_INCLUDING_DIRS,
                 fileSystem,
-                dir,
-                mig,
+                sourceDatabaseLayout,
+                migrationDatabaseLayout,
                 storeFiles.toArray(new Path[] {}),
                 true, // allow to skip non-existent source files
                 ExistingTargetStrategy.OVERWRITE);
 
         // Move the migrated ones into the store directory
-        Path migIndexFolder = IndexDirectoryStructure.baseSchemaIndexFolder(mig.databaseDirectory());
-        storeFiles = Sets.mutable.of(mig.storeFiles().toArray(new Path[] {}));
-        idFiles = mig.idFiles();
-        storeFiles.addAll(idFiles);
+        Path migIndexFolder =
+                IndexDirectoryStructure.baseSchemaIndexFolder(migrationDatabaseLayout.databaseDirectory());
+        Path vectorIndexFolder = migrationDatabaseLayout.vectorStoresDirectory();
+        storeFiles = targetStorageEngine.listStorageFiles(fileSystem, migrationDatabaseLayout);
         fileOperation(
                 MOVE,
                 fileSystem,
-                mig,
-                dir,
+                migrationDatabaseLayout,
+                sourceDatabaseLayout,
                 storeFiles.toArray(new Path[] {}),
                 true, // allow to skip non-existent source files
                 ExistingTargetStrategy.OVERWRITE);
 
         // Move the token indexes that were built in migrate, so they don't have to rebuild on start-up
         fileSystem.moveToDirectory(migIndexFolder, indexFolder.getParent());
+        // move vector files
+        if (fileSystem.fileExists(vectorIndexFolder)) {
+            fileSystem.moveToDirectory(vectorIndexFolder, sourceDatabaseLayout.databaseDirectory());
+        }
     }
 
     @Override

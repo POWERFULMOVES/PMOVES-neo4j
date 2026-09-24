@@ -29,8 +29,8 @@ import java.nio.ByteOrder;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.internal.id.BatchingIdSequence;
+import org.neo4j.internal.recordstorage.RecordStorageEngineFactory;
 import org.neo4j.io.memory.ByteBuffers;
 import org.neo4j.io.pagecache.ByteArrayPageCursor;
 import org.neo4j.io.pagecache.PageCursor;
@@ -43,10 +43,11 @@ import org.neo4j.kernel.impl.store.record.RecordLoad;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.values.storable.RandomValuesUtils;
 
 @SuppressWarnings("AbstractClassWithoutAbstractMethods")
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 public abstract class AbstractRecordFormatTest {
     // Whoever is hit first
     protected static final long TEST_ITERATIONS = 100_000;
@@ -72,6 +73,9 @@ public abstract class AbstractRecordFormatTest {
 
     @BeforeEach
     public void before() {
+        random.withConfiguration(
+                        RandomValuesUtils.selectStorageEngineDependentConfiguration(RecordStorageEngineFactory.NAME))
+                .reset();
         generators = new LimitedRecordGenerators(random.randomValues(), entityBits, propertyBits, 40, 16, -1, formats);
     }
 

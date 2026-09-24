@@ -34,10 +34,12 @@ import org.neo4j.storageengine.api.enrichment.WriteEnrichmentChannel;
 import org.neo4j.values.AnyValue;
 import org.neo4j.values.AnyValueWriter;
 import org.neo4j.values.storable.CoordinateReferenceSystem;
+import org.neo4j.values.storable.Float16Format;
 import org.neo4j.values.storable.TextArray;
 import org.neo4j.values.storable.TextValue;
 import org.neo4j.values.storable.TimeZones;
 import org.neo4j.values.storable.Value;
+import org.neo4j.values.storable.VectorValue;
 import org.neo4j.values.utils.TemporalUtil;
 import org.neo4j.values.virtual.ListValue;
 import org.neo4j.values.virtual.MapValue;
@@ -46,10 +48,16 @@ import org.neo4j.values.virtual.RelationshipValue;
 import org.neo4j.values.virtual.VirtualNodeValue;
 import org.neo4j.values.virtual.VirtualRelationshipValue;
 
-/**
- * @param channel the channel to write the {@link Value} objects out to.
- */
-public record ValuesWriter(WriteEnrichmentChannel channel) implements AnyValueWriter<RuntimeException> {
+public class ValuesWriter implements AnyValueWriter<RuntimeException> {
+    private final WriteEnrichmentChannel channel;
+    private ArrayType arrayType;
+
+    /**
+     * @param channel the channel to write the {@link Value} objects out to.
+     */
+    public ValuesWriter(WriteEnrichmentChannel channel) {
+        this.channel = channel;
+    }
 
     public int write(AnyValue value) {
         final var position = channel.size();
@@ -131,12 +139,13 @@ public record ValuesWriter(WriteEnrichmentChannel channel) implements AnyValueWr
 
     @Override
     public void beginArray(int size, ArrayType arrayType) {
+        this.arrayType = arrayType;
         channel.putInt(size);
     }
 
     @Override
     public void endArray() {
-        // no-op
+        this.arrayType = null;
     }
 
     @Override
@@ -206,6 +215,85 @@ public record ValuesWriter(WriteEnrichmentChannel channel) implements AnyValueWr
         }
     }
 
+    private void writeValueTypeIfArrayItem(byte type) {
+        if (arrayType == ArrayType.VECTOR) {
+            channel.put(type);
+        }
+    }
+
+    @Override
+    public void writeInt8Vector(byte[] values) throws RuntimeException {
+        VectorValue.ensureValidDimensions(values.length);
+        writeValueTypeIfArrayItem(ValuesReader.VECTOR_INT8.id());
+        channel.putShort((short) values.length);
+        channel.put(values);
+    }
+
+    @Override
+    public void writeInt16Vector(short[] values) throws RuntimeException {
+        VectorValue.ensureValidDimensions(values.length);
+        writeValueTypeIfArrayItem(ValuesReader.VECTOR_INT16.id());
+        channel.putShort((short) values.length);
+        for (var value : values) {
+            channel.putShort(value);
+        }
+    }
+
+    @Override
+    public void writeInt32Vector(int[] values) throws RuntimeException {
+        VectorValue.ensureValidDimensions(values.length);
+        writeValueTypeIfArrayItem(ValuesReader.VECTOR_INT32.id());
+        channel.putShort((short) values.length);
+        for (var value : values) {
+            channel.putInt(value);
+        }
+    }
+
+    @Override
+    public void writeInt64Vector(long[] values) throws RuntimeException {
+        VectorValue.ensureValidDimensions(values.length);
+        writeValueTypeIfArrayItem(ValuesReader.VECTOR_INT64.id());
+        channel.putShort((short) values.length);
+        for (var value : values) {
+            channel.putLong(value);
+        }
+    }
+
+    @Override
+    public void writeFloat16Vector(Float16Format format, short[] values) throws RuntimeException {
+        VectorValue.ensureValidDimensions(values.length);
+        byte typeId =
+                switch (format) {
+                    case FLOAT16 -> ValuesReader.VECTOR_FLOAT16.id();
+                    case BFLOAT16 -> ValuesReader.VECTOR_BFLOAT16.id();
+                };
+        writeValueTypeIfArrayItem(typeId);
+        channel.putShort((short) values.length);
+        for (var value : values) {
+            channel.putShort(value);
+        }
+    }
+
+    @Override
+    public void writeFloat32Vector(float[] values) throws RuntimeException {
+        VectorValue.ensureValidDimensions(values.length);
+        writeValueTypeIfArrayItem(ValuesReader.VECTOR_FLOAT32.id());
+        channel.putShort((short) values.length);
+        for (var value : values) {
+            channel.putFloat(value);
+        }
+    }
+
+    @Override
+    public void writeFloat64Vector(double[] values) throws RuntimeException {
+        VectorValue.ensureValidDimensions(values.length);
+        writeValueTypeIfArrayItem(ValuesReader.VECTOR_FLOAT64.id());
+        channel.putShort((short) values.length);
+        for (var value : values) {
+            channel.putDouble(value);
+        }
+    }
+
     @Override
     public void beginMap(int size) {
         channel.putInt(size);
@@ -248,7 +336,7 @@ public record ValuesWriter(WriteEnrichmentChannel channel) implements AnyValueWr
 
         writeInteger(labels.intSize());
         for (var i = 0; i < labels.intSize(); i++) {
-            writeString(labels.stringValue(i));
+            labels.stringValue(i).writeTo(this);
         }
 
         beginMap(properties.size());
@@ -340,6 +428,12 @@ public record ValuesWriter(WriteEnrichmentChannel channel) implements AnyValueWr
     public void writeRelationshipReference(long relId) {
         writeBoolean(false);
         writeInteger(relId);
+    }
+
+    @Override
+    public void writeUUID(long msb, long lsb) throws RuntimeException {
+        channel.putLong(msb);
+        channel.putLong(lsb);
     }
 
     private void writeList(ListValue list) {

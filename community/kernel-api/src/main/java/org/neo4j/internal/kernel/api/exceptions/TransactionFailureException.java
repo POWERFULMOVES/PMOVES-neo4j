@@ -22,18 +22,17 @@ package org.neo4j.internal.kernel.api.exceptions;
 import static org.neo4j.kernel.api.exceptions.Status.Cluster.ReplicationFailure;
 import static org.neo4j.kernel.api.exceptions.Status.General.UnknownError;
 import static org.neo4j.kernel.api.exceptions.Status.Transaction.LeaseExpired;
+import static org.neo4j.kernel.api.exceptions.Status.Transaction.TransactionCommitFailed;
 
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
+import org.neo4j.gqlstatus.GqlHelper;
 import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.kernel.api.exceptions.Status;
+import org.neo4j.logging.Log;
 
 public class TransactionFailureException extends KernelException {
-    @Deprecated
-    public TransactionFailureException(Status statusCode, Throwable cause, String message, Object... parameters) {
-        super(statusCode, cause, message, parameters);
-    }
 
     protected TransactionFailureException(
             ErrorGqlStatusObject gqlStatusObject,
@@ -44,33 +43,42 @@ public class TransactionFailureException extends KernelException {
         super(gqlStatusObject, statusCode, cause, message, parameters);
     }
 
-    @Deprecated
-    public TransactionFailureException(Status statusCode, Throwable cause) {
-        super(statusCode, cause);
-    }
-
-    public TransactionFailureException(ErrorGqlStatusObject gqlStatusObject, Status statusCode, Throwable cause) {
+    private TransactionFailureException(ErrorGqlStatusObject gqlStatusObject, Status statusCode, Throwable cause) {
         super(gqlStatusObject, statusCode, cause);
     }
 
-    @Deprecated
-    public TransactionFailureException(Status statusCode, String message, Object... parameters) {
-        super(statusCode, message, parameters);
-    }
-
-    public TransactionFailureException(
+    protected TransactionFailureException(
             ErrorGqlStatusObject gqlStatusObject, Status statusCode, String message, Object... parameters) {
         super(gqlStatusObject, statusCode, message, parameters);
     }
 
-    // To satisfy DatabaseHealth
-    @Deprecated
-    public TransactionFailureException(String message, Throwable cause) {
-        super(Status.Transaction.TransactionStartFailed, cause, message);
-    }
-
     private TransactionFailureException(ErrorGqlStatusObject gqlStatusObject, String message, Throwable cause) {
         super(gqlStatusObject, Status.Transaction.TransactionStartFailed, cause, message);
+    }
+
+    public static <EX extends Throwable & Status.HasStatus> TransactionFailureException wrapError(EX cause) {
+        if (cause instanceof ErrorGqlStatusObject gqlException && gqlException.gqlStatusObject() != null) {
+            return new TransactionFailureException(gqlException, cause.status(), cause, cause.getMessage());
+        }
+        // This case can be removed once all errors has been ported to GQLSTATUS
+        return new TransactionFailureException(GqlHelper.getDefaultObject(), cause.status(), cause, cause.getMessage());
+    }
+
+    public static TransactionFailureException internalError(String msgTitle, String message, Throwable cause) {
+        var gql = GqlHelper.get50N00(msgTitle, message);
+        return new TransactionFailureException(gql, message, cause);
+    }
+
+    public static TransactionFailureException internalError(
+            Status statusCode, String msgTitle, String message, Object... parameters) {
+        var gql = GqlHelper.get50N00(msgTitle, message);
+        return new TransactionFailureException(gql, statusCode, message, parameters);
+    }
+
+    public static TransactionFailureException internalError(
+            Status statusCode, Throwable cause, String msgTitle, String message, Object... parameters) {
+        var gql = GqlHelper.get50N00(msgTitle, message);
+        return new TransactionFailureException(gql, statusCode, cause, message, parameters);
     }
 
     public static TransactionFailureException leaseExpired(int currentLeaseId, int leaseId) {
@@ -100,5 +108,75 @@ public class TransactionFailureException extends KernelException {
         var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N33)
                 .build();
         return new TransactionFailureException(gql, ReplicationFailure, cause);
+    }
+
+    public static TransactionFailureException innerTransactionsStillOpen() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_2DN07)
+                .build();
+        return new TransactionFailureException(
+                gql,
+                TransactionCommitFailed,
+                "The transaction cannot be committed when it has open inner transactions.");
+    }
+
+    public static TransactionFailureException unknownError(Throwable e) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_50N42)
+                .build();
+        return new TransactionFailureException(gql, Status.General.UnknownError, e);
+    }
+
+    public static TransactionFailureException cannotBeCommitedInReadOnlyDb() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_08N08)
+                .build();
+        return new TransactionFailureException(
+                gql,
+                Status.General.ForbiddenOnReadOnlyDatabase,
+                "Transactions cannot be committed in a read-only Neo4j database");
+    }
+
+    public static TransactionFailureException transactionRollbackFailed(Throwable cause) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_40N01)
+                .build();
+        return new TransactionFailureException(gql, Status.Transaction.TransactionRollbackFailed, cause);
+    }
+
+    // KNL-038
+    public static TransactionFailureException cannotRollbackCannotDropCreatedConstraintIndex(Throwable cause) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_40N01)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_50N10)
+                        // We should have an indexName here, but we don't have it
+                        .build())
+                .build();
+        return new TransactionFailureException(
+                gql, Status.Transaction.TransactionRollbackFailed, cause, "Could not drop created constraint indexes");
+    }
+
+    public static TransactionFailureException couldNotApplyTransaction(String batchString, Throwable cause, Log log) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_2DN05)
+                .build();
+        final var message =
+                "Could not apply the transaction: %s to the store after written to log.".formatted(batchString);
+        var e = new TransactionFailureException(gql, Status.Transaction.TransactionCommitFailed, cause, message);
+        log.error(message, e);
+        return e;
+    }
+
+    public static TransactionFailureException couldNotAppendTransaction(String batchString, Throwable cause, Log log) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_2DN06)
+                .build();
+        final var message = "Could not append transaction: %s to log.".formatted(batchString);
+        final var e = new TransactionFailureException(gql, Status.Transaction.TransactionLogError, cause, message);
+        log.error(message, e);
+        return e;
+    }
+
+    public static TransactionFailureException couldNotPreallocateDiskSpace(
+            String batchString, Status status, Throwable cause, Log log) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N59)
+                .build();
+        final var message = "Could not preallocate disk space for the transaction: %s".formatted(batchString);
+        final var e = new TransactionFailureException(gql, status, cause, message);
+        log.error(message, e);
+        return e;
     }
 }

@@ -19,6 +19,9 @@
  */
 package org.neo4j.io.fs;
 
+import static java.lang.String.format;
+import static org.neo4j.io.ByteUnit.kibiBytes;
+
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
@@ -27,12 +30,18 @@ import java.nio.file.CopyOption;
 import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.FileAlreadyExistsException;
+import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.NotDirectoryException;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
+import java.nio.file.PathMatcher;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Set;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
@@ -42,11 +51,16 @@ import org.neo4j.io.fs.watcher.FileWatcher;
  * Abstraction for all interactions with files.
  */
 public interface FileSystemAbstraction extends Closeable {
+
+    String DEFAULT_TMP_SUFFIX = ".tmp";
+    Predicate<String> IS_DEFAULT_TMP_SUFFIX = s -> s.endsWith(DEFAULT_TMP_SUFFIX);
     /**
      * Used as return value from {@link #getFileDescriptor(StoreChannel)} for a channel where the machine-specific file descriptor
      * for that given file cannot be determined or retrieved.
      */
     int INVALID_FILE_DESCRIPTOR = -1;
+
+    int DEFAULT_OUTPUT_STREAM_BUFFER_SIZE = (int) kibiBytes(8);
 
     CopyOption[] EMPTY_COPY_OPTIONS = new CopyOption[0];
 
@@ -82,6 +96,20 @@ public interface FileSystemAbstraction extends Closeable {
     StoreChannel open(Path fileName, Set<OpenOption> options) throws IOException;
 
     /**
+     * @see #openAsOutputStream(Path, boolean, int)
+     */
+    default OutputStream openAsOutputStream(Path fileName, boolean append) throws IOException {
+        return openAsOutputStream(fileName, append, DEFAULT_OUTPUT_STREAM_BUFFER_SIZE);
+    }
+
+    /**
+     * @see #openAsOutputStream(Path, Set, int)
+     */
+    default OutputStream openAsOutputStream(Path fileName, Set<OpenOption> options) throws IOException {
+        return openAsOutputStream(fileName, options, DEFAULT_OUTPUT_STREAM_BUFFER_SIZE);
+    }
+
+    /**
      * Opens a file denoted by the {@code fileName} and returns an {@link OutputStream} to write binary data to it.
      * The semantics of how this file is opened is the equivalence of:
      * <ul>
@@ -93,10 +121,32 @@ public interface FileSystemAbstraction extends Closeable {
      * @param fileName the path to the file to open.
      * @param append if {@code false} truncates the file to zero length, otherwise if {@code true} sets the position at the end of the
      * existing file so that written data gets appended at the end of the file.
+     * @param bufferSize size of the buffer to use for this stream.
      * @return an {@link OutputStream} capable of writing binary data to the file denoted by {@code fileName}.
      * @throws IOException on I/O error opening/creating the file.
      */
-    OutputStream openAsOutputStream(Path fileName, boolean append) throws IOException;
+    OutputStream openAsOutputStream(Path fileName, boolean append, int bufferSize) throws IOException;
+
+    /**
+     * Opens a file denoted by the {@code fileName} and returns a {@link OutputStream} to write binary data to it.
+     * This call can alternatively even create the file if it doesn't already exist, depending on the provided {@code options}.
+     *
+     * @param fileName the path to the file to open.
+     * @param options a set of options to apply to this call. Common such options include:
+     * <ul>
+     *     <li>{@link StandardOpenOption#WRITE}: open the file for writing into it}</li>
+     *     <li>{@link StandardOpenOption#CREATE}: create the file before opening it, if it doesn't already exist</li>
+     *     <li>{@link StandardOpenOption#CREATE_NEW}: create the file and fail if it already exists</li>
+     *     <li>{@link StandardOpenOption#TRUNCATE_EXISTING}: truncate the file to 0 bytes if the file already existed</li>
+     *     <li>{@link StandardOpenOption#APPEND}: accompanied {@link StandardOpenOption#WRITE} this places the write position
+     *     at the end of the file, if it already contains data</li>
+     * </ul>
+     * @param bufferSize size of the buffer to use for this stream.
+     * @return the {@link StoreChannel} used to interact with the opened file.
+     * @throws IOException on I/O error opening/creating the file with the provided set of {@code options}, or if the provided options
+     * doesn't match the state of the file, e.g. if the options prohibits the file from existing, but it already exists.
+     */
+    OutputStream openAsOutputStream(Path fileName, Set<OpenOption> options, int bufferSize) throws IOException;
 
     /**
      * Opens a file denoted by the {@code fileName} and returns an {@link InputStream} to read from it.
@@ -248,7 +298,7 @@ public interface FileSystemAbstraction extends Closeable {
      * Lists files in the given {@code directory}.
      *
      * @param directory the directory to list files for. Both files and directories contained in the {@code directory} are returned, non-recursively.
-     * @return a list of files and directories contained in the provided {@code directory}
+     * @return an array of files and directories contained in the provided {@code directory}
      * @throws NotDirectoryException if the provided {@code directory} isn't a directory.
      * @throws NoSuchFileException if the provided {@code directory} doesn't exist.
      * @throws IOException on I/O error.
@@ -260,12 +310,29 @@ public interface FileSystemAbstraction extends Closeable {
      *
      * @param directory the directory to list files for. Both files and directories contained in the {@code directory} are returned, non-recursively.
      * @param filter the filter to use in the listing.
-     * @return a list of files and directories contained in the provided {@code directory}
+     * @return an array of files and directories contained in the provided {@code directory}
      * @throws NotDirectoryException if the provided {@code directory} isn't a directory.
      * @throws NoSuchFileException if the provided {@code directory} doesn't exist.
      * @throws IOException on I/O error.
      */
     Path[] listFiles(Path directory, DirectoryStream.Filter<Path> filter) throws IOException;
+
+    /**
+     * Returns paths and metadata for files passing the provided {@code filter} in the given {@code directory}.
+     *
+     * @param directory the directory to list files for. Both files and directories contained in the {@code directory} are returned, non-recursively.
+     * @param filter the filter to use in the listing.
+     * @return a stream of files and directories contained in the provided {@code directory}. For each file, metadata is included if available from the underlying file system.
+     * @throws NotDirectoryException if the provided {@code directory} isn't a directory.
+     * @throws NoSuchFileException if the provided {@code directory} doesn't exist.
+     * @throws IOException on I/O error.
+     */
+    default List<PathWithMetadata> listFilesWithMetadata(Path directory, DirectoryStream.Filter<Path> filter)
+            throws IOException {
+        return Arrays.stream(listFiles(directory, filter))
+                .map(PathWithMetadata::withoutMetadata)
+                .toList();
+    }
 
     /**
      * @param file the file to check whether or not it's a directory.
@@ -465,4 +532,73 @@ public interface FileSystemAbstraction extends Closeable {
      * @throws IOException if an I/O error occurs or the specified directory does not exist.
      */
     Path createTempDirectory(Path dir, String prefix) throws IOException;
+
+    /**
+     * @return whether this file system abstraction supports opening a directory channel for the given path.
+     * The given path must be a directory.
+     */
+    boolean supportsDirectoryChannel(Path directory);
+
+    /**
+     * Match files using a glob pattern.
+     * @param dir base directory to match files in.
+     * @param style style of pattern to use to match files, e.g.: regex or glob.
+     * @param pattern pattern to match files against, e.g. {@code "*.txt"}.
+     * @return matching files.
+     * @throws IOException if an I/O error occurs or the specified directory does not exist.
+     */
+    default List<Path> matchFiles(Path dir, PatternStyle style, String pattern) throws IOException {
+        PathMatcher matcher = dir.getFileSystem().getPathMatcher(style.name() + ":" + pattern);
+        List<Path> matches = new ArrayList<>();
+        if (style == PatternStyle.GLOB && pattern.contains("**")) {
+            try (Stream<Path> stream = Files.walk(dir)) {
+                Iterator<Path> iterator = stream.iterator();
+                while (iterator.hasNext()) {
+                    Path candidate = iterator.next();
+                    if (isDirectory(candidate)) {
+                        continue;
+                    }
+                    if (matcher.matches(dir.relativize(candidate.toAbsolutePath()))) {
+                        matches.add(candidate);
+                    }
+                }
+            }
+        } else {
+            Path[] listedFiles = listFiles(dir, path -> matcher.matches(path.getFileName()));
+            if (listedFiles != null) {
+                matches.addAll(List.of(listedFiles));
+            }
+        }
+        return matches;
+    }
+
+    /**
+     * Try forcing changes in a directory to disk, e.g. file renames in the directory, if the underlying file system
+     * supports it.
+     */
+    default void tryForceDirectory(Path directory) throws IOException {
+        if (!fileExists(directory)) {
+            return;
+        } else if (!isDirectory(directory)) {
+            throw new NotDirectoryException(
+                    format("The path %s must refer to a directory!", directory.toAbsolutePath()));
+        }
+
+        if (!supportsDirectoryChannel(directory)) {
+            return;
+        }
+
+        // Attempts to fsync the directory, guarantying e.g. file creation/deletion/rename events are durable
+        // See http://mail.openjdk.java.net/pipermail/nio-dev/2015-May/003140.html
+        // See also https://github.com/apache/lucene-solr/commit/7bea628bf3961a10581833935e4c1b61ad708c5c
+        try (StoreChannel channel = read(directory)) {
+            channel.force(true);
+        }
+    }
+
+    enum PatternStyle {
+        REGEX,
+        GLOB,
+        NONE
+    }
 }

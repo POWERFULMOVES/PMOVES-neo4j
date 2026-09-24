@@ -19,14 +19,16 @@
  */
 package org.neo4j.graphdb;
 
-import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.util.function.Consumer;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.graphdb.schema.ConstraintDefinition;
 import org.neo4j.graphdb.schema.Schema;
+import org.neo4j.internal.kernel.api.exceptions.schema.CreateConstraintFailureException;
 
 public class SchemaAcceptanceTestBase {
     protected final String propertyKey = "my_property_key";
@@ -58,19 +60,25 @@ public class SchemaAcceptanceTestBase {
 
         // When
         // Then
-        var e = assertThrows(UnsupportedOperationException.class, () -> {
-            try (Transaction tx = db.beginTx()) {
-                tx.schema().getConstraintByName(nameA).drop();
-                similar.createConstraint(tx.schema(), propertyKey, nameB);
-                tx.commit();
-            }
-        });
-        assertThat(e)
-                .hasMessageContaining(format(
-                        "Trying to create constraint '%s' in same transaction as dropping '%s'. "
-                                + "This is not supported because they are both backed by similar indexes. "
-                                + "Please drop constraint in a separate transaction before creating the new one.",
-                        nameB, nameA));
+        ErrorGqlStatusObjectAssertions.assertThatNonGqlThrownBy(() -> {
+                    try (Transaction tx = db.beginTx()) {
+                        tx.schema().getConstraintByName(nameA).drop();
+                        similar.createConstraint(tx.schema(), propertyKey, nameB);
+                        tx.commit();
+                    }
+                })
+                .causeWithGqlStatus()
+                .isInstanceOf(CreateConstraintFailureException.class)
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_50N11)
+                .hasMessageContainingAll(
+                        "Trying to create constraint",
+                        nameB,
+                        "in same transaction as dropping",
+                        nameA,
+                        "This is not supported because they are both backed by similar indexes",
+                        "Please drop constraint in a separate transaction before creating the new one")
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N66);
     }
 
     protected void dropIndexBackedConstraintAndCreateSlightlyDifferentInSameTxMustSucceed(
@@ -142,6 +150,52 @@ public class SchemaAcceptanceTestBase {
                 GraphDatabaseService db,
                 Consumer<Schema> firstSchemaRule,
                 Consumer<Schema> secondSchemaRule,
+                Class<EXCEPTION> expectedException);
+    }
+
+    protected enum SchemaAndCypherTxStrategy {
+        SEPARATE_TX {
+            @Override
+            public <EXCEPTION extends Throwable> EXCEPTION execute(
+                    GraphDatabaseService db,
+                    Consumer<Schema> firstSchemaRule,
+                    String cypherQuery,
+                    Class<EXCEPTION> expectedException) {
+                try (Transaction tx = db.beginTx()) {
+                    firstSchemaRule.accept(tx.schema());
+                    tx.commit();
+                }
+                return assertThrows(expectedException, () -> {
+                    try (Transaction tx = db.beginTx()) {
+                        // Execute and consume all results
+                        tx.execute(cypherQuery).resultAsString();
+                        tx.commit();
+                    }
+                });
+            }
+        },
+        SAME_TX {
+            @Override
+            public <EXCEPTION extends Throwable> EXCEPTION execute(
+                    GraphDatabaseService db,
+                    Consumer<Schema> firstSchemaRule,
+                    String cypherQuery,
+                    Class<EXCEPTION> expectedException) {
+                return assertThrows(expectedException, () -> {
+                    try (Transaction tx = db.beginTx()) {
+                        firstSchemaRule.accept(tx.schema());
+                        // Execute and consume all results
+                        tx.execute(cypherQuery).resultAsString();
+                        tx.commit();
+                    }
+                });
+            }
+        };
+
+        public abstract <EXCEPTION extends Throwable> EXCEPTION execute(
+                GraphDatabaseService db,
+                Consumer<Schema> firstSchemaRule,
+                String cypherQuery,
                 Class<EXCEPTION> expectedException);
     }
 

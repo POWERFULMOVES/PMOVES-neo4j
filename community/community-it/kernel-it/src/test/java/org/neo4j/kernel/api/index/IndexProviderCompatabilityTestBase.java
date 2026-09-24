@@ -27,7 +27,6 @@ import java.util.concurrent.Callable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.TestInfo;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.common.TokenNameLookup;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
@@ -46,12 +45,12 @@ import org.neo4j.scheduler.JobMonitoringParams;
 import org.neo4j.scheduler.JobScheduler;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.extension.pagecache.PageCacheExtension;
 import org.neo4j.test.utils.TestDirectory;
 
 @PageCacheExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 abstract class IndexProviderCompatabilityTestBase {
     @Inject
     private PageCache pageCache;
@@ -68,7 +67,7 @@ abstract class IndexProviderCompatabilityTestBase {
     private final JobScheduler jobScheduler;
     IndexProvider indexProvider;
     IndexDescriptor descriptor;
-    TokenNameLookup tokenNameLookup;
+    final TokenNameLookup tokenNameLookup;
     final IndexPopulator.PopulationWorkScheduler populationWorkScheduler;
     Config config;
     Path homePath;
@@ -81,7 +80,7 @@ abstract class IndexProviderCompatabilityTestBase {
         String testName = info.getTestMethod().orElseThrow().getName().toLowerCase(Locale.ROOT);
         testDirectory.prepareDirectory(testClass, testSuite.getClass().getSimpleName());
         homePath = testDirectory.homePath(testName);
-        final boolean hasNodeBasedRelIndex = random.nextBoolean();
+        boolean hasNodeBasedRelIndex = random.nextBoolean();
         storageEngineIndexingBehaviour = new TestStorageEngineIndexingBehaviour(hasNodeBasedRelIndex);
 
         Config.Builder configBuilder = Config.newBuilder();
@@ -93,6 +92,7 @@ abstract class IndexProviderCompatabilityTestBase {
         indexProvider = testSuite.createIndexProvider(pageCache, fs, homePath, config);
         descriptor = indexProvider.completeConfiguration(
                 incompleteIndexPrototype.withName("index_17").materialise(17), storageEngineIndexingBehaviour);
+
         jobScheduler.start();
     }
 

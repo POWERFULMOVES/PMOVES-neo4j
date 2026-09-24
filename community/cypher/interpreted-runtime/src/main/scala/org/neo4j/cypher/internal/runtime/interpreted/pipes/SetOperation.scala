@@ -23,12 +23,12 @@ import org.eclipse.collections.impl.factory.primitive.IntObjectMaps
 import org.neo4j.cypher.internal.runtime
 import org.neo4j.cypher.internal.runtime.CastSupport
 import org.neo4j.cypher.internal.runtime.CypherRow
-import org.neo4j.cypher.internal.runtime.ExpressionCursors
 import org.neo4j.cypher.internal.runtime.NodeOperations
 import org.neo4j.cypher.internal.runtime.Operations
 import org.neo4j.cypher.internal.runtime.QueryContext
 import org.neo4j.cypher.internal.runtime.RelationshipOperations
 import org.neo4j.cypher.internal.runtime.WriteOperations
+import org.neo4j.cypher.internal.runtime.cursors.ExpressionCursors
 import org.neo4j.cypher.internal.runtime.interpreted.IsMap
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Expression
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.SideEffect
@@ -322,8 +322,9 @@ case class SetPropertyOperation(entityExpr: Expression, propertyKey: LazyPropert
             state.query.relationshipWriteOps,
             (id: Long) => executionContext.invalidateCachedRelationshipProperties(id)
           )
-        case _ => throw new InvalidArgumentException(
-            s"The expression $entityExpr should have been a node or a relationship, but got $resolvedEntity"
+        case _ => throw InvalidArgumentException.entityShouldBeNodeOrRel(
+            String.valueOf(entityExpr),
+            String.valueOf(resolvedEntity)
           )
       }
 
@@ -376,8 +377,9 @@ case class SetDynamicPropertyOperation(
             state.query.relationshipWriteOps,
             (id: Long) => executionContext.invalidateCachedRelationshipProperties(id)
           )
-        case _ => throw new InvalidArgumentException(
-            s"The expression $entityExpression should have been a node or a relationship, but got $entity"
+        case _ => throw InvalidArgumentException.entityShouldBeNodeOrRel(
+            String.valueOf(entityExpression),
+            String.valueOf(entity)
           )
       }
 
@@ -417,8 +419,9 @@ case class SetPropertiesOperation(entityExpr: Expression, keys: Array[LazyProper
             state.query.relationshipWriteOps,
             (id: Long) => executionContext.invalidateCachedRelationshipProperties(id)
           )
-        case _ => throw new InvalidArgumentException(
-            s"The expression $entityExpr should have been a node or a relationship, but got $resolvedEntity"
+        case _ => throw InvalidArgumentException.entityShouldBeNodeOrRel(
+            String.valueOf(entityExpr),
+            String.valueOf(resolvedEntity)
           )
       }
     } else {
@@ -613,8 +616,9 @@ case class SetPropertyFromMapOperation(entityExpr: Expression, expression: Expre
             state.cursors.relationshipScanCursor,
             (id: Long) => executionContext.invalidateCachedRelationshipProperties(id)
           )
-        case _ => throw new InvalidArgumentException(
-            s"The expression $entityExpr should have been a node or a relationship, but got $resolvedEntity"
+        case _ => throw InvalidArgumentException.entityShouldBeNodeOrRel(
+            String.valueOf(entityExpr),
+            String.valueOf(resolvedEntity)
           )
       }
     } else {
@@ -633,7 +637,9 @@ case class SetLabelsOperation(nodeName: String, labels: Seq[LazyLabel], dynamicL
     if (!(value eq Values.NO_VALUE)) {
       val nodeId = CastSupport.castOrFail[VirtualNodeValue](value).id()
       val labelIds = labels.map(_.getOrCreateId(state.query)) ++ dynamicLabels.flatMap(e => {
-        CypherFunctions.asStringList(e(executionContext, state)).asScala.map(l => state.query.getOrCreateLabelId(l))
+        CypherFunctions.nodeLabelsAsStringList(e(executionContext, state)).asScala.map(l =>
+          state.query.getOrCreateLabelId(l)
+        )
       })
       state.query.setLabelsOnNode(nodeId, labelIds.iterator).toLong
     } else {

@@ -107,7 +107,8 @@ public class SystemDatabaseRunner implements Resource {
             globalDependencies.satisfyDependency(edition.getSystemGraphComponents());
 
             var databaseContextProvider = edition.createDatabaseContextProvider(globalModule);
-            var systemDatabaseProvider = new ContextBasedSystemDatabaseProvider(databaseContextProvider);
+            var systemDatabaseProvider = new ContextBasedSystemDatabaseProvider(
+                    databaseContextProvider, globalModule.getDatabaseEventListeners());
             edition.createGlobalReadOnlyChecker(
                     systemDatabaseProvider, databaseContextProvider.databaseIdRepository(), globalModule);
             edition.bootstrapQueryRouterServices(null);
@@ -116,7 +117,7 @@ public class SystemDatabaseRunner implements Resource {
             edition.createDefaultDatabaseResolver(systemDatabaseProvider);
             globalDependencies.satisfyDependency(edition.getDefaultDatabaseResolver());
 
-            edition.createSecurityModule(globalModule);
+            edition.createSecurityModule(globalModule, systemDatabaseProvider);
             SecurityProvider securityProvider = edition.getSecurityProvider();
             globalDependencies.satisfyDependencies(securityProvider.authManager());
 

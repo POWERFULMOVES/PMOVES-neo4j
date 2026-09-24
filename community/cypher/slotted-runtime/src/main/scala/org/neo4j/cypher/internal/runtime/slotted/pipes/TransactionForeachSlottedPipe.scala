@@ -19,7 +19,7 @@
  */
 package org.neo4j.cypher.internal.runtime.slotted.pipes
 
-import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour
+import org.neo4j.cypher.internal.logical.plans.TransactionalPlan.RecoveryMode
 import org.neo4j.cypher.internal.physicalplanning.Slot
 import org.neo4j.cypher.internal.runtime.ClosingIterator
 import org.neo4j.cypher.internal.runtime.CypherRow
@@ -27,6 +27,7 @@ import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Expres
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.AbstractTransactionForeachPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.Pipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.TransactionForeachPipe.toStatusMap
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.TransactionRetryPolicy
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.TransactionStatus
 import org.neo4j.cypher.internal.util.attribution.Id
 
@@ -34,9 +35,11 @@ case class TransactionForeachSlottedPipe(
   source: Pipe,
   inner: Pipe,
   batchSize: Expression,
-  onErrorBehaviour: InTransactionsOnErrorBehaviour,
-  statusSlot: Option[Slot]
-)(val id: Id = Id.INVALID_ID) extends AbstractTransactionForeachPipe(source, inner, batchSize, onErrorBehaviour) {
+  recoveryMode: RecoveryMode,
+  statusSlot: Option[Slot],
+  retryPolicy: TransactionRetryPolicy
+)(val id: Id = Id.INVALID_ID)
+    extends AbstractTransactionForeachPipe(source, inner, batchSize, recoveryMode, retryPolicy) {
   private[this] val statusOffsetOpt = statusSlot.map(_.offset)
 
   override protected def withStatus(

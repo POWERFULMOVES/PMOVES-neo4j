@@ -19,13 +19,13 @@
  */
 package org.neo4j.gqlstatus;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.List;
 import java.util.Locale;
 import org.junit.jupiter.api.Test;
 
-public class ProcessorTest {
+class ProcessorTest {
 
     private static String expectedIDENT(String s) {
         return "`" + s + "`";
@@ -60,190 +60,180 @@ public class ProcessorTest {
     // Fixing changes to format in these tests should be as easy as changing the corresponding
     // expectedPROCESSOR()-method
     @Test
-    public void testIDENT() {
-        assertEquals(expectedIDENT("abc"), processorIdent.process("abc"));
-        assertEquals(expectedIDENT("abc()"), processorIdent.process("abc()"));
-        assertEquals(expectedIDENT("{ %s } abc"), processorIdent.process("{ %s } abc"));
-        assertEquals(expectedIDENT("`abc`"), processorIdent.process("`abc`"));
+    void testIDENT() {
+        assertThat(processorIdent.process("abc")).isEqualTo(expectedIDENT("abc"));
+        assertThat(processorIdent.process("abc()")).isEqualTo(expectedIDENT("abc()"));
+        assertThat(processorIdent.process("{ %s } abc")).isEqualTo(expectedIDENT("{ %s } abc"));
+        assertThat(processorIdent.process("`abc`")).isEqualTo(expectedIDENT("`abc`"));
     }
 
     @Test
-    public void testCALLABLE_IDENT() {
-        assertEquals(expectedCALLABLE_IDENT("abc"), processorCallableIdent.process("abc"));
-        assertEquals(expectedCALLABLE_IDENT("abc()"), processorCallableIdent.process("abc()"));
-        assertEquals(expectedCALLABLE_IDENT("{ %s } abc"), processorCallableIdent.process("{ %s } abc"));
-        assertEquals(expectedCALLABLE_IDENT("'abc'"), processorCallableIdent.process("'abc'"));
+    void testCALLABLE_IDENT() {
+        assertThat(processorCallableIdent.process("abc")).isEqualTo(expectedCALLABLE_IDENT("abc"));
+        assertThat(processorCallableIdent.process("abc()")).isEqualTo(expectedCALLABLE_IDENT("abc()"));
+        assertThat(processorCallableIdent.process("{ %s } abc")).isEqualTo(expectedCALLABLE_IDENT("{ %s } abc"));
+        assertThat(processorCallableIdent.process("'abc'")).isEqualTo(expectedCALLABLE_IDENT("'abc'"));
     }
 
     @Test
-    public void testSTRLIT() {
-        assertEquals(expectedSTRLIT("abc"), processorStrlit.process("abc"));
-        assertEquals(expectedSTRLIT("abc()"), processorStrlit.process("abc()"));
-        assertEquals(expectedSTRLIT("{ %s } abc"), processorStrlit.process("{ %s } abc"));
-        assertEquals(expectedSTRLIT("'abc'"), processorStrlit.process("'abc'"));
+    void testSTRLIT() {
+        assertThat(processorStrlit.process("abc")).isEqualTo(expectedSTRLIT("abc"));
+        assertThat(processorStrlit.process("abc()")).isEqualTo(expectedSTRLIT("abc()"));
+        assertThat(processorStrlit.process("{ %s } abc")).isEqualTo(expectedSTRLIT("{ %s } abc"));
+        assertThat(processorStrlit.process("'abc'")).isEqualTo(expectedSTRLIT("'abc'"));
     }
 
     @Test
-    public void testPARAM() {
-        assertEquals("$" + expectedIDENT("abc"), processorParam.process("abc"));
-        assertEquals("$" + expectedIDENT("abc()"), processorParam.process("abc()"));
-        assertEquals("$" + expectedIDENT("{ %s } abc"), processorParam.process("{ %s } abc"));
-        assertEquals("$" + expectedIDENT("'abc'"), processorParam.process("'abc'"));
+    void testPARAM() {
+        assertThat(processorParam.process("abc")).isEqualTo("$" + expectedIDENT("abc"));
+        assertThat(processorParam.process("abc()")).isEqualTo("$" + expectedIDENT("abc()"));
+        assertThat(processorParam.process("{ %s } abc")).isEqualTo("$" + expectedIDENT("{ %s } abc"));
+        assertThat(processorParam.process("'abc'")).isEqualTo("$" + expectedIDENT("'abc'"));
     }
 
     @Test
-    public void testUPPER() {
-        assertEquals(expectedUPPER("abc"), processorUpper.process("abc"));
-        assertEquals(expectedUPPER("abc()"), processorUpper.process("abc()"));
-        assertEquals(expectedUPPER("{ %s } abc"), processorUpper.process("{ %s } abc"));
-        assertEquals(expectedUPPER("'abc'"), processorUpper.process("'abc'"));
+    void testUPPER() {
+        assertThat(processorUpper.process("abc")).isEqualTo(expectedUPPER("abc"));
+        assertThat(processorUpper.process("abc()")).isEqualTo(expectedUPPER("abc()"));
+        assertThat(processorUpper.process("{ %s } abc")).isEqualTo(expectedUPPER("{ %s } abc"));
+        assertThat(processorUpper.process("'abc'")).isEqualTo(expectedUPPER("'abc'"));
     }
 
     @Test
-    public void testUPPER_with_STRLIT() {
-        assertEquals(expectedSTRLIT(expectedUPPER("abc")), processorUpperStrlit.process("abc"));
-        assertEquals(expectedSTRLIT(expectedUPPER("abc()")), processorUpperStrlit.process("abc()"));
-        assertEquals(expectedSTRLIT(expectedUPPER("{ %s } abc")), processorUpperStrlit.process("{ %s } abc"));
-        assertEquals(expectedSTRLIT(expectedUPPER("'abc'")), processorUpperStrlit.process("'abc'"));
+    void testUPPER_with_STRLIT() {
+        assertThat(processorUpperStrlit.process("abc")).isEqualTo(expectedSTRLIT(expectedUPPER("abc")));
+        assertThat(processorUpperStrlit.process("abc()")).isEqualTo(expectedSTRLIT(expectedUPPER("abc()")));
+        assertThat(processorUpperStrlit.process("{ %s } abc")).isEqualTo(expectedSTRLIT(expectedUPPER("{ %s } abc")));
+        assertThat(processorUpperStrlit.process("'abc'")).isEqualTo(expectedSTRLIT(expectedUPPER("'abc'")));
     }
 
     @Test
-    public void testUPPER_with_IDENT() {
-        assertEquals(expectedUPPER(expectedIDENT("abc")), processorUpperIdent.process("abc"));
-        assertEquals(expectedUPPER(expectedIDENT("abc()")), processorUpperIdent.process("abc()"));
-        assertEquals(expectedUPPER(expectedIDENT("{ %s } abc")), processorUpperIdent.process("{ %s } abc"));
-        assertEquals(expectedUPPER(expectedIDENT("'abc'")), processorUpperIdent.process("'abc'"));
+    void testUPPER_with_IDENT() {
+        assertThat(processorUpperIdent.process("abc")).isEqualTo(expectedUPPER(expectedIDENT("abc")));
+        assertThat(processorUpperIdent.process("abc()")).isEqualTo(expectedUPPER(expectedIDENT("abc()")));
+        assertThat(processorUpperIdent.process("{ %s } abc")).isEqualTo(expectedUPPER(expectedIDENT("{ %s } abc")));
+        assertThat(processorUpperIdent.process("'abc'")).isEqualTo(expectedUPPER(expectedIDENT("'abc'")));
     }
 
     @Test
-    public void testUPPER_with_CALLABLE_IDENT() {
-        assertEquals(expectedUPPER(expectedCALLABLE_IDENT("abc")), processorUpperCallableIdent.process("abc"));
-        assertEquals(expectedUPPER(expectedCALLABLE_IDENT("abc()")), processorUpperCallableIdent.process("abc()"));
-        assertEquals(
-                expectedUPPER(expectedCALLABLE_IDENT("{ %s } abc")), processorUpperCallableIdent.process("{ %s } abc"));
-        assertEquals(expectedUPPER(expectedCALLABLE_IDENT("'abc'")), processorUpperCallableIdent.process("'abc'"));
+    void testUPPER_with_CALLABLE_IDENT() {
+        assertThat(processorUpperCallableIdent.process("abc")).isEqualTo(expectedUPPER(expectedCALLABLE_IDENT("abc")));
+        assertThat(processorUpperCallableIdent.process("abc()"))
+                .isEqualTo(expectedUPPER(expectedCALLABLE_IDENT("abc()")));
+        assertThat(processorUpperCallableIdent.process("{ %s } abc"))
+                .isEqualTo(expectedUPPER(expectedCALLABLE_IDENT("{ %s } abc")));
+        assertThat(processorUpperCallableIdent.process("'abc'"))
+                .isEqualTo(expectedUPPER(expectedCALLABLE_IDENT("'abc'")));
     }
 
     @Test
-    public void testNELIST_with_VERBATIM() {
-        assertEquals("abc", processorNelistVerbatim.process(List.of("abc"), null));
-        assertEquals("abc(), cbd()", processorNelistVerbatim.process(List.of("abc()", "cbd()"), null));
-        assertEquals(
-                "{ %s } abc, `abc`, a", processorNelistVerbatim.process(List.of("{ %s } abc", "`abc`", "a"), null));
+    void testNELIST_with_VERBATIM() {
+        assertThat(processorNelistVerbatim.process(List.of("abc"), null)).isEqualTo("abc");
+        assertThat(processorNelistVerbatim.process(List.of("abc()", "cbd()"), null))
+                .isEqualTo("abc(), cbd()");
+        assertThat(processorNelistVerbatim.process(List.of("{ %s } abc", "`abc`", "a"), null))
+                .isEqualTo("{ %s } abc, `abc`, a");
     }
 
     @Test
-    public void testNELIST_with_IDENT() {
-        assertEquals(expectedIDENT("abc"), processorNelistIdent.process(List.of("abc"), null));
-        assertEquals(
-                expectedIDENT("abc()") + ", " + expectedIDENT("cbd()"),
-                processorNelistIdent.process(List.of("abc()", "cbd()"), null));
-        assertEquals(
-                expectedIDENT("{ %s } abc") + ", " + expectedIDENT("`abc`") + ", " + expectedIDENT("a"),
-                processorNelistIdent.process(List.of("{ %s } abc", "`abc`", "a"), null));
+    void testNELIST_with_IDENT() {
+        assertThat(processorNelistIdent.process(List.of("abc"), null)).isEqualTo(expectedIDENT("abc"));
+        assertThat(processorNelistIdent.process(List.of("abc()", "cbd()"), null))
+                .isEqualTo(expectedIDENT("abc()") + ", " + expectedIDENT("cbd()"));
+        assertThat(processorNelistIdent.process(List.of("{ %s } abc", "`abc`", "a"), null))
+                .isEqualTo(expectedIDENT("{ %s } abc") + ", " + expectedIDENT("`abc`") + ", " + expectedIDENT("a"));
     }
 
     @Test
-    public void testNELIST_with_CALLABLE_IDENT() {
-        assertEquals(expectedCALLABLE_IDENT("abc"), processorNelistCallableIdent.process(List.of("abc"), null));
-        assertEquals(
-                expectedCALLABLE_IDENT("abc()") + ", " + expectedCALLABLE_IDENT("cbd()"),
-                processorNelistCallableIdent.process(List.of("abc()", "cbd()"), null));
-        assertEquals(
-                expectedCALLABLE_IDENT("{ %s } abc") + ", " + expectedCALLABLE_IDENT("`abc`") + ", "
-                        + expectedCALLABLE_IDENT("a"),
-                processorNelistCallableIdent.process(List.of("{ %s } abc", "`abc`", "a"), null));
+    void testNELIST_with_CALLABLE_IDENT() {
+        assertThat(processorNelistCallableIdent.process(List.of("abc"), null)).isEqualTo(expectedCALLABLE_IDENT("abc"));
+        assertThat(processorNelistCallableIdent.process(List.of("abc()", "cbd()"), null))
+                .isEqualTo(expectedCALLABLE_IDENT("abc()") + ", " + expectedCALLABLE_IDENT("cbd()"));
+        assertThat(processorNelistCallableIdent.process(List.of("{ %s } abc", "`abc`", "a"), null))
+                .isEqualTo(expectedCALLABLE_IDENT("{ %s } abc") + ", " + expectedCALLABLE_IDENT("`abc`") + ", "
+                        + expectedCALLABLE_IDENT("a"));
     }
 
     @Test
-    public void testNELIST_with_STRLIT() {
-        assertEquals(expectedSTRLIT("abc"), processorNelistStrlit.process(List.of("abc"), null));
-        assertEquals(
-                expectedSTRLIT("abc()") + ", " + expectedSTRLIT("cbd()"),
-                processorNelistStrlit.process(List.of("abc()", "cbd()"), null));
-        assertEquals(
-                expectedSTRLIT("{ %s } abc") + ", " + expectedSTRLIT("`abc`") + ", " + expectedSTRLIT("a"),
-                processorNelistStrlit.process(List.of("{ %s } abc", "`abc`", "a"), null));
+    void testNELIST_with_STRLIT() {
+        assertThat(processorNelistStrlit.process(List.of("abc"), null)).isEqualTo(expectedSTRLIT("abc"));
+        assertThat(processorNelistStrlit.process(List.of("abc()", "cbd()"), null))
+                .isEqualTo(expectedSTRLIT("abc()") + ", " + expectedSTRLIT("cbd()"));
+        assertThat(processorNelistStrlit.process(List.of("{ %s } abc", "`abc`", "a"), null))
+                .isEqualTo(expectedSTRLIT("{ %s } abc") + ", " + expectedSTRLIT("`abc`") + ", " + expectedSTRLIT("a"));
     }
 
     @Test
-    public void testANDEDNELIST_with_VERBATIM() {
+    void testANDEDNELIST_with_VERBATIM() {
         var joinStyle = GqlParams.JoinStyle.ANDED;
-        assertEquals("abc", processorNelistVerbatim.process(List.of("abc"), joinStyle));
-        assertEquals("abc() and cbd()", processorNelistVerbatim.process(List.of("abc()", "cbd()"), joinStyle));
-        assertEquals(
-                "{ %s } abc, `abc` and a",
-                processorNelistVerbatim.process(List.of("{ %s } abc", "`abc`", "a"), joinStyle));
+        assertThat(processorNelistVerbatim.process(List.of("abc"), joinStyle)).isEqualTo("abc");
+        assertThat(processorNelistVerbatim.process(List.of("abc()", "cbd()"), joinStyle))
+                .isEqualTo("abc() and cbd()");
+        assertThat(processorNelistVerbatim.process(List.of("{ %s } abc", "`abc`", "a"), joinStyle))
+                .isEqualTo("{ %s } abc, `abc` and a");
     }
 
     @Test
-    public void testANDEDNELIST_with_IDENT() {
+    void testANDEDNELIST_with_IDENT() {
         var joinStyle = GqlParams.JoinStyle.ANDED;
-        assertEquals(expectedIDENT("abc"), processorNelistIdent.process(List.of("abc"), joinStyle));
-        assertEquals(
-                expectedIDENT("abc()") + " and " + expectedIDENT("cbd()"),
-                processorNelistIdent.process(List.of("abc()", "cbd()"), joinStyle));
-        assertEquals(
-                expectedIDENT("{ %s } abc") + ", " + expectedIDENT("`abc`") + " and " + expectedIDENT("a"),
-                processorNelistIdent.process(List.of("{ %s } abc", "`abc`", "a"), joinStyle));
+        assertThat(processorNelistIdent.process(List.of("abc"), joinStyle)).isEqualTo(expectedIDENT("abc"));
+        assertThat(processorNelistIdent.process(List.of("abc()", "cbd()"), joinStyle))
+                .isEqualTo(expectedIDENT("abc()") + " and " + expectedIDENT("cbd()"));
+        assertThat(processorNelistIdent.process(List.of("{ %s } abc", "`abc`", "a"), joinStyle))
+                .isEqualTo(expectedIDENT("{ %s } abc") + ", " + expectedIDENT("`abc`") + " and " + expectedIDENT("a"));
     }
 
     @Test
-    public void testANDEDNELIST_with_CALLABLE_IDENT() {
+    void testANDEDNELIST_with_CALLABLE_IDENT() {
         var joinStyle = GqlParams.JoinStyle.ANDED;
-        assertEquals(expectedCALLABLE_IDENT("abc"), processorNelistCallableIdent.process(List.of("abc"), joinStyle));
-        assertEquals(
-                expectedCALLABLE_IDENT("abc()") + " and " + expectedCALLABLE_IDENT("cbd()"),
-                processorNelistCallableIdent.process(List.of("abc()", "cbd()"), joinStyle));
-        assertEquals(
-                expectedCALLABLE_IDENT("{ %s } abc") + ", " + expectedCALLABLE_IDENT("`abc`") + " and "
-                        + expectedCALLABLE_IDENT("a"),
-                processorNelistCallableIdent.process(List.of("{ %s } abc", "`abc`", "a"), joinStyle));
+        assertThat(processorNelistCallableIdent.process(List.of("abc"), joinStyle))
+                .isEqualTo(expectedCALLABLE_IDENT("abc"));
+        assertThat(processorNelistCallableIdent.process(List.of("abc()", "cbd()"), joinStyle))
+                .isEqualTo(expectedCALLABLE_IDENT("abc()") + " and " + expectedCALLABLE_IDENT("cbd()"));
+        assertThat(processorNelistCallableIdent.process(List.of("{ %s } abc", "`abc`", "a"), joinStyle))
+                .isEqualTo(expectedCALLABLE_IDENT("{ %s } abc") + ", " + expectedCALLABLE_IDENT("`abc`") + " and "
+                        + expectedCALLABLE_IDENT("a"));
     }
 
     @Test
-    public void testANDEDNELIST_with_STRLIT() {
+    void testANDEDNELIST_with_STRLIT() {
         var joinStyle = GqlParams.JoinStyle.ANDED;
 
-        assertEquals(expectedSTRLIT("abc"), processorNelistStrlit.process(List.of("abc"), joinStyle));
-        assertEquals(
-                expectedSTRLIT("abc()") + " and " + expectedSTRLIT("cbd()"),
-                processorNelistStrlit.process(List.of("abc()", "cbd()"), joinStyle));
-        assertEquals(
-                expectedSTRLIT("{ %s } abc") + ", " + expectedSTRLIT("`abc`") + " and " + expectedSTRLIT("a"),
-                processorNelistStrlit.process(List.of("{ %s } abc", "`abc`", "a"), joinStyle));
+        assertThat(processorNelistStrlit.process(List.of("abc"), joinStyle)).isEqualTo(expectedSTRLIT("abc"));
+        assertThat(processorNelistStrlit.process(List.of("abc()", "cbd()"), joinStyle))
+                .isEqualTo(expectedSTRLIT("abc()") + " and " + expectedSTRLIT("cbd()"));
+        assertThat(processorNelistStrlit.process(List.of("{ %s } abc", "`abc`", "a"), joinStyle))
+                .isEqualTo(
+                        expectedSTRLIT("{ %s } abc") + ", " + expectedSTRLIT("`abc`") + " and " + expectedSTRLIT("a"));
     }
 
     // More readable, but tedious fixing of format-changes
     @Test
-    public void testLiteralMessages() {
-        assertEquals("", processorNelistVerbatim.process(List.of(""), GqlParams.JoinStyle.ANDED));
-        assertEquals("", processorNelistVerbatim.process(List.of(""), GqlParams.JoinStyle.ORED));
-        assertEquals("", processorNelistVerbatim.process(List.of(""), GqlParams.JoinStyle.COMMAD));
-        assertEquals("'abc'", processorStrlit.process("abc"));
-        assertEquals("`abc`", processorIdent.process("abc"));
-        assertEquals("$`abc`", processorParam.process("abc"));
-        assertEquals("abc()", processorCallableIdent.process("abc"));
-        assertEquals(
-                "abc, def, ghi",
-                processorNelistVerbatim.process(List.of("abc", "def", "ghi"), GqlParams.JoinStyle.COMMAD));
-        assertEquals(
-                "abc, def or ghi",
-                processorNelistVerbatim.process(List.of("abc", "def", "ghi"), GqlParams.JoinStyle.ORED));
-        assertEquals(
-                "abc, def and ghi",
-                processorNelistVerbatim.process(List.of("abc", "def", "ghi"), GqlParams.JoinStyle.ANDED));
-        assertEquals(
-                "abc(), def() and ghi()",
-                processorNelistCallableIdent.process(List.of("abc", "def", "ghi"), GqlParams.JoinStyle.ANDED));
-        assertEquals(
-                "`abc`, `def` and `ghi`",
-                processorNelistIdent.process(List.of("abc", "def", "ghi"), GqlParams.JoinStyle.ANDED));
-        assertEquals(
-                "'abc', 'def' and 'ghi'",
-                processorNelistStrlit.process(List.of("abc", "def", "ghi"), GqlParams.JoinStyle.ANDED));
-        assertEquals("ABC()", processorUpperCallableIdent.process("abc"));
-        assertEquals("`ABC`", processorUpperIdent.process("abc"));
-        assertEquals("'ABC'", processorUpperStrlit.process("abc"));
+    void testLiteralMessages() {
+        assertThat(processorNelistVerbatim.process(List.of(""), GqlParams.JoinStyle.ANDED))
+                .isEqualTo("");
+        assertThat(processorNelistVerbatim.process(List.of(""), GqlParams.JoinStyle.ORED))
+                .isEqualTo("");
+        assertThat(processorNelistVerbatim.process(List.of(""), GqlParams.JoinStyle.COMMAD))
+                .isEqualTo("");
+        assertThat(processorStrlit.process("abc")).isEqualTo("'abc'");
+        assertThat(processorIdent.process("abc")).isEqualTo("`abc`");
+        assertThat(processorParam.process("abc")).isEqualTo("$`abc`");
+        assertThat(processorCallableIdent.process("abc")).isEqualTo("abc()");
+        assertThat(processorNelistVerbatim.process(List.of("abc", "def", "ghi"), GqlParams.JoinStyle.COMMAD))
+                .isEqualTo("abc, def, ghi");
+        assertThat(processorNelistVerbatim.process(List.of("abc", "def", "ghi"), GqlParams.JoinStyle.ORED))
+                .isEqualTo("abc, def or ghi");
+        assertThat(processorNelistVerbatim.process(List.of("abc", "def", "ghi"), GqlParams.JoinStyle.ANDED))
+                .isEqualTo("abc, def and ghi");
+        assertThat(processorNelistCallableIdent.process(List.of("abc", "def", "ghi"), GqlParams.JoinStyle.ANDED))
+                .isEqualTo("abc(), def() and ghi()");
+        assertThat(processorNelistIdent.process(List.of("abc", "def", "ghi"), GqlParams.JoinStyle.ANDED))
+                .isEqualTo("`abc`, `def` and `ghi`");
+        assertThat(processorNelistStrlit.process(List.of("abc", "def", "ghi"), GqlParams.JoinStyle.ANDED))
+                .isEqualTo("'abc', 'def' and 'ghi'");
+        assertThat(processorUpperCallableIdent.process("abc")).isEqualTo("ABC()");
+        assertThat(processorUpperIdent.process("abc")).isEqualTo("`ABC`");
+        assertThat(processorUpperStrlit.process("abc")).isEqualTo("'ABC'");
     }
 }

@@ -16,10 +16,19 @@
  */
 package org.neo4j.cypher.internal.rewriting.rewriters
 
-import org.neo4j.cypher.internal.ast.semantics.SemanticCheckContext
+import org.neo4j.cypher.internal.CypherVersionHelpers
+import org.neo4j.cypher.internal.ast.AddedInRewriteGeneral
+import org.neo4j.cypher.internal.ast.Statement
+import org.neo4j.cypher.internal.ast.With
+import org.neo4j.cypher.internal.ast.prettifier.ExpressionStringifier
+import org.neo4j.cypher.internal.ast.prettifier.Prettifier
 import org.neo4j.cypher.internal.ast.semantics.SemanticState
 import org.neo4j.cypher.internal.rewriting.AstRewritingTestSupport
-import org.neo4j.cypher.internal.util.OpenCypherExceptionFactory
+import org.neo4j.cypher.internal.rewriting.rewriters.astRewriters.AddDependenciesToProjectionsInSubqueryExpressions
+import org.neo4j.cypher.internal.rewriting.rewriters.preparatoryRewriters.NormalizeWithAndReturnClauses
+import org.neo4j.cypher.internal.util.Neo4jCypherExceptionFactory
+import org.neo4j.cypher.internal.util.Rewriter
+import org.neo4j.cypher.internal.util.bottomUp
 import org.neo4j.cypher.internal.util.inSequence
 import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 import org.neo4j.cypher.internal.util.test_helpers.TestName
@@ -70,7 +79,7 @@ class addDependenciesToProjectionInSubqueryExpressionsTest
         |WHERE EXISTS {
         | MATCH (person)-[:HAS_DOG]->(d:Dog)
         | WHERE EXISTS {
-        |  WITH "Ozzy" as x, person AS person, d AS d
+        |  WITH "Ozzy" as x, d AS d, person AS person
         |  MATCH (person)-[:HAS_DOG]->(d:Dog)
         |  WHERE d.name = x
         |  RETURN person AS person
@@ -192,18 +201,6 @@ class addDependenciesToProjectionInSubqueryExpressionsTest
         |}
         |RETURN person.name AS name""".stripMargin
     )
-  }
-
-  test("""WITH "Bosse" as x
-         |MATCH (person:Person)
-         |WHERE EXISTS {
-         | WITH "Ozzy" AS x, person AS person
-         | MATCH (person)-[:HAS_DOG]->(d:Dog)
-         | WHERE d.name = x
-         | RETURN person AS person
-         |}
-         |RETURN person.name AS name""".stripMargin) {
-    assertIsNotRewritten(testName)
   }
 
   test("""MATCH (person:Person)
@@ -286,7 +283,7 @@ class addDependenciesToProjectionInSubqueryExpressionsTest
         |WHERE COUNT {
         | MATCH (person)-[:HAS_DOG]->(d:Dog)
         | WHERE COUNT {
-        |  WITH "Ozzy" as x, person AS person, d AS d
+        |  WITH "Ozzy" as x, d AS d, person AS person
         |  MATCH (person)-[:HAS_DOG]->(d:Dog)
         |  WHERE d.name = x
         |  RETURN person AS person
@@ -408,18 +405,6 @@ class addDependenciesToProjectionInSubqueryExpressionsTest
         |} > 2
         |RETURN person.name AS name""".stripMargin
     )
-  }
-
-  test("""WITH "Bosse" as x
-         |MATCH (person:Person)
-         |WHERE COUNT {
-         | WITH "Ozzy" AS x, person AS person
-         | MATCH (person)-[:HAS_DOG]->(d:Dog)
-         | WHERE d.name = x
-         | RETURN person AS person
-         |} > 2
-         |RETURN person.name AS name""".stripMargin) {
-    assertIsNotRewritten(testName)
   }
 
   test("""MATCH (person:Person)
@@ -473,11 +458,20 @@ class addDependenciesToProjectionInSubqueryExpressionsTest
         |  WITH x + y AS `x + y`, x AS x, y AS y
         |  ORDER BY x SKIP 10 LIMIT 5
         |  RETURN `x + y` AS `x + y`
-        |} AS result""".stripMargin
+        |} AS result""".stripMargin,
+      additionalExpectedAstUpdates = expectedStatement => {
+        expectedStatement.endoRewrite(bottomUp(Rewriter.lift {
+          // The original/rewritten statement will have AddedInRewriteGeneral on the extra WITH,
+          // both explicit WITHs in the expected will have DefaultWith
+          // so let's update the added WITH before checking the equality
+          case w: With if w.returnItems.items.exists(r => r.name.equals("x + y")) =>
+            w.copy(withType = AddedInRewriteGeneral())(w.position)
+        }))
+      }
     )
   }
 
-  test("should rewrite innerquery of SubqueryCall into single WITH") {
+  test("should not thread scope-clause imports into the subquery's inner WITH clauses") {
     assertRewrite(
       """WITH 1 AS a
         |CALL(a) {
@@ -489,8 +483,8 @@ class addDependenciesToProjectionInSubqueryExpressionsTest
         |""".stripMargin,
       """WITH 1 AS a
         |CALL(a) {
-        |WITH 2 AS b, a AS a
-        |WITH 3 AS c, a AS a
+        |WITH 2 AS b
+        |WITH 3 AS c
         |RETURN a + c AS res
         |}
         |RETURN res AS res
@@ -498,7 +492,7 @@ class addDependenciesToProjectionInSubqueryExpressionsTest
     )
   }
 
-  test("should rewrite innerquery of SubqueryCall and return not split") {
+  test("should not thread scope-clause imports into inner WITH clauses (RETURN not split)") {
     assertRewrite(
       """WITH 1 AS a
         |CALL(a) {
@@ -511,9 +505,9 @@ class addDependenciesToProjectionInSubqueryExpressionsTest
         |""".stripMargin,
       """WITH 1 AS a
         |CALL(a) {
-        |WITH 2 AS b, a AS a
-        |WITH 3 AS c, a AS a
-        |WITH a + c AS res, a AS a
+        |WITH 2 AS b
+        |WITH 3 AS c
+        |WITH a + c AS res
         |RETURN res AS res LIMIT 1
         |}
         |RETURN res AS res LIMIT 1
@@ -525,22 +519,35 @@ class addDependenciesToProjectionInSubqueryExpressionsTest
     assertRewrite(query, query)
   }
 
-  private def assertRewrite(originalQuery: String, expectedQuery: String): Unit = {
-    val cypherExceptionFactory = OpenCypherExceptionFactory(None)
+  // additionalExpectedAstUpdates is for updating things that are changed in the rewriter but cannot be expressed in the query,
+  // for example the AddedInRewriteGeneral flag on WITH
+  private def assertRewrite(
+    originalQuery: String,
+    expectedQuery: String,
+    additionalExpectedAstUpdates: Statement => Statement = statement => statement
+  ): Unit = {
+    val cypherExceptionFactory = Neo4jCypherExceptionFactory(originalQuery, None)
     val original = parse(originalQuery, cypherExceptionFactory)
-    val expected = parse(expectedQuery, cypherExceptionFactory)
+    val initialExpected = parse(expectedQuery, cypherExceptionFactory)
+    val expected = additionalExpectedAstUpdates(initialExpected)
+    val version = CypherVersionHelpers.arbitrarySemanticContext()
 
     val normalizedWithAndReturnClauses =
-      original.endoRewrite(normalizeWithAndReturnClauses.getRewriter(cypherExceptionFactory))
+      original.endoRewrite(NormalizeWithAndReturnClauses.getRewriter(
+        cypherExceptionFactory,
+        Some(version.cypherVersion)
+      ))
     val checkResult =
-      normalizedWithAndReturnClauses.semanticCheck.run(SemanticState.clean, SemanticCheckContext.default)
+      normalizedWithAndReturnClauses.semanticCheck.run(SemanticState.clean, version)
     val rewriter =
       inSequence(
         computeDependenciesForExpressions(checkResult.state),
-        addDependenciesToProjectionsInSubqueryExpressions.subqueryExpressionAndCallClauseRewriter
+        AddDependenciesToProjectionsInSubqueryExpressions.subqueryExpressionRewriter
       )
 
     val result = normalizedWithAndReturnClauses.rewrite(rewriter)
-    assert(result === expected)
+    withClue(Prettifier(ExpressionStringifier()).asString(result.asInstanceOf[Statement])) {
+      assert(result === expected)
+    }
   }
 }

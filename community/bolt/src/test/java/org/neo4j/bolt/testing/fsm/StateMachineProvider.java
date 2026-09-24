@@ -20,7 +20,7 @@
 package org.neo4j.bolt.testing.fsm;
 
 import java.util.stream.Stream;
-import org.neo4j.bolt.negotiation.ProtocolVersion;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 import org.neo4j.bolt.protocol.common.BoltProtocol;
 import org.neo4j.bolt.testing.messages.BoltMessages;
 
@@ -36,7 +36,13 @@ public interface StateMachineProvider {
                 StateMachineV50Provider.getInstance(),
                 StateMachineV51Provider.getInstance(),
                 StateMachineV52Provider.getInstance(),
-                StateMachineV58Provider.getInstance());
+                StateMachineV53Provider.getInstance(),
+                StateMachineV54Provider.getInstance(),
+                StateMachineV56Provider.getInstance(),
+                StateMachineV57Provider.getInstance(),
+                StateMachineV58Provider.getInstance(),
+                StateMachineV60Provider.getInstance(),
+                StateMachineV61Provider.getInstance());
     }
 
     default ProtocolVersion version() {

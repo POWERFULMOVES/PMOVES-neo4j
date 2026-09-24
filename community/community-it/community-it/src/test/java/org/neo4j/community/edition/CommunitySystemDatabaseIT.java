@@ -20,6 +20,7 @@
 package org.neo4j.community.edition;
 
 import static java.lang.String.valueOf;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -47,15 +48,15 @@ import org.neo4j.graphdb.RelationshipType;
 import org.neo4j.graphdb.Transaction;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.kernel.database.NamedDatabaseId;
-import org.neo4j.kernel.impl.transaction.log.CommandBatchCursor;
-import org.neo4j.kernel.impl.transaction.log.LogicalTransactionStore;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
-import org.neo4j.storageengine.api.TransactionIdStore;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
+import org.neo4j.wal.CommandBatchCursor;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.LogicalTransactionStore;
 
 @TestDirectoryExtension
 class CommunitySystemDatabaseIT {
@@ -97,6 +98,7 @@ class CommunitySystemDatabaseIT {
     }
 
     @Test
+    @SkipOnSpd(reason = "We have a very different system graph in enterprise (getAllLabels mismatch)")
     void systemDatabaseDataNotAvailableInDefaultDatabase() {
         Label systemLabel = label("systemLabel");
         try (Transaction transaction = systemDb.beginTx()) {
@@ -114,9 +116,16 @@ class CommunitySystemDatabaseIT {
         }
     }
 
+    @SkipOnSpd(
+            reason =
+                    "For cluster/SPD there are topology maintenance jobs that runs in the background "
+                            + "and potentially creates transactions in the system db. Specifically for this test there's a race where "
+                            + "TopologyGraphInstanceVersionUpdater can be run after getting the systemTxCountBefore and therefor "
+                            + "show up in the systemTxCountAfter, causing an unexpected tx count. We basically don't need to run "
+                            + "this test for SPD specifically to show that the dbms distinguishes between system db and other db tx logs",
+            notes = SkipOnSpd.Note.irrelevant)
     @Test
     void separateTransactionLogsForSystemDatabase() throws IOException {
-
         int systemDatabaseTransactions = 100;
         int defaultDatabaseTransactions = 15;
 
@@ -142,8 +151,8 @@ class CommunitySystemDatabaseIT {
         var systemTxCountAfter = countTransactionInLogicalStore(systemDb);
         var defaultTxCountAfter = countTransactionInLogicalStore(defaultDb);
 
-        assertEquals(systemTxCountAfter - systemTxCountBefore, systemDatabaseTransactions * 2);
-        assertEquals(defaultTxCountAfter - defaultTxCountBefore, defaultDatabaseTransactions * 2);
+        assertThat(systemTxCountAfter - systemTxCountBefore).isEqualTo(systemDatabaseTransactions * 2);
+        assertThat(defaultTxCountAfter - defaultTxCountBefore).isEqualTo(defaultDatabaseTransactions * 2);
     }
 
     @Test
@@ -209,7 +218,11 @@ class CommunitySystemDatabaseIT {
     private static int countTransactionInLogicalStore(GraphDatabaseAPI facade) throws IOException {
         LogicalTransactionStore transactionStore =
                 facade.getDependencyResolver().resolveDependency(LogicalTransactionStore.class);
-        try (CommandBatchCursor cursor = transactionStore.getCommandBatches(TransactionIdStore.BASE_TX_ID + 1)) {
+        var logFile =
+                facade.getDependencyResolver().resolveDependency(LogFiles.class).getLogFile();
+        var lowestVersion = logFile.getLogRangeInfo().lowestVersion();
+        var baseTxId = logFile.extractHeader(lowestVersion).getLastAppendIndex(); // First one in file is this +1
+        try (CommandBatchCursor cursor = transactionStore.getCommandBatches(baseTxId + 1)) {
             var count = 0;
             while (cursor.next()) {
                 count++;

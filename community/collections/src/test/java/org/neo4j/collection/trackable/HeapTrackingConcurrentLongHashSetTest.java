@@ -25,21 +25,29 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.eclipse.collections.impl.list.Interval;
 import org.eclipse.collections.impl.parallel.ParallelIterate;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.neo4j.memory.EmptyMemoryTracker;
 
 @SuppressWarnings({"SameParameterValue", "resource"})
-public class HeapTrackingConcurrentLongHashSetTest {
+class HeapTrackingConcurrentLongHashSetTest {
+
+    private final ExecutorService executor = Executors.newFixedThreadPool(20);
+
+    @AfterEach
+    void tearDown() {
+        executor.shutdown();
+    }
 
     @Test
-    public void add() {
+    void add() {
         HeapTrackingConcurrentLongHashSet set = newSetWith(1, 2);
         assertThat(set.add(1)).isFalse();
         assertThat(set.add(3)).isTrue();
     }
 
     @Test
-    public void remove() {
+    void remove() {
         HeapTrackingConcurrentLongHashSet set = newSetWith(1, 2);
 
         assertThat(set.contains(1)).isTrue();
@@ -49,7 +57,7 @@ public class HeapTrackingConcurrentLongHashSetTest {
     }
 
     @Test
-    public void concurrentAddAndRemove() {
+    void concurrentAddAndRemove() {
         HeapTrackingConcurrentLongHashSet set1 = HeapTrackingConcurrentLongHashSet.newSet(EmptyMemoryTracker.INSTANCE);
         HeapTrackingConcurrentLongHashSet set2 = HeapTrackingConcurrentLongHashSet.newSet(EmptyMemoryTracker.INSTANCE);
         ParallelIterate.forEach(
@@ -72,13 +80,12 @@ public class HeapTrackingConcurrentLongHashSetTest {
                     assertThat(set2.add(each)).isTrue();
                 },
                 1,
-                executor());
-        assertThat(set1).isEqualTo(set2);
-        assertThat(set1).hasSameHashCodeAs(set2);
+                executor);
+        assertThat(set1).isEqualTo(set2).hasSameHashCodeAs(set2);
     }
 
     @Test
-    public void concurrentClear() {
+    void concurrentClear() {
         HeapTrackingConcurrentLongHashSet set = HeapTrackingConcurrentLongHashSet.newSet(EmptyMemoryTracker.INSTANCE);
         ParallelIterate.forEach(
                 Interval.oneTo(100),
@@ -89,7 +96,7 @@ public class HeapTrackingConcurrentLongHashSetTest {
                     set.clear();
                 },
                 1,
-                executor());
+                executor);
         assertThat(set.isEmpty()).isTrue();
     }
 
@@ -100,9 +107,5 @@ public class HeapTrackingConcurrentLongHashSetTest {
             set.add(k);
         }
         return set;
-    }
-
-    private ExecutorService executor() {
-        return Executors.newFixedThreadPool(20);
     }
 }

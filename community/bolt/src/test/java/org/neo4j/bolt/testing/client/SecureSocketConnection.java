@@ -29,7 +29,9 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLPeerUnverifiedException;
+import org.neo4j.bolt.protocol.common.connector.transport.ConnectorTransport;
 import org.neo4j.bolt.testing.client.tls.NaiveTrustManager;
+import org.neo4j.bolt.testing.messages.BoltWire;
 
 public sealed class SecureSocketConnection extends SocketConnection implements SecureBoltTestConnection
         permits CertConfiguredSecureSocketConnection {
@@ -39,13 +41,15 @@ public sealed class SecureSocketConnection extends SocketConnection implements S
         return factory;
     }
 
-    public SecureSocketConnection(InetSocketAddress address) {
-        super(address);
+    public SecureSocketConnection(ConnectorTransport transport, BoltWire wire, InetSocketAddress address) {
+        super(transport, wire, address);
     }
 
     @Override
     protected SslContext sslContext() throws SSLException {
-        var builder = SslContextBuilder.forClient().trustManager(NaiveTrustManager.getInstance());
+        var builder = SslContextBuilder.forClient()
+                .endpointIdentificationAlgorithm(null)
+                .trustManager(NaiveTrustManager.getInstance());
 
         if (this.certificate != null) {
             builder.keyManager(this.privateKey, this.certificate);
@@ -73,9 +77,9 @@ public sealed class SecureSocketConnection extends SocketConnection implements S
     private static class Factory implements BoltTestConnection.Factory {
 
         @Override
-        public BoltTestConnection create(SocketAddress address) {
+        public BoltTestConnection create(ConnectorTransport transport, BoltWire wire, SocketAddress address) {
             if (address instanceof InetSocketAddress inetSocketAddress) {
-                return new SecureSocketConnection(inetSocketAddress);
+                return new SecureSocketConnection(transport, wire, inetSocketAddress);
             }
 
             throw new IllegalArgumentException("Cannot initialize TLS connection with address of type "

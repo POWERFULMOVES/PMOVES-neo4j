@@ -34,6 +34,7 @@ import java.util.concurrent.atomic.AtomicLong
 
 import scala.collection.mutable
 import scala.io.AnsiColor
+import scala.util.DynamicVariable
 
 trait CostComparisonListener {
 
@@ -44,7 +45,8 @@ trait CostComparisonListener {
     context: LogicalPlanningContext,
     resolved: => String,
     resolvedPerPlan: LogicalPlan => String = _ => "",
-    heuristic: SelectorHeuristic
+    heuristic: SelectorHeuristic,
+    planDescriptor: X => Option[String]
   ): Unit
 }
 
@@ -55,12 +57,20 @@ object CostComparisonListener {
       Option.when(
         options.printCostComparisonsEnabled || java.lang.Boolean.getBoolean("pickBestPlan.VERBOSE")
       )(new SystemOutCostLogger()),
-      Option.when(options.logCostComparisonsEnabled)(new DebugCostLogger(log))
+      Option.when(options.logCostComparisonsEnabled)(new DebugCostLogger(log)),
+      TEST_LISTENER.value
     ).flatten match {
       case Nil             => devNullListener
       case listener :: Nil => listener
       case listeners       => new CombinedListener(listeners)
     }
+
+  // for tests only
+  def withScopedTestListener[A](listener: CostComparisonListener)(f: => A): A = {
+    TEST_LISTENER.withValue(Option(listener))(f)
+  }
+
+  private val TEST_LISTENER: DynamicVariable[Option[CostComparisonListener]] = new DynamicVariable(None)
 }
 
 object devNullListener extends CostComparisonListener {
@@ -72,7 +82,8 @@ object devNullListener extends CostComparisonListener {
     context: LogicalPlanningContext,
     resolved: => String,
     resolvedPerPlan: LogicalPlan => String = _ => "",
-    heuristic: SelectorHeuristic
+    heuristic: SelectorHeuristic,
+    planDescriptor: X => Option[String]
   ): Unit = {}
 }
 
@@ -85,9 +96,19 @@ final class CombinedListener(listeners: List[CostComparisonListener]) extends Co
     context: LogicalPlanningContext,
     resolved: => String,
     resolvedPerPlan: LogicalPlan => String = _ => "",
-    heuristic: SelectorHeuristic
+    heuristic: SelectorHeuristic,
+    planDescriptor: X => Option[String]
   ): Unit =
-    listeners.foreach(_.report(projector, input, calculateScore, context, resolved, resolvedPerPlan, heuristic))
+    listeners.foreach(_.report(
+      projector,
+      input,
+      calculateScore,
+      context,
+      resolved,
+      resolvedPerPlan,
+      heuristic,
+      planDescriptor
+    ))
 }
 
 abstract class CostLogger extends CostComparisonListener {
@@ -118,7 +139,8 @@ abstract class CostLogger extends CostComparisonListener {
     context: LogicalPlanningContext,
     resolved: => String,
     resolvedPerPlan: LogicalPlan => String = _ => "",
-    heuristic: SelectorHeuristic
+    heuristic: SelectorHeuristic,
+    planDescriptor: X => Option[String]
   ): Unit = {
     // Key is a tuple of (root plan ID, plan ID)
     val planCost: mutable.Map[(Id, Id), Cost] = mutable.Map.empty
@@ -166,9 +188,11 @@ abstract class CostLogger extends CostComparisonListener {
         ) // calculate the score for each value, only once, populating `planCost` and `planEffectiveCardinality`
         .sortBy(_._2) // sort by score, actually a strict operation under the hood so `calculateScore` actually gets called at this point
         .map(_._1) // ditch the score
-        .map(projector) // get the LogicalPlan
+        .map(x =>
+          (projector(x), planDescriptor(x))
+        ) // get the LogicalPlan
         .zipWithIndex
-        .foreach { case (plan, index) =>
+        .foreach { case ((plan, maybeDescription), index) =>
           // Update cost and effective cardinality for each subplan
           context.cost.costFor(
             plan,
@@ -182,7 +206,8 @@ abstract class CostLogger extends CostComparisonListener {
           )
           val winner = if (index == 0) green(" [winner]") else ""
           val resolvedStr = cyan(s" ${resolvedPerPlan(plan)}")
-          val header = blue(s"$index: Plan #${plan.debugId}") + winner + resolvedStr
+          val description = maybeDescription.map(description => cyan(s" ($description)")).getOrElse("")
+          val header = blue(s"$index: Plan #${plan.debugId}") + description + winner + resolvedStr
           val planWithCosts =
             LogicalPlanToPlanBuilderString(plan, extra = costString(plan), planPrefixDot = planPrefixDotString(plan))
           val hints = context.staticComponents.planningAttributes.solveds.get(plan.id).numHints

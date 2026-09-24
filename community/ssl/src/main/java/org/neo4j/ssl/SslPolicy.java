@@ -21,10 +21,12 @@ package org.neo4j.ssl;
 
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandler;
+import io.netty.channel.PreferHeapByteBufAllocator;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslProvider;
+import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.PrivateKey;
 import java.security.cert.X509Certificate;
@@ -39,6 +41,8 @@ import org.neo4j.logging.InternalLog;
 import org.neo4j.logging.InternalLogProvider;
 
 public class SslPolicy {
+    private static final List<String> DISABLED_CIPHERS = List.of("_CBC_", "_DH_", "_ECDH_");
+
     /* cryptographic objects */
     private final PrivateKey privateKey;
     private final X509Certificate[] keyCertChain;
@@ -47,6 +51,10 @@ public class SslPolicy {
     private final List<String> ciphers;
     private final String[] tlsVersions;
     private final ClientAuth clientAuth;
+
+    /* Temporary, to be removed when we have a proper way to configure the driver */
+    private final Path privateKeyFile;
+    private final Path certificateFile;
 
     private final TrustManagerFactory trustManagerFactory;
     private final SslProvider sslProvider;
@@ -57,7 +65,9 @@ public class SslPolicy {
 
     public SslPolicy(
             PrivateKey privateKey,
+            Path privateKeyFile,
             X509Certificate[] keyCertChain,
+            Path certificateFile,
             List<String> tlsVersions,
             List<String> ciphers,
             ClientAuth clientAuth,
@@ -69,13 +79,42 @@ public class SslPolicy {
         this.privateKey = privateKey;
         this.keyCertChain = keyCertChain;
         this.tlsVersions = tlsVersions == null ? null : tlsVersions.toArray(new String[0]);
-        this.ciphers = ciphers;
         this.clientAuth = clientAuth;
         this.trustManagerFactory = trustManagerFactory;
         this.sslProvider = sslProvider;
         this.verifyHostname = verifyHostname;
         this.verifyExpiration = verifyExpiration;
         this.log = logProvider.getLog(SslPolicy.class);
+        this.privateKeyFile = privateKeyFile;
+        this.certificateFile = certificateFile;
+
+        var filteredCiphers = removeInsecureCiphersFromDefaults(ciphers);
+        this.ciphers = filteredCiphers;
+    }
+
+    private List<String> removeInsecureCiphersFromDefaults(List<String> ciphers) {
+        if (ciphers == null) // default ciphers
+        {
+            try {
+                var builder = SslContextBuilder.forClient()
+                        .sslProvider(sslProvider)
+                        .keyManager(privateKey, keyCertChain)
+                        .protocols(tlsVersions)
+                        .ciphers(ciphers)
+                        .trustManager(trustManagerFactory);
+                var context = builder.build();
+                var alloc = PreferHeapByteBufAllocator.DEFAULT;
+                var engine = context.newEngine(alloc);
+                var enabledCiphers = engine.getEnabledCipherSuites();
+
+                ciphers = Arrays.stream(enabledCiphers)
+                        .filter(cipher -> !DISABLED_CIPHERS.contains(cipher))
+                        .toList();
+            } catch (SSLException e) {
+                log.warn("Exception interrogating default enabled cipher suites", e);
+            }
+        }
+        return ciphers;
     }
 
     public SslContext nettyServerContext() throws SSLException {
@@ -89,26 +128,24 @@ public class SslPolicy {
     }
 
     public SslContext nettyClientContext() throws SSLException {
-        return SslContextBuilder.forClient()
+        var builder = SslContextBuilder.forClient()
                 .sslProvider(sslProvider)
                 .keyManager(privateKey, keyCertChain)
                 .protocols(tlsVersions)
                 .ciphers(ciphers)
-                .trustManager(trustManagerFactory)
-                .build();
+                .trustManager(trustManagerFactory);
+        if (!verifyHostname) {
+            builder.endpointIdentificationAlgorithm(null);
+        }
+        return builder.build();
     }
 
     private static io.netty.handler.ssl.ClientAuth forNetty(ClientAuth clientAuth) {
-        switch (clientAuth) {
-            case NONE:
-                return io.netty.handler.ssl.ClientAuth.NONE;
-            case OPTIONAL:
-                return io.netty.handler.ssl.ClientAuth.OPTIONAL;
-            case REQUIRE:
-                return io.netty.handler.ssl.ClientAuth.REQUIRE;
-            default:
-                throw new IllegalArgumentException("Cannot translate to netty equivalent: " + clientAuth);
-        }
+        return switch (clientAuth) {
+            case NONE -> io.netty.handler.ssl.ClientAuth.NONE;
+            case OPTIONAL -> io.netty.handler.ssl.ClientAuth.OPTIONAL;
+            case REQUIRE -> io.netty.handler.ssl.ClientAuth.REQUIRE;
+        };
     }
 
     public ChannelHandler nettyServerHandler(Channel channel) throws SSLException {
@@ -125,7 +162,11 @@ public class SslPolicy {
     }
 
     public ChannelHandler nettyClientHandler(Channel channel, SslContext sslContext) {
-        return new ClientSideOnConnectSslHandler(channel, sslContext, verifyHostname, tlsVersions);
+        return new ClientSideOnConnectSslHandler(channel, sslContext, verifyHostname, tlsVersions, new String[] {});
+    }
+
+    public ChannelHandler nettyClientHandler(Channel channel, SslContext sslContext, String[] namedGroups) {
+        return new ClientSideOnConnectSslHandler(channel, sslContext, verifyHostname, tlsVersions, namedGroups);
     }
 
     public PrivateKey privateKey() {
@@ -134,6 +175,14 @@ public class SslPolicy {
 
     public X509Certificate[] certificateChain() {
         return keyCertChain;
+    }
+
+    public Path certificateFile() {
+        return certificateFile;
+    }
+
+    public Path privateKeyFile() {
+        return privateKeyFile;
     }
 
     public KeyStore getKeyStore(char[] keyStorePass, char[] privateKeyPass) {

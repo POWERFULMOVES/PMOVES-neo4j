@@ -19,10 +19,10 @@
  */
 package org.neo4j.cypher.internal.compiler.planner.logical.steps
 
+import org.neo4j.cypher.internal.compiler.planner.logical.ExpressionEvaluator
 import org.neo4j.cypher.internal.compiler.planner.logical.LogicalPlanningContext
-import org.neo4j.cypher.internal.compiler.planner.logical.PlanTransformer
-import org.neo4j.cypher.internal.compiler.planner.logical.simpleExpressionEvaluator
 import org.neo4j.cypher.internal.expressions.Expression
+import org.neo4j.cypher.internal.expressions.SignedDecimalIntegerLiteral
 import org.neo4j.cypher.internal.ir.QueryPagination
 import org.neo4j.cypher.internal.ir.QueryProjection
 import org.neo4j.cypher.internal.ir.SinglePlannerQuery
@@ -31,11 +31,13 @@ import org.neo4j.cypher.internal.logical.plans.ExhaustiveLogicalPlan
 import org.neo4j.cypher.internal.logical.plans.Limit
 import org.neo4j.cypher.internal.logical.plans.LogicalBinaryPlan
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
+import org.neo4j.cypher.internal.logical.plans.RemoteBatchProperties
+import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.attribution.IdGen
 
 import scala.annotation.tailrec
 
-object skipAndLimit extends PlanTransformer {
+object skipAndLimit {
 
   @tailrec
   def shouldPlanExhaustiveLimit(plan: LogicalPlan, limit: Option[Long]): Boolean = plan match {
@@ -48,59 +50,109 @@ object skipAndLimit extends PlanTransformer {
       }
   }
 
-  def planLimitOnTopOf(plan: LogicalPlan, count: Expression)(implicit idGen: IdGen): LogicalPlan =
-    if (shouldPlanExhaustiveLimit(plan, simpleExpressionEvaluator.evaluateLongIfStable(count)))
-      ExhaustiveLimit(plan, count)(idGen)
-    else Limit(plan, count)(idGen)
+  def planLimitOnTopOf(
+    plan: LogicalPlan,
+    count: Expression,
+    expressionEvaluator: ExpressionEvaluator
+  )(implicit idGen: IdGen): LogicalPlan = {
+    doPlanLimitOnTopOf(plan, expressionEvaluator.evaluateLongIfStable(count), count)
+  }
 
-  def apply(plan: LogicalPlan, query: SinglePlannerQuery, context: LogicalPlanningContext): LogicalPlan = {
+  def planLimitOnTopOf(plan: LogicalPlan, count: Long)(implicit idGen: IdGen): LogicalPlan = {
+    val countExpr = SignedDecimalIntegerLiteral(count.toString)(InputPosition.NONE)
+    doPlanLimitOnTopOf(plan, Some(count), countExpr)
+  }
+
+  private def doPlanLimitOnTopOf(plan: LogicalPlan, maybeCount: Option[Long], countExpr: Expression)(implicit
+    idGen: IdGen): LogicalPlan = {
+    if (shouldPlanExhaustiveLimit(plan, maybeCount))
+      ExhaustiveLimit(plan, countExpr)(idGen)
+    else Limit(plan, countExpr)(idGen)
+  }
+
+  def planHorizon(plan: LogicalPlan, query: SinglePlannerQuery, context: LogicalPlanningContext): LogicalPlan = {
+    plan match {
+      // A remoteBatchProperties operator will run on a fixed batch size irrespective of the actual limit.
+      // Since the remoteBatchProperties operator will not affect the overall correctness of the output,
+      // and has to run on a remote shard, it is more performant to run this operator after the limit operator.
+      case remoteBatchProperties: RemoteBatchProperties =>
+        planSkipAndLimit(remoteBatchProperties.source, query, context)
+          .map(skipAndLimitPlan =>
+            context.staticComponents.logicalPlanProducer.changeSourceOnRemoteBatchProperties(
+              skipAndLimitPlan,
+              remoteBatchProperties,
+              context
+            )
+          )
+          .getOrElse(remoteBatchProperties)
+      case otherPlans =>
+        planSkipAndLimit(otherPlans, query, context).getOrElse(otherPlans)
+    }
+  }
+
+  @tailrec
+  private def planSkipAndLimit(
+    plan: LogicalPlan,
+    query: SinglePlannerQuery,
+    context: LogicalPlanningContext
+  ): Option[LogicalPlan] = {
     query.horizon match {
       case p: QueryProjection =>
         val queryPagination = p.queryPagination
         (queryPagination.skip, queryPagination.limit) match {
           case (Some(skipExpr), Some(limitExpr)) if skipExpr.isConstantForQuery =>
-            context.staticComponents.logicalPlanProducer.planSkipAndLimit(
+            Some(context.staticComponents.logicalPlanProducer.planSkipAndLimit(
               plan,
               skipExpr,
               limitExpr,
               query.interestingOrder,
               context,
-              shouldPlanExhaustiveLimit(plan, simpleExpressionEvaluator.evaluateLongIfStable(limitExpr))
-            )
+              shouldPlanExhaustiveLimit(
+                plan,
+                context.staticComponents.expressionEvaluator.evaluateLongIfStable(limitExpr)
+              )
+            ))
 
           case (Some(skipExpr), Some(limitExpr)) =>
             val skipped =
               context.staticComponents.logicalPlanProducer.planSkip(plan, skipExpr, query.interestingOrder, context)
             // Recurse and remove skip from horizon to get limit planned as well
-            apply(skipped, query.withHorizon(p.withPagination(QueryPagination(None, Some(limitExpr)))), context)
+            planSkipAndLimit(
+              skipped,
+              query.withHorizon(p.withPagination(QueryPagination(None, Some(limitExpr)))),
+              context
+            )
 
           case (Some(skipExpr), _) =>
-            context.staticComponents.logicalPlanProducer.planSkip(plan, skipExpr, query.interestingOrder, context)
+            Some(context.staticComponents.logicalPlanProducer.planSkip(plan, skipExpr, query.interestingOrder, context))
 
           case (_, Some(limitExpr))
-            if shouldPlanExhaustiveLimit(plan, simpleExpressionEvaluator.evaluateLongIfStable(limitExpr)) =>
-            context.staticComponents.logicalPlanProducer.planExhaustiveLimit(
+            if shouldPlanExhaustiveLimit(
+              plan,
+              context.staticComponents.expressionEvaluator.evaluateLongIfStable(limitExpr)
+            ) =>
+            Some(context.staticComponents.logicalPlanProducer.planExhaustiveLimit(
               plan,
               limitExpr,
               limitExpr,
               query.interestingOrder,
               context = context
-            )
+            ))
 
           case (_, Some(limitExpr)) =>
-            context.staticComponents.logicalPlanProducer.planLimit(
+            Some(context.staticComponents.logicalPlanProducer.planLimit(
               plan,
               limitExpr,
               limitExpr,
               query.interestingOrder,
               context = context
-            )
+            ))
 
           case _ =>
-            plan
+            None
         }
 
-      case _ => plan
+      case _ => None
     }
   }
 }

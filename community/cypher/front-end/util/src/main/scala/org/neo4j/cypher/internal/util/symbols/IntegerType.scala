@@ -20,13 +20,13 @@ import org.neo4j.cypher.internal.util.InputPosition
 
 case class IntegerType(isNullable: Boolean)(val position: InputPosition) extends CypherType {
   val parentType: CypherType = CTNumber
-  override lazy val coercibleTo: Set[CypherType] = Set(CTFloat) ++ parentType.coercibleTo
-  override val toString = "Integer"
+  override def coercibleTo: Set[CypherType] = Set(CTFloat) ++ parentType.coercibleTo
+  override val toClassString = "Integer"
   override val toCypherTypeString = "INTEGER"
 
   override def sortOrder: Int = CypherTypeOrder.INTEGER.id
 
-  override def hasValueRepresentation: Boolean = true
+  override def couldBeStoredInProperty: Boolean = true
 
   override def withIsNullable(isNullable: Boolean): CypherType = this.copy(isNullable = isNullable)(position)
 

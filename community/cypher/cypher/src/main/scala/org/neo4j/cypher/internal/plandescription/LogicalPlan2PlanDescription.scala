@@ -21,35 +21,46 @@ package org.neo4j.cypher.internal.plandescription
 
 import org.neo4j.common.EntityType
 import org.neo4j.cypher.internal.CypherVersion
-import org.neo4j.cypher.internal.ast.CommandResultItem
+import org.neo4j.cypher.internal.ast.AllDatabasesScope
+import org.neo4j.cypher.internal.ast.CommaSeparatedNames
+import org.neo4j.cypher.internal.ast.CommandClauseNames
 import org.neo4j.cypher.internal.ast.CreateConstraintType
+import org.neo4j.cypher.internal.ast.DatabaseScope
+import org.neo4j.cypher.internal.ast.DefaultDatabaseScope
 import org.neo4j.cypher.internal.ast.ExecutableBy
+import org.neo4j.cypher.internal.ast.ExpressionNames
+import org.neo4j.cypher.internal.ast.HomeDatabaseScope
+import org.neo4j.cypher.internal.ast.NoNames
 import org.neo4j.cypher.internal.ast.NoOptions
 import org.neo4j.cypher.internal.ast.Options
 import org.neo4j.cypher.internal.ast.OptionsMap
 import org.neo4j.cypher.internal.ast.OptionsParam
+import org.neo4j.cypher.internal.ast.SingleNamedDatabaseScope
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorBreak
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorContinue
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorFail
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorRetryThenBreak
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorRetryThenContinue
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorRetryThenFail
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsRetryParameters
 import org.neo4j.cypher.internal.ast.prettifier.Prettifier
 import org.neo4j.cypher.internal.expressions
+import org.neo4j.cypher.internal.expressions.AllReduceAccumulator
 import org.neo4j.cypher.internal.expressions.Ands
+import org.neo4j.cypher.internal.expressions.AutoExtractedParameter
 import org.neo4j.cypher.internal.expressions.DecimalDoubleLiteral
 import org.neo4j.cypher.internal.expressions.DynamicLabelExpression
 import org.neo4j.cypher.internal.expressions.DynamicRelTypeExpression
 import org.neo4j.cypher.internal.expressions.ElementTypeName
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
-import org.neo4j.cypher.internal.expressions.FunctionName
 import org.neo4j.cypher.internal.expressions.LabelName
 import org.neo4j.cypher.internal.expressions.LabelToken
 import org.neo4j.cypher.internal.expressions.ListLiteral
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.MapExpression
 import org.neo4j.cypher.internal.expressions.NameToken
-import org.neo4j.cypher.internal.expressions.Namespace
-import org.neo4j.cypher.internal.expressions.Parameter
 import org.neo4j.cypher.internal.expressions.Property
 import org.neo4j.cypher.internal.expressions.PropertyKeyName
 import org.neo4j.cypher.internal.expressions.PropertyKeyToken
@@ -57,12 +68,15 @@ import org.neo4j.cypher.internal.expressions.RelTypeExpression
 import org.neo4j.cypher.internal.expressions.RelTypeName
 import org.neo4j.cypher.internal.expressions.RelationshipTypeToken
 import org.neo4j.cypher.internal.expressions.SemanticDirection
-import org.neo4j.cypher.internal.expressions.UnsignedDecimalIntegerLiteral
+import org.neo4j.cypher.internal.expressions.SemanticDirection.BOTH
+import org.neo4j.cypher.internal.expressions.SemanticDirection.OUTGOING
+import org.neo4j.cypher.internal.expressions.SignedDecimalIntegerLiteral
+import org.neo4j.cypher.internal.expressions.UnPositionedVariable.varFor
 import org.neo4j.cypher.internal.expressions.functions.Labels
 import org.neo4j.cypher.internal.expressions.functions.Point
 import org.neo4j.cypher.internal.expressions.functions.Type
 import org.neo4j.cypher.internal.frontend.PlannerName
-import org.neo4j.cypher.internal.frontend.phases.ResolvedCall
+import org.neo4j.cypher.internal.frontend.phases.ResolvedNonLocalCall
 import org.neo4j.cypher.internal.ir.CreateNode
 import org.neo4j.cypher.internal.ir.CreatePattern
 import org.neo4j.cypher.internal.ir.CreateRelationship
@@ -72,6 +86,7 @@ import org.neo4j.cypher.internal.ir.PatternRelationship
 import org.neo4j.cypher.internal.ir.RemoveLabelPattern
 import org.neo4j.cypher.internal.ir.SetDynamicPropertyPattern
 import org.neo4j.cypher.internal.ir.SetLabelPattern
+import org.neo4j.cypher.internal.ir.SetMutatingPattern
 import org.neo4j.cypher.internal.ir.SetNodePropertiesFromMapPattern
 import org.neo4j.cypher.internal.ir.SetNodePropertiesPattern
 import org.neo4j.cypher.internal.ir.SetNodePropertyPattern
@@ -89,6 +104,9 @@ import org.neo4j.cypher.internal.logical.plans
 import org.neo4j.cypher.internal.logical.plans.AdministrationCommandLogicalPlan
 import org.neo4j.cypher.internal.logical.plans.Aggregation
 import org.neo4j.cypher.internal.logical.plans.AllNodesScan
+import org.neo4j.cypher.internal.logical.plans.AllQueryExpression
+import org.neo4j.cypher.internal.logical.plans.AllowedNonAdministrationCommands
+import org.neo4j.cypher.internal.logical.plans.AlterCurrentGraphType
 import org.neo4j.cypher.internal.logical.plans.Anti
 import org.neo4j.cypher.internal.logical.plans.AntiConditionalApply
 import org.neo4j.cypher.internal.logical.plans.AntiSemiApply
@@ -105,6 +123,7 @@ import org.neo4j.cypher.internal.logical.plans.Bound
 import org.neo4j.cypher.internal.logical.plans.CacheProperties
 import org.neo4j.cypher.internal.logical.plans.CartesianProduct
 import org.neo4j.cypher.internal.logical.plans.ColumnOrder
+import org.neo4j.cypher.internal.logical.plans.CommandYieldColumn
 import org.neo4j.cypher.internal.logical.plans.CompositeQueryExpression
 import org.neo4j.cypher.internal.logical.plans.ConditionalApply
 import org.neo4j.cypher.internal.logical.plans.Create
@@ -112,6 +131,7 @@ import org.neo4j.cypher.internal.logical.plans.CreateConstraint
 import org.neo4j.cypher.internal.logical.plans.CreateFulltextIndex
 import org.neo4j.cypher.internal.logical.plans.CreateIndex
 import org.neo4j.cypher.internal.logical.plans.CreateLookupIndex
+import org.neo4j.cypher.internal.logical.plans.CreateVectorIndex
 import org.neo4j.cypher.internal.logical.plans.DeleteExpression
 import org.neo4j.cypher.internal.logical.plans.DeleteNode
 import org.neo4j.cypher.internal.logical.plans.DeletePath
@@ -123,20 +143,27 @@ import org.neo4j.cypher.internal.logical.plans.DetachDeletePath
 import org.neo4j.cypher.internal.logical.plans.DirectedAllRelationshipsScan
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipByElementIdSeek
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipByIdSeek
+import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipFulltextIndexSearch
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipIndexContainsScan
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipIndexEndsWithScan
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipIndexScan
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipIndexSeek
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipTypeScan
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipUniqueIndexSeek
+import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipVectorIndexSearch
 import org.neo4j.cypher.internal.logical.plans.DirectedUnionRelationshipTypesScan
 import org.neo4j.cypher.internal.logical.plans.Distinct
 import org.neo4j.cypher.internal.logical.plans.DoNothingIfExistsForConstraint
 import org.neo4j.cypher.internal.logical.plans.DoNothingIfExistsForFulltextIndex
 import org.neo4j.cypher.internal.logical.plans.DoNothingIfExistsForIndex
 import org.neo4j.cypher.internal.logical.plans.DoNothingIfExistsForLookupIndex
+import org.neo4j.cypher.internal.logical.plans.DoNothingIfExistsForVectorIndex
 import org.neo4j.cypher.internal.logical.plans.DropConstraintOnName
 import org.neo4j.cypher.internal.logical.plans.DropIndexOnName
+import org.neo4j.cypher.internal.logical.plans.DynamicDirectedRelationshipTypeLookup
+import org.neo4j.cypher.internal.logical.plans.DynamicElement
+import org.neo4j.cypher.internal.logical.plans.DynamicLabelNodeLookup
+import org.neo4j.cypher.internal.logical.plans.DynamicUndirectedRelationshipTypeLookup
 import org.neo4j.cypher.internal.logical.plans.Eager
 import org.neo4j.cypher.internal.logical.plans.EmptyResult
 import org.neo4j.cypher.internal.logical.plans.ErrorPlan
@@ -149,6 +176,14 @@ import org.neo4j.cypher.internal.logical.plans.Expand.VariablePredicate
 import org.neo4j.cypher.internal.logical.plans.FindShortestPaths
 import org.neo4j.cypher.internal.logical.plans.Foreach
 import org.neo4j.cypher.internal.logical.plans.ForeachApply
+import org.neo4j.cypher.internal.logical.plans.ForeignLeafPlan
+import org.neo4j.cypher.internal.logical.plans.FusedMerge
+import org.neo4j.cypher.internal.logical.plans.GraphType.graphTypeDropInfo
+import org.neo4j.cypher.internal.logical.plans.GraphType.graphTypeInfoForPlan
+import org.neo4j.cypher.internal.logical.plans.GraphTypeForAdd
+import org.neo4j.cypher.internal.logical.plans.GraphTypeForAlter
+import org.neo4j.cypher.internal.logical.plans.GraphTypeForDrop
+import org.neo4j.cypher.internal.logical.plans.GraphTypeForSet
 import org.neo4j.cypher.internal.logical.plans.IndexSeekNames
 import org.neo4j.cypher.internal.logical.plans.InequalitySeekRangeWrapper
 import org.neo4j.cypher.internal.logical.plans.Input
@@ -164,18 +199,26 @@ import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 import org.neo4j.cypher.internal.logical.plans.LogicalPlans
 import org.neo4j.cypher.internal.logical.plans.ManyQueryExpression
 import org.neo4j.cypher.internal.logical.plans.ManySeekableArgs
+import org.neo4j.cypher.internal.logical.plans.MatchAllQueryExpression
+import org.neo4j.cypher.internal.logical.plans.MatchEntitySetQueryExpression
 import org.neo4j.cypher.internal.logical.plans.Merge
+import org.neo4j.cypher.internal.logical.plans.MergeInto
+import org.neo4j.cypher.internal.logical.plans.MergeUniqueNode
 import org.neo4j.cypher.internal.logical.plans.MultiNodeIndexSeek
+import org.neo4j.cypher.internal.logical.plans.NestedPlanExpression
 import org.neo4j.cypher.internal.logical.plans.NodeByElementIdSeek
 import org.neo4j.cypher.internal.logical.plans.NodeByIdSeek
 import org.neo4j.cypher.internal.logical.plans.NodeByLabelScan
 import org.neo4j.cypher.internal.logical.plans.NodeCountFromCountStore
+import org.neo4j.cypher.internal.logical.plans.NodeFulltextIndexSearch
 import org.neo4j.cypher.internal.logical.plans.NodeHashJoin
 import org.neo4j.cypher.internal.logical.plans.NodeIndexContainsScan
 import org.neo4j.cypher.internal.logical.plans.NodeIndexEndsWithScan
 import org.neo4j.cypher.internal.logical.plans.NodeIndexScan
 import org.neo4j.cypher.internal.logical.plans.NodeIndexSeek
 import org.neo4j.cypher.internal.logical.plans.NodeUniqueIndexSeek
+import org.neo4j.cypher.internal.logical.plans.NodeVectorIndexSearch
+import org.neo4j.cypher.internal.logical.plans.NonExistenceQueryExpression
 import org.neo4j.cypher.internal.logical.plans.NullifyMetadata
 import org.neo4j.cypher.internal.logical.plans.Optional
 import org.neo4j.cypher.internal.logical.plans.OptionalExpand
@@ -208,6 +251,7 @@ import org.neo4j.cypher.internal.logical.plans.PointBoundingBoxSeekRangeWrapper
 import org.neo4j.cypher.internal.logical.plans.PointDistanceRange
 import org.neo4j.cypher.internal.logical.plans.PointDistanceSeekRangeWrapper
 import org.neo4j.cypher.internal.logical.plans.PrefixSeekRangeWrapper
+import org.neo4j.cypher.internal.logical.plans.PreparedEntityFilterExpression
 import org.neo4j.cypher.internal.logical.plans.PreserveOrder
 import org.neo4j.cypher.internal.logical.plans.ProcedureCall
 import org.neo4j.cypher.internal.logical.plans.ProduceResult
@@ -221,7 +265,15 @@ import org.neo4j.cypher.internal.logical.plans.RangeLessThan
 import org.neo4j.cypher.internal.logical.plans.RangeQueryExpression
 import org.neo4j.cypher.internal.logical.plans.RelationshipCountFromCountStore
 import org.neo4j.cypher.internal.logical.plans.RemoteBatchProperties
+import org.neo4j.cypher.internal.logical.plans.RemoteBatchPropertiesWithFilter
+import org.neo4j.cypher.internal.logical.plans.RemoteDirectedRelationshipIndexSeek
+import org.neo4j.cypher.internal.logical.plans.RemoteDirectedRelationshipUniqueIndexSeek
+import org.neo4j.cypher.internal.logical.plans.RemoteNodeIndexSeek
+import org.neo4j.cypher.internal.logical.plans.RemoteNodeUniqueIndexSeek
+import org.neo4j.cypher.internal.logical.plans.RemoteUndirectedRelationshipIndexSeek
+import org.neo4j.cypher.internal.logical.plans.RemoteUndirectedRelationshipUniqueIndexSeek
 import org.neo4j.cypher.internal.logical.plans.RemoveLabels
+import org.neo4j.cypher.internal.logical.plans.RepeatAcyclic
 import org.neo4j.cypher.internal.logical.plans.RepeatOptions
 import org.neo4j.cypher.internal.logical.plans.RepeatTrail
 import org.neo4j.cypher.internal.logical.plans.RepeatWalk
@@ -245,6 +297,8 @@ import org.neo4j.cypher.internal.logical.plans.SetRelationshipProperties
 import org.neo4j.cypher.internal.logical.plans.SetRelationshipPropertiesFromMap
 import org.neo4j.cypher.internal.logical.plans.SetRelationshipProperty
 import org.neo4j.cypher.internal.logical.plans.ShowConstraints
+import org.neo4j.cypher.internal.logical.plans.ShowCurrentGraphType
+import org.neo4j.cypher.internal.logical.plans.ShowDatabases
 import org.neo4j.cypher.internal.logical.plans.ShowFunctions
 import org.neo4j.cypher.internal.logical.plans.ShowIndexes
 import org.neo4j.cypher.internal.logical.plans.ShowProcedures
@@ -267,45 +321,56 @@ import org.neo4j.cypher.internal.logical.plans.Top1WithTies
 import org.neo4j.cypher.internal.logical.plans.TransactionApply
 import org.neo4j.cypher.internal.logical.plans.TransactionConcurrency
 import org.neo4j.cypher.internal.logical.plans.TransactionForeach
+import org.neo4j.cypher.internal.logical.plans.TransactionalPlan.ErrorHandling
 import org.neo4j.cypher.internal.logical.plans.TriadicBuild
 import org.neo4j.cypher.internal.logical.plans.TriadicFilter
 import org.neo4j.cypher.internal.logical.plans.TriadicSelection
 import org.neo4j.cypher.internal.logical.plans.UndirectedAllRelationshipsScan
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipByElementIdSeek
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipByIdSeek
+import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipFulltextIndexSearch
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipIndexContainsScan
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipIndexEndsWithScan
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipIndexScan
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipIndexSeek
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipTypeScan
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipUniqueIndexSeek
+import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipVectorIndexSearch
 import org.neo4j.cypher.internal.logical.plans.UndirectedUnionRelationshipTypesScan
 import org.neo4j.cypher.internal.logical.plans.Union
 import org.neo4j.cypher.internal.logical.plans.UnionNodeByLabelsScan
 import org.neo4j.cypher.internal.logical.plans.UnwindCollection
 import org.neo4j.cypher.internal.logical.plans.ValueHashJoin
+import org.neo4j.cypher.internal.logical.plans.ValueMergeJoin
 import org.neo4j.cypher.internal.logical.plans.VarExpand
-import org.neo4j.cypher.internal.macros.AssertMacros.checkOnlyWhenAssertionsAreEnabled
+import org.neo4j.cypher.internal.macros.AssertMacros3.checkOnlyWhenAssertionsAreEnabled
 import org.neo4j.cypher.internal.plandescription.Arguments.Details
 import org.neo4j.cypher.internal.plandescription.Arguments.EstimatedRows
 import org.neo4j.cypher.internal.plandescription.Arguments.Planner
 import org.neo4j.cypher.internal.plandescription.Arguments.PlannerImpl
-import org.neo4j.cypher.internal.plandescription.Arguments.PlannerVersion
+import org.neo4j.cypher.internal.plandescription.Arguments.PlannerVersionArgument
 import org.neo4j.cypher.internal.plandescription.Arguments.RuntimeVersion
 import org.neo4j.cypher.internal.plandescription.Arguments.Version
+import org.neo4j.cypher.internal.plandescription.LogicalPlan2PlanDescription.getPrettyDynamicElement
 import org.neo4j.cypher.internal.plandescription.LogicalPlan2PlanDescription.getPrettyStringName
 import org.neo4j.cypher.internal.plandescription.LogicalPlan2PlanDescription.prettyOptions
 import org.neo4j.cypher.internal.plandescription.LogicalPlan2PlanDescription.prettyUpdateLabelString
 import org.neo4j.cypher.internal.plandescription.asPrettyString.PrettyStringInterpolator
 import org.neo4j.cypher.internal.plandescription.asPrettyString.PrettyStringMaker
+import org.neo4j.cypher.internal.plandescription.asPrettyString.raw
 import org.neo4j.cypher.internal.planner.spi.ImmutablePlanningAttributes
 import org.neo4j.cypher.internal.util.CancellationChecker
+import org.neo4j.cypher.internal.util.Foldable.SkipChildren
+import org.neo4j.cypher.internal.util.FunctionName
 import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.cypher.internal.util.Namespace
 import org.neo4j.cypher.internal.util.Repetition
+import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.UpperBound.Limited
 import org.neo4j.cypher.internal.util.UpperBound.Unlimited
 import org.neo4j.cypher.internal.util.attribution.Id
 import org.neo4j.cypher.internal.util.collection.immutable.ListSet
+import org.neo4j.cypher.internal.util.topDown
 import org.neo4j.exceptions.InternalException
 import org.neo4j.graphdb.schema.IndexType
 
@@ -318,25 +383,27 @@ object LogicalPlan2PlanDescription {
     effectiveCardinalities: ImmutablePlanningAttributes.EffectiveCardinalities,
     withRawCardinalities: Boolean,
     withDistinctness: Boolean,
+    renderNestedPlanExpressions: Boolean,
     providedOrders: ImmutablePlanningAttributes.ProvidedOrders,
     runtimeOperatorMetadata: Id => Seq[Argument],
-    cypherVersion: CypherVersion
+    cypherVersion: CypherVersion,
+    cypherPlannerVersion: Option[String] = None
   ): InternalPlanDescription = {
     new LogicalPlan2PlanDescription(
       readOnly,
       effectiveCardinalities,
       withRawCardinalities,
       withDistinctness,
+      renderNestedPlanExpressions,
       providedOrders,
-      runtimeOperatorMetadata,
-      cypherVersion
+      runtimeOperatorMetadata
     )
       .create(input)
       .addArgument(Version(cypherVersion.versionName))
       .addArgument(RuntimeVersion.currentVersion)
       .addArgument(Planner(plannerName.toTextOutput))
       .addArgument(PlannerImpl(plannerName.name))
-      .addArgument(PlannerVersion.currentVersion)
+      .addArgument(PlannerVersionArgument.forDisplay(cypherPlannerVersion))
   }
 
   def prettyOptions(options: Options): PrettyString = options match {
@@ -357,8 +424,21 @@ object LogicalPlan2PlanDescription {
     pretty"$prettyStaticLabels$prettyDynamicLabels"
   }
 
-  def getPrettyStringName(nameOption: Option[Either[String, Parameter]]): PrettyString =
-    nameOption.map(n => pretty" ${PrettyString(Prettifier.escapeName(n))}").getOrElse(pretty"")
+  def getPrettyStringName(nameOption: Option[Expression]): PrettyString =
+    nameOption.map(n => pretty" ${getPrettyStringName(n)}").getOrElse(pretty"")
+
+  def getPrettyStringName(name: Expression): PrettyString =
+    name match {
+      case _: AutoExtractedParameter => asPrettyString(name)
+      case _                         => PrettyString(Prettifier.escapeName(name))
+    }
+
+  def getPrettyDynamicElement(expr: DynamicElement) = {
+    expr match {
+      case DynamicElement.Simple(expr, DynamicElement.All) => pretty"$$all(${asPrettyString(expr)})"
+      case DynamicElement.Simple(expr, DynamicElement.Any) => pretty"$$any(${asPrettyString(expr)})"
+    }
+  }
 }
 
 case class LogicalPlan2PlanDescription(
@@ -366,9 +446,9 @@ case class LogicalPlan2PlanDescription(
   effectiveCardinalities: ImmutablePlanningAttributes.EffectiveCardinalities,
   withRawCardinalities: Boolean,
   withDistinctness: Boolean = false,
+  renderNestedPlanExpressions: Boolean = false,
   providedOrders: ImmutablePlanningAttributes.ProvidedOrders,
-  runtimeOperatorMetadata: Id => Seq[Argument],
-  cypherVersion: CypherVersion = CypherVersion.Default
+  runtimeOperatorMetadata: Id => Seq[Argument]
 ) extends LogicalPlans.Mapper[InternalPlanDescription] {
   private val SEPARATOR = ", "
 
@@ -383,13 +463,16 @@ case class LogicalPlan2PlanDescription(
 
     val id = plan.id
     val variables = plan.availableSymbols.map(asPrettyString(_))
+    val children = describeNestedPlans(plan)
 
-    val result: InternalPlanDescription = plan match {
+    val result: InternalPlanDescription = replaceNestedPlansWithPlaceholder(plan) match {
+      case AllowedNonAdministrationCommands(_, Some(commandPlan)) => create(commandPlan)
+
       case _: AdministrationCommandLogicalPlan =>
         PlanDescriptionImpl(
           id,
           "AdministrationCommand",
-          NoChildren,
+          children,
           Seq.empty,
           Set.empty,
           withRawCardinalities,
@@ -400,7 +483,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "AllNodesScan",
-          NoChildren,
+          children,
           Seq(Details(asPrettyString(idName))),
           variables,
           withRawCardinalities,
@@ -411,7 +494,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "PartitionedAllNodesScan",
-          NoChildren,
+          children,
           Seq(Details(asPrettyString(idName))),
           variables,
           withRawCardinalities,
@@ -423,7 +506,22 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "NodeByLabelScan",
-          NoChildren,
+          children,
+          Seq(Details(prettyDetails)),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case DynamicLabelNodeLookup(idName, labelExpr, _, propertyPredicates) =>
+        val label = getPrettyDynamicElement(labelExpr)
+        val prettyDetails = pretty"${asPrettyString(idName)}:$label"
+          .append(formatPropertyPredicatesForDynamicIndexSeek(asPrettyString(idName), propertyPredicates))
+
+        PlanDescriptionImpl(
+          id,
+          "DynamicLabelNodeLookup",
+          children,
           Seq(Details(prettyDetails)),
           variables,
           withRawCardinalities,
@@ -435,7 +533,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "PartitionedNodeByLabelScan",
-          NoChildren,
+          children,
           Seq(Details(prettyDetails)),
           variables,
           withRawCardinalities,
@@ -448,7 +546,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "UnionNodeByLabelsScan",
-          NoChildren,
+          children,
           Seq(Details(prettyDetails)),
           variables,
           withRawCardinalities,
@@ -461,7 +559,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "PartitionedUnionNodeByLabelsScan",
-          NoChildren,
+          children,
           Seq(Details(prettyDetails)),
           variables,
           withRawCardinalities,
@@ -474,7 +572,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "IntersectionNodeByLabelsScan",
-          NoChildren,
+          children,
           Seq(Details(prettyDetails)),
           variables,
           withRawCardinalities,
@@ -487,7 +585,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "PartitionedIntersectionNodeByLabelsScan",
-          NoChildren,
+          children,
           Seq(Details(prettyDetails)),
           variables,
           withRawCardinalities,
@@ -504,7 +602,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "SubtractionNodeByLabelsScan",
-          NoChildren,
+          children,
           Seq(Details(prettyDetails)),
           variables,
           withRawCardinalities,
@@ -521,7 +619,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "PartitionedSubtractionNodeByLabelsScan",
-          NoChildren,
+          children,
           Seq(Details(prettyDetails)),
           variables,
           withRawCardinalities,
@@ -538,7 +636,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "DirectedUnionRelationshipTypesScan",
-          NoChildren,
+          children,
           Seq(Details(prettyDetails)),
           variables,
           withRawCardinalities,
@@ -555,7 +653,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "UndirectedUnionRelationshipTypesScan",
-          NoChildren,
+          children,
           Seq(Details(prettyDetails)),
           variables,
           withRawCardinalities,
@@ -572,7 +670,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "PartitionedDirectedUnionRelationshipTypesScan",
-          NoChildren,
+          children,
           Seq(Details(prettyDetails)),
           variables,
           withRawCardinalities,
@@ -589,7 +687,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "PartitionedUndirectedUnionRelationshipTypesScan",
-          NoChildren,
+          children,
           Seq(Details(prettyDetails)),
           variables,
           withRawCardinalities,
@@ -602,7 +700,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "NodeByIdSeek",
-          NoChildren,
+          children,
           Seq(Details(prettyDetails)),
           variables,
           withRawCardinalities,
@@ -615,7 +713,193 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "NodeByElementIdSeek",
-          NoChildren,
+          children,
+          Seq(Details(prettyDetails)),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case NodeVectorIndexSearch(
+          idName,
+          _,
+          properties,
+          maybeScore,
+          indexName,
+          vector,
+          limit,
+          _,
+          maybePropertyFilter,
+          _
+        ) =>
+        val predicate = maybePropertyFilter match {
+          case Some(valueExpr) =>
+            pretty" WHERE ${indexPredicateString(Some(idName), properties.drop(1).map(_.propertyKeyToken), valueExpr)}"
+          case None => pretty""
+        }
+        val score = maybeScore match {
+          case Some(scoreVariable) => pretty" SCORE AS ${asPrettyString(scoreVariable.name)}"
+          case None                => pretty""
+        }
+        val prettyDetails =
+          pretty"SEARCH ${asPrettyString(idName)} IN (VECTOR INDEX ${asPrettyString(indexName)} FOR ${asPrettyString(vector)}$predicate LIMIT ${asPrettyString(limit)})$score"
+
+        PlanDescriptionImpl(
+          id,
+          "NodeVectorIndexSearch",
+          Seq.empty,
+          Seq(Details(prettyDetails)),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case DirectedRelationshipVectorIndexSearch(
+          idName,
+          start,
+          end,
+          typeTokens,
+          properties,
+          maybeScore,
+          indexName,
+          vector,
+          limit,
+          _,
+          maybePropertyFilter,
+          _
+        ) =>
+
+        val predicate = maybePropertyFilter match {
+          case Some(valueExpr) =>
+            pretty" WHERE ${indexPredicateString(idName, properties.drop(1).map(_.propertyKeyToken), valueExpr)}"
+          case None => pretty""
+        }
+        val score = maybeScore match {
+          case Some(scoreVariable) => pretty" SCORE AS ${asPrettyString(scoreVariable.name)}"
+          case None                => pretty""
+        }
+        val prettyDetails =
+          pretty"SEARCH ${relationshipPattern(start, idName, typeTokens.map(t => RelTypeName(t.name)(InputPosition.NONE)), end, OUTGOING)} IN (VECTOR INDEX ${asPrettyString(indexName)} FOR ${asPrettyString(vector)}$predicate LIMIT ${asPrettyString(limit)})$score"
+
+        PlanDescriptionImpl(
+          id,
+          "DirectedRelationshipVectorIndexSearch",
+          Seq.empty,
+          Seq(Details(prettyDetails)),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case UndirectedRelationshipVectorIndexSearch(
+          idName,
+          start,
+          end,
+          typeTokens,
+          properties,
+          maybeScore,
+          indexName,
+          vector,
+          limit,
+          _,
+          maybePropertyFilter,
+          _
+        ) =>
+
+        val predicate = maybePropertyFilter match {
+          case Some(valueExpr) =>
+            pretty" WHERE ${indexPredicateString(idName, properties.drop(1).map(_.propertyKeyToken), valueExpr)}"
+          case None => pretty""
+        }
+        val score = maybeScore match {
+          case Some(scoreVariable) => pretty" SCORE AS ${asPrettyString(scoreVariable.name)}"
+          case None                => pretty""
+        }
+        val prettyDetails =
+          pretty"SEARCH ${relationshipPattern(start, idName, typeTokens.map(t => RelTypeName(t.name)(InputPosition.NONE)), end, BOTH)} IN (VECTOR INDEX ${asPrettyString(indexName)} FOR ${asPrettyString(vector)}$predicate LIMIT ${asPrettyString(limit)})$score"
+
+        PlanDescriptionImpl(
+          id,
+          "UndirectedRelationshipVectorIndexSearch",
+          Seq.empty,
+          Seq(Details(prettyDetails)),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case s: NodeFulltextIndexSearch =>
+        val analyzerPart = s.analyzer match {
+          case Some(a) => pretty" WITH ANALYZER ${asPrettyString(a)}"
+          case None    => pretty""
+        }
+        val skipPart = s.skip match {
+          case Some(sk) => pretty" SKIP ${asPrettyString(sk)}"
+          case None     => pretty""
+        }
+        val score = s.score match {
+          case Some(scoreVariable) => pretty" SCORE AS ${asPrettyString(scoreVariable.name)}"
+          case None                => pretty""
+        }
+        val prettyDetails =
+          pretty"SEARCH ${asPrettyString(s.idName)} IN (FULLTEXT INDEX ${asPrettyString(s.indexName)} FOR ${asPrettyString(s.queryString)}$analyzerPart$skipPart LIMIT ${asPrettyString(s.limit)})$score"
+
+        PlanDescriptionImpl(
+          id,
+          "NodeFulltextIndexSearch",
+          Seq.empty,
+          Seq(Details(prettyDetails)),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case s: DirectedRelationshipFulltextIndexSearch =>
+        val analyzerPart = s.analyzer match {
+          case Some(a) => pretty" WITH ANALYZER ${asPrettyString(a)}"
+          case None    => pretty""
+        }
+        val skipPart = s.skip match {
+          case Some(sk) => pretty" SKIP ${asPrettyString(sk)}"
+          case None     => pretty""
+        }
+        val score = s.score match {
+          case Some(scoreVariable) => pretty" SCORE AS ${asPrettyString(scoreVariable.name)}"
+          case None                => pretty""
+        }
+        val prettyDetails =
+          pretty"SEARCH ${relationshipPattern(s.startNode, s.idName, s.typeTokens.map(t => RelTypeName(t.name)(InputPosition.NONE)), s.endNode, OUTGOING)} IN (FULLTEXT INDEX ${asPrettyString(s.indexName)} FOR ${asPrettyString(s.queryString)}$analyzerPart$skipPart LIMIT ${asPrettyString(s.limit)})$score"
+
+        PlanDescriptionImpl(
+          id,
+          "DirectedRelationshipFulltextIndexSearch",
+          Seq.empty,
+          Seq(Details(prettyDetails)),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case s: UndirectedRelationshipFulltextIndexSearch =>
+        val analyzerPart = s.analyzer match {
+          case Some(a) => pretty" WITH ANALYZER ${asPrettyString(a)}"
+          case None    => pretty""
+        }
+        val skipPart = s.skip match {
+          case Some(sk) => pretty" SKIP ${asPrettyString(sk)}"
+          case None     => pretty""
+        }
+        val score = s.score match {
+          case Some(scoreVariable) => pretty" SCORE AS ${asPrettyString(scoreVariable.name)}"
+          case None                => pretty""
+        }
+        val prettyDetails =
+          pretty"SEARCH ${relationshipPattern(s.startNode, s.idName, s.typeTokens.map(t => RelTypeName(t.name)(InputPosition.NONE)), s.endNode, BOTH)} IN (FULLTEXT INDEX ${asPrettyString(s.indexName)} FOR ${asPrettyString(s.queryString)}$analyzerPart$skipPart LIMIT ${asPrettyString(s.limit)})$score"
+
+        PlanDescriptionImpl(
+          id,
+          "UndirectedRelationshipFulltextIndexSearch",
+          Seq.empty,
           Seq(Details(prettyDetails)),
           variables,
           withRawCardinalities,
@@ -624,7 +908,7 @@ case class LogicalPlan2PlanDescription(
 
       case p @ NodeIndexSeek(idName, label, properties, valueExpr, _, _, indexType, _) =>
         val (indexMode, indexDesc) = getNodeIndexDescriptions(
-          idName.name,
+          idName,
           label,
           properties.map(_.propertyKeyToken),
           indexType,
@@ -636,7 +920,28 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           indexMode,
-          NoChildren,
+          Seq.empty,
+          Seq(Details(indexDesc)),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case p @ RemoteNodeIndexSeek(idName, label, properties, valueExpr, _, _, indexType, _) =>
+        val (indexMode, indexDesc) = getNodeIndexDescriptions(
+          idName,
+          label,
+          properties.map(_.propertyKeyToken),
+          indexType,
+          valueExpr,
+          unique = false,
+          readOnly,
+          p.cachedProperties
+        )
+        PlanDescriptionImpl(
+          id,
+          "Remote" + indexMode,
+          Seq.empty,
           Seq(Details(indexDesc)),
           variables,
           withRawCardinalities,
@@ -645,7 +950,7 @@ case class LogicalPlan2PlanDescription(
 
       case p @ PartitionedNodeIndexSeek(idName, label, properties, valueExpr, _, indexType) =>
         val (indexMode, indexDesc) = getNodeIndexDescriptions(
-          idName.name,
+          idName,
           label,
           properties.map(_.propertyKeyToken),
           indexType,
@@ -657,7 +962,28 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "Partitioned" + indexMode,
-          NoChildren,
+          Seq.empty,
+          Seq(Details(indexDesc)),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case p @ RemoteNodeUniqueIndexSeek(idName, label, properties, valueExpr, _, _, indexType, _) =>
+        val (indexMode, indexDesc) = getNodeIndexDescriptions(
+          idName,
+          label,
+          properties.map(_.propertyKeyToken),
+          indexType,
+          valueExpr,
+          unique = true,
+          readOnly,
+          p.cachedProperties
+        )
+        PlanDescriptionImpl(
+          id,
+          "Remote" + indexMode,
+          Seq.empty,
           Seq(Details(indexDesc)),
           variables,
           withRawCardinalities,
@@ -666,7 +992,7 @@ case class LogicalPlan2PlanDescription(
 
       case p @ NodeUniqueIndexSeek(idName, label, properties, valueExpr, _, _, indexType, _) =>
         val (indexMode, indexDesc) = getNodeIndexDescriptions(
-          idName.name,
+          idName,
           label,
           properties.map(_.propertyKeyToken),
           indexType,
@@ -678,8 +1004,52 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           indexMode,
-          NoChildren,
+          Seq.empty,
           Seq(Details(indexDesc)),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case MergeUniqueNode(idName, label, properties, seekExpressions, _, _, indexType, onMatch, onCreate) =>
+        val queryExpression = if (seekExpressions.length == 1) {
+          SingleQueryExpression(seekExpressions.head)
+        } else {
+          CompositeQueryExpression(seekExpressions.map(SingleQueryExpression(_)))
+        }
+
+        def asPrettyProps(kv: (PropertyKeyName, Expression)): PrettyString = {
+          pretty"${asPrettyString(idName)}.${asPrettyString(kv._1)} = ${asPrettyString(kv._2)}"
+        }
+        def asPretty(op: String, props: Seq[(PropertyKeyName, Expression)]): PrettyString = {
+          if (props.isEmpty) pretty""
+          else {
+            pretty"ON ${asPrettyString(op)} SET ${props.map(asPrettyProps).mkPrettyString(", ")}"
+          }
+        }
+
+        val onDetails = pretty"${asPretty("MATCH", onMatch)} ${asPretty("CREATE", onCreate)}"
+
+        val (_, indexDesc) = getNodeIndexDescriptions(
+          idName,
+          label,
+          properties.map(_.propertyKeyToken),
+          indexType,
+          queryExpression,
+          unique = true,
+          readOnly,
+          Seq.empty
+        )
+        PlanDescriptionImpl(
+          id,
+          "MergeUniqueNode",
+          Seq.empty,
+          Seq(Details(
+            Seq(
+              indexDesc,
+              onDetails
+            )
+          )),
           variables,
           withRawCardinalities,
           withDistinctness
@@ -688,7 +1058,7 @@ case class LogicalPlan2PlanDescription(
       case p @ MultiNodeIndexSeek(indexLeafPlans) =>
         val (_, indexDescs) = indexLeafPlans.map(l =>
           getNodeIndexDescriptions(
-            l.idName.name,
+            l.idName,
             l.label,
             l.properties.map(_.propertyKeyToken),
             l.indexType,
@@ -701,7 +1071,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id = plan.id,
           "MultiNodeIndexSeek",
-          NoChildren,
+          children,
           Seq(Details(indexDescs)),
           variables,
           withRawCardinalities,
@@ -711,7 +1081,7 @@ case class LogicalPlan2PlanDescription(
       case p @ AssertingMultiNodeIndexSeek(_, indexLeafPlans) =>
         val (_, indexDescs) = indexLeafPlans.map(l =>
           getNodeIndexDescriptions(
-            l.idName.name,
+            l.idName,
             l.label,
             l.properties.map(_.propertyKeyToken),
             l.indexType,
@@ -724,7 +1094,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id = plan.id,
           "AssertingMultiNodeIndexSeek",
-          NoChildren,
+          children,
           Seq(Details(indexDescs)),
           variables,
           withRawCardinalities,
@@ -734,10 +1104,10 @@ case class LogicalPlan2PlanDescription(
       case p @ AssertingMultiRelationshipIndexSeek(_, _, _, _, indexLeafPlans) =>
         val (_, indexDescs) = indexLeafPlans.map(l =>
           getRelIndexDescriptions(
-            l.idName.name,
-            l.leftNode.name,
+            l.idName,
+            l.leftNode,
             l.typeToken,
-            l.rightNode.name,
+            l.rightNode,
             l.directed,
             l.properties.map(_.propertyKeyToken),
             l.indexType,
@@ -750,7 +1120,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id = plan.id,
           "AssertingMultiRelationshipIndexSeek",
-          NoChildren,
+          children,
           Seq(Details(indexDescs)),
           variables,
           withRawCardinalities,
@@ -758,10 +1128,10 @@ case class LogicalPlan2PlanDescription(
         )
       case p @ DirectedRelationshipIndexSeek(idName, start, end, typ, properties, valueExpr, _, _, indexType, _) =>
         val (indexMode, indexDesc) = getRelIndexDescriptions(
-          idName.name,
-          start.name,
+          idName,
+          start,
           typ,
-          end.name,
+          end,
           isDirected = true,
           properties.map(_.propertyKeyToken),
           indexType,
@@ -770,13 +1140,13 @@ case class LogicalPlan2PlanDescription(
           readOnly = readOnly,
           p.cachedProperties
         )
-        PlanDescriptionImpl(id, indexMode, NoChildren, Seq(Details(indexDesc)), variables)
+        PlanDescriptionImpl(id, indexMode, Seq.empty, Seq(Details(indexDesc)), variables)
       case p @ UndirectedRelationshipIndexSeek(idName, start, end, typ, properties, valueExpr, _, _, indexType, _) =>
         val (indexMode, indexDesc) = getRelIndexDescriptions(
-          idName.name,
-          start.name,
+          idName,
+          start,
           typ,
-          end.name,
+          end,
           isDirected = false,
           properties.map(_.propertyKeyToken),
           indexType,
@@ -788,7 +1158,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           indexMode,
-          NoChildren,
+          Seq.empty,
           Seq(Details(indexDesc)),
           variables,
           withRawCardinalities,
@@ -796,10 +1166,10 @@ case class LogicalPlan2PlanDescription(
         )
       case p @ PartitionedDirectedRelationshipIndexSeek(idName, start, end, typ, properties, valueExpr, _, indexType) =>
         val (indexMode, indexDesc) = getRelIndexDescriptions(
-          idName.name,
-          start.name,
+          idName,
+          start,
           typ,
-          end.name,
+          end,
           isDirected = true,
           properties.map(_.propertyKeyToken),
           indexType,
@@ -808,7 +1178,7 @@ case class LogicalPlan2PlanDescription(
           readOnly = readOnly,
           p.cachedProperties
         )
-        PlanDescriptionImpl(id, "Partitioned" + indexMode, NoChildren, Seq(Details(indexDesc)), variables)
+        PlanDescriptionImpl(id, "Partitioned" + indexMode, Seq.empty, Seq(Details(indexDesc)), variables)
       case p @ PartitionedUndirectedRelationshipIndexSeek(
           idName,
           start,
@@ -820,10 +1190,10 @@ case class LogicalPlan2PlanDescription(
           indexType
         ) =>
         val (indexMode, indexDesc) = getRelIndexDescriptions(
-          idName.name,
-          start.name,
+          idName,
+          start,
           typ,
-          end.name,
+          end,
           isDirected = false,
           properties.map(_.propertyKeyToken),
           indexType,
@@ -835,7 +1205,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "Partitioned" + indexMode,
-          NoChildren,
+          Seq.empty,
           Seq(Details(indexDesc)),
           variables,
           withRawCardinalities,
@@ -843,10 +1213,10 @@ case class LogicalPlan2PlanDescription(
         )
       case p @ DirectedRelationshipUniqueIndexSeek(idName, start, end, typ, properties, valueExpr, _, _, indexType) =>
         val (indexMode, indexDesc) = getRelIndexDescriptions(
-          idName.name,
-          start.name,
+          idName,
+          start,
           typ,
-          end.name,
+          end,
           isDirected = true,
           properties.map(_.propertyKeyToken),
           indexType,
@@ -855,13 +1225,13 @@ case class LogicalPlan2PlanDescription(
           readOnly = readOnly,
           p.cachedProperties
         )
-        PlanDescriptionImpl(id, indexMode, NoChildren, Seq(Details(indexDesc)), variables)
+        PlanDescriptionImpl(id, indexMode, Seq.empty, Seq(Details(indexDesc)), variables)
       case p @ UndirectedRelationshipUniqueIndexSeek(idName, start, end, typ, properties, valueExpr, _, _, indexType) =>
         val (indexMode, indexDesc) = getRelIndexDescriptions(
-          idName.name,
-          start.name,
+          idName,
+          start,
           typ,
-          end.name,
+          end,
           isDirected = false,
           properties.map(_.propertyKeyToken),
           indexType,
@@ -873,7 +1243,141 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           indexMode,
-          NoChildren,
+          Seq.empty,
+          Seq(Details(indexDesc)),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+      case p @ RemoteDirectedRelationshipIndexSeek(
+          idName,
+          start,
+          end,
+          typ,
+          properties,
+          valueExpr,
+          _,
+          _,
+          indexType,
+          _
+        ) =>
+        val (indexMode, indexDesc) = getRelIndexDescriptions(
+          idName,
+          start,
+          typ,
+          end,
+          isDirected = true,
+          properties.map(_.propertyKeyToken),
+          indexType,
+          valueExpr,
+          unique = false,
+          readOnly = readOnly,
+          p.cachedProperties
+        )
+        PlanDescriptionImpl(
+          id,
+          "Remote" + indexMode,
+          Seq.empty,
+          Seq(Details(indexDesc)),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+      case p @ RemoteUndirectedRelationshipIndexSeek(
+          idName,
+          start,
+          end,
+          typ,
+          properties,
+          valueExpr,
+          _,
+          _,
+          indexType,
+          _
+        ) =>
+        val (indexMode, indexDesc) = getRelIndexDescriptions(
+          idName,
+          start,
+          typ,
+          end,
+          isDirected = false,
+          properties.map(_.propertyKeyToken),
+          indexType,
+          valueExpr,
+          unique = false,
+          readOnly = readOnly,
+          p.cachedProperties
+        )
+        PlanDescriptionImpl(
+          id,
+          "Remote" + indexMode,
+          Seq.empty,
+          Seq(Details(indexDesc)),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+      case p @ RemoteDirectedRelationshipUniqueIndexSeek(
+          idName,
+          start,
+          end,
+          typ,
+          properties,
+          valueExpr,
+          _,
+          _,
+          indexType
+        ) =>
+        val (indexMode, indexDesc) = getRelIndexDescriptions(
+          idName,
+          start,
+          typ,
+          end,
+          isDirected = true,
+          properties.map(_.propertyKeyToken),
+          indexType,
+          valueExpr,
+          unique = true,
+          readOnly = readOnly,
+          p.cachedProperties
+        )
+        PlanDescriptionImpl(
+          id,
+          "Remote" + indexMode,
+          Seq.empty,
+          Seq(Details(indexDesc)),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+      case p @ RemoteUndirectedRelationshipUniqueIndexSeek(
+          idName,
+          start,
+          end,
+          typ,
+          properties,
+          valueExpr,
+          _,
+          _,
+          indexType
+        ) =>
+        val (indexMode, indexDesc) = getRelIndexDescriptions(
+          idName,
+          start,
+          typ,
+          end,
+          isDirected = false,
+          properties.map(_.propertyKeyToken),
+          indexType,
+          valueExpr,
+          unique = true,
+          readOnly = readOnly,
+          p.cachedProperties
+        )
+        PlanDescriptionImpl(
+          id,
+          "Remote" + indexMode,
+          Seq.empty,
           Seq(Details(indexDesc)),
           variables,
           withRawCardinalities,
@@ -884,10 +1388,10 @@ case class LogicalPlan2PlanDescription(
         val props = tokens.map(x => asPrettyString(x.name))
         val predicates = props.map(p => pretty"$p IS NOT NULL").mkPrettyString(" AND ")
         val info = relIndexInfoString(
-          idName.name,
-          start.name,
+          idName,
+          start,
           typ,
-          end.name,
+          end,
           isDirected = true,
           tokens,
           indexType,
@@ -897,7 +1401,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "DirectedRelationshipIndexScan",
-          NoChildren,
+          children,
           Seq(Details(info)),
           variables,
           withRawCardinalities,
@@ -908,10 +1412,10 @@ case class LogicalPlan2PlanDescription(
         val props = tokens.map(x => asPrettyString(x.name))
         val predicates = props.map(p => pretty"$p IS NOT NULL").mkPrettyString(" AND ")
         val info = relIndexInfoString(
-          idName.name,
-          start.name,
+          idName,
+          start,
           typ,
-          end.name,
+          end,
           isDirected = false,
           tokens,
           indexType,
@@ -921,7 +1425,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "UndirectedRelationshipIndexScan",
-          NoChildren,
+          children,
           Seq(Details(info)),
           variables,
           withRawCardinalities,
@@ -932,10 +1436,10 @@ case class LogicalPlan2PlanDescription(
         val props = tokens.map(x => asPrettyString(x.name))
         val predicates = props.map(p => pretty"$p IS NOT NULL").mkPrettyString(" AND ")
         val info = relIndexInfoString(
-          idName.name,
-          start.name,
+          idName,
+          start,
           typ,
-          end.name,
+          end,
           isDirected = true,
           tokens,
           indexType,
@@ -945,7 +1449,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "PartitionedDirectedRelationshipIndexScan",
-          NoChildren,
+          children,
           Seq(Details(info)),
           variables,
           withRawCardinalities,
@@ -956,10 +1460,10 @@ case class LogicalPlan2PlanDescription(
         val props = tokens.map(x => asPrettyString(x.name))
         val predicates = props.map(p => pretty"$p IS NOT NULL").mkPrettyString(" AND ")
         val info = relIndexInfoString(
-          idName.name,
-          start.name,
+          idName,
+          start,
           typ,
-          end.name,
+          end,
           isDirected = false,
           tokens,
           indexType,
@@ -969,7 +1473,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "PartitionedUndirectedRelationshipIndexScan",
-          NoChildren,
+          children,
           Seq(Details(info)),
           variables,
           withRawCardinalities,
@@ -978,24 +1482,24 @@ case class LogicalPlan2PlanDescription(
       case p @ DirectedRelationshipIndexContainsScan(idName, start, end, typ, property, valueExpr, _, _, indexType) =>
         val predicate = pretty"${asPrettyString(property.propertyKeyToken.name)} CONTAINS ${asPrettyString(valueExpr)}"
         val info = relIndexInfoString(
-          idName.name,
-          start.name,
+          idName,
+          start,
           typ,
-          end.name,
+          end,
           isDirected = true,
           Seq(property.propertyKeyToken),
           indexType,
           predicate,
           p.cachedProperties
         )
-        PlanDescriptionImpl(id, "DirectedRelationshipIndexContainsScan", NoChildren, Seq(Details(info)), variables)
+        PlanDescriptionImpl(id, "DirectedRelationshipIndexContainsScan", Seq.empty, Seq(Details(info)), variables)
       case p @ UndirectedRelationshipIndexContainsScan(idName, start, end, typ, property, valueExpr, _, _, indexType) =>
         val predicate = pretty"${asPrettyString(property.propertyKeyToken.name)} CONTAINS ${asPrettyString(valueExpr)}"
         val info = relIndexInfoString(
-          idName.name,
-          start.name,
+          idName,
+          start,
           typ,
-          end.name,
+          end,
           isDirected = false,
           Seq(property.propertyKeyToken),
           indexType,
@@ -1005,7 +1509,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "UndirectedRelationshipIndexContainsScan",
-          NoChildren,
+          children,
           Seq(Details(info)),
           variables,
           withRawCardinalities,
@@ -1014,10 +1518,10 @@ case class LogicalPlan2PlanDescription(
       case p @ DirectedRelationshipIndexEndsWithScan(idName, start, end, typ, property, valueExpr, _, _, indexType) =>
         val predicate = pretty"${asPrettyString(property.propertyKeyToken.name)} ENDS WITH ${asPrettyString(valueExpr)}"
         val info = relIndexInfoString(
-          idName.name,
-          start.name,
+          idName,
+          start,
           typ,
-          end.name,
+          end,
           isDirected = true,
           Seq(property.propertyKeyToken),
           indexType,
@@ -1027,7 +1531,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "DirectedRelationshipIndexEndsWithScan",
-          NoChildren,
+          children,
           Seq(Details(info)),
           variables,
           withRawCardinalities,
@@ -1036,10 +1540,10 @@ case class LogicalPlan2PlanDescription(
       case p @ UndirectedRelationshipIndexEndsWithScan(idName, start, end, typ, property, valueExpr, _, _, indexType) =>
         val predicate = pretty"${asPrettyString(property.propertyKeyToken.name)} ENDS WITH ${asPrettyString(valueExpr)}"
         val info = relIndexInfoString(
-          idName.name,
-          start.name,
+          idName,
+          start,
           typ,
-          end.name,
+          end,
           isDirected = false,
           Seq(property.propertyKeyToken),
           indexType,
@@ -1049,7 +1553,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "UndirectedRelationshipIndexEndsWithScan",
-          NoChildren,
+          children,
           Seq(Details(info)),
           variables,
           withRawCardinalities,
@@ -1060,17 +1564,17 @@ case class LogicalPlan2PlanDescription(
         val details =
           if (argumentIds.nonEmpty) Seq(Details(argumentIds.map(asPrettyString(_)).mkPrettyString(SEPARATOR)))
           else Seq.empty
-        PlanDescriptionImpl(id, "Argument", NoChildren, details, variables, withRawCardinalities, withDistinctness)
+        PlanDescriptionImpl(id, "Argument", Seq.empty, details, variables, withRawCardinalities, withDistinctness)
 
       case _: plans.Argument =>
         ArgumentPlanDescription(id, Seq.empty, variables)
 
       case DirectedRelationshipByIdSeek(idName, relIds, startNode, endNode, _) =>
-        val details = Details(relationshipByIdSeekInfo(idName.name, relIds, startNode.name, endNode.name, true, "id"))
+        val details = Details(relationshipByIdSeekInfo(idName, relIds, startNode, endNode, true, "id"))
         PlanDescriptionImpl(
           id,
           "DirectedRelationshipByIdSeek",
-          NoChildren,
+          children,
           Seq(details),
           variables,
           withRawCardinalities,
@@ -1079,11 +1583,11 @@ case class LogicalPlan2PlanDescription(
 
       case DirectedRelationshipByElementIdSeek(idName, relIds, startNode, endNode, _) =>
         val details =
-          Details(relationshipByIdSeekInfo(idName.name, relIds, startNode.name, endNode.name, true, "elementId"))
+          Details(relationshipByIdSeekInfo(idName, relIds, startNode, endNode, true, "elementId"))
         PlanDescriptionImpl(
           id,
           "DirectedRelationshipByElementIdSeek",
-          NoChildren,
+          children,
           Seq(details),
           variables,
           withRawCardinalities,
@@ -1091,11 +1595,11 @@ case class LogicalPlan2PlanDescription(
         )
 
       case UndirectedRelationshipByIdSeek(idName, relIds, startNode, endNode, _) =>
-        val details = Details(relationshipByIdSeekInfo(idName.name, relIds, startNode.name, endNode.name, false, "id"))
+        val details = Details(relationshipByIdSeekInfo(idName, relIds, startNode, endNode, false, "id"))
         PlanDescriptionImpl(
           id,
           "UndirectedRelationshipByIdSeek",
-          NoChildren,
+          children,
           Seq(details),
           variables,
           withRawCardinalities,
@@ -1104,11 +1608,11 @@ case class LogicalPlan2PlanDescription(
 
       case UndirectedRelationshipByElementIdSeek(idName, relIds, startNode, endNode, _) =>
         val details =
-          Details(relationshipByIdSeekInfo(idName.name, relIds, startNode.name, endNode.name, false, "elementId"))
+          Details(relationshipByIdSeekInfo(idName, relIds, startNode, endNode, false, "elementId"))
         PlanDescriptionImpl(
           id,
           "UndirectedRelationshipByElementIdSeek",
-          NoChildren,
+          children,
           Seq(details),
           variables,
           withRawCardinalities,
@@ -1116,77 +1620,93 @@ case class LogicalPlan2PlanDescription(
         )
 
       case DirectedAllRelationshipsScan(idName, start, end, _) =>
-        val prettyDetails =
-          pretty"(${asPrettyString(start)})-[${asPrettyString(idName)}]->(${asPrettyString(end)})"
         PlanDescriptionImpl(
           id,
           "DirectedAllRelationshipsScan",
-          NoChildren,
-          Seq(Details(prettyDetails)),
+          children,
+          Seq(Details(relationshipPattern(start, idName, Seq.empty, end, OUTGOING))),
           variables,
           withRawCardinalities,
           withDistinctness
         )
 
       case PartitionedDirectedAllRelationshipsScan(idName, start, end, _) =>
-        val prettyDetails =
-          pretty"(${asPrettyString(start)})-[${asPrettyString(idName)}]->(${asPrettyString(end)})"
         PlanDescriptionImpl(
           id,
           "PartitionedDirectedAllRelationshipsScan",
-          NoChildren,
-          Seq(Details(prettyDetails)),
+          children,
+          Seq(Details(relationshipPattern(start, idName, Seq.empty, end, OUTGOING))),
           variables,
           withRawCardinalities,
           withDistinctness
         )
 
       case UndirectedAllRelationshipsScan(idName, start, end, _) =>
-        val prettyDetails =
-          pretty"(${asPrettyString(start)})-[${asPrettyString(idName)}]-(${asPrettyString(end)})"
         PlanDescriptionImpl(
           id,
           "UndirectedAllRelationshipsScan",
-          NoChildren,
-          Seq(Details(prettyDetails)),
+          children,
+          Seq(Details(relationshipPattern(start, idName, Seq.empty, end, BOTH))),
           variables,
           withRawCardinalities,
           withDistinctness
         )
 
       case PartitionedUndirectedAllRelationshipsScan(idName, start, end, _) =>
-        val prettyDetails =
-          pretty"(${asPrettyString(start)})-[${asPrettyString(idName)}]-(${asPrettyString(end)})"
         PlanDescriptionImpl(
           id,
           "PartitionedUndirectedAllRelationshipsScan",
-          NoChildren,
-          Seq(Details(prettyDetails)),
+          children,
+          Seq(Details(relationshipPattern(start, idName, Seq.empty, end, BOTH))),
           variables,
           withRawCardinalities,
           withDistinctness
         )
 
       case DirectedRelationshipTypeScan(idName, start, typeName, end, _, _) =>
-        val prettyDetails =
-          pretty"(${asPrettyString(start)})-[${asPrettyString(idName)}:${asPrettyString(typeName.name)}]->(${asPrettyString(end)})"
         PlanDescriptionImpl(
           id,
           "DirectedRelationshipTypeScan",
-          NoChildren,
-          Seq(Details(prettyDetails)),
+          children,
+          Seq(Details(relationshipPattern(start, idName, Seq(typeName), end, OUTGOING))),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case DynamicDirectedRelationshipTypeLookup(idName, start, typeExpr, end, _, _, propertyPredicates) =>
+        val prettyType =
+          pretty"(${asPrettyString(start)})-[${asPrettyString(idName)}:${getPrettyDynamicElement(typeExpr)}]->(${asPrettyString(end)})"
+            .append(formatPropertyPredicatesForDynamicIndexSeek(asPrettyString(idName), propertyPredicates))
+        PlanDescriptionImpl(
+          id,
+          "DynamicDirectedRelationshipTypeLookup",
+          children,
+          Seq(Details(prettyType)),
           variables,
           withRawCardinalities,
           withDistinctness
         )
 
       case UndirectedRelationshipTypeScan(idName, start, typeName, end, _, _) =>
-        val prettyDetails =
-          pretty"(${asPrettyString(start)})-[${asPrettyString(idName)}:${asPrettyString(typeName.name)}]-(${asPrettyString(end)})"
         PlanDescriptionImpl(
           id,
           "UndirectedRelationshipTypeScan",
-          NoChildren,
+          children,
+          Seq(Details(relationshipPattern(start, idName, Seq(typeName), end, BOTH))),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case DynamicUndirectedRelationshipTypeLookup(idName, start, typeExpr, end, _, _, propertyPredicates) =>
+        val prettyDetails =
+          pretty"(${asPrettyString(start)})-[${asPrettyString(idName)}:${getPrettyDynamicElement(typeExpr)}]-(${asPrettyString(end)})"
+            .append(formatPropertyPredicatesForDynamicIndexSeek(asPrettyString(idName), propertyPredicates))
+        PlanDescriptionImpl(
+          id,
+          "DynamicUndirectedRelationshipTypeLookup",
+          children,
           Seq(Details(prettyDetails)),
           variables,
           withRawCardinalities,
@@ -1194,26 +1714,22 @@ case class LogicalPlan2PlanDescription(
         )
 
       case PartitionedDirectedRelationshipTypeScan(idName, start, typeName, end, _) =>
-        val prettyDetails =
-          pretty"(${asPrettyString(start)})-[${asPrettyString(idName)}:${asPrettyString(typeName.name)}]->(${asPrettyString(end)})"
         PlanDescriptionImpl(
           id,
           "PartitionedDirectedRelationshipTypeScan",
-          NoChildren,
-          Seq(Details(prettyDetails)),
+          children,
+          Seq(Details(relationshipPattern(start, idName, Seq(typeName), end, OUTGOING))),
           variables,
           withRawCardinalities,
           withDistinctness
         )
 
       case PartitionedUndirectedRelationshipTypeScan(idName, start, typeName, end, _) =>
-        val prettyDetails =
-          pretty"(${asPrettyString(start)})-[${asPrettyString(idName)}:${asPrettyString(typeName.name)}]-(${asPrettyString(end)})"
         PlanDescriptionImpl(
           id,
           "PartitionedUndirectedRelationshipTypeScan",
-          NoChildren,
-          Seq(Details(prettyDetails)),
+          children,
+          Seq(Details(relationshipPattern(start, idName, Seq(typeName), end, BOTH))),
           variables,
           withRawCardinalities,
           withDistinctness
@@ -1223,7 +1739,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "Input",
-          NoChildren,
+          children,
           Seq(Details((nodes ++ rels ++ inputVars).map(asPrettyString(_)))),
           variables,
           withRawCardinalities,
@@ -1235,7 +1751,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "NodeCountFromCountStore",
-          NoChildren,
+          children,
           Seq(Details(info)),
           variables,
           withRawCardinalities,
@@ -1256,7 +1772,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "NodeIndexContainsScan",
-          NoChildren,
+          children,
           Seq(Details(info)),
           variables,
           withRawCardinalities,
@@ -1277,7 +1793,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "NodeIndexEndsWithScan",
-          NoChildren,
+          children,
           Seq(Details(info)),
           variables,
           withRawCardinalities,
@@ -1293,7 +1809,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "NodeIndexScan",
-          NoChildren,
+          children,
           Seq(Details(info)),
           variables,
           withRawCardinalities,
@@ -1309,7 +1825,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "PartitionedNodeIndexScan",
-          NoChildren,
+          children,
           Seq(Details(info)),
           variables,
           withRawCardinalities,
@@ -1319,12 +1835,12 @@ case class LogicalPlan2PlanDescription(
       case SimulatedNodeScan(idName, numberOfRows) =>
         val details = Details(Seq(
           asPrettyString(idName),
-          asPrettyString(UnsignedDecimalIntegerLiteral(numberOfRows.toString)(InputPosition.NONE))
+          asPrettyString(SignedDecimalIntegerLiteral(numberOfRows.toString)(InputPosition.NONE))
         ))
         PlanDescriptionImpl(
           id,
           "SimulatedNodeScan",
-          NoChildren,
+          children,
           Seq(details),
           variables,
           withRawCardinalities,
@@ -1335,7 +1851,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "ProcedureCall",
-          NoChildren,
+          children,
           Seq(Details(signatureInfo(call))),
           variables,
           withRawCardinalities,
@@ -1347,7 +1863,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "RelationshipCountFromCountStore",
-          NoChildren,
+          children,
           Seq(Details(info)),
           variables,
           withRawCardinalities,
@@ -1358,7 +1874,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           s"DoNothingIfExists(INDEX)",
-          NoChildren,
+          children,
           Seq(Details(indexInfo(indexType.name(), nameOption, entityName, propertyKeyNames, NoOptions))),
           variables,
           withRawCardinalities,
@@ -1369,7 +1885,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           s"DoNothingIfExists(INDEX)",
-          NoChildren,
+          children,
           Seq(Details(lookupIndexInfo(nameOption, entityType, NoOptions))),
           variables,
           withRawCardinalities,
@@ -1380,8 +1896,25 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           s"DoNothingIfExists(INDEX)",
-          NoChildren,
+          children,
           Seq(Details(fulltextIndexInfo(nameOption, entityNames, propertyKeyNames, NoOptions))),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case DoNothingIfExistsForVectorIndex(entityNames, propertyKeyNames, additionalPropertyKeyNames, nameOption, _) =>
+        PlanDescriptionImpl(
+          id,
+          s"DoNothingIfExists(INDEX)",
+          children,
+          Seq(Details(vectorIndexInfo(
+            nameOption,
+            entityNames,
+            propertyKeyNames,
+            additionalPropertyKeyNames,
+            NoOptions
+          ))),
           variables,
           withRawCardinalities,
           withDistinctness
@@ -1398,7 +1931,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "CreateIndex",
-          NoChildren,
+          children,
           Seq(Details(indexInfo(indexType.name(), nameOption, entityName, propertyKeyNames, options))),
           variables,
           withRawCardinalities,
@@ -1414,7 +1947,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "CreateIndex",
-          NoChildren,
+          children,
           Seq(Details(lookupIndexInfo(nameOption, entityType, options))),
           variables,
           withRawCardinalities,
@@ -1431,8 +1964,26 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "CreateIndex",
-          NoChildren,
+          children,
           Seq(Details(fulltextIndexInfo(nameOption, entityNames, propertyKeyNames, options))),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case CreateVectorIndex(
+          _,
+          entityNames,
+          propertyKeyNames,
+          additionalPropertyKeyNames,
+          nameOption,
+          options
+        ) => // Can be both a leaf plan and a middle plan so need to be in both places
+        PlanDescriptionImpl(
+          id,
+          "CreateIndex",
+          children,
+          Seq(Details(vectorIndexInfo(nameOption, entityNames, propertyKeyNames, additionalPropertyKeyNames, options))),
           variables,
           withRawCardinalities,
           withDistinctness
@@ -1443,8 +1994,8 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "DropIndex",
-          NoChildren,
-          Seq(Details(pretty"INDEX ${PrettyString(Prettifier.escapeName(name))}$ifExistsString")),
+          children,
+          Seq(Details(pretty"INDEX ${getPrettyStringName(name)}$ifExistsString")),
           variables,
           withRawCardinalities,
           withDistinctness
@@ -1456,7 +2007,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "ShowIndexes",
-          NoChildren,
+          children,
           Seq(Details(pretty"$typeDescription, $colsDescription")),
           variables,
           withRawCardinalities,
@@ -1468,7 +2019,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           s"DoNothingIfExists(CONSTRAINT)",
-          NoChildren,
+          children,
           Seq(Details(constraintInfo(name, entity, entityName, props, assertion))),
           variables,
           withRawCardinalities,
@@ -1495,7 +2046,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "CreateConstraint",
-          NoChildren,
+          children,
           Seq(details),
           variables,
           withRawCardinalities,
@@ -1504,11 +2055,11 @@ case class LogicalPlan2PlanDescription(
 
       case DropConstraintOnName(name, ifExists) =>
         val ifExistsString = if (ifExists) pretty" IF EXISTS" else pretty""
-        val constraintDetails = Details(pretty"CONSTRAINT ${PrettyString(Prettifier.escapeName(name))}$ifExistsString")
+        val constraintDetails = Details(pretty"CONSTRAINT ${getPrettyStringName(name)}$ifExistsString")
         PlanDescriptionImpl(
           id,
           "DropConstraint",
-          NoChildren,
+          children,
           Seq(constraintDetails),
           variables,
           withRawCardinalities,
@@ -1521,8 +2072,70 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "ShowConstraints",
-          NoChildren,
+          children,
           Seq(Details(pretty"$typeDescription, $colsDescription")),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case AlterCurrentGraphType(gt: GraphTypeForSet) =>
+        val details = Details(asPrettyString.raw(graphTypeInfoForPlan(gt.elementTypes, gt.constraints)))
+        PlanDescriptionImpl(
+          id,
+          "AlterCurrentGraphTypeSet",
+          children,
+          Seq(details),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case AlterCurrentGraphType(gt: GraphTypeForAdd) =>
+        val details = Details(asPrettyString.raw(graphTypeInfoForPlan(gt.elementTypes, gt.constraints)))
+        PlanDescriptionImpl(
+          id,
+          "AlterCurrentGraphTypeAdd",
+          children,
+          Seq(details),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case AlterCurrentGraphType(gt: GraphTypeForDrop) =>
+        val details = Details(asPrettyString.raw(graphTypeDropInfo(gt.elementTypes, gt.constraints)))
+        PlanDescriptionImpl(
+          id,
+          "AlterCurrentGraphTypeDrop",
+          children,
+          Seq(details),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case AlterCurrentGraphType(gt: GraphTypeForAlter) =>
+        val details = Details(asPrettyString.raw(graphTypeInfoForPlan(gt.elementTypes, Set.empty)))
+        PlanDescriptionImpl(
+          id,
+          "AlterCurrentGraphTypeAlter",
+          children,
+          Seq(details),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case s: ShowCurrentGraphType =>
+        val colsDescription = commandColumnInfo(s.yieldColumns, s.yieldAll)
+        val commandDescription = if (s.asGraph) pretty"graphTypeAsGraph" else pretty"graphTypeAsString"
+
+        PlanDescriptionImpl(
+          id,
+          "ShowCurrentGraphType",
+          children,
+          Seq(Details(pretty"$commandDescription, $colsDescription")),
           variables,
           withRawCardinalities,
           withDistinctness
@@ -1536,7 +2149,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "ShowProcedures",
-          NoChildren,
+          children,
           Seq(Details(pretty"$executableDescription, $colsDescription")),
           variables,
           withRawCardinalities,
@@ -1552,7 +2165,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "ShowFunctions",
-          NoChildren,
+          children,
           Seq(Details(pretty"$typeDescription, $executableDescription, $colsDescription")),
           variables,
           withRawCardinalities,
@@ -1560,16 +2173,13 @@ case class LogicalPlan2PlanDescription(
         )
 
       case s: ShowTransactions =>
-        val idsDescription = s.ids match {
-          case Left(ls) =>
-            asPrettyString.raw(if (ls.isEmpty) "allTransactions" else s"transactions(${ls.mkString(", ")})")
-          case Right(e) => asPrettyString.raw(s"transactions(${e.asCanonicalStringVal})")
-        }
+        val idsDescription =
+          getInnerNameDescriptions(s.ids).map(i => pretty"transactions($i)").getOrElse(pretty"allTransactions")
         val colsDescription = commandColumnInfo(s.yieldColumns, s.yieldAll)
         PlanDescriptionImpl(
           id,
           "ShowTransactions",
-          NoChildren,
+          children,
           Seq(Details(pretty"$colsDescription, $idsDescription")),
           variables,
           withRawCardinalities,
@@ -1577,15 +2187,18 @@ case class LogicalPlan2PlanDescription(
         )
 
       case t: TerminateTransactions =>
-        val idsDescription = t.ids match {
-          case Left(ls) => asPrettyString.raw(ls.mkString(", "))
-          case Right(e) => asPrettyString.raw(s"${e.asCanonicalStringVal}")
-        }
+        val idsDescription = getInnerNameDescriptions(t.ids).getOrElse(
+          // We always parse ids so it shouldn't be able to be empty
+          throw InternalException.internalError(
+            this.getClass.getSimpleName,
+            "Terminate transactions had no id's."
+          )
+        )
         val colsDescription = commandColumnInfo(t.yieldColumns, t.yieldAll)
         PlanDescriptionImpl(
           id,
           "TerminateTransactions",
-          NoChildren,
+          children,
           Seq(Details(pretty"$colsDescription, transactions($idsDescription)")),
           variables,
           withRawCardinalities,
@@ -1593,26 +2206,64 @@ case class LogicalPlan2PlanDescription(
         )
 
       case s: ShowSettings =>
-        val namesDescription = s.names match {
-          case Left(Seq()) => asPrettyString.raw("allSettings")
-          case Left(names) => asPrettyString.raw(s"settings(${names.mkString(", ")})")
-          case Right(e)    => asPrettyString.raw(s"settings(${e.asCanonicalStringVal})")
-        }
+        val namesDescription =
+          getInnerNameDescriptions(s.names).map(i => pretty"settings($i)").getOrElse(pretty"allSettings")
         val colsDescription = commandColumnInfo(s.yieldColumns, s.yieldAll)
         PlanDescriptionImpl(
           id,
           "ShowSettings",
-          NoChildren,
+          children,
           Seq(Details(pretty"$namesDescription, $colsDescription")),
           variables,
           withRawCardinalities,
           withDistinctness
         )
 
-      case SystemProcedureCall(procedureName, _, _, _, _) =>
-        PlanDescriptionImpl(id, procedureName, NoChildren, Seq.empty, variables, withRawCardinalities, withDistinctness)
+      // System database only commands
+      case s: ShowDatabases =>
+        val colsDescription = commandColumnInfo(s.yieldColumns, s.yieldAll)
+        val scopeDescription: PartialFunction[DatabaseScope, PrettyString] = {
+          case AllDatabasesScope()          => pretty"allDatabases"
+          case DefaultDatabaseScope()       => pretty"defaultDatabase"
+          case HomeDatabaseScope()          => pretty"homeDatabase"
+          case SingleNamedDatabaseScope(db) => pretty"database(${asPrettyString(db.asCanonicalStringVal)})"
+        }
+        PlanDescriptionImpl(
+          id,
+          "ShowDatabases",
+          children,
+          Seq(Details(pretty"${scopeDescription(s.dbScope)}, $colsDescription")),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
 
-      case x => throw new InternalException(s"Unknown plan type: ${x.getClass.getSimpleName}. Missing a case?")
+      case SystemProcedureCall(call, _, _, _) =>
+        PlanDescriptionImpl(
+          id,
+          "ProcedureCall",
+          children,
+          Seq(Details(signatureInfo(call))),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case ForeignLeafPlan(_, externalPlan, _) =>
+        PlanDescriptionImpl(
+          id,
+          "External",
+          Seq.empty,
+          Seq(Details(asPrettyString.raw(externalPlan.planDescriptionDetails))),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case x => throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"Unknown plan type: ${x.getClass.getSimpleName}. Missing a case?"
+        )
     }
 
     addRuntimeAttributes(addPlanningAttributes(result, plan), plan)
@@ -1624,14 +2275,16 @@ case class LogicalPlan2PlanDescription(
 
     val id = plan.id
     val variables = plan.availableSymbols.map(asPrettyString(_))
-    val children = if (source.isInstanceOf[ArgumentPlanDescription]) NoChildren else SingleChild(source)
+    val nestedPlanDescriptions = describeNestedPlans(plan)
+    val children =
+      Seq(source).filterNot(_.isInstanceOf[ArgumentPlanDescription]) ++ nestedPlanDescriptions
 
-    val result: InternalPlanDescription = plan match {
+    val result: InternalPlanDescription = replaceNestedPlansWithPlaceholder(plan) match {
       case _: AdministrationCommandLogicalPlan =>
         PlanDescriptionImpl(
           id,
           "AdministrationCommand",
-          NoChildren,
+          nestedPlanDescriptions,
           Seq.empty,
           Set.empty,
           withRawCardinalities,
@@ -1691,10 +2344,10 @@ case class LogicalPlan2PlanDescription(
           case c: CreateNode => createNodeDescription(c)
           case CreateRelationship(idName, leftNode, relType, rightNode, direction, properties) =>
             expandExpressionDescription(
-              leftNode,
+              Some(leftNode),
               Some(idName),
               Seq(relType),
-              rightNode,
+              Some(rightNode),
               direction,
               1,
               Some(1),
@@ -1801,7 +2454,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "NodeCountFromCountStore",
-          NoChildren,
+          nestedPlanDescriptions,
           Seq(Details(info)),
           variables,
           withRawCardinalities,
@@ -1813,7 +2466,7 @@ case class LogicalPlan2PlanDescription(
         PlanDescriptionImpl(
           id,
           "RelationshipCountFromCountStore",
-          NoChildren,
+          nestedPlanDescriptions,
           Seq(Details(info)),
           variables,
           withRawCardinalities,
@@ -1825,8 +2478,8 @@ case class LogicalPlan2PlanDescription(
 
       case Expand(_, fromName, dir, typeNames, toName, relName, mode) =>
         val expression = Details(expandExpressionDescription(
-          fromName,
-          Some(relName),
+          Some(fromName),
+          relName,
           typeNames,
           toName,
           dir,
@@ -1849,10 +2502,10 @@ case class LogicalPlan2PlanDescription(
         val prettyFactor = asPrettyString(DecimalDoubleLiteral(factor.toString)(InputPosition.NONE))
         val details = Details(Seq(
           expandExpressionDescription(
-            fromName,
+            Some(fromName),
             Some(relName),
             Seq.empty,
-            toName,
+            Some(toName),
             SemanticDirection.OUTGOING,
             1,
             Some(1),
@@ -1914,10 +2567,21 @@ case class LogicalPlan2PlanDescription(
           withDistinctness
         )
 
+      case RemoteBatchPropertiesWithFilter(_, predicates, properties) =>
+        PlanDescriptionImpl(
+          id,
+          "RemoteBatchPropertiesWithFilter",
+          children,
+          Seq(Details(properties.toSeq.map(asPrettyString(_)) ++ predicates.toSeq.map(asPrettyString(_)))),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
       case OptionalExpand(_, fromName, dir, typeNames, toName, relName, mode, predicates) =>
         val predicate = predicates.map(p => pretty" WHERE ${asPrettyString(p)}").getOrElse(pretty"")
         val expandExpressionDesc =
-          expandExpressionDescription(fromName, Some(relName), typeNames, toName, dir, 1, Some(1), None)
+          expandExpressionDescription(Some(fromName), relName, typeNames, toName, dir, 1, Some(1), None)
         val details = Details(pretty"$expandExpressionDesc$predicate")
         val modeText = mode match {
           case ExpandAll  => "OptionalExpand(All)"
@@ -1980,7 +2644,7 @@ case class LogicalPlan2PlanDescription(
           sourceNode,
           _,
           nfa,
-          mode,
+          expansionMode,
           nonInlinedPreFilters,
           _,
           _,
@@ -1990,7 +2654,7 @@ case class LogicalPlan2PlanDescription(
           solvedExpressionString,
           _,
           _,
-          _
+          pathMode
         ) =>
         def predicateLines(preds: Seq[PrettyString], prefix: PrettyString): PrettyString = {
           preds.tail
@@ -2002,9 +2666,9 @@ case class LogicalPlan2PlanDescription(
             )
         }
 
-        val modeDescr = expandModeDescription(mode)
+        val modeDescr = expandModeDescription(expansionMode)
         val patternStr = asPrettyString.solvedExpressionString(solvedExpressionString)
-        val expandDirStr = mode match {
+        val expandDirStr = expansionMode match {
           case ExpandAll  => pretty"\n        expanding from: ${asPrettyString(sourceNode)}"
           case ExpandInto => pretty"" // We expand from both ends in ExpandInto
         }
@@ -2031,7 +2695,7 @@ case class LogicalPlan2PlanDescription(
         val detailsStr = pretty"$patternStr$expandDirStr$inlinedPredicatesStr$nonInlinedPredicatesStr"
         PlanDescriptionImpl(
           id = id,
-          name = s"StatefulShortestPath($modeDescr)",
+          name = s"StatefulShortestPath($modeDescr, $pathMode)",
           children = children,
           arguments = Seq(Details(detailsStr)),
           variables = variables,
@@ -2050,10 +2714,11 @@ case class LogicalPlan2PlanDescription(
           relPredicates,
           pathPredicates,
           _,
+          _,
           _
         ) =>
         val patternRelationshipInfo =
-          expandExpressionDescription(fromName, Some(relName), relTypes, toName, dir, patternLength)
+          expandExpressionDescription(Some(fromName), Some(relName), relTypes, Some(toName), dir, patternLength)
 
         val pathName = asPrettyString(maybePathName.map(_.name).getOrElse("p"))
 
@@ -2098,39 +2763,35 @@ case class LogicalPlan2PlanDescription(
           withDistinctness
         )
 
-      case Merge(_, createNodes, createRelationships, onMatch, onCreate, nodesToLock) =>
-        val createNodesPretty = createNodes.map(createNodeDescription)
-        val createRelsPretty = createRelationships.map {
-          case CreateRelationship(relationship, startNode, typ, endNode, direction, properties) =>
-            expandExpressionDescription(
-              startNode,
-              Some(relationship),
-              Seq(typ),
-              endNode,
-              direction,
-              1,
-              Some(1),
-              properties
-            )
+      case MergeInto(_, r, leftNode, dir, relType, rightNode, onMatch, onCreate) =>
+        val createRelationship =
+          expandExpressionDescription(Some(leftNode), Some(r), Seq(relType), Some(rightNode), dir, 1, Some(1), None)
+        def asPrettyProps(kv: (PropertyKeyName, Expression)): PrettyString = {
+          pretty"${asPrettyString(r)}.${asPrettyString(kv._1)} = ${asPrettyString(kv._2)}"
         }
-        val details: Seq[PrettyString] =
-          Seq(pretty"CREATE ${(createNodesPretty ++ createRelsPretty).mkPrettyString(", ")}") ++
-            (if (onMatch.nonEmpty) Seq(pretty"ON MATCH ${onMatch.map(mutatingPatternString).mkPrettyString(", ")}")
-             else Seq.empty) ++
-            (if (onCreate.nonEmpty) Seq(pretty"ON CREATE ${onCreate.map(mutatingPatternString).mkPrettyString(", ")}")
-             else Seq.empty) ++
-            (if (nodesToLock.nonEmpty) Seq(pretty"LOCK(${keyNamesInfo(nodesToLock.toSeq)})") else Seq.empty)
+        def asPretty(op: String, props: Seq[(PropertyKeyName, Expression)]): PrettyString = {
+          if (props.isEmpty) pretty""
+          else {
+            pretty" ON ${asPrettyString(op)} SET ${props.map(asPrettyProps).mkPrettyString(", ")}"
+          }
+        }
 
-        val name = if (nodesToLock.isEmpty) "Merge" else "LockingMerge"
+        val detail = pretty"MERGE $createRelationship${asPretty("MATCH", onMatch)}${asPretty("CREATE", onCreate)}"
         PlanDescriptionImpl(
           id,
-          name,
+          "MergeInto",
           children,
-          Seq(Details(details)),
+          Seq(Details(Seq(detail))),
           variables,
           withRawCardinalities,
           withDistinctness
         )
+
+      case Merge(_, createNodes, createRelationships, onMatch, onCreate, nodesToLock) =>
+        mergePlanDescription(id, variables, children, createNodes, createRelationships, onMatch, onCreate, nodesToLock)
+
+      case FusedMerge(_, createNodes, createRelationships, onMatch, onCreate, nodesToLock) =>
+        mergePlanDescription(id, variables, children, createNodes, createRelationships, onMatch, onCreate, nodesToLock)
 
       case Optional(_, protectedSymbols) =>
         PlanDescriptionImpl(
@@ -2160,7 +2821,8 @@ case class LogicalPlan2PlanDescription(
       case ProjectEndpoints(_, relName, start, _, end, _, relTypes, direction, patternLength) =>
         val name = s"ProjectEndpoints"
 
-        val details = expandExpressionDescription(start, Some(relName), relTypes, end, direction, patternLength)
+        val details =
+          expandExpressionDescription(Some(start), Some(relName), relTypes, Some(end), direction, patternLength)
         PlanDescriptionImpl(
           id,
           name,
@@ -2180,10 +2842,11 @@ case class LogicalPlan2PlanDescription(
           min,
           max,
           nodePredicates,
-          relationshipPredicates
+          relationshipPredicates,
+          _
         ) =>
         val expandInfo = expandExpressionDescription(
-          fromName,
+          Some(fromName),
           None,
           types,
           toName,
@@ -2215,10 +2878,11 @@ case class LogicalPlan2PlanDescription(
           depthName,
           mode,
           nodePredicates,
-          relationshipPredicates
+          relationshipPredicates,
+          _
         ) =>
         val expandInfo = expandExpressionDescription(
-          fromName,
+          Some(fromName),
           None,
           types,
           toName,
@@ -2256,10 +2920,10 @@ case class LogicalPlan2PlanDescription(
           relationshipPredicates
         ) =>
         val expandDescription = expandExpressionDescription(
-          from,
+          Some(from),
           Some(relName),
           types,
-          to,
+          Some(to),
           dir,
           minLength = length.min,
           maxLength = length.max,
@@ -2502,17 +3166,21 @@ case class LogicalPlan2PlanDescription(
           withDistinctness
         )
 
-      case UnwindCollection(_, variable, expression) =>
-        val details = Details(projectedExpressionInfo(Map(variable -> expression)).mkPrettyString(SEPARATOR))
-        PlanDescriptionImpl(id, "Unwind", children, Seq(details), variables, withRawCardinalities, withDistinctness)
+      case UnwindCollection(_, maybeVariable, expression) =>
+        val details = maybeVariable.map(variable =>
+          Details(projectedExpressionInfo(Map(variable -> expression)).mkPrettyString(SEPARATOR))
+        ).toSeq
+        PlanDescriptionImpl(id, "Unwind", children, details, variables, withRawCardinalities, withDistinctness)
 
-      case PartitionedUnwindCollection(_, variable, expression) =>
-        val details = Details(projectedExpressionInfo(Map(variable -> expression)).mkPrettyString(SEPARATOR))
+      case PartitionedUnwindCollection(_, maybeVariable, expression) =>
+        val details = maybeVariable.map(variable =>
+          Details(projectedExpressionInfo(Map(variable -> expression)).mkPrettyString(SEPARATOR))
+        ).toSeq
         PlanDescriptionImpl(
           id,
           "PartitionedUnwind",
           children,
-          Seq(details),
+          details,
           variables,
           withRawCardinalities,
           withDistinctness
@@ -2533,8 +3201,8 @@ case class LogicalPlan2PlanDescription(
           _
         ) =>
         val expandDescription = expandExpressionDescription(
-          fromName,
-          Some(relName),
+          Some(fromName),
+          relName,
           types,
           toName,
           dir,
@@ -2601,6 +3269,24 @@ case class LogicalPlan2PlanDescription(
           "CreateIndex",
           children,
           Seq(Details(fulltextIndexInfo(nameOption, entityNames, propertyKeyNames, options))),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case CreateVectorIndex(
+          _,
+          entityNames,
+          propertyKeyNames,
+          additionalPropertyKeyNames,
+          nameOption,
+          options
+        ) => // Can be both a leaf plan and a middle plan so need to be in both places
+        PlanDescriptionImpl(
+          id,
+          "CreateIndex",
+          children,
+          Seq(Details(vectorIndexInfo(nameOption, entityNames, propertyKeyNames, additionalPropertyKeyNames, options))),
           variables,
           withRawCardinalities,
           withDistinctness
@@ -2719,10 +3405,128 @@ case class LogicalPlan2PlanDescription(
           withDistinctness
         )
 
-      case x => throw new InternalException(s"Unknown plan type: ${x.getClass.getSimpleName}. Missing a case?")
+      case plans.LockNodes(_, nodesToLock) =>
+        PlanDescriptionImpl(
+          id,
+          "LockNodes",
+          children,
+          Seq(Details(keyNamesInfo(nodesToLock.toSeq))),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case x => throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"Unknown plan type: ${x.getClass.getSimpleName}. Missing a case?"
+        )
     }
 
     addRuntimeAttributes(addPlanningAttributes(result, plan), plan)
+  }
+
+  private def mergePlanDescription(
+    id: Id,
+    variables: Set[PrettyString],
+    children: Seq[InternalPlanDescription],
+    createNodes: Seq[CreateNode],
+    createRelationships: Seq[CreateRelationship],
+    onMatch: Seq[SetMutatingPattern],
+    onCreate: Seq[SetMutatingPattern],
+    nodesToLock: Set[LogicalVariable]
+  ) = {
+    val createNodesPretty = createNodes.map(createNodeDescription)
+    val createRelsPretty = createRelationships.map {
+      case CreateRelationship(relationship, startNode, typ, endNode, direction, properties) =>
+        expandExpressionDescription(
+          Some(startNode),
+          Some(relationship),
+          Seq(typ),
+          Some(endNode),
+          direction,
+          1,
+          Some(1),
+          properties
+        )
+    }
+    val details: Seq[PrettyString] =
+      Seq(pretty"CREATE ${(createNodesPretty ++ createRelsPretty).mkPrettyString(", ")}") ++
+        (if (onMatch.nonEmpty) Seq(pretty"ON MATCH ${onMatch.map(mutatingPatternString).mkPrettyString(", ")}")
+         else Seq.empty) ++
+        (if (onCreate.nonEmpty) Seq(pretty"ON CREATE ${onCreate.map(mutatingPatternString).mkPrettyString(", ")}")
+         else Seq.empty) ++
+        (if (nodesToLock.nonEmpty) Seq(pretty"LOCK(${keyNamesInfo(nodesToLock.toSeq)})") else Seq.empty)
+
+    val name = if (nodesToLock.isEmpty) "Merge" else "LockingMerge"
+    PlanDescriptionImpl(
+      id,
+      name,
+      children,
+      Seq(Details(details)),
+      variables,
+      withRawCardinalities,
+      withDistinctness
+    )
+  }
+
+  private def replaceNestedPlansWithPlaceholder(plan: LogicalPlan) = {
+    if (renderNestedPlanExpressions) {
+      val nestedPlansToVariables =
+        nestedPlanExpressionsMap(plan)
+          .view
+          .mapValues(varFor)
+      plan.endoRewrite(topDown(
+        Rewriter.lift({
+          case expression: NestedPlanExpression if nestedPlansToVariables.contains(expression) =>
+            nestedPlansToVariables(expression)
+        }),
+        stopper = elem => elem != plan && elem.isInstanceOf[LogicalPlan]
+      ))
+    } else {
+      plan
+    }
+  }
+
+  /**
+   * Nested plan expressions mapped to a Cypher-esque identifier
+   */
+  def nestedPlanExpressionsMap(plan: LogicalPlan): Map[NestedPlanExpression, String] =
+    plan.folder.treeFold(Seq.empty[NestedPlanExpression]) {
+      case e: NestedPlanExpression =>
+        acc => SkipChildren(acc :+ e)
+      case childPlan: LogicalPlan if childPlan != plan =>
+        acc => SkipChildren(acc)
+    }
+      .zipWithIndex
+      .map { case (nestedPlanExpression, index) =>
+        nestedPlanExpression -> s"nested_plan_$index"
+      }
+      .toMap
+
+  private def describeNestedPlans(plan: LogicalPlan): Seq[InternalPlanDescription] = {
+    if (renderNestedPlanExpressions) {
+      nestedPlanExpressionsMap(plan)
+        .map { case (expression, expressionIdentifier) =>
+          // We don't use an actual CancellationChecker here,
+          // because it is possible to get here even after the transaction has been closed.
+          val nestedPlanDescription: InternalPlanDescription =
+            LogicalPlans.map(expression.plan, this)(CancellationChecker.neverCancelled())
+          val details: PrettyString = asPrettyString(expression) append pretty" AS ${raw(expressionIdentifier)}"
+          val description = PlanDescriptionImpl(
+            Id.INVALID_ID,
+            expression.getClass.getSimpleName,
+            Seq(nestedPlanDescription),
+            Seq(Details(details)),
+            Set.empty,
+            withRawCardinalities,
+            withDistinctness
+          )
+          addPlanningAttributes(description, expression.plan)
+        }
+        .toSeq
+    } else {
+      Seq.empty
+    }
   }
 
   private def expandModeDescription(mode: Expand.ExpansionMode) = {
@@ -2736,7 +3540,9 @@ case class LogicalPlan2PlanDescription(
     batchSize: Expression,
     concurrency: TransactionConcurrency,
     onErrorBehaviour: InTransactionsOnErrorBehaviour,
-    maybeReportAs: Option[LogicalVariable]
+    maybeReportAs: Option[LogicalVariable],
+    maybeRetryParameters: Option[InTransactionsRetryParameters],
+    disjointBy: Seq[Expression]
   ) = {
     val concurrencyParams = concurrency match {
       case TransactionConcurrency.Concurrent(None)              => "CONCURRENT "
@@ -2744,16 +3550,27 @@ case class LogicalPlan2PlanDescription(
       case _                                                    => ""
     }
     val errorParams = onErrorBehaviour match {
-      case OnErrorContinue => " ON ERROR CONTINUE"
-      case OnErrorBreak    => " ON ERROR BREAK"
-      case OnErrorFail     => " ON ERROR FAIL"
+      case OnErrorContinue          => (" ON ERROR CONTINUE", "")
+      case OnErrorBreak             => (" ON ERROR BREAK", "")
+      case OnErrorFail              => (" ON ERROR FAIL", "")
+      case OnErrorRetryThenContinue => (" ON ERROR RETRY ", "THEN CONTINUE")
+      case OnErrorRetryThenBreak    => (" ON ERROR RETRY ", "THEN BREAK")
+      case OnErrorRetryThenFail     => (" ON ERROR RETRY ", "THEN FAIL")
     }
     val reportParams = maybeReportAs.fold("")(status => s" REPORT STATUS AS ${status.name}")
+    val retryParams = maybeRetryParameters.fold("")(_.timeout match {
+      case Some(timeout) => s"FOR ${asPrettyString(timeout)} SECONDS "
+      case _             => ""
+    })
+    val prettyDisjointBy = if (disjointBy.isEmpty) pretty""
+    else {
+      disjointBy.map(asPrettyString(_)).mkPrettyString(" DISJOINT BY (", ", ", ")")
+    }
 
     Details(
       pretty"IN ${asPrettyString.raw(concurrencyParams)}TRANSACTIONS OF ${asPrettyString(
           batchSize
-        )} ROWS${asPrettyString.raw(errorParams)}${asPrettyString.raw(reportParams)}"
+        )} ROWS${prettyDisjointBy}${asPrettyString.raw(errorParams._1)}${asPrettyString.raw(retryParams)}${asPrettyString.raw(errorParams._2)}${asPrettyString.raw(reportParams)}"
     )
   }
 
@@ -2767,9 +3584,9 @@ case class LogicalPlan2PlanDescription(
 
     val id = plan.id
     val variables = plan.availableSymbols.map(asPrettyString(_))
-    val children = TwoChildren(lhs, rhs)
+    val children = Seq(lhs, rhs) ++ describeNestedPlans(plan)
 
-    val result: InternalPlanDescription = plan match {
+    val result: InternalPlanDescription = replaceNestedPlansWithPlaceholder(plan) match {
       case _: AntiConditionalApply =>
         PlanDescriptionImpl(
           id,
@@ -2960,8 +3777,26 @@ case class LogicalPlan2PlanDescription(
       case _: SemiApply =>
         PlanDescriptionImpl(id, "SemiApply", children, Seq.empty, variables, withRawCardinalities, withDistinctness)
 
-      case TransactionForeach(_, _, batchSize, concurrency, onErrorBehaviour, maybeReportAs) =>
-        val details = callInTxsDetails(batchSize, concurrency, onErrorBehaviour, maybeReportAs)
+      case TransactionForeach(
+          _,
+          _,
+          batchSize,
+          concurrency,
+          errorBehaviour,
+          maybeReportAs,
+          _,
+          effectiveDisjointBy
+        ) =>
+        val (onErrorBehaviour, maybeRetryParameters) = ErrorHandling.toAst(errorBehaviour)
+        val details =
+          callInTxsDetails(
+            batchSize,
+            concurrency,
+            onErrorBehaviour,
+            maybeReportAs,
+            maybeRetryParameters,
+            effectiveDisjointBy
+          )
         PlanDescriptionImpl(
           id,
           "TransactionForeach",
@@ -2972,8 +3807,26 @@ case class LogicalPlan2PlanDescription(
           withDistinctness
         )
 
-      case TransactionApply(_, _, batchSize, concurrency, onErrorBehaviour, maybeReportAs) =>
-        val details = callInTxsDetails(batchSize, concurrency, onErrorBehaviour, maybeReportAs)
+      case TransactionApply(
+          _,
+          _,
+          batchSize,
+          concurrency,
+          errorBehaviour,
+          maybeReportAs,
+          _,
+          effectiveDisjointBy
+        ) =>
+        val (onErrorBehaviour, maybeRetryParameters) = ErrorHandling.toAst(errorBehaviour)
+        val details =
+          callInTxsDetails(
+            batchSize,
+            concurrency,
+            onErrorBehaviour,
+            maybeReportAs,
+            maybeRetryParameters,
+            effectiveDisjointBy
+          )
         PlanDescriptionImpl(
           id,
           "TransactionApply",
@@ -3015,6 +3868,17 @@ case class LogicalPlan2PlanDescription(
           withDistinctness
         )
 
+      case ValueMergeJoin(_, _, predicate) =>
+        PlanDescriptionImpl(
+          id = id,
+          name = "ValueMergeJoin",
+          children = children,
+          arguments = Seq(Details(asPrettyString(predicate))),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
       case _: MultiNodeIndexSeek | _: AssertingMultiNodeIndexSeek | _: SubqueryForeach =>
         PlanDescriptionImpl(
           id = plan.id,
@@ -3026,12 +3890,23 @@ case class LogicalPlan2PlanDescription(
           withDistinctness
         )
 
-      case RepeatTrail(_, _, repetition, start, end, _, _, _, _, _, _, _, _) =>
+      case RepeatTrail(_, _, repetition, start, end, _, _, _, _, _, _, _, _, mode, allReduceMappings) =>
         PlanDescriptionImpl(
           id = plan.id,
-          "Repeat(Trail)",
+          s"Repeat(${expandModeDescription(mode)}, Trail)",
           children,
-          Seq(Details(repeatDetails(repetition, start, end))),
+          Seq(Details(repeatDetails(repetition, start, end, allReduceMappings))),
+          variables,
+          withRawCardinalities,
+          withDistinctness
+        )
+
+      case RepeatAcyclic(_, _, repetition, start, end, _, _, _, _, _, _, _, _, _, _, _, mode, allReduceMappings) =>
+        PlanDescriptionImpl(
+          id = plan.id,
+          s"Repeat(${expandModeDescription(mode)}, Acyclic)",
+          children,
+          Seq(Details(repeatDetails(repetition, start, end, allReduceMappings))),
           variables,
           withRawCardinalities,
           withDistinctness
@@ -3042,7 +3917,7 @@ case class LogicalPlan2PlanDescription(
           id = plan.id,
           "BidirectionalRepeat(Trail)",
           children,
-          Seq(Details(repeatDetails(repetition, start, end))),
+          Seq(Details(repeatDetails(repetition, start, end, Set.empty))),
           variables,
           withRawCardinalities,
           withDistinctness
@@ -3059,31 +3934,54 @@ case class LogicalPlan2PlanDescription(
           withDistinctness
         )
 
-      case RepeatWalk(_, _, repetition, start, end, _, _, _, _, _) =>
+      case RepeatWalk(_, _, repetition, start, end, _, _, _, _, _, _, mode, allReduceMappings) =>
         PlanDescriptionImpl(
           id = plan.id,
-          "Repeat(Walk)",
+          s"Repeat(${expandModeDescription(mode)}, Walk)",
           children,
-          Seq(Details(repeatDetails(repetition, start, end))),
+          Seq(Details(repeatDetails(repetition, start, end, allReduceMappings))),
           variables,
           withRawCardinalities,
           withDistinctness
         )
 
-      case x => throw new InternalException(s"Unknown plan type: ${x.getClass.getSimpleName}. Missing a case?")
+      case x => throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"Unknown plan type: ${x.getClass.getSimpleName}. Missing a case?"
+        )
     }
 
     addRuntimeAttributes(addPlanningAttributes(result, plan), plan)
   }
 
-  private def repeatDetails(repetition: Repetition, start: LogicalVariable, end: LogicalVariable): PrettyString = {
+  private def repeatDetails(
+    repetition: Repetition,
+    start: LogicalVariable,
+    end: LogicalVariable,
+    inlinedAllReduceAccumulators: Set[AllReduceAccumulator]
+  ): PrettyString = {
+    val allReduceInitString = {
+      inlinedAllReduceAccumulators.toSeq match {
+        case Seq() => pretty""
+        case accs =>
+          accs
+            .map(acc => pretty"  ${asPrettyString(acc.previous)} = ${asPrettyString(acc.initial)}")
+            .sorted
+            .mkPrettyString(
+              "\n \ninlined allReduce() initializers:\n",
+              "\n",
+              ""
+            )
+      }
+    }
+
     val repString = repetition match {
       case Repetition(min, Limited(n)) =>
         pretty"{${asPrettyString.raw(min.toString)}, ${asPrettyString.raw(n.toString)}}"
       case Repetition(min, Unlimited) =>
         pretty"{${asPrettyString.raw(min.toString)}, }"
     }
-    pretty"(${asPrettyString(start.name)}) (...)$repString (${asPrettyString(end.name)})"
+    pretty"(${asPrettyString(start.name)}) (...)$repString (${asPrettyString(end.name)})$allReduceInitString"
   }
 
   private def addPlanningAttributes(
@@ -3153,7 +4051,7 @@ case class LogicalPlan2PlanDescription(
   }
 
   private def getNodeIndexDescriptions(
-    idName: String,
+    idName: LogicalVariable,
     label: LabelToken,
     propertyKeys: Seq[PropertyKeyToken],
     indexType: IndexType,
@@ -3164,17 +4062,17 @@ case class LogicalPlan2PlanDescription(
   ): (String, PrettyString) = {
 
     val name = nodeIndexOperatorName(valueExpr, unique, readOnly)
-    val predicate = indexPredicateString(propertyKeys, valueExpr)
-    val info = nodeIndexInfoString(idName, unique, label, propertyKeys, indexType, predicate, caches)
+    val predicate = indexPredicateString(Some(idName), propertyKeys, valueExpr)
+    val info = nodeIndexInfoString(idName.name, unique, label, propertyKeys, indexType, predicate, caches)
 
     (name, info)
   }
 
   private def getRelIndexDescriptions(
-    idName: String,
-    start: String,
+    idName: Option[LogicalVariable],
+    start: Option[LogicalVariable],
     typeToken: RelationshipTypeToken,
-    end: String,
+    end: Option[LogicalVariable],
     isDirected: Boolean,
     propertyKeys: Seq[PropertyKeyToken],
     indexType: IndexType,
@@ -3185,7 +4083,7 @@ case class LogicalPlan2PlanDescription(
   ): (String, PrettyString) = {
 
     val name = relationshipIndexOperatorName(valueExpr, unique, readOnly, isDirected)
-    val predicate = indexPredicateString(propertyKeys, valueExpr)
+    val predicate = indexPredicateString(idName, propertyKeys, valueExpr)
     val info = relIndexInfoString(idName, start, typeToken, end, isDirected, propertyKeys, indexType, predicate, caches)
 
     (name, info)
@@ -3224,26 +4122,41 @@ case class LogicalPlan2PlanDescription(
         indexSeekNames.PLAN_DESCRIPTION_INDEX_SEEK_NAME
       }
     valueExpr match {
-      case _: ExistenceQueryExpression[expressions.Expression] =>
+      case ExistenceQueryExpression =>
         indexSeekNames.PLAN_DESCRIPTION_INDEX_SCAN_NAME
-      case _: RangeQueryExpression[expressions.Expression] =>
+      case _: RangeQueryExpression[?] =>
         if (unique) indexSeekNames.PLAN_DESCRIPTION_UNIQUE_INDEX_SEEK_RANGE_NAME
         else indexSeekNames.PLAN_DESCRIPTION_INDEX_SEEK_RANGE_NAME
-      case e: CompositeQueryExpression[expressions.Expression] =>
-        findName(e.exactOnly)
+      case e: CompositeQueryExpression[?] =>
+        findName(e.exact)
       case _ =>
         findName()
     }
   }
 
   private def indexPredicateString(
+    idName: Option[LogicalVariable],
     propertyKeys: Seq[PropertyKeyToken],
     valueExpr: QueryExpression[expressions.Expression]
   ): PrettyString = valueExpr match {
-    case _: ExistenceQueryExpression[expressions.Expression] =>
+    case AllQueryExpression =>
+      pretty"all(${asPrettyString(propertyKeys.head.name)})"
+
+    case ExistenceQueryExpression =>
       pretty"${asPrettyString(propertyKeys.head.name)} IS NOT NULL"
 
-    case e: RangeQueryExpression[expressions.Expression] =>
+    case NonExistenceQueryExpression =>
+      pretty"${asPrettyString(propertyKeys.head.name)} IS NULL"
+
+    case MatchEntitySetQueryExpression(expression) =>
+      pretty"${asPrettyString(idName)} IN ${asPrettyString(expression)}"
+
+    case PreparedEntityFilterExpression(expression) =>
+      pretty"${asPrettyString(idName)} IN ${asPrettyString(expression)}"
+
+    case MatchAllQueryExpression => pretty""
+
+    case e: RangeQueryExpression[?] =>
       checkOnlyWhenAssertionsAreEnabled(propertyKeys.size == 1)
       e.expression match {
         case PrefixSeekRangeWrapper(range) =>
@@ -3273,14 +4186,14 @@ case class LogicalPlan2PlanDescription(
           val propertyKeyName = asPrettyString(propertyKeys.head.name)
           pretty"point.withinBBox($propertyKeyName, $pll, $pur)"
         case _ =>
-          throw new IllegalStateException("The expression did not confomr to the expected type RangeQueryExpression")
+          throw new IllegalStateException("The expression did not conform to the expected type RangeQueryExpression")
       }
 
-    case e: SingleQueryExpression[expressions.Expression] =>
+    case e: SingleQueryExpression[?] =>
       val propertyKeyName = asPrettyString(propertyKeys.head.name)
       pretty"$propertyKeyName = ${asPrettyString(e.expression)}"
 
-    case e: ManyQueryExpression[expressions.Expression] =>
+    case e: ManyQueryExpression[?] =>
       val (eqOp, innerExp) = e.expression match {
         case ll @ ListLiteral(es) =>
           if (es.size == 1) (pretty"=", es.head) else (pretty"IN", ll)
@@ -3290,9 +4203,9 @@ case class LogicalPlan2PlanDescription(
       val propertyKeyName = asPrettyString(propertyKeys.head.name)
       pretty"$propertyKeyName $eqOp ${asPrettyString(innerExp)}"
 
-    case e: CompositeQueryExpression[expressions.Expression] =>
+    case e: CompositeQueryExpression[?] =>
       val predicates = e.inner.zipWithIndex.map {
-        case (exp, i) => indexPredicateString(Seq(propertyKeys(i)), exp)
+        case (exp, i) => indexPredicateString(idName, Seq(propertyKeys(i)), exp)
       }
       predicates.mkPrettyString(" AND ")
   }
@@ -3308,7 +4221,7 @@ case class LogicalPlan2PlanDescription(
   private def prettyPoint(point: Expression) = {
     val funcName = Point.name
     point match {
-      case FunctionInvocation(FunctionName(Namespace(List()), `funcName`), _, Seq(MapExpression(args)), _, _) =>
+      case FunctionInvocation(FunctionName(Namespace(List()), `funcName`), _, Seq(MapExpression(args)), _, _, _, _) =>
         pretty"point(${args.map(_._2).map(asPrettyString(_)).mkPrettyString(", ")})"
       case _ => asPrettyString(point)
     }
@@ -3352,19 +4265,20 @@ case class LogicalPlan2PlanDescription(
   }
 
   private def relationshipByIdSeekInfo(
-    idName: String,
+    idName: Option[LogicalVariable],
     relIds: SeekableArgs,
-    startNode: String,
-    endNode: String,
+    startNode: Option[LogicalVariable],
+    endNode: Option[LogicalVariable],
     isDirectional: Boolean,
     functionName: String
   ): PrettyString = {
     val predicate = seekableArgsInfo(relIds)
     val directionString = if (isDirectional) pretty">" else pretty""
     val prettyStartNode = asPrettyString(startNode)
-    val prettyIdName = asPrettyString(idName)
+    val prettyIdName = idName.map(n => asPrettyString(n)).getOrElse(pretty"_")
+    val prettyRelationship = idName.map(n => pretty"[${asPrettyString(n)}]").getOrElse(pretty"")
     val prettyEndNode = asPrettyString(endNode)
-    pretty"(${prettyStartNode})-[$prettyIdName]-$directionString($prettyEndNode) WHERE ${asPrettyString(functionName)}($prettyIdName) $predicate"
+    pretty"($prettyStartNode)-$prettyRelationship-$directionString($prettyEndNode) WHERE ${asPrettyString(functionName)}($prettyIdName) $predicate"
   }
 
   private def seekableArgsInfo(seekableArgs: SeekableArgs): PrettyString = seekableArgs match {
@@ -3376,14 +4290,14 @@ case class LogicalPlan2PlanDescription(
       pretty"= ${asPrettyString(expr)}"
   }
 
-  private def signatureInfo(call: ResolvedCall): PrettyString = {
+  private def signatureInfo(call: ResolvedNonLocalCall): PrettyString = {
     val argString = call.callArguments.map(asPrettyString(_)).mkPrettyString(SEPARATOR)
     val resultString = call.callResultTypes
       .map { case (name, typ) =>
         pretty"${asPrettyString(name)} :: ${asPrettyString.raw(typ.normalizedCypherTypeString())}"
       }
       .mkPrettyString(SEPARATOR)
-    pretty"${asPrettyString.raw(call.qualifiedName.toString)}($argString) :: ($resultString)"
+    pretty"${asPrettyString.raw(call.procedureName.fullName)}($argString) :: ($resultString)"
   }
 
   private def orderInfo(orderBy: Seq[ColumnOrder]): PrettyString = {
@@ -3456,11 +4370,20 @@ case class LogicalPlan2PlanDescription(
   private def conflictInfo(conflict: EagernessReason.Conflict): String =
     s"Operator: ${conflict.first.x} vs ${conflict.second.x}"
 
-  private def expandExpressionDescription(
-    from: LogicalVariable,
+  private def relationshipPattern(
+    from: Option[LogicalVariable],
     maybeRelName: Option[LogicalVariable],
     relTypes: Seq[RelTypeExpression],
-    to: LogicalVariable,
+    to: Option[LogicalVariable],
+    direction: SemanticDirection
+  ): PrettyString =
+    expandExpressionDescription(from, maybeRelName, relTypes, to, direction, SimplePatternLength)
+
+  private def expandExpressionDescription(
+    from: Option[LogicalVariable],
+    maybeRelName: Option[LogicalVariable],
+    relTypes: Seq[RelTypeExpression],
+    to: Option[LogicalVariable],
     direction: SemanticDirection,
     patternLength: PatternLength
   ): PrettyString = {
@@ -3485,10 +4408,10 @@ case class LogicalPlan2PlanDescription(
   }
 
   private def expandExpressionDescription(
-    from: LogicalVariable,
+    maybeFromName: Option[LogicalVariable],
     maybeRelName: Option[LogicalVariable],
     relTypes: Seq[RelTypeExpression],
-    to: LogicalVariable,
+    maybeToName: Option[LogicalVariable],
     direction: SemanticDirection,
     minLength: Int,
     maxLength: Option[Int],
@@ -3519,7 +4442,7 @@ case class LogicalPlan2PlanDescription(
     val relInfo =
       if (lengthDescr == pretty"" && relTypes.isEmpty && relName.prettifiedString.isEmpty) pretty""
       else pretty"[$relName$types$lengthDescr$propsString]"
-    pretty"(${asPrettyString(from)})$left$relInfo$right(${asPrettyString(to)})"
+    pretty"(${asPrettyString(maybeFromName.map(_.name).getOrElse(""))})$left$relInfo$right(${asPrettyString(maybeToName.map(_.name).getOrElse(""))})"
   }
 
   private def nodeIndexInfoString(
@@ -3537,10 +4460,10 @@ case class LogicalPlan2PlanDescription(
   }
 
   private def relIndexInfoString(
-    idName: String,
-    start: String,
+    idName: Option[LogicalVariable],
+    start: Option[LogicalVariable],
     relType: NameToken[_],
-    end: String,
+    end: Option[LogicalVariable],
     isDirected: Boolean,
     propertyKeys: Seq[PropertyKeyToken],
     indexType: IndexType,
@@ -3593,7 +4516,7 @@ case class LogicalPlan2PlanDescription(
 
   private def indexInfo(
     indexType: String,
-    nameOption: Option[Either[String, Parameter]],
+    nameOption: Option[Expression],
     entityName: ElementTypeName,
     properties: Seq[PropertyKeyName],
     options: Options
@@ -3617,13 +4540,13 @@ case class LogicalPlan2PlanDescription(
         pretty"()-[:all$$($prettyType)]-()"
       case dynamicType: DynamicRelTypeExpression =>
         val prettyType = asPrettyString(dynamicType.expression)
-        pretty"()-[:all$$($prettyType)]-()"
+        pretty"()-[:any$$($prettyType)]-()"
     }
     indexInfoString(indexType, nameOption, pattern, propertyString, options)
   }
 
   private def fulltextIndexInfo(
-    nameOption: Option[Either[String, Parameter]],
+    nameOption: Option[Expression],
     entityNames: Either[List[LabelName], List[RelTypeName]],
     properties: Seq[PropertyKeyName],
     options: Options
@@ -3640,8 +4563,30 @@ case class LogicalPlan2PlanDescription(
     indexInfoString("FULLTEXT", nameOption, pattern, pretty"EACH $propertyString", options)
   }
 
+  private def vectorIndexInfo(
+    nameOption: Option[Expression],
+    entityNames: Either[List[LabelName], List[RelTypeName]],
+    properties: Seq[PropertyKeyName],
+    additionalProperties: Seq[PropertyKeyName],
+    options: Options
+  ): PrettyString = {
+    val propertyString = properties.map(asPrettyString(_)).mkPrettyString("(", SEPARATOR, ")")
+    val additionalPropertiesString = if (additionalProperties.nonEmpty)
+      additionalProperties.map(asPrettyString(_)).mkPrettyString(" WITH [", SEPARATOR, "]")
+    else pretty""
+    val pattern = entityNames match {
+      case Left(labels) =>
+        val innerPattern = labels.map(l => asPrettyString(l.name)).mkPrettyString(":", "|", "")
+        pretty"($innerPattern)"
+      case Right(relTypes) =>
+        val innerPattern = relTypes.map(r => asPrettyString(r.name)).mkPrettyString(":", "|", "")
+        pretty"()-[$innerPattern]-()"
+    }
+    indexInfoString("VECTOR", nameOption, pattern, pretty"$propertyString$additionalPropertiesString", options)
+  }
+
   private def lookupIndexInfo(
-    nameOption: Option[Either[String, Parameter]],
+    nameOption: Option[Expression],
     entityType: EntityType,
     options: Options
   ): PrettyString = {
@@ -3654,7 +4599,7 @@ case class LogicalPlan2PlanDescription(
 
   private def indexInfoString(
     indexType: String,
-    nameOption: Option[Either[String, Parameter]],
+    nameOption: Option[Expression],
     nodeOrRelPattern: PrettyString,
     onDefinition: PrettyString,
     options: Options
@@ -3664,7 +4609,7 @@ case class LogicalPlan2PlanDescription(
   }
 
   private def constraintInfo(
-    nameOption: Option[Either[String, Parameter]],
+    nameOption: Option[Expression],
     entity: String,
     entityName: ElementTypeName,
     properties: Seq[Property],
@@ -3692,7 +4637,7 @@ case class LogicalPlan2PlanDescription(
         pretty"()-[$prettyEntity:all$$($prettyType)]-()"
       case dynamicType: DynamicRelTypeExpression =>
         val prettyType = asPrettyString(dynamicType.expression)
-        pretty"()-[$prettyEntity:all$$($prettyType)]-()"
+        pretty"()-[$prettyEntity:any$$($prettyType)]-()"
     }
     val onOrFor = if (useForAndRequire) pretty"FOR" else pretty"ON"
     val assertOrRequire = if (useForAndRequire) pretty"REQUIRE" else pretty"ASSERT"
@@ -3712,10 +4657,10 @@ case class LogicalPlan2PlanDescription(
         case c: CreateNode => createNodeDescription(c)
         case CreateRelationship(relationship, startNode, typ, endNode, direction, properties) =>
           expandExpressionDescription(
-            startNode,
+            Some(startNode),
             Some(relationship),
             Seq(typ),
-            endNode,
+            Some(endNode),
             direction,
             1,
             Some(1),
@@ -3772,15 +4717,39 @@ case class LogicalPlan2PlanDescription(
       pretty"SET $setOps"
   }
 
-  private def commandColumnInfo(yieldColumns: List[CommandResultItem], yieldAll: Boolean): PrettyString =
+  private def commandColumnInfo(yieldColumns: List[CommandYieldColumn], yieldAll: Boolean): PrettyString =
     if (yieldColumns.nonEmpty)
       asPrettyString.raw(yieldColumns.map(y => {
         val variableName = y.originalName
-        val aliasName = y.aliasedVariable.name
+        val aliasName = y.aliasedName
 
         if (!variableName.equals(aliasName)) s"$variableName AS $aliasName"
         else variableName
       }).mkString("columns(", ", ", ")"))
     else if (yieldAll) pretty"allColumns"
     else pretty"defaultColumns"
+
+  private def getInnerNameDescriptions(names: CommandClauseNames): Option[PrettyString] = names match {
+    case NoNames => None
+    case CommaSeparatedNames(ls) =>
+      val es = ls.expressions.map(asPrettyString(_))
+      Some(asPrettyString.raw(es.mkString(", ")))
+    case ExpressionNames(e) => Some(asPrettyString(e))
+  }
+
+  private def formatPropertyPredicatesForDynamicIndexSeek(
+    idName: PrettyString,
+    propertyPredicates: Map[PropertyKeyToken, Expression]
+  ): PrettyString = {
+    if (propertyPredicates.isEmpty) {
+      pretty""
+    } else {
+      pretty"\n"
+        .append(propertyPredicates
+          .map { case (prop, expr) =>
+            pretty"$idName.${asPrettyString.raw(prop.name)} = ${asPrettyString(expr)}"
+          }
+          .mkPrettyString("\n"))
+    }
+  }
 }

@@ -19,11 +19,12 @@
  */
 package org.neo4j.cypher.internal.compiler.planner.logical
 
-import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
+import org.neo4j.cypher.internal.compiler.ast.convert.plannerQuery.GroupInequalitiesStep
 import org.neo4j.cypher.internal.compiler.phases.CompilationContains
 import org.neo4j.cypher.internal.compiler.phases.LogicalPlanState
 import org.neo4j.cypher.internal.compiler.phases.PlannerContext
 import org.neo4j.cypher.internal.frontend.phases.Transformer
+import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerConfig
 import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerFactory
 import org.neo4j.cypher.internal.ir.PatternRelationship
 import org.neo4j.cypher.internal.ir.PlannerQuery
@@ -86,13 +87,13 @@ case object MoveQuantifiedPathPatternPredicates extends PlannerQueryRewriter wit
 
   override def preConditions: Set[StepSequencer.Condition] = Set(
     CompilationContains[PlannerQuery](),
-    InlineRelationshipTypePredicates.completed
+    InlineRelationshipTypePredicates.completed,
+    // We cannot group inequalities after moving QPP predicates, since we do not recognize ForAllRepetitions as a groupable predicate
+    GroupInequalitiesStep.completed
   )
 
   override def invalidatedConditions: Set[StepSequencer.Condition] = Set.empty
 
-  override def getTransformer(
-    pushdownPropertyReads: Boolean,
-    semanticFeatures: Seq[SemanticFeature]
-  ): Transformer[PlannerContext, LogicalPlanState, LogicalPlanState] = this
+  override def getTransformer(planPipelineConfig: PlanPipelineTransformerConfig)
+    : Transformer[PlannerContext, LogicalPlanState, LogicalPlanState] = this
 }

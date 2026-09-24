@@ -22,6 +22,7 @@ package org.neo4j.cypher.internal.procs
 import org.neo4j.cypher.internal.ast.AccessDatabaseAction
 import org.neo4j.cypher.internal.ast.AdministrationAction
 import org.neo4j.cypher.internal.ast.AllAliasManagementActions
+import org.neo4j.cypher.internal.ast.AllAuthRuleActions
 import org.neo4j.cypher.internal.ast.AllConstraintActions
 import org.neo4j.cypher.internal.ast.AllDatabaseAction
 import org.neo4j.cypher.internal.ast.AllDatabaseManagementActions
@@ -30,17 +31,23 @@ import org.neo4j.cypher.internal.ast.AllGraphAction
 import org.neo4j.cypher.internal.ast.AllIndexActions
 import org.neo4j.cypher.internal.ast.AllPrivilegeActions
 import org.neo4j.cypher.internal.ast.AllRoleActions
+import org.neo4j.cypher.internal.ast.AllSecretManagementActions
 import org.neo4j.cypher.internal.ast.AllTokenActions
 import org.neo4j.cypher.internal.ast.AllTransactionActions
 import org.neo4j.cypher.internal.ast.AllUserActions
+import org.neo4j.cypher.internal.ast.AllUserMetadataActions
 import org.neo4j.cypher.internal.ast.AlterAliasAction
+import org.neo4j.cypher.internal.ast.AlterAuthRuleAction
+import org.neo4j.cypher.internal.ast.AlterCompositeDatabaseAction
 import org.neo4j.cypher.internal.ast.AlterDatabaseAction
+import org.neo4j.cypher.internal.ast.AlterDatabaseOptionsAction
+import org.neo4j.cypher.internal.ast.AlterDatabaseTopologyAction
 import org.neo4j.cypher.internal.ast.AlterUserAction
-import org.neo4j.cypher.internal.ast.AssignImmutablePrivilegeAction
 import org.neo4j.cypher.internal.ast.AssignPrivilegeAction
 import org.neo4j.cypher.internal.ast.AssignRoleAction
 import org.neo4j.cypher.internal.ast.CompositeDatabaseManagementActions
 import org.neo4j.cypher.internal.ast.CreateAliasAction
+import org.neo4j.cypher.internal.ast.CreateAuthRuleAction
 import org.neo4j.cypher.internal.ast.CreateCompositeDatabaseAction
 import org.neo4j.cypher.internal.ast.CreateConstraintAction
 import org.neo4j.cypher.internal.ast.CreateDatabaseAction
@@ -53,6 +60,7 @@ import org.neo4j.cypher.internal.ast.CreateRoleAction
 import org.neo4j.cypher.internal.ast.CreateUserAction
 import org.neo4j.cypher.internal.ast.DeleteElementAction
 import org.neo4j.cypher.internal.ast.DropAliasAction
+import org.neo4j.cypher.internal.ast.DropAuthRuleAction
 import org.neo4j.cypher.internal.ast.DropCompositeDatabaseAction
 import org.neo4j.cypher.internal.ast.DropConstraintAction
 import org.neo4j.cypher.internal.ast.DropDatabaseAction
@@ -71,34 +79,43 @@ import org.neo4j.cypher.internal.ast.LoadUrlAction
 import org.neo4j.cypher.internal.ast.MatchAction
 import org.neo4j.cypher.internal.ast.MergeAdminAction
 import org.neo4j.cypher.internal.ast.ReadAction
-import org.neo4j.cypher.internal.ast.RemoveImmutablePrivilegeAction
+import org.neo4j.cypher.internal.ast.ReadSecretsAction
 import org.neo4j.cypher.internal.ast.RemoveLabelAction
 import org.neo4j.cypher.internal.ast.RemovePrivilegeAction
 import org.neo4j.cypher.internal.ast.RemoveRoleAction
+import org.neo4j.cypher.internal.ast.RenameAuthRuleAction
 import org.neo4j.cypher.internal.ast.RenameRoleAction
 import org.neo4j.cypher.internal.ast.RenameUserAction
 import org.neo4j.cypher.internal.ast.ServerManagementAction
 import org.neo4j.cypher.internal.ast.SetAuthAction
 import org.neo4j.cypher.internal.ast.SetDatabaseAccessAction
+import org.neo4j.cypher.internal.ast.SetDatabaseDefaultLanguageAction
 import org.neo4j.cypher.internal.ast.SetLabelAction
 import org.neo4j.cypher.internal.ast.SetPasswordsAction
 import org.neo4j.cypher.internal.ast.SetPropertyAction
 import org.neo4j.cypher.internal.ast.SetUserHomeDatabaseAction
+import org.neo4j.cypher.internal.ast.SetUserMetadataAction
 import org.neo4j.cypher.internal.ast.SetUserStatusAction
 import org.neo4j.cypher.internal.ast.ShowAliasAction
+import org.neo4j.cypher.internal.ast.ShowAuthRuleAction
 import org.neo4j.cypher.internal.ast.ShowConstraintAction
 import org.neo4j.cypher.internal.ast.ShowIndexAction
 import org.neo4j.cypher.internal.ast.ShowPrivilegeAction
 import org.neo4j.cypher.internal.ast.ShowRoleAction
+import org.neo4j.cypher.internal.ast.ShowSecretsAction
 import org.neo4j.cypher.internal.ast.ShowServerAction
 import org.neo4j.cypher.internal.ast.ShowSettingAction
 import org.neo4j.cypher.internal.ast.ShowTransactionAction
 import org.neo4j.cypher.internal.ast.ShowUserAction
+import org.neo4j.cypher.internal.ast.ShowUserCredentialsAction
+import org.neo4j.cypher.internal.ast.ShowUserMetadataAction
 import org.neo4j.cypher.internal.ast.StartDatabaseAction
 import org.neo4j.cypher.internal.ast.StopDatabaseAction
 import org.neo4j.cypher.internal.ast.TerminateTransactionAction
 import org.neo4j.cypher.internal.ast.TraverseAction
 import org.neo4j.cypher.internal.ast.WriteAction
+import org.neo4j.cypher.internal.ast.WriteSecretsAction
+import org.neo4j.exceptions.InternalException
 import org.neo4j.internal.kernel.api.security
 
 object ActionMapper {
@@ -143,7 +160,13 @@ object ActionMapper {
     case StartDatabaseAction => security.PrivilegeAction.START_DATABASE
     case StopDatabaseAction  => security.PrivilegeAction.STOP_DATABASE
 
+    case AllSecretManagementActions => security.PrivilegeAction.SECRETS_MANAGEMENT
+    case ReadSecretsAction          => security.PrivilegeAction.READ_SECRETS
+    case WriteSecretsAction         => security.PrivilegeAction.WRITE_SECRETS
+    case ShowSecretsAction          => security.PrivilegeAction.SHOW_SECRETS
+
     case AllUserActions            => security.PrivilegeAction.USER_MANAGEMENT
+    case ShowUserCredentialsAction => security.PrivilegeAction.SHOW_USER_CREDENTIALS
     case ShowUserAction            => security.PrivilegeAction.SHOW_USER
     case CreateUserAction          => security.PrivilegeAction.CREATE_USER
     case RenameUserAction          => security.PrivilegeAction.RENAME_USER
@@ -154,6 +177,10 @@ object ActionMapper {
     case AlterUserAction           => security.PrivilegeAction.ALTER_USER
     case DropUserAction            => security.PrivilegeAction.DROP_USER
 
+    case AllUserMetadataActions => security.PrivilegeAction.USER_METADATA_MANAGEMENT
+    case ShowUserMetadataAction => security.PrivilegeAction.SHOW_USER_METADATA
+    case SetUserMetadataAction  => security.PrivilegeAction.SET_USER_METADATA
+
     case AllRoleActions   => security.PrivilegeAction.ROLE_MANAGEMENT
     case ShowRoleAction   => security.PrivilegeAction.SHOW_ROLE
     case CreateRoleAction => security.PrivilegeAction.CREATE_ROLE
@@ -162,14 +189,25 @@ object ActionMapper {
     case AssignRoleAction => security.PrivilegeAction.ASSIGN_ROLE
     case RemoveRoleAction => security.PrivilegeAction.REMOVE_ROLE
 
-    case AllDatabaseManagementActions       => security.PrivilegeAction.DATABASE_MANAGEMENT
-    case CreateDatabaseAction               => security.PrivilegeAction.CREATE_DATABASE
-    case DropDatabaseAction                 => security.PrivilegeAction.DROP_DATABASE
-    case AlterDatabaseAction                => security.PrivilegeAction.ALTER_DATABASE
-    case SetDatabaseAccessAction            => security.PrivilegeAction.SET_DATABASE_ACCESS
-    case CreateCompositeDatabaseAction      => security.PrivilegeAction.CREATE_COMPOSITE_DATABASE
-    case DropCompositeDatabaseAction        => security.PrivilegeAction.DROP_COMPOSITE_DATABASE
-    case CompositeDatabaseManagementActions => security.PrivilegeAction.COMPOSITE_DATABASE_MANAGEMENT
+    case AllAuthRuleActions   => security.PrivilegeAction.AUTH_RULE_MANAGEMENT
+    case ShowAuthRuleAction   => security.PrivilegeAction.SHOW_AUTH_RULE
+    case CreateAuthRuleAction => security.PrivilegeAction.CREATE_AUTH_RULE
+    case RenameAuthRuleAction => security.PrivilegeAction.RENAME_AUTH_RULE
+    case AlterAuthRuleAction  => security.PrivilegeAction.ALTER_AUTH_RULE
+    case DropAuthRuleAction   => security.PrivilegeAction.DROP_AUTH_RULE
+
+    case AllDatabaseManagementActions        => security.PrivilegeAction.DATABASE_MANAGEMENT
+    case CreateDatabaseAction                => security.PrivilegeAction.CREATE_DATABASE
+    case DropDatabaseAction                  => security.PrivilegeAction.DROP_DATABASE
+    case _: AlterDatabaseAction              => security.PrivilegeAction.ALTER_DATABASE
+    case _: SetDatabaseAccessAction          => security.PrivilegeAction.SET_DATABASE_ACCESS
+    case _: SetDatabaseDefaultLanguageAction => security.PrivilegeAction.SET_DEFAULT_LANGUAGE
+    case _: AlterDatabaseTopologyAction      => security.PrivilegeAction.ALTER_DATABASE_TOPOLOGY
+    case _: AlterDatabaseOptionsAction       => security.PrivilegeAction.ALTER_DATABASE_OPTIONS
+    case CreateCompositeDatabaseAction       => security.PrivilegeAction.CREATE_COMPOSITE_DATABASE
+    case DropCompositeDatabaseAction         => security.PrivilegeAction.DROP_COMPOSITE_DATABASE
+    case _: AlterCompositeDatabaseAction     => security.PrivilegeAction.ALTER_COMPOSITE_DATABASE
+    case CompositeDatabaseManagementActions  => security.PrivilegeAction.COMPOSITE_DATABASE_MANAGEMENT
 
     case AllAliasManagementActions => security.PrivilegeAction.ALIAS_MANAGEMENT
     case CreateAliasAction         => security.PrivilegeAction.CREATE_ALIAS
@@ -177,12 +215,10 @@ object ActionMapper {
     case AlterAliasAction          => security.PrivilegeAction.ALTER_ALIAS
     case ShowAliasAction           => security.PrivilegeAction.SHOW_ALIAS
 
-    case AllPrivilegeActions            => security.PrivilegeAction.PRIVILEGE_MANAGEMENT
-    case ShowPrivilegeAction            => security.PrivilegeAction.SHOW_PRIVILEGE
-    case AssignPrivilegeAction          => security.PrivilegeAction.ASSIGN_PRIVILEGE
-    case RemovePrivilegeAction          => security.PrivilegeAction.REMOVE_PRIVILEGE
-    case AssignImmutablePrivilegeAction => security.PrivilegeAction.ASSIGN_IMMUTABLE_PRIVILEGE
-    case RemoveImmutablePrivilegeAction => security.PrivilegeAction.REMOVE_IMMUTABLE_PRIVILEGE
+    case AllPrivilegeActions   => security.PrivilegeAction.PRIVILEGE_MANAGEMENT
+    case ShowPrivilegeAction   => security.PrivilegeAction.SHOW_PRIVILEGE
+    case AssignPrivilegeAction => security.PrivilegeAction.ASSIGN_PRIVILEGE
+    case RemovePrivilegeAction => security.PrivilegeAction.REMOVE_PRIVILEGE
 
     case ExecuteProcedureAction        => security.PrivilegeAction.EXECUTE
     case ExecuteBoostedProcedureAction => security.PrivilegeAction.EXECUTE_BOOSTED
@@ -204,6 +240,10 @@ object ActionMapper {
 
     case AllDbmsAction => security.PrivilegeAction.DBMS_ACTIONS
 
-    case _ => throw new IllegalStateException(s"Cannot handle action: $action")
+    case _ => throw InternalException.internalError(
+        this.getClass.getSimpleName,
+        s"Cannot handle action: $action.",
+        s"Cannot handle action: $action"
+      )
   }
 }

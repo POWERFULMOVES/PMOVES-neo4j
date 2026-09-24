@@ -23,7 +23,7 @@ import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAM
 import static org.neo4j.internal.schema.IndexPrototype.forSchema;
 import static org.neo4j.internal.schema.IndexPrototype.uniqueForSchema;
 import static org.neo4j.internal.schema.SchemaDescriptors.forLabel;
-import static org.neo4j.internal.schema.SchemaDescriptors.fulltext;
+import static org.neo4j.internal.schema.SchemaDescriptors.forSemanticSearch;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.kernel.impl.api.index.TestIndexProviderDescriptor.PROVIDER_DESCRIPTOR;
 
@@ -44,7 +44,8 @@ import org.neo4j.kernel.api.exceptions.index.IndexEntryConflictException;
 import org.neo4j.kernel.api.index.IndexAccessor;
 import org.neo4j.kernel.api.index.IndexUpdater;
 import org.neo4j.kernel.impl.api.index.IndexUpdateMode;
-import org.neo4j.storageengine.api.IndexEntryUpdate;
+import org.neo4j.logging.NullLogProvider;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.values.ElementIdMapper;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.Values;
@@ -65,7 +66,8 @@ class RangeIndexProviderTest extends IndexProviderTests {
                         .withMonitors(monitors)
                         .withReadOnlyChecker(readOnlyChecker)
                         .build();
-                return new RangeIndexProvider(context, dir, collector, Config.defaults());
+                return new RangeIndexProvider(
+                        context, dir, collector, Config.defaults(), NullLogProvider.getInstance());
             };
 
     RangeIndexProviderTest() {
@@ -83,16 +85,16 @@ class RangeIndexProviderTest extends IndexProviderTests {
         try (IndexAccessor accessor = provider.getOnlineAccessor(
                         descriptor,
                         samplingConfig(),
-                        tokenNameLookup,
+                        TOKEN_NAME_LOOKUP,
                         ElementIdMapper.PLACEHOLDER,
                         Sets.immutable.empty(),
                         StorageEngineIndexingBehaviour.EMPTY);
                 IndexUpdater indexUpdater = accessor.newUpdater(IndexUpdateMode.ONLINE, NULL_CONTEXT, false)) {
-            indexUpdater.process(IndexEntryUpdate.add(1, descriptor, someValue));
+            indexUpdater.process(EagerValueIndexEntryUpdate.add(1, descriptor, someValue));
 
             // then
             // ... expect no failure on duplicate value
-            indexUpdater.process(IndexEntryUpdate.add(2, descriptor, someValue));
+            indexUpdater.process(EagerValueIndexEntryUpdate.add(2, descriptor, someValue));
         }
     }
 
@@ -130,7 +132,7 @@ class RangeIndexProviderTest extends IndexProviderTests {
     List<IndexPrototype> invalidPrototypes() {
         return List.of(
                 forSchema(SchemaDescriptors.ANY_TOKEN_NODE_SCHEMA_DESCRIPTOR).withName("unsupported"),
-                forSchema(fulltext(EntityType.NODE, new int[] {labelId}, new int[] {propId}))
+                forSchema(forSemanticSearch(EntityType.NODE, new int[] {labelId}, new int[] {propId}))
                         .withName("unsupported"),
                 forSchema(forLabel(labelId, propId))
                         .withIndexType(IndexType.POINT)

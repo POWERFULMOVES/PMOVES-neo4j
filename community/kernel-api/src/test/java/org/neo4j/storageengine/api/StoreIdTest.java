@@ -20,9 +20,6 @@
 package org.neo4j.storageengine.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import org.junit.jupiter.api.Test;
@@ -39,16 +36,42 @@ class StoreIdTest {
     @Test
     void testCompatibilityCheck() {
         var storeId = new StoreId(1234, 789, ENGINE_1, FORMAT_FAMILY_1, 3, 7);
-        assertTrue(storeId.isSameOrUpgradeSuccessor(new StoreId(1234, 789, ENGINE_1, FORMAT_FAMILY_1, 3, 7)));
-        assertTrue(storeId.isSameOrUpgradeSuccessor(new StoreId(1234, 789, ENGINE_1, FORMAT_FAMILY_1, 3, 8)));
-        assertTrue(storeId.isSameOrUpgradeSuccessor(new StoreId(1234, 789, ENGINE_1, FORMAT_FAMILY_1, 3, 15)));
-        assertFalse(storeId.isSameOrUpgradeSuccessor(new StoreId(666, 789, ENGINE_1, FORMAT_FAMILY_1, 3, 7)));
-        assertFalse(storeId.isSameOrUpgradeSuccessor(new StoreId(1234, 666, ENGINE_1, FORMAT_FAMILY_1, 3, 7)));
-        assertFalse(storeId.isSameOrUpgradeSuccessor(new StoreId(1234, 789, ENGINE_1, FORMAT_FAMILY_1, 3, 6)));
-        assertFalse(storeId.isSameOrUpgradeSuccessor(new StoreId(1234, 789, ENGINE_1, FORMAT_FAMILY_1, 4, 7)));
-        assertFalse(storeId.isSameOrUpgradeSuccessor(new StoreId(1234, 789, ENGINE_1, FORMAT_FAMILY_1, 2, 7)));
-        assertFalse(storeId.isSameOrUpgradeSuccessor(new StoreId(1234, 789, ENGINE_2, FORMAT_FAMILY_1, 3, 7)));
-        assertFalse(storeId.isSameOrUpgradeSuccessor(new StoreId(1234, 789, ENGINE_1, FORMAT_FAMILY_2, 3, 7)));
+        assertThat(storeId.isSameOrUpgradeSuccessor(new StoreId(1234, 789, ENGINE_1, FORMAT_FAMILY_1, 3, 7)))
+                .isTrue();
+        assertThat(storeId.isSameOrUpgradeSuccessor(new StoreId(1234, 789, ENGINE_1, FORMAT_FAMILY_1, 3, 8)))
+                .isTrue();
+        assertThat(storeId.isSameOrUpgradeSuccessor(new StoreId(1234, 789, ENGINE_1, FORMAT_FAMILY_1, 3, 15)))
+                .isTrue();
+        assertThat(storeId.isSameOrUpgradeSuccessor(new StoreId(666, 789, ENGINE_1, FORMAT_FAMILY_1, 3, 7)))
+                .isFalse();
+        assertThat(storeId.isSameOrUpgradeSuccessor(new StoreId(1234, 666, ENGINE_1, FORMAT_FAMILY_1, 3, 7)))
+                .isFalse();
+        assertThat(storeId.isSameOrUpgradeSuccessor(new StoreId(1234, 789, ENGINE_1, FORMAT_FAMILY_1, 3, 6)))
+                .isFalse();
+        assertThat(storeId.isSameOrUpgradeSuccessor(new StoreId(1234, 789, ENGINE_1, FORMAT_FAMILY_1, 4, 7)))
+                .isFalse();
+        assertThat(storeId.isSameOrUpgradeSuccessor(new StoreId(1234, 789, ENGINE_1, FORMAT_FAMILY_1, 2, 7)))
+                .isFalse();
+        assertThat(storeId.isSameOrUpgradeSuccessor(new StoreId(1234, 789, ENGINE_2, FORMAT_FAMILY_1, 3, 7)))
+                .isFalse();
+        assertThat(storeId.isSameOrUpgradeSuccessor(new StoreId(1234, 789, ENGINE_1, FORMAT_FAMILY_2, 3, 7)))
+                .isFalse();
+    }
+
+    @Test
+    void testCompatibilityCheckWithLong() {
+        StoreId storeId = new StoreId(1234, 789, ENGINE_1, FORMAT_FAMILY_1, 3, 7);
+        StoreIdentifier storeIdentifier = StoreIdentifier.newStoreIdentifier(storeId);
+        StoreIdentifier limitedStoreId = StoreIdentifier.newStoreIdentifier(789);
+        assertThat(storeId.isSameOrUpgradeSuccessor(limitedStoreId)).isTrue();
+        assertThat(limitedStoreId.isSameOrUpgradeSuccessor(storeId)).isTrue();
+        assertThat(storeIdentifier.isSameOrUpgradeSuccessor(storeId)).isTrue();
+        assertThat(limitedStoreId.matches(storeId)).isTrue();
+        assertThat(storeIdentifier.matches(storeId)).isTrue();
+        assertThat(limitedStoreId.isSameOrUpgradeSuccessor(new StoreId(1234, 789, ENGINE_1, FORMAT_FAMILY_1, 3, 7)))
+                .isTrue();
+        assertThat(limitedStoreId.isSameOrUpgradeSuccessor(new StoreId(1234, 666, ENGINE_1, FORMAT_FAMILY_1, 3, 7)))
+                .isFalse();
     }
 
     @ParameterizedTest
@@ -59,7 +82,7 @@ class StoreIdTest {
         storeId.serialize(buffer);
         buffer.flip();
         var deserializedStoreId = StoreId.deserialize(buffer);
-        assertEquals(storeId, deserializedStoreId);
+        assertThat(deserializedStoreId).isEqualTo(storeId);
     }
 
     @Test

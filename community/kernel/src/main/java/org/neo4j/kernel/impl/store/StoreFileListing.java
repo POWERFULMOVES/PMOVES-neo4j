@@ -25,35 +25,38 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArraySet;
-import java.util.function.Function;
 import org.neo4j.graphdb.Resource;
 import org.neo4j.graphdb.ResourceIterator;
 import org.neo4j.internal.helpers.Exceptions;
 import org.neo4j.io.IOUtils;
+import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.CommonDatabaseStores;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.kernel.impl.api.index.IndexingService;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
 import org.neo4j.kernel.impl.util.MultiResource;
 import org.neo4j.storageengine.api.StorageEngine;
-import org.neo4j.storageengine.api.StoreFileMetadata;
+import org.neo4j.storageengine.api.StorageFileSelection;
+import org.neo4j.wal.LogFiles;
 
 public class StoreFileListing implements FileStoreProviderRegistry {
     private final DatabaseLayout databaseLayout;
+    private final FileSystemAbstraction fs;
     private final LogFiles logFiles;
     private final StorageEngine storageEngine;
-    private static final Function<Path, StoreFileMetadata> logFileMapper = path -> new StoreFileMetadata(path, true);
     private final SchemaAndIndexingFileIndexListing fileIndexListing;
     private final Collection<StoreFileProvider> additionalProviders;
 
     public StoreFileListing(
             DatabaseLayout databaseLayout,
+            FileSystemAbstraction fs,
             LogFiles logFiles,
             IndexingService indexingService,
             StorageEngine storageEngine) {
         this.databaseLayout = databaseLayout;
+        this.fs = fs;
         this.logFiles = logFiles;
         this.storageEngine = storageEngine;
         this.fileIndexListing = new SchemaAndIndexingFileIndexListing(indexingService);
@@ -69,25 +72,25 @@ public class StoreFileListing implements FileStoreProviderRegistry {
         additionalProviders.add(provider);
     }
 
-    private void placeMetaDataStoreLast(List<StoreFileMetadata> files) {
+    private void placeMetaDataStoreLast(List<Path> files) {
         int index = 0;
-        for (StoreFileMetadata file : files) {
-            if (databaseLayout.pathForStore(CommonDatabaseStores.METADATA).equals(file.path())) {
+        for (Path file : files) {
+            if (databaseLayout
+                    .pathForStore(CommonDatabaseStores.METADATA)
+                    .baseSegment()
+                    .equals(file)) {
                 break;
             }
             index++;
         }
         if (index < files.size() - 1) {
-            StoreFileMetadata metaDataStoreFile = files.remove(index);
+            Path metaDataStoreFile = files.remove(index);
             files.add(metaDataStoreFile);
         }
     }
 
-    private void gatherLogFiles(Collection<StoreFileMetadata> files) throws IOException {
-        Path[] list = this.logFiles.logFiles();
-        for (Path logFile : list) {
-            files.add(logFileMapper.apply(logFile));
-        }
+    private void gatherLogFiles(Collection<Path> files) throws IOException {
+        Collections.addAll(files, logFiles.logFiles());
     }
 
     public class Builder {
@@ -179,21 +182,19 @@ public class StoreFileListing implements FileStoreProviderRegistry {
             return this;
         }
 
-        public ResourceIterator<StoreFileMetadata> build() throws IOException {
-            List<StoreFileMetadata> files = new ArrayList<>();
+        public ResourceIterator<Path> build() throws IOException {
+            List<Path> files = new ArrayList<>();
             List<Resource> resources = new ArrayList<>();
             try {
                 if (!excludeLogFiles) {
                     gatherLogFiles(files);
                 }
-                if (!excludeAtomicStorageFiles || !excludeReplayableStorageFiles) {
-                    gatherStorageFiles(files, !excludeAtomicStorageFiles, !excludeReplayableStorageFiles);
-                }
-                if (!excludeIdFiles) {
-                    gatherIdFiles(files);
-                }
+
+                files.addAll(storageEngine.listStorageFiles(new StorageFileSelection(
+                        !excludeAtomicStorageFiles, !excludeReplayableStorageFiles, !excludeIdFiles)));
+
                 if (!excludeSchemaIndexStoreFiles) {
-                    resources.add(fileIndexListing.gatherSchemaIndexFiles(files));
+                    resources.add(fileIndexListing.gatherSchemaIndexFiles(fs, files));
                 }
                 if (!excludeAdditionalProviders) {
                     for (StoreFileProvider additionalProvider : additionalProviders) {
@@ -211,23 +212,6 @@ public class StoreFileListing implements FileStoreProviderRegistry {
             }
 
             return resourceIterator(files.iterator(), new MultiResource(resources));
-        }
-    }
-
-    private void gatherIdFiles(List<StoreFileMetadata> targetFiles) {
-        storageEngine.listIdFiles(targetFiles);
-    }
-
-    private void gatherStorageFiles(
-            final Collection<StoreFileMetadata> targetFiles, boolean gatherAtomic, boolean gatherReplayable) {
-        Collection<StoreFileMetadata> atomic = new ArrayList<>();
-        Collection<StoreFileMetadata> replayable = new ArrayList<>();
-        storageEngine.listStorageFiles(atomic, replayable);
-        if (gatherAtomic) {
-            targetFiles.addAll(atomic);
-        }
-        if (gatherReplayable) {
-            targetFiles.addAll(replayable);
         }
     }
 }

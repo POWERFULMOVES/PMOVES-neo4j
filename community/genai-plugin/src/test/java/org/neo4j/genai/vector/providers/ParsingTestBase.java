@@ -22,7 +22,7 @@ package org.neo4j.genai.vector.providers;
 import static org.apache.commons.lang3.ArrayUtils.EMPTY_INT_ARRAY;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.neo4j.genai.util.ThrowingSupplierAssert.assertThatThrownBy;
-import static org.neo4j.genai.vector.VectorEncoding.BatchRow;
+import static org.neo4j.genai.vector.DeprecatedVectorEncoding.BatchRow;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
@@ -38,7 +38,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.neo4j.function.ThrowingSupplier;
-import org.neo4j.genai.vector.MalformedGenAIResponseException;
+import org.neo4j.genai.util.MalformedGenAIResponseException;
 
 @TestInstance(Lifecycle.PER_CLASS)
 abstract class ParsingTestBase {

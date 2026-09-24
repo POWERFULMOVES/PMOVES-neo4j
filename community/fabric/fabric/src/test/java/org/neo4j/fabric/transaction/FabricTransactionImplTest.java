@@ -33,12 +33,16 @@ import static org.neo4j.kernel.api.exceptions.Status.Transaction.Terminated;
 import static org.neo4j.kernel.api.exceptions.Status.Transaction.TransactionTimedOut;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Future;
 import org.junit.jupiter.api.Test;
-import org.neo4j.bolt.protocol.common.message.AccessMode;
-import org.neo4j.bolt.protocol.common.message.request.connection.RoutingContext;
+import org.neo4j.boltmessages.AccessMode;
+import org.neo4j.boltmessages.request.connection.RoutingContext;
 import org.neo4j.configuration.Config;
 import org.neo4j.fabric.FabricDatabaseManager;
 import org.neo4j.fabric.bookmark.LocalGraphTransactionIdTracker;
@@ -61,12 +65,13 @@ import org.neo4j.kernel.database.NormalizedDatabaseName;
 import org.neo4j.kernel.impl.coreapi.InternalTransaction;
 import org.neo4j.kernel.impl.query.QueryExecutionConfiguration;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
+import org.neo4j.scheduler.CallableExecutor;
 import org.neo4j.time.Clocks;
 
-public class FabricTransactionImplTest {
+class FabricTransactionImplTest {
 
     @Test
-    void testChildrenAreTerminated() {
+    void childrenAreTerminated() {
         var config = Config.defaults();
         var bookmarkManager = mock(TransactionBookmarkManager.class);
 
@@ -98,7 +103,7 @@ public class FabricTransactionImplTest {
     }
 
     @Test
-    void testClosedChildrenAreNotTerminated() {
+    void closedChildrenAreNotTerminated() {
         var config = Config.defaults();
         var bookmarkManager = mock(TransactionBookmarkManager.class);
 
@@ -130,7 +135,7 @@ public class FabricTransactionImplTest {
     }
 
     @Test
-    void testTerminatedChildrenAreNotTerminated() {
+    void terminatedChildrenAreNotTerminated() {
         var config = Config.defaults();
         var bookmarkManager = mock(TransactionBookmarkManager.class);
 
@@ -181,7 +186,8 @@ public class FabricTransactionImplTest {
                 var graphDatabaseApi = mock(GraphDatabaseAPI.class, RETURNS_MOCKS);
                 when(graphDatabaseApi.databaseId())
                         .thenReturn(DatabaseIdFactory.from(loc.getDatabaseName(), loc.getUuid()));
-                when(graphDatabaseApi.beginTransaction(any(), any(), any(), any(), anyLong(), any(), any(), any()))
+                when(graphDatabaseApi.beginTransaction(
+                                any(), any(), any(), any(), any(), anyLong(), any(), any(), any()))
                         .thenReturn(itx);
                 when(fabricDatabaseManager.getDatabaseFacade(eq(loc.getDatabaseName())))
                         .thenReturn(graphDatabaseApi);
@@ -194,7 +200,7 @@ public class FabricTransactionImplTest {
                 FabricConfig.from(config), fabricDatabaseManager, mock(LocalGraphTransactionIdTracker.class));
     }
 
-    private static TransactionManager transactionManager(Config config, FabricLocalExecutor localExecutor) {
+    private TransactionManager transactionManager(Config config, FabricLocalExecutor localExecutor) {
         var remoteExecutor = mock(FabricRemoteExecutor.class, RETURNS_MOCKS);
         var errorReporter = mock(ErrorReporter.class);
         var transactionMonitor = mock(FabricTransactionMonitor.class);
@@ -212,7 +218,8 @@ public class FabricTransactionImplTest {
                 config,
                 guard,
                 errorReporter,
-                globalProcedures);
+                globalProcedures,
+                new SameThreadExecutor());
     }
 
     private static FabricTransactionInfo createTransactionInfo() {
@@ -228,6 +235,25 @@ public class FabricTransactionImplTest {
                 Duration.ZERO,
                 emptyMap(),
                 new RoutingContext(true, emptyMap()),
-                QueryExecutionConfiguration.DEFAULT_CONFIG);
+                QueryExecutionConfiguration.DEFAULT_CONFIG,
+                List.of());
+    }
+
+    private static class SameThreadExecutor implements CallableExecutor {
+
+        @Override
+        public <T> Future<T> submit(Callable<T> callable) {
+            try {
+                return CompletableFuture.completedFuture(callable.call());
+            } catch (Exception e) {
+                return CompletableFuture.failedFuture(e);
+            }
+        }
+        ;
+
+        @Override
+        public void execute(Runnable command) {
+            command.run();
+        }
     }
 }

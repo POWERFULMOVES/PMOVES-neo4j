@@ -50,22 +50,19 @@ import org.neo4j.shell.state.LicenseDetails;
  */
 public class CypherShell implements StatementExecuter, Connector, TransactionHandler, DatabaseManager {
     private static final Logger log = Logger.create();
-    private static final String LICENSE_EXPIRED_WARNING =
-            """
+    private static final String LICENSE_EXPIRED_WARNING = """
             Thank you for installing Neo4j. This is a time limited trial, and the
             %d days have expired. Please contact https://neo4j.com/contact-us/
             to continue using the software. Use of this Software without
             a proper commercial or evaluation license with Neo4j, Inc. or
             its affiliates is prohibited.
             """;
-    private static final String LICENSE_DAYS_LEFT_WARNING =
-            """
+    private static final String LICENSE_DAYS_LEFT_WARNING = """
             Thank you for installing Neo4j. This is a time limited trial.
             You have %d days remaining out of %d days. Please
             contact https://neo4j.com/contact-us/ if you require more time.
             """;
-    private static final String LICENSE_NOT_ACCEPTED_WARNING =
-            """
+    private static final String LICENSE_NOT_ACCEPTED_WARNING = """
             A Neo4j license has not been accepted. To accept the commercial license agreement, run
                 neo4j-admin server license --accept-commercial.
             To accept the terms of the evaluation agreement, run
@@ -137,7 +134,7 @@ public class CypherShell implements StatementExecuter, Connector, TransactionHan
         try {
             final Optional<BoltResult> result = boltStateHandler.runUserCypher(cypher, parameters.parameters());
             result.ifPresent(boltResult -> {
-                prettyPrinter.format(boltResult, printer, getProtocolVersion());
+                prettyPrinter.format(boltResult, printer);
                 boltStateHandler.updateActualDbName(boltResult.getSummary());
             });
             lastNeo4jErrorCode = null;
@@ -256,6 +253,12 @@ public class CypherShell implements StatementExecuter, Connector, TransactionHan
         return boltStateHandler.runCypher(cypher, queryParams, type);
     }
 
+    @Override
+    public Optional<BoltResult> runCypher5(String cypher, Map<String, Value> queryParams, TransactionType type)
+            throws CommandException {
+        return boltStateHandler.runCypher5(cypher, queryParams, type);
+    }
+
     public void setCommandHelper(CommandHelper commandHelper) {
         this.commandHelper = commandHelper;
     }
@@ -341,15 +344,15 @@ public class CypherShell implements StatementExecuter, Connector, TransactionHan
         } else if (license.status() == LicenseDetails.Status.EXPIRED
                 && license.trialDays().isPresent()) {
             printer.printOut(AnsiFormattedText.s()
-                    .orange(format(LICENSE_EXPIRED_WARNING, license.trialDays().get()))
+                    .orange(format(LICENSE_EXPIRED_WARNING, license.trialDays().getAsLong()))
                     .resetAndRender());
         } else if (license.status() == LicenseDetails.Status.EVAL
                 && license.daysLeft().isPresent()
                 && license.trialDays().isPresent()) {
             printer.printOut(format(
                     LICENSE_DAYS_LEFT_WARNING,
-                    license.daysLeft().get(),
-                    license.trialDays().get()));
+                    license.daysLeft().getAsLong(),
+                    license.trialDays().getAsLong()));
         }
     }
 

@@ -22,6 +22,7 @@ package org.neo4j.tracers;
 import static org.neo4j.graphdb.RelationshipType.withName;
 import static org.neo4j.test.PageCacheTracerAssertions.assertThatTracing;
 import static org.neo4j.test.PageCacheTracerAssertions.pins;
+import static org.neo4j.test.extension.SkipOnSpd.Note.incompatible;
 
 import java.util.function.Consumer;
 import org.assertj.core.api.SoftAssertions;
@@ -43,6 +44,7 @@ import org.neo4j.kernel.impl.coreapi.InternalTransaction;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.test.extension.DbmsExtension;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
 
 @ExtendWith(SoftAssertionsExtension.class)
 @DbmsExtension
@@ -75,11 +77,19 @@ class TransactionTracingIT {
                     .as("Number of expected nodes")
                     .isEqualTo(ENTITY_COUNT);
 
-            assertThatTracing(database).record(pins(2).noFaults()).block(pins(16).noFaults());
+            assertThatTracing(database)
+                    .record(pins(1).atMost(2).noFaults())
+                    .block(pins(15).atMost(16).noFaults())
+                    .spd(pins(7).atMost(8).noFaults())
+                    .matches(cursorContext.getCursorTracer());
         }
     }
 
     @Test
+    @SkipOnSpd(
+            reason =
+                    "On SPD create node will reserve a node and pin an unexpected page (so we have pins after createNode)",
+            notes = incompatible)
     void tracePageCacheAccessOnNodeCreation() {
         try (InternalTransaction transaction = (InternalTransaction) database.beginTx()) {
             var cursorContext = transaction.kernelTransaction().cursorContext();
@@ -87,6 +97,7 @@ class TransactionTracingIT {
             var commitCursorChecker = new CommitCursorChecker(db -> assertThatTracing(db)
                     .record(pins(1001).faults(2))
                     .block(pins(2001).faults(16))
+                    .spd(pins(2002).faults(9))
                     .matches(cursorContext.getCursorTracer()));
             managementService.registerTransactionEventListener(database.databaseName(), commitCursorChecker);
 
@@ -121,8 +132,9 @@ class TransactionTracingIT {
                     .isEqualTo(ENTITY_COUNT);
 
             assertThatTracing(database)
-                    .record(pins(5).noFaults())
+                    .record(pins(5).noFaults().skipUnpins())
                     .block(pins(32).noFaults().skipUnpins())
+                    .spd(pins(16).noFaults().skipUnpins())
                     .matches(cursorContext.getCursorTracer());
         }
     }
@@ -150,6 +162,7 @@ class TransactionTracingIT {
             assertThatTracing(database)
                     .record(pins(1).noFaults())
                     .block(pins(1).noFaults())
+                    .spd(pins(1).noFaults())
                     .matches(cursorContext.getCursorTracer());
         }
     }
@@ -177,6 +190,7 @@ class TransactionTracingIT {
             assertThatTracing(database)
                     .record(pins(1).noFaults())
                     .block(pins(33).noFaults().skipUnpins())
+                    .spd(pins(17).noFaults().skipUnpins())
                     .matches(cursorContext.getCursorTracer());
         }
     }
@@ -202,6 +216,7 @@ class TransactionTracingIT {
             assertThatTracing(database)
                     .record(pins(2).noFaults().skipUnpins())
                     .block(pins(1).noFaults().skipUnpins())
+                    .spd(pins(1).noFaults().skipUnpins())
                     .matches(cursorContext.getCursorTracer());
         }
     }

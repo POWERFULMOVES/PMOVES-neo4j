@@ -19,6 +19,7 @@
  */
 package org.neo4j.cypher.internal.compiler.planner.logical.idp
 
+import org.neo4j.cypher.internal.compiler.helpers.PropertyAccessHelper
 import org.neo4j.cypher.internal.compiler.planner.logical.LogicalPlanningContext
 import org.neo4j.cypher.internal.compiler.planner.logical.Metrics.LabelInfo
 import org.neo4j.cypher.internal.compiler.planner.logical.QueryGraphSolver
@@ -29,10 +30,14 @@ import org.neo4j.cypher.internal.compiler.planner.logical.SortPlanner.orderSatis
 import org.neo4j.cypher.internal.compiler.planner.logical.ordering.InterestingOrderConfig
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.BestPlans
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.ExistsSubqueryPlanner
-import org.neo4j.cypher.internal.compiler.planner.logical.steps.planShortestRelationships
+import org.neo4j.cypher.internal.expressions.Expression
+import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.ir.QueryGraph
 import org.neo4j.cypher.internal.ir.ast.ExistsIRExpression
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
+import org.neo4j.cypher.internal.planner.spi.DatabaseMode
+
+import scala.util.chaining.scalaUtilChainingOps
 
 trait IDPQueryGraphSolverMonitor extends IDPSolverMonitor {
   def noIDPIterationFor(graph: QueryGraph, result: LogicalPlan): Unit
@@ -55,7 +60,13 @@ object IDPQueryGraphSolver {
     generators: Seq[IDPSolverStep[Solvable, LogicalPlan, LogicalPlanningContext]]
   ): IDPSolverStep[Solvable, LogicalPlan, LogicalPlanningContext] = {
     val combinedSolverSteps =
-      generators.map(selectingAndSortingSolverStep(queryGraph, interestingOrderConfig, kit, context, _))
+      generators
+        .map(solverStep => {
+          val selectingAndSortingSolver =
+            selectingAndSortingSolverStep(queryGraph, interestingOrderConfig, kit, context, solverStep)
+          prefetchingPropertiesSolverStep(queryGraph, context, selectingAndSortingSolver)
+        })
+
     combinedSolverSteps.foldLeft(IDPSolverStep.empty[Solvable, LogicalPlan, LogicalPlanningContext])(_ ++ _)
   }
 
@@ -80,6 +91,25 @@ object IDPQueryGraphSolver {
         ).filterNot(_ == plan)
       )
       selectingSolverStep ++ sortingSolverStep
+    }
+  }
+
+  private def prefetchingPropertiesSolverStep[Solvable](
+    queryGraph: QueryGraph,
+    context: LogicalPlanningContext,
+    solverStep: IDPSolverStep[Solvable, LogicalPlan, LogicalPlanningContext]
+  ): IDPSolverStep[Solvable, LogicalPlan, LogicalPlanningContext] = {
+    if (context.staticComponents.planContext.databaseMode == DatabaseMode.SHARDED) {
+      val prefetchedPropertiesSolverStep = solverStep.flatMap(plan =>
+        context.settings.remoteBatchPropertiesStrategy.planPrefetchRemoteBatchPropertiesIfRequired(
+          queryGraph,
+          Iterable(plan),
+          context
+        )
+      )
+      solverStep ++ prefetchedPropertiesSolverStep
+    } else {
+      solverStep
     }
   }
 
@@ -123,13 +153,17 @@ case class IDPQueryGraphSolver(
     interestingOrderConfig: InterestingOrderConfig,
     context: LogicalPlanningContext
   ): BestPlans = {
-    val kit = kitWithShortestPathSupport(context.plannerState.config.toKit(interestingOrderConfig, context), context)
+    val kit =
+      context.plannerState.config.toKit(interestingOrderConfig, context)
+        .pipe(QueryPlannerKit.withShortestPathSupportIfNeeded(_, queryGraph, context))
+        .pipe(QueryPlannerKit.withSearchSupportIfNeeded(_, queryGraph, context))
+
     val components = queryGraph.connectedComponents
     val plannedComponents =
       if (components.isEmpty)
         planEmptyComponent(queryGraph, context, kit)
       else
-        planComponents(components, interestingOrderConfig, context, kit)
+        planComponents(components, interestingOrderConfig, context, kit, queryGraph)
 
     connectComponentsAndSolveOptionalMatch(plannedComponents, queryGraph, interestingOrderConfig, context, kit)
   }
@@ -142,31 +176,53 @@ case class IDPQueryGraphSolver(
     existsSubqueryPlanner.planInnerOfExistsSubquery(subquery, labelInfo, context)
   }
 
-  private def kitWithShortestPathSupport(kit: QueryPlannerKit, context: LogicalPlanningContext) =
-    kit.copy(select = (initialPlan: LogicalPlan, qg: QueryGraph) => selectShortestPath(kit, initialPlan, qg, context))
-
-  private def selectShortestPath(
-    kit: QueryPlannerKit,
-    initialPlan: LogicalPlan,
-    qg: QueryGraph,
-    context: LogicalPlanningContext
-  ): LogicalPlan =
-    qg.shortestRelationshipPatterns.foldLeft(kit.select(initialPlan, qg)) {
-      case (plan, sp) if sp.isFindableFrom(plan.availableSymbols) =>
-        val shortestPath = planShortestRelationships(plan, qg, sp, context)
-        kit.select(shortestPath, qg)
-      case (plan, _) => plan
-    }
-
   private def planComponents(
     components: Seq[QueryGraph],
     interestingOrderConfig: InterestingOrderConfig,
     context: LogicalPlanningContext,
-    kit: QueryPlannerKit
-  ): Seq[PlannedComponent] =
-    components.map { qg =>
-      PlannedComponent(qg, singleComponentSolver.planComponent(qg, context, kit, interestingOrderConfig))
+    kit: QueryPlannerKit,
+    parentQueryGraph: QueryGraph
+  ): Seq[PlannedComponent] = {
+    def updatedContext(qg: QueryGraph): LogicalPlanningContext = {
+
+      def overlappingParentPredicatesGivenIds(ids: Set[LogicalVariable]): Set[Expression] = {
+        val qgPredicates = qg.selections.flatPredicatesSet
+        parentQueryGraph.selections.predicates.collect {
+          case p if p.dependencies.exists(ids) && !qgPredicates.contains(p.expr) => p.expr
+        }
+      }
+
+      context
+        .pipe { context =>
+          val overlappingPredicates = overlappingParentPredicatesGivenIds(qg.allCoveredIds)
+          context.withModifiedPlannerState(_.withOverlappingMulticomponentPredicates(overlappingPredicates))
+        }
+        .pipe { context =>
+          if (context.staticComponents.planContext.databaseMode == DatabaseMode.SHARDED) {
+            val relatedPredicates = overlappingParentPredicatesGivenIds(qg.dependencies)
+            val propertyAccessInRelatedQueryQueryGraph =
+              PropertyAccessHelper.findPropertyAccesses(relatedPredicates.toSeq)
+            val updatedContextualPropertyAccess = context.plannerState.contextualPropertyAccess.copy(
+              propertyAccessInOtherComponents = propertyAccessInRelatedQueryQueryGraph
+            )
+            context.withModifiedPlannerState(_.withContextualPropertyAccess(updatedContextualPropertyAccess))
+          } else
+            context
+        }
     }
+
+    components.map { qg =>
+      PlannedComponent(
+        qg,
+        singleComponentSolver.planComponent(
+          qg,
+          updatedContext(qg),
+          kit,
+          interestingOrderConfig
+        )
+      )
+    }
+  }
 
   private def planEmptyComponent(
     queryGraph: QueryGraph,
@@ -176,7 +232,7 @@ case class IDPQueryGraphSolver(
     val plan = context.staticComponents.logicalPlanProducer.planQueryArgument(queryGraph, context)
     val result: LogicalPlan = kit.select(plan, queryGraph)
     monitor.emptyComponentPlanned(queryGraph, result)
-    Seq(PlannedComponent(queryGraph, BestResults(result, None)))
+    Seq(PlannedComponent(queryGraph, BestResults(result, None, None)))
   }
 
   private def connectComponentsAndSolveOptionalMatch(

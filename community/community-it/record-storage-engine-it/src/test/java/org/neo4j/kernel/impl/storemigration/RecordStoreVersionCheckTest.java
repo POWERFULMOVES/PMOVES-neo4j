@@ -23,16 +23,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.neo4j.configuration.GraphDatabaseInternalSettings.include_versions_under_development;
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
 
 import java.io.IOException;
 import java.io.OutputStream;
-import java.nio.file.Path;
 import java.util.function.Consumer;
-import org.eclipse.collections.api.factory.Sets;
 import org.junit.jupiter.api.Test;
 import org.neo4j.configuration.Config;
 import org.neo4j.internal.id.DefaultIdGeneratorFactory;
@@ -42,15 +39,16 @@ import org.neo4j.io.layout.recordstorage.RecordDatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.io.pagecache.tracing.cursor.PageCursorTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.store.MetaDataStore;
 import org.neo4j.kernel.impl.store.StoreFactory;
 import org.neo4j.kernel.impl.store.StoreType;
 import org.neo4j.kernel.impl.store.format.RecordFormats;
 import org.neo4j.kernel.impl.store.format.aligned.PageAligned;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.logging.InternalLogProvider;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.storageengine.api.StoreId;
@@ -181,7 +179,7 @@ class RecordStoreVersionCheckTest {
     }
 
     @Test
-    void tracePageCacheAccessOnMigrationCheck() throws IOException {
+    void tracePageCacheAccessOnMigrationCheck() {
         RecordStoreVersionCheck storeVersionCheck = newStoreVersionCheck();
 
         doTestTraceOnCheck(cursorContext -> {
@@ -220,10 +218,10 @@ class RecordStoreVersionCheckTest {
     @Test
     void tracePageCacheAccessOnStoreVersionAccess() throws IOException {
         RecordFormats format = PageAligned.LATEST_RECORD_FORMATS;
-        Path neoStore = createMetaDataStore(format);
+        createMetaDataStore(format);
 
-        var fieldAccess =
-                MetaDataStore.getFieldAccess(pageCache, neoStore, databaseLayout.getDatabaseName(), NULL_CONTEXT);
+        var fieldAccess = MetaDataStore.getFieldAccess(
+                pageCache, databaseLayout.metadataStore(), databaseLayout.getDatabaseName(), NULL_CONTEXT);
         fieldAccess.isLegacyFieldValid();
         fieldAccess.writeStoreId(StoreId.generateNew(
                 RecordStorageEngineFactory.NAME,
@@ -246,19 +244,18 @@ class RecordStoreVersionCheckTest {
 
     private static void metaDataFileContaining(RecordDatabaseLayout layout, FileSystemAbstraction fs, String content)
             throws IOException {
-        Path shortFile = layout.metadataStore();
-        fs.deleteFile(shortFile);
-        try (OutputStream outputStream = fs.openAsOutputStream(shortFile, false)) {
+        StoreFile metadataStore = layout.metadataStore();
+        metadataStore.delete(fs);
+        try (OutputStream outputStream = fs.openAsOutputStream(metadataStore.baseSegment(), false)) {
             outputStream.write(UTF8.encode(content));
         }
     }
 
     private RecordStoreVersionCheck newStoreVersionCheck() {
-        return new RecordStoreVersionCheck(
-                pageCache, databaseLayout, Config.defaults(include_versions_under_development, false));
+        return new RecordStoreVersionCheck(pageCache, databaseLayout, Config.defaults());
     }
 
-    private Path createMetaDataStore(RecordFormats recordFormats) {
+    private StoreFile createMetaDataStore(RecordFormats recordFormats) {
         InternalLogProvider logProvider = NullLogProvider.getInstance();
         PageCacheTracer pageCacheTracer = PageCacheTracer.NULL;
         StoreFactory storeFactory = new StoreFactory(
@@ -273,10 +270,9 @@ class RecordStoreVersionCheckTest {
                 logProvider,
                 CursorContextFactory.NULL_CONTEXT_FACTORY,
                 false,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
-                Sets.immutable.empty());
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
         try (var metaDataStore = storeFactory.openNeoStores(StoreType.META_DATA).getMetaDataStore()) {
-            return metaDataStore.getStorageFile();
+            return metaDataStore.getStoreFile();
         }
     }
 }

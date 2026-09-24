@@ -16,40 +16,181 @@
  */
 package org.neo4j.cypher.internal.frontend.phases
 
+import org.neo4j.cypher.internal.ast.AbstractFieldSignature
 import org.neo4j.cypher.internal.ast.CallClause
+import org.neo4j.cypher.internal.ast.LocalFieldSignature
+import org.neo4j.cypher.internal.ast.NonOptional
+import org.neo4j.cypher.internal.ast.OptionalState
 import org.neo4j.cypher.internal.ast.ProcedureResult
 import org.neo4j.cypher.internal.ast.ProcedureResultItem
 import org.neo4j.cypher.internal.ast.ReturnItems.ReturnVariables
 import org.neo4j.cypher.internal.ast.UnresolvedCall
+import org.neo4j.cypher.internal.ast.semantics.*
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheck
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheck.success
+import org.neo4j.cypher.internal.ast.semantics.SemanticError
 import org.neo4j.cypher.internal.ast.semantics.SemanticExpressionCheck
-import org.neo4j.cypher.internal.expressions.AutoExtractedParameter
+import org.neo4j.cypher.internal.ast.semantics.scoping.LocalProcedureScopeSignature
 import org.neo4j.cypher.internal.expressions.CoerceTo
 import org.neo4j.cypher.internal.expressions.ExplicitParameter
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.Expression.SemanticContext
 import org.neo4j.cypher.internal.expressions.ImplicitProcedureArgument
-import org.neo4j.cypher.internal.expressions.Literal
-import org.neo4j.cypher.internal.expressions.Namespace
-import org.neo4j.cypher.internal.expressions.ProcedureName
-import org.neo4j.cypher.internal.expressions.SensitiveAutoParameter
-import org.neo4j.cypher.internal.expressions.SensitiveParameter
 import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.util.InputPosition
-import org.neo4j.cypher.internal.util.Rewriter
+import org.neo4j.cypher.internal.util.ProcedureName
 import org.neo4j.cypher.internal.util.ZippableUtil.Zippable
-import org.neo4j.cypher.internal.util.bottomUp
 import org.neo4j.cypher.internal.util.symbols
 import org.neo4j.cypher.internal.util.symbols.CypherType
 import org.neo4j.exceptions.SyntaxException
 
-object ResolvedCall {
+trait ResolvedCall[IMPL <: ResolvedCall[IMPL]] extends CallClause {
+  def procedureName: ProcedureName
+  def inputFieldSignatures: Seq[AbstractFieldSignature]
+  def outputFieldSignatures: Option[Seq[AbstractFieldSignature]]
 
-  def apply(signatureLookup: QualifiedName => ProcedureSignature)(unresolved: UnresolvedCall): ResolvedCall = {
-    val UnresolvedCall(_, _, declaredArguments, declaredResult, yieldAll, optional) = unresolved
+  def callArguments: Seq[Expression]
+  def callResults: IndexedSeq[ProcedureResultItem]
+  def declaredArguments: Boolean
+  def declaredResults: Boolean
+
+  def withArguments(arguments: Seq[Expression]): IMPL
+  def withFakedFullDeclarations: IMPL
+
+  def asUnresolvedCall: UnresolvedCall
+
+  def coerceArguments: IMPL = {
+    val optInputFields = inputFieldSignatures.map(Some(_))
+    val coercedArguments =
+      callArguments.zipLeft(optInputFields, None)
+        .map {
+          case (arg, optField) =>
+            // If type is CTAny we don't need any coercion
+            optField.map { field =>
+              if (field.getType == symbols.CTAny) arg
+              else CoerceTo(arg, field.getType)
+            }.getOrElse(arg)
+        }
+    withArguments(coercedArguments)
+  }
+
+  def callResultIndices: IndexedSeq[(Int, String, String)] = { // pos, newName, oldName
+    val outputIndices: Map[String, Int] = outputFieldSignatures.map { outputs =>
+      outputs.map(_.name).zip(outputs.indices).toMap
+    }.getOrElse(Map.empty)
+    callResults.map(result => (outputIndices(result.outputName), result.variable.name, result.outputName))
+  }
+
+  def callResultTypes: Seq[(String, CypherType)] = {
+    if (outputFieldSignatures.isEmpty && (callResults.nonEmpty || yieldAll)) {
+      throw SyntaxException.cannotYieldFromVoidProcedure()
+    }
+    callResults.map(result => result.variable.name -> callOutputTypes(result.outputName))
+  }
+
+  override def returnVariables: ReturnVariables =
+    ReturnVariables(includeExisting = false, callResults.map(_.variable).toList)
+
+  def signatureString: String
+
+  def description: String
+
+  override def argumentCheck: SemanticCheck = {
+    val totalNumArgs = inputFieldSignatures.length
+    val numArgsWithDefaults = inputFieldSignatures.count(_.hasDefault)
+    val minNumArgs = totalNumArgs - numArgsWithDefaults
+    val givenNumArgs = callArguments.length
+
+    if (declaredArguments) {
+      val tooFewArgs = givenNumArgs < minNumArgs
+      val tooManyArgs = givenNumArgs > totalNumArgs
+      if (!tooFewArgs && !tooManyArgs) {
+        // this zip is fine since it will only verify provided args in callArguments
+        // default values are checked at load time
+        inputFieldSignatures.zip(callArguments).map {
+          case (field, arg) =>
+            SemanticExpressionCheck.check(SemanticContext.Results, arg) chain
+              SemanticExpressionCheck.expectType(field.getType.covariant, arg)
+        }.foldLeft(success)(_ chain _)
+      } else {
+        val argTypes = minNumArgs match {
+          case 0 => "no arguments"
+          case 1 => s"at least 1 argument of type ${inputFieldSignatures.head.getType.normalizedCypherTypeString()}"
+          case _ =>
+            s"at least $minNumArgs arguments of types ${inputFieldSignatures.take(minNumArgs).map(_.getType.normalizedCypherTypeString()).mkString(", ")}"
+        }
+        val sigDesc =
+          s"""Procedure ${procedureName.fullName} has signature: $signatureString
+             |meaning that it expects $argTypes""".stripMargin
+
+        if (tooFewArgs) {
+          error(SemanticError.procedureCallTooFewArguments(
+            givenNumArgs,
+            minNumArgs,
+            totalNumArgs,
+            numArgsWithDefaults,
+            String.valueOf(procedureName.fullName),
+            String.valueOf(signatureString),
+            sigDesc,
+            description,
+            position
+          ))
+        } else {
+          val maxExpectedMsg = totalNumArgs match {
+            case 0 => "none"
+            case _ => s"no more than $totalNumArgs"
+          }
+          error(SemanticError.procedureCallTooManyArguments(
+            totalNumArgs,
+            givenNumArgs,
+            String.valueOf(procedureName.fullName),
+            String.valueOf(signatureString),
+            maxExpectedMsg,
+            sigDesc,
+            description,
+            position
+          ))
+        }
+      }
+    } else {
+      if (totalNumArgs == 0) {
+        error(SemanticError.procedureCallWithoutParentheses(procedureName.fullName, position))
+      } else
+        error(SemanticError.procedureCallWithParenthesesWithArgs(procedureName.fullName, position))
+    }
+  }
+
+  override def resultCheck: SemanticCheck = {
+    // CALL of VOID procedure => No need to name arguments, even in query
+    // CALL of empty procedure => No need to name arguments, even in query
+    if ((outputFieldSignatures.isEmpty || outputFieldSignatures.get.isEmpty) && (callResults.nonEmpty || yieldAll)) {
+      error(SemanticError.cannotYieldFromVoidProcedure(position))
+    } else if (outputFieldSignatures.isEmpty || outputFieldSignatures.get.isEmpty) {
+      success
+    } // CALL ... YIELD ... => Check named outputs
+    else if (declaredResults) {
+      callResults.foldSemanticCheck(_.semanticCheck(callOutputTypes))
+    } // CALL wo YIELD of non-VOID or non-empty procedure in query => Error
+    else {
+      error(
+        SemanticError.procedureCallWithImplicitNaming(callOutputTypes.keys.toList.sorted, position)
+      )
+    }
+  }
+
+  override def invalidAggregationCheck: SemanticCheck =
+    callArguments.foldSemanticCheck(arg => checkArgumentForAggregation(arg))
+
+  val callOutputTypes: Map[String, CypherType] =
+    outputFieldSignatures.map { _.map { field => field.name -> field.getType }.toMap }.getOrElse(Map.empty)
+}
+
+object ResolvedNonLocalCall {
+
+  def apply(signatureLookup: ProcedureName => ProcedureSignature)(unresolved: UnresolvedCall): ResolvedNonLocalCall = {
+    val UnresolvedCall(_, declaredArguments, declaredResult, _, yieldAll, optional) = unresolved
     val position = unresolved.position
-    val signature = signatureLookup(QualifiedName(unresolved))
+    val signature = signatureLookup(unresolved.procedureName)
     def implicitArguments = signature.inputSignature.map(s =>
       s.default.map(d => ImplicitProcedureArgument(s.name, s.typ, d)).getOrElse(
         ExplicitParameter(s.name, s.typ)(position)
@@ -69,7 +210,7 @@ object ResolvedCall {
     if (callFilter.nonEmpty)
       throw new IllegalArgumentException(s"Expected no unresolved call with WHERE but got: $unresolved")
     else
-      ResolvedCall(
+      ResolvedNonLocalCall(
         signature,
         callArgumentsWithSensitivityMarkers,
         callResults,
@@ -89,39 +230,27 @@ object ResolvedCall {
     }.toIndexedSeq
 }
 
-object SensitiveParameterRewriter extends Rewriter {
-
-  private val instance = bottomUp(Rewriter.lift {
-    case p: ExplicitParameter =>
-      new ExplicitParameter(p.name, p.parameterType, p.sizeHint)(p.position) with SensitiveParameter
-    case p: AutoExtractedParameter =>
-      new AutoExtractedParameter(p.name, p.parameterType, p.sizeHint)(p.position) with SensitiveAutoParameter
-    case l: Literal =>
-      l.asSensitiveLiteral
-  })
-
-  override def apply(v: AnyRef): AnyRef = instance.apply(v)
-}
-
-case class ResolvedCall(
+case class ResolvedNonLocalCall(
   signature: ProcedureSignature,
-  callArguments: Seq[Expression],
-  callResults: IndexedSeq[ProcedureResultItem],
+  override val callArguments: Seq[Expression],
+  override val callResults: IndexedSeq[ProcedureResultItem],
   // true if given by the user originally
-  declaredArguments: Boolean = true,
+  override val declaredArguments: Boolean = true,
   // true if given by the user originally
-  declaredResults: Boolean = true,
+  override val declaredResults: Boolean = true,
   // YIELD *
   override val yieldAll: Boolean = false,
-  override val optional: Boolean = false
-)(val position: InputPosition)
-    extends CallClause {
+  override val optionalState: OptionalState = NonOptional
+)(val position: InputPosition) extends ResolvedCall[ResolvedNonLocalCall] {
+  override def procedureName: ProcedureName = signature.name
 
-  def qualifiedName: QualifiedName = signature.name
+  override def inputFieldSignatures: Seq[AbstractFieldSignature] = signature.inputSignature
 
-  def fullyDeclared: Boolean = declaredArguments && declaredResults
+  override def outputFieldSignatures: Option[Seq[AbstractFieldSignature]] = signature.outputSignature
 
-  def withFakedFullDeclarations: ResolvedCall =
+  def withArguments(arguments: Seq[Expression]): ResolvedNonLocalCall = copy(callArguments = arguments)(position)
+
+  def withFakedFullDeclarations: ResolvedNonLocalCall =
     // keep old YieldAll value for VOID procedure to be able to throw correct error if true
     copy(
       declaredArguments = true,
@@ -129,125 +258,12 @@ case class ResolvedCall(
       yieldAll = if (signature.outputSignature.isEmpty) yieldAll else false
     )(position)
 
-  def coerceArguments: ResolvedCall = {
-    val optInputFields = signature.inputSignature.map(Some(_))
-    val coercedArguments =
-      callArguments.zipLeft(optInputFields, None)
-        .map {
-          case (arg, optField) =>
-            // If type is CTAny we don't need any coercion
-            optField.map { field => if (field.typ == symbols.CTAny) arg else CoerceTo(arg, field.typ) }.getOrElse(arg)
-        }
-    copy(callArguments = coercedArguments)(position)
-  }
-
-  override def returnVariables: ReturnVariables =
-    ReturnVariables(includeExisting = false, callResults.map(_.variable).toList)
-
-  def callResultIndices: IndexedSeq[(Int, String, String)] = { // pos, newName, oldName
-    val outputIndices: Map[String, Int] = signature.outputSignature.map { outputs =>
-      outputs.map(_.name).zip(outputs.indices).toMap
-    }.getOrElse(Map.empty)
-    callResults.map(result => (outputIndices(result.outputName), result.variable.name, result.outputName))
-  }
-
-  def callResultTypes: Seq[(String, CypherType)] = {
-    if (signature.outputSignature.isEmpty && (callResults.nonEmpty || yieldAll)) {
-      throw new SyntaxException("Cannot yield value from void procedure.")
-    }
-    val outputTypes = callOutputTypes
-    callResults.map(result => result.variable.name -> outputTypes(result.outputName))
-  }
-
-  def mapCallArguments(f: Expression => Expression): ResolvedCall =
+  def mapCallArguments(f: Expression => Expression): ResolvedNonLocalCall =
     copy(callArguments = callArguments.map(f))(this.position)
 
-  override def clauseSpecificSemanticCheck: SemanticCheck =
-    argumentCheck chain resultCheck
+  def signatureString: String = signature.toString
 
-  private def argumentCheck: SemanticCheck = {
-    val totalNumArgs = signature.inputSignature.length
-    val numArgsWithDefaults = signature.inputSignature.flatMap(_.default).size
-    val minNumArgs = totalNumArgs - numArgsWithDefaults
-    val givenNumArgs = callArguments.length
-
-    if (declaredArguments) {
-      val tooFewArgs = givenNumArgs < minNumArgs
-      val tooManyArgs = givenNumArgs > totalNumArgs
-      if (!tooFewArgs && !tooManyArgs) {
-        // this zip is fine since it will only verify provided args in callArguments
-        // default values are checked at load time
-        signature.inputSignature.zip(callArguments).map {
-          case (field, arg) =>
-            SemanticExpressionCheck.check(SemanticContext.Results, arg) chain
-              SemanticExpressionCheck.expectType(field.typ.covariant, arg)
-        }.foldLeft(success)(_ chain _)
-      } else {
-        val argTypes = minNumArgs match {
-          case 0 => "no arguments"
-          case 1 => s"at least 1 argument of type ${signature.inputSignature.head.typ.normalizedCypherTypeString()}"
-          case _ =>
-            s"at least $minNumArgs arguments of types ${signature.inputSignature.take(minNumArgs).map(_.typ.normalizedCypherTypeString()).mkString(", ")}"
-        }
-        val sigDesc =
-          s"""Procedure ${signature.name} has signature: $signature
-             |meaning that it expects $argTypes""".stripMargin
-        val description = signature.description.fold("")(d => s"Description: $d")
-
-        if (tooFewArgs) {
-          error(
-            s"""Procedure call does not provide the required number of arguments: got $givenNumArgs expected at least $minNumArgs (total: $totalNumArgs, $numArgsWithDefaults of which have default values).
-               |
-               |$sigDesc
-               |$description""".stripMargin,
-            position
-          )
-        } else {
-          val maxExpectedMsg = totalNumArgs match {
-            case 0 => "none"
-            case _ => s"no more than $totalNumArgs"
-          }
-          error(
-            s"""Procedure call provides too many arguments: got $givenNumArgs expected $maxExpectedMsg.
-               |
-               |$sigDesc
-               |$description""".stripMargin,
-            position
-          )
-        }
-      }
-    } else {
-      if (totalNumArgs == 0) {
-        error("Procedure call is missing parentheses: " + signature.name, position)
-      } else
-        error(
-          "Procedure call inside a query does not support passing arguments implicitly. " +
-            "Please pass arguments explicitly in parentheses after procedure name for " + signature.name,
-          position
-        )
-    }
-  }
-
-  private def resultCheck: SemanticCheck =
-    // CALL of VOID procedure => No need to name arguments, even in query
-    // CALL of empty procedure => No need to name arguments, even in query
-    if (signature.outputFields.isEmpty && (callResults.nonEmpty || yieldAll)) {
-      error("Cannot yield value from void procedure.", position)
-    } else if (signature.outputFields.isEmpty) {
-      success
-    } // CALL ... YIELD ... => Check named outputs
-    else if (declaredResults) {
-      callResults.foldSemanticCheck(_.semanticCheck(callOutputTypes))
-    } // CALL wo YIELD of non-VOID or non-empty procedure in query => Error
-    else {
-      error(
-        s"Procedure call inside a query does not support naming results implicitly (name explicitly using `YIELD` instead)",
-        position
-      )
-    }
-
-  private val callOutputTypes: Map[String, CypherType] =
-    signature.outputSignature.map { _.map { field => field.name -> field.typ }.toMap }.getOrElse(Map.empty)
+  override val description: String = signature.description.fold("")(d => s"Description: $d")
 
   override def containsNoUpdates: Boolean = signature.accessMode match {
     case ProcedureReadOnlyAccess => true
@@ -255,9 +271,107 @@ case class ResolvedCall(
     case _                       => false
   }
 
-  def asUnresolvedCall: UnresolvedCall = UnresolvedCall(
-    procedureNamespace = Namespace(signature.name.namespace.toList)(position),
-    procedureName = ProcedureName(signature.name.name)(position),
+  override def asUnresolvedCall: UnresolvedCall = UnresolvedCall(
+    procedureName = signature.name,
+    declaredArguments = if (declaredArguments) Some(callArguments) else None,
+    declaredResult = if (declaredResults) Some(ProcedureResult(callResults)(position)) else None,
+    yieldAll,
+    optional
+  )(position)
+}
+
+object ResolvedLocalCall {
+
+  def apply(
+    unresolved: UnresolvedCall,
+    localProcedureScopeSignature: LocalProcedureScopeSignature
+  ): ResolvedLocalCall = {
+    val UnresolvedCall(procedureName, declaredArguments, declaredResult, _, yieldAll, optional) = unresolved
+    val position = unresolved.position
+    val inputSignature = localProcedureScopeSignature.inputSignature
+    val outputSignature = localProcedureScopeSignature.outputSignature
+
+    val callArguments = declaredArguments.getOrElse(Seq.empty)
+    val callArgumentsWithSensitivityMarkers = callArguments.map { (e: Expression) =>
+      e.endoRewrite(SensitiveParameterRewriter)
+    }
+
+    def implicitCallResults: IndexedSeq[ProcedureResultItem] =
+      outputSignature.getOrElse(Seq.empty).map {
+        field => ProcedureResultItem(Variable(field.name)(position, Variable.isIsolatedDefault))(position)
+      }.toIndexedSeq
+
+    val callResults = declaredResult.map(_.items).getOrElse(implicitCallResults)
+
+    val callFilter = declaredResult.flatMap(_.where)
+    if (callFilter.nonEmpty)
+      throw new IllegalArgumentException(s"Expected no unresolved call with WHERE but got: $unresolved")
+    else
+      ResolvedLocalCall(
+        procedureName,
+        inputSignature,
+        outputSignature,
+        bodyContainsUpdates = false,
+        callArgumentsWithSensitivityMarkers,
+        callResults,
+        declaredArguments.nonEmpty,
+        declaredResult.nonEmpty,
+        yieldAll,
+        optional
+      )(position)
+  }
+}
+
+case class ResolvedLocalCall(
+  override val procedureName: ProcedureName,
+  inputSignature: Seq[LocalFieldSignature],
+  outputSignature: Option[Seq[LocalFieldSignature]],
+  bodyContainsUpdates: Boolean,
+  override val callArguments: Seq[Expression],
+  override val callResults: IndexedSeq[ProcedureResultItem],
+  // true if given by the user originally
+  override val declaredArguments: Boolean = true,
+  // true if given by the user originally
+  override val declaredResults: Boolean = true,
+  // YIELD *
+  override val yieldAll: Boolean = false,
+  override val optionalState: OptionalState = NonOptional
+)(val position: InputPosition) extends ResolvedCall[ResolvedLocalCall] {
+
+  override def inputFieldSignatures: Seq[AbstractFieldSignature] = inputSignature
+
+  override def outputFieldSignatures: Option[Seq[AbstractFieldSignature]] = outputSignature
+
+  def fullyDeclared: Boolean = declaredArguments && declaredResults
+
+  def withArguments(arguments: Seq[Expression]): ResolvedLocalCall = copy(callArguments = arguments)(position)
+
+  def withFakedFullDeclarations: ResolvedLocalCall =
+    // keep old YieldAll value for VOID procedure to be able to throw correct error if true
+    copy(
+      declaredArguments = true,
+      declaredResults = true,
+      yieldAll = if (outputSignature.isEmpty) yieldAll else false
+    )(position)
+
+  def mapCallArguments(f: Expression => Expression): ResolvedLocalCall =
+    copy(callArguments = callArguments.map(f))(this.position)
+
+  def withBodyContainsUpdates(newValue: Boolean): ResolvedLocalCall =
+    copy(bodyContainsUpdates = newValue)(position)
+
+  override def signatureString: String = {
+    val sig = inputSignature.mkString(", ")
+    val nameAndSig = s"${procedureName.fullName}($sig)"
+    outputSignature.map(out => s"$nameAndSig :: ${out.mkString(", ")}").getOrElse(nameAndSig)
+  }
+
+  override val description: String = "(local procedure)"
+
+  override def containsNoUpdates: Boolean = !bodyContainsUpdates
+
+  override def asUnresolvedCall: UnresolvedCall = UnresolvedCall(
+    procedureName = procedureName,
     declaredArguments = if (declaredArguments) Some(callArguments) else None,
     declaredResult = if (declaredResults) Some(ProcedureResult(callResults)(position)) else None,
     yieldAll,

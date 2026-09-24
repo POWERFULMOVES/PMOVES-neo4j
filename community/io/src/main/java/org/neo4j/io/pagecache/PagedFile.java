@@ -21,6 +21,7 @@ package org.neo4j.io.pagecache;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import org.neo4j.io.async.AsyncBlockAccessor;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.monitoring.PageFileCounters;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
@@ -175,9 +176,18 @@ public interface PagedFile extends AutoCloseable {
     Path path();
 
     /**
-     * Flush all dirty pages into the file channel, and force the file channel to disk. IO will limited by the specific io controller used by mapped file.
+     * Flush all dirty pages into the file channel, but does not force the file channel to disk.
+     * IO will be limited by the specific io controller used by mapped file.
      */
-    void flushAndForce(FileFlushEvent flushEvent) throws IOException;
+    default void flush(FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor) throws IOException {
+        flushAndForce(flushEvent, asyncBlockAccessor);
+    }
+
+    /**
+     * Flush all dirty pages into the file channel, and force the file channel to disk.
+     * IO will be limited by the specific io controller used by mapped file.
+     */
+    void flushAndForce(FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor) throws IOException;
 
     /**
      * Get the file-page-id of the last page in the file.

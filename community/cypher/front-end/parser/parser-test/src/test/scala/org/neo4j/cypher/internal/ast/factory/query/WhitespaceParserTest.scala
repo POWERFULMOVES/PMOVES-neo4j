@@ -17,16 +17,13 @@
 package org.neo4j.cypher.internal.ast.factory.query
 
 import org.neo4j.cypher.internal.ast.Statement
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher25
 import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
 import org.neo4j.cypher.internal.ast.test.util.AstParsingTestBase
 
 class WhitespaceParserTest extends AstParsingTestBase {
 
   private val whitespaceCharacters =
     Seq(
-
       // Unicode General Category Zp
       '\u2029',
 
@@ -194,10 +191,8 @@ class WhitespaceParserTest extends AstParsingTestBase {
   test("MATCH\\u0085(m) RETURN m") {
     val unicodeString = "\\u0085"
     parsesIn[Statement] {
-      case Cypher5JavaCc => _.withMessageStart("Encountered \" <IDENTIFIER> \"MATCH\\u0085\"\"")
-      case Cypher5 =>
-        _.withSyntaxError(
-          s"""Invalid input 'MATCH\u0085': expected 'FOREACH', 'ALTER', 'ORDER BY', 'CALL', 'USING PERIODIC COMMIT', 'CREATE', 'LOAD CSV', 'START DATABASE', 'STOP DATABASE', 'DEALLOCATE', 'DELETE', 'DENY', 'DETACH', 'DROP', 'DRYRUN', 'FINISH', 'GRANT', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REALLOCATE', 'REMOVE', 'RENAME', 'RETURN', 'REVOKE', 'ENABLE SERVER', 'SET', 'SHOW', 'SKIP', 'TERMINATE', 'UNWIND', 'USE' or 'WITH' (line 1, column 1 (offset: 0))
+      case Cypher5 => _.withSyntaxError(
+          s"""Invalid input 'MATCH\u0085': expected 'ALTER', 'ORDER BY', 'CALL', 'USING PERIODIC COMMIT', 'CREATE', 'LOAD CSV', 'START DATABASE', 'STOP DATABASE', 'DEALLOCATE', 'DELETE', 'DENY', 'DETACH', 'DROP', 'DRYRUN', 'FINISH', 'FOREACH', 'GRANT', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REALLOCATE', 'REMOVE', 'RENAME', 'RETURN', 'REVOKE', 'ENABLE SERVER', 'SET', 'SHOW', 'SKIP', 'TERMINATE', 'UNWIND', 'USE' or 'WITH' (line 1, column 1 (offset: 0))
              |"MATCH${unicodeString}(m) RETURN m"
              | ^""".stripMargin
         )
@@ -210,9 +205,8 @@ class WhitespaceParserTest extends AstParsingTestBase {
 
   test("MATCH\u0085(m) RETURN m") {
     parsesIn[Statement] {
-      case Cypher5JavaCc => _.withMessageStart("Encountered \" <IDENTIFIER> \"MATCH\\u0085\"\"")
       case Cypher5 =>
-        _.withSyntaxError(s"""Invalid input 'MATCH\u0085': expected 'FOREACH', 'ALTER', 'ORDER BY', 'CALL', 'USING PERIODIC COMMIT', 'CREATE', 'LOAD CSV', 'START DATABASE', 'STOP DATABASE', 'DEALLOCATE', 'DELETE', 'DENY', 'DETACH', 'DROP', 'DRYRUN', 'FINISH', 'GRANT', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REALLOCATE', 'REMOVE', 'RENAME', 'RETURN', 'REVOKE', 'ENABLE SERVER', 'SET', 'SHOW', 'SKIP', 'TERMINATE', 'UNWIND', 'USE' or 'WITH' (line 1, column 1 (offset: 0))
+        _.withSyntaxError(s"""Invalid input 'MATCH\u0085': expected 'ALTER', 'ORDER BY', 'CALL', 'USING PERIODIC COMMIT', 'CREATE', 'LOAD CSV', 'START DATABASE', 'STOP DATABASE', 'DEALLOCATE', 'DELETE', 'DENY', 'DETACH', 'DROP', 'DRYRUN', 'FINISH', 'FOREACH', 'GRANT', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REALLOCATE', 'REMOVE', 'RENAME', 'RETURN', 'REVOKE', 'ENABLE SERVER', 'SET', 'SHOW', 'SKIP', 'TERMINATE', 'UNWIND', 'USE' or 'WITH' (line 1, column 1 (offset: 0))
                              |"MATCH\u0085(m) RETURN m"
                              | ^""".stripMargin)
       case _ => _.toAst(singleQuery(
@@ -224,26 +218,26 @@ class WhitespaceParserTest extends AstParsingTestBase {
 
   test("CREATE (f\u0085oo)") {
     parsesIn[Statement] {
-      case Cypher25 =>
+      case Cypher5 => _.toAst(singleQuery(
+          create(nodePat(name = Some("f\u0085oo")))
+        ))
+      case _ =>
         _.withSyntaxError(s"""Invalid input 'oo': expected a graph pattern, a parameter, ')', ':', 'IS', 'WHERE' or '{' (line 1, column 11 (offset: 10))
                              |"CREATE (f\u0085oo)"
                              |           ^""".stripMargin)
-      case _ => _.toAst(singleQuery(
-          create(nodePat(name = Some("f\u0085oo")))
-        ))
     }
   }
 
   test("CREATE (f\\u0085oo)") {
     val whitespace = "\\u0085"
     parsesIn[Statement] {
-      case Cypher25 =>
+      case Cypher5 => _.toAst(singleQuery(
+          create(nodePat(name = Some("f\u0085oo")))
+        ))
+      case _ =>
         _.withSyntaxError(s"""Invalid input 'oo': expected a graph pattern, a parameter, ')', ':', 'IS', 'WHERE' or '{' (line 1, column 16 (offset: 15))
                              |"CREATE (f${whitespace}oo)"
                              |                ^""".stripMargin)
-      case _ => _.toAst(singleQuery(
-          create(nodePat(name = Some("f\u0085oo")))
-        ))
     }
   }
 }

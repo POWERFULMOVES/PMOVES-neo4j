@@ -17,14 +17,15 @@
 package org.neo4j.cypher.internal.frontend.phases
 
 import org.neo4j.cypher.internal.CypherVersion
-import org.neo4j.cypher.internal.ast.UnresolvedCall
-import org.neo4j.cypher.internal.expressions.FunctionInvocation
+import org.neo4j.cypher.internal.ast.AbstractFieldSignature
+import org.neo4j.cypher.internal.util.FunctionName
+import org.neo4j.cypher.internal.util.ProcedureName
 import org.neo4j.cypher.internal.util.symbols.CypherType
 import org.neo4j.values.AnyValue
 import org.neo4j.values.storable.Value
 
 case class ProcedureSignature(
-  name: QualifiedName,
+  name: ProcedureName,
   inputSignature: IndexedSeq[FieldSignature],
   outputSignature: Option[IndexedSeq[FieldSignature]],
   deprecationInfo: Option[DeprecationInfo],
@@ -44,12 +45,12 @@ case class ProcedureSignature(
 
   override def toString: String = {
     val sig = inputSignature.mkString(", ")
-    outputSignature.map(out => s"$name($sig) :: ${out.mkString(", ")}").getOrElse(s"$name($sig)")
+    outputSignature.map(out => s"${name.fullName}($sig) :: ${out.mkString(", ")}").getOrElse(s"${name.fullName}($sig)")
   }
 }
 
 case class UserFunctionSignature(
-  name: QualifiedName,
+  name: FunctionName,
   inputSignature: IndexedSeq[FieldSignature],
   outputType: CypherType,
   deprecationInfo: Option[DeprecationInfo],
@@ -61,20 +62,7 @@ case class UserFunctionSignature(
 ) {
 
   override def toString =
-    s"$name(${inputSignature.mkString(", ")}) :: ${outputType.normalizedCypherTypeString()}"
-}
-
-object QualifiedName {
-
-  def apply(unresolved: UnresolvedCall): QualifiedName =
-    QualifiedName(unresolved.procedureNamespace.parts, unresolved.procedureName.name)
-
-  def apply(unresolved: FunctionInvocation): QualifiedName =
-    QualifiedName(unresolved.functionName.namespace.parts, unresolved.functionName.name)
-}
-
-case class QualifiedName(namespace: Seq[String], name: String) {
-  override def toString: String = (namespace :+ name).mkString(".")
+    s"${name.fullName}(${inputSignature.mkString(", ")}) :: ${outputType.normalizedCypherTypeString()}"
 }
 
 // Should have one to one mapping with org.neo4j.kernel.api.QueryLanguage
@@ -90,6 +78,16 @@ object QueryLanguage {
     case CypherVersion.Cypher25 => QueryLanguage.Cypher25
   }
 
+  def toCypherVersion(scope: QueryLanguage): CypherVersion = scope match {
+    case QueryLanguage.Cypher5  => CypherVersion.Cypher5
+    case QueryLanguage.Cypher25 => CypherVersion.Cypher25
+  }
+
+  def otherVersion(scope: QueryLanguage): QueryLanguage = scope match {
+    case QueryLanguage.Cypher5  => QueryLanguage.Cypher25
+    case QueryLanguage.Cypher25 => QueryLanguage.Cypher5
+  }
+
   def toKernelScope(scope: QueryLanguage): org.neo4j.kernel.api.QueryLanguage = scope match {
     case QueryLanguage.Cypher5  => org.neo4j.kernel.api.QueryLanguage.CYPHER_5
     case QueryLanguage.Cypher25 => org.neo4j.kernel.api.QueryLanguage.CYPHER_25
@@ -98,13 +96,20 @@ object QueryLanguage {
 }
 
 case class FieldSignature(
-  name: String,
+  override val name: String,
   typ: CypherType,
   default: Option[AnyValue] = None,
   deprecated: Boolean = false,
   sensitive: Boolean = false,
   description: String = null
-) {
+) extends AbstractFieldSignature {
+
+  /**
+   * Returns value of `typ`.
+   */
+  override def getType: CypherType = typ
+
+  def hasDefault: Boolean = default.nonEmpty
 
   override def toString: String = {
     val nameValue = default.map(d => s"$name  =  ${stringOf(d)}").getOrElse(name)

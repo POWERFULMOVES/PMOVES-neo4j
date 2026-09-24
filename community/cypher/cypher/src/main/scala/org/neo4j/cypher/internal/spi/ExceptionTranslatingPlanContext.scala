@@ -20,17 +20,25 @@
 package org.neo4j.cypher.internal.spi
 
 import org.neo4j.cypher.internal.frontend.phases.ProcedureSignature
-import org.neo4j.cypher.internal.frontend.phases.QualifiedName
+import org.neo4j.cypher.internal.frontend.phases.QueryLanguage
 import org.neo4j.cypher.internal.frontend.phases.UserFunctionSignature
-import org.neo4j.cypher.internal.macros.TranslateExceptionMacros.translateException
+import org.neo4j.cypher.internal.macros.TranslateExceptionMacros3.translateException
+import org.neo4j.cypher.internal.notification.InternalNotificationLogger
 import org.neo4j.cypher.internal.planner.spi.DatabaseMode.DatabaseMode
 import org.neo4j.cypher.internal.planner.spi.IndexDescriptor
+import org.neo4j.cypher.internal.planner.spi.IndexLookupError
 import org.neo4j.cypher.internal.planner.spi.InstrumentedGraphStatistics
+import org.neo4j.cypher.internal.planner.spi.NodeFulltextIndexDescriptor
+import org.neo4j.cypher.internal.planner.spi.NodeVectorIndexDescriptor
 import org.neo4j.cypher.internal.planner.spi.PlanContext
+import org.neo4j.cypher.internal.planner.spi.RelationshipFulltextIndexDescriptor
+import org.neo4j.cypher.internal.planner.spi.RelationshipVectorIndexDescriptor
 import org.neo4j.cypher.internal.planner.spi.TokenIndexDescriptor
 import org.neo4j.cypher.internal.planning.ExceptionTranslationSupport
-import org.neo4j.cypher.internal.util.InternalNotificationLogger
-import org.neo4j.internal.schema.constraints.SchemaValueType
+import org.neo4j.cypher.internal.util.FunctionName
+import org.neo4j.cypher.internal.util.ProcedureName
+import org.neo4j.internal.schema.EndpointType
+import org.neo4j.internal.schema.constraints.ConstrainableType
 
 class ExceptionTranslatingPlanContext(inner: PlanContext) extends PlanContext with ExceptionTranslationSupport {
 
@@ -117,10 +125,10 @@ class ExceptionTranslatingPlanContext(inner: PlanContext) extends PlanContext wi
     () => translateException(tokenNameLookup, innerTxProvider())
   }
 
-  override def procedureSignature(name: QualifiedName): ProcedureSignature =
+  override def procedureSignature(name: ProcedureName): ProcedureSignature =
     translateException(tokenNameLookup, inner.procedureSignature(name))
 
-  override def functionSignature(name: QualifiedName): Option[UserFunctionSignature] =
+  override def functionSignature(name: FunctionName): Option[UserFunctionSignature] =
     translateException(tokenNameLookup, inner.functionSignature(name))
 
   override def indexExistsForLabel(labelId: Int): Boolean =
@@ -134,6 +142,20 @@ class ExceptionTranslatingPlanContext(inner: PlanContext) extends PlanContext wi
 
   override def relationshipTokenIndex: Option[TokenIndexDescriptor] =
     translateException(tokenNameLookup, inner.relationshipTokenIndex)
+
+  override def nodeVectorIndexByName(indexName: String): Either[IndexLookupError, NodeVectorIndexDescriptor] =
+    translateException(tokenNameLookup, inner.nodeVectorIndexByName(indexName))
+
+  override def relationshipVectorIndexByName(indexName: String)
+    : Either[IndexLookupError, RelationshipVectorIndexDescriptor] =
+    translateException(tokenNameLookup, inner.relationshipVectorIndexByName(indexName))
+
+  override def nodeFulltextIndexByName(indexName: String): Either[IndexLookupError, NodeFulltextIndexDescriptor] =
+    translateException(tokenNameLookup, inner.nodeFulltextIndexByName(indexName))
+
+  override def relationshipFulltextIndexByName(indexName: String)
+    : Either[IndexLookupError, RelationshipFulltextIndexDescriptor] =
+    translateException(tokenNameLookup, inner.relationshipFulltextIndexByName(indexName))
 
   override def hasNodePropertyExistenceConstraint(labelName: String, propertyKey: String): Boolean =
     translateException(tokenNameLookup, inner.hasNodePropertyExistenceConstraint(labelName, propertyKey))
@@ -186,25 +208,47 @@ class ExceptionTranslatingPlanContext(inner: PlanContext) extends PlanContext wi
   override def hasNodePropertyTypeConstraint(
     labelName: String,
     propertyKey: String,
-    cypherType: SchemaValueType
+    cypherType: ConstrainableType
   ): Boolean =
     translateException(tokenNameLookup, inner.hasNodePropertyTypeConstraint(labelName, propertyKey, cypherType))
 
-  override def getNodePropertiesWithTypeConstraint(labelName: String): Map[String, Seq[SchemaValueType]] =
+  override def getNodePropertiesWithTypeConstraint(labelName: String): Map[String, Seq[ConstrainableType]] =
     translateException(tokenNameLookup, inner.getNodePropertiesWithTypeConstraint(labelName))
 
-  override def getRelationshipPropertiesWithTypeConstraint(relTypeName: String): Map[String, Seq[SchemaValueType]] =
+  override def getRelationshipPropertiesWithTypeConstraint(relTypeName: String): Map[String, Seq[ConstrainableType]] =
     translateException(tokenNameLookup, inner.getRelationshipPropertiesWithTypeConstraint(relTypeName))
 
   override def hasRelationshipPropertyTypeConstraint(
     relTypeName: String,
     propertyKey: String,
-    cypherType: SchemaValueType
+    cypherType: ConstrainableType
   ): Boolean =
     translateException(
       tokenNameLookup,
       inner.hasRelationshipPropertyTypeConstraint(relTypeName, propertyKey, cypherType)
     )
+
+  override def hasRelationshipEndpointLabelConstraint(
+    relTypeName: String,
+    labelName: String,
+    endpointType: EndpointType
+  ): Boolean =
+    translateException(
+      tokenNameLookup,
+      inner.hasRelationshipEndpointLabelConstraint(relTypeName, labelName, endpointType)
+    )
+
+  override def getRelationshipEndpointLabelConstraints(relTypeName: String): Map[EndpointType, String] =
+    translateException(
+      tokenNameLookup,
+      inner.getRelationshipEndpointLabelConstraints(relTypeName)
+    )
+
+  override def hasNodeLabelConstraint(constrainedLabel: String, impliedLabel: String): Boolean =
+    translateException(tokenNameLookup, inner.hasNodeLabelConstraint(constrainedLabel, impliedLabel))
+
+  override def getNodeLabelConstraints(constrainedLabel: String): Set[String] =
+    translateException(tokenNameLookup, inner.getNodeLabelConstraints(constrainedLabel))
 
   override def procedureSignatureVersion: Long = translateException(tokenNameLookup, inner.procedureSignatureVersion)
 
@@ -220,4 +264,14 @@ class ExceptionTranslatingPlanContext(inner: PlanContext) extends PlanContext wi
 
   override def storageHasPropertyColocation: Boolean =
     translateException(tokenNameLookup, inner.storageHasPropertyColocation)
+
+  override def storageSupportsFastExpandInto: Boolean =
+    translateException(tokenNameLookup, inner.storageSupportsFastExpandInto)
+
+  override def storageIsMvcc: Boolean =
+    translateException(tokenNameLookup, inner.storageIsMvcc)
+
+  override def queryLanguage: QueryLanguage = inner.queryLanguage
+
+  override def functionSignatureInOtherVersion(name: FunctionName): Option[UserFunctionSignature] = None
 }

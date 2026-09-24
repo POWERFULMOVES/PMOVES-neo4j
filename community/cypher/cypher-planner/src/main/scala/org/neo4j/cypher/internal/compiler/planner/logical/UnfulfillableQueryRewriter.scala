@@ -19,7 +19,6 @@
  */
 package org.neo4j.cypher.internal.compiler.planner.logical
 
-import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
 import org.neo4j.cypher.internal.compiler.phases.CompilationContains
 import org.neo4j.cypher.internal.compiler.phases.LogicalPlanState
 import org.neo4j.cypher.internal.compiler.phases.PlannerContext
@@ -29,11 +28,11 @@ import org.neo4j.cypher.internal.expressions.SignedDecimalIntegerLiteral
 import org.neo4j.cypher.internal.frontend.phases.BaseContext
 import org.neo4j.cypher.internal.frontend.phases.BaseState
 import org.neo4j.cypher.internal.frontend.phases.Transformer
+import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerConfig
 import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerFactory
 import org.neo4j.cypher.internal.ir.PlannerQuery
 import org.neo4j.cypher.internal.ir.QueryGraph
 import org.neo4j.cypher.internal.ir.QueryPagination
-import org.neo4j.cypher.internal.ir.QueryProjection
 import org.neo4j.cypher.internal.ir.RegularQueryProjection
 import org.neo4j.cypher.internal.ir.RegularSinglePlannerQuery
 import org.neo4j.cypher.internal.util.InputPosition
@@ -67,10 +66,7 @@ case object UnfulfillableQueryRewriter extends PlannerQueryRewriter with StepSeq
         val projection = RegularQueryProjection(
           projectionMap,
           queryPagination = QueryPagination(limit = Some(SignedDecimalIntegerLiteral("0")(InputPosition.NONE))),
-          importedExposedSymbols = horizon match {
-            case projection: QueryProjection => projection.importedExposedSymbols
-            case _                           => Set.empty
-          }
+          importedExposedSymbols = horizon.importedSymbolsFromLastCallSubquery
         )
         RegularSinglePlannerQuery(
           QueryGraph.apply(argumentIds = queryGraph.argumentIds),
@@ -94,8 +90,6 @@ case object UnfulfillableQueryRewriter extends PlannerQueryRewriter with StepSeq
 
   override def invalidatedConditions: Set[StepSequencer.Condition] = Set.empty
 
-  override def getTransformer(
-    pushdownPropertyReads: Boolean,
-    semanticFeatures: Seq[SemanticFeature]
-  ): Transformer[_ <: BaseContext, _ <: BaseState, BaseState] = this
+  override def getTransformer(planPipelineConfig: PlanPipelineTransformerConfig)
+    : Transformer[_ <: BaseContext, _ <: BaseState, BaseState] = this
 }

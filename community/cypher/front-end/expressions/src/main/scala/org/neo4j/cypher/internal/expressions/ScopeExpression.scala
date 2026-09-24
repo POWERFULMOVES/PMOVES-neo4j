@@ -19,15 +19,15 @@ package org.neo4j.cypher.internal.expressions
 import org.neo4j.cypher.internal.util.ASTNode
 import org.neo4j.cypher.internal.util.InputPosition
 
-// Scope expressions bundle together variables of a new scope
-// together with any child expressions that get evaluated in a context where
-// these variables are bound
-//
-// This is a hard contract: There must be no child expressions of a scope expressions
-// that are not
-// - either introduced variables
-// - or child expressions in a scope where those variables are bound
-//
+/**
+ * Scope expressions bundle together variables of a new scope
+ * together with any child expressions that get evaluated in a context where
+ * these variables are bound
+ *
+ * This is a hard contract(!): All child expressions of a scope expression must be:
+ * - either an introduced variable
+ * - or child expressions in a scope where those variables are bound
+ */
 trait ScopeExpression extends Expression {
   def introducedVariables: Set[LogicalVariable]
   def scopeDependencies: Set[LogicalVariable]
@@ -57,6 +57,37 @@ case class ExtractScope(
   override def scopeDependencies: Set[LogicalVariable] =
     innerPredicate.fold(Set.empty[LogicalVariable])(_.dependencies) ++
       extractExpression.fold(Set.empty[LogicalVariable])(_.dependencies) --
+      introducedVariables
+}
+
+case class ExtractMapScope(
+  variable: LogicalVariable,
+  innerPredicate: Option[Expression],
+  extractKeyExpression: Expression,
+  extractValueExpression: Expression
+)(val position: InputPosition) extends ScopeExpression {
+  val introducedVariables: Set[LogicalVariable] = Set(variable)
+
+  override def scopeDependencies: Set[LogicalVariable] =
+    innerPredicate.fold(Set.empty[LogicalVariable])(_.dependencies) ++
+      extractKeyExpression.dependencies ++
+      extractValueExpression.dependencies --
+      introducedVariables
+}
+
+case class ExtractMapEntriesScope(
+  keyVariable: LogicalVariable,
+  valueVariable: LogicalVariable,
+  innerPredicate: Option[Expression],
+  extractKeyExpression: Expression,
+  extractValueExpression: Expression
+)(val position: InputPosition) extends ScopeExpression {
+  val introducedVariables: Set[LogicalVariable] = Set(keyVariable, valueVariable)
+
+  override def scopeDependencies: Set[LogicalVariable] =
+    innerPredicate.fold(Set.empty[LogicalVariable])(_.dependencies) ++
+      extractKeyExpression.dependencies ++
+      extractValueExpression.dependencies --
       introducedVariables
 }
 

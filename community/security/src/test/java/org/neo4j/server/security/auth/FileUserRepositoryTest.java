@@ -19,12 +19,10 @@
  */
 package org.neo4j.server.security.auth;
 
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.neo4j.kernel.api.exceptions.Status.General.InvalidArguments;
 import static org.neo4j.logging.AssertableLogProvider.Level.ERROR;
 import static org.neo4j.logging.LogAssertions.assertThat;
 
@@ -37,6 +35,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.io.fs.DelegatingFileSystemAbstraction;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.kernel.api.exceptions.InvalidArgumentsException;
@@ -209,11 +209,12 @@ class FileUserRepositoryTest {
         User user = new User("jake", null, LegacyCredential.INACCESSIBLE, true, false);
 
         // When
-        var e = assertThrows(IOException.class, () -> users.create(user));
-        assertSame(exception, e);
+        assertThatExceptionOfType(IOException.class)
+                .isThrownBy(() -> users.create(user))
+                .isSameAs(exception);
 
         // Then
-        assertFalse(crashingFileSystem.fileExists(authFile));
+        assertThat(crashingFileSystem.fileExists(authFile)).isFalse();
         assertThat(crashingFileSystem.listFiles(authFile.getParent()).length).isEqualTo(0);
     }
 
@@ -223,19 +224,17 @@ class FileUserRepositoryTest {
         AssertableLogProvider logProvider = new AssertableLogProvider();
         fs.mkdir(authFile.getParent());
         // First line is correctly formatted, second line has an extra field
-        FileRepositorySerializer.writeToFile(
-                fs,
-                authFile,
-                UTF8.encode(
-                        "admin:SHA-256,A42E541F276CF17036DB7818F8B09B1C229AAD52A17F69F4029617F3A554640F,FB7E8AE08A6A7C741F678AD22217808F:\n"
-                                + "neo4j:fc4c600b43ffe4d5857b4439c35df88f:SHA-256,"
-                                + "A42E541F276CF17036DB7818F8B09B1C229AAD52A17F69F4029617F3A554640F,FB7E8AE08A6A7C741F678AD22217808F:\n"));
+        FileRepositorySerializer.writeToFile(fs, authFile, UTF8.encode("""
+                                admin:SHA-256,A42E541F276CF17036DB7818F8B09B1C229AAD52A17F69F4029617F3A554640F,FB7E8AE08A6A7C741F678AD22217808F:
+                                neo4j:fc4c600b43ffe4d5857b4439c35df88f:SHA-256,A42E541F276CF17036DB7818F8B09B1C229AAD52A17F69F4029617F3A554640F,FB7E8AE08A6A7C741F678AD22217808F:
+                                """));
 
         // When
         FileUserRepository users = new FileUserRepository(fs, authFile, logProvider, memoryTracker);
 
-        var e = assertThrows(IllegalStateException.class, users::start);
-        assertThat(e.getMessage()).startsWith("Failed to read authentication file: ");
+        assertThatThrownBy(users::start)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageStartingWith("Failed to read authentication file: ");
 
         assertThat(users.numberOfUsers()).isEqualTo(0);
         assertThat(logProvider)
@@ -254,8 +253,7 @@ class FileUserRepositoryTest {
         DoubleLatch latch = new DoubleLatch(2);
 
         // When
-        var executor = Executors.newSingleThreadExecutor();
-        try {
+        try (var executor = Executors.newSingleThreadExecutor()) {
             Future<?> setUsers = executor.submit(() -> {
                 try {
                     users.setUsers(new HangingListSnapshot(latch, 10L, Collections.emptyList()));
@@ -267,13 +265,31 @@ class FileUserRepositoryTest {
             latch.startAndWaitForAllToStart();
 
             // Then
-            assertNotNull(users.getUserByName("oskar"));
+            assertThat(users.getUserByName("oskar")).isNotNull();
 
             latch.finish();
             setUsers.get();
-        } finally {
-            executor.shutdown();
         }
+    }
+
+    @Test
+    void shouldFailToCreateDuplicateUsers() throws Exception {
+        FileUserRepository users = new FileUserRepository(fs, authFile, logProvider, memoryTracker);
+        User badger = new User("badger", null, LegacyCredential.forPassword("hidden"), false, false);
+
+        // Given
+        users.create(badger);
+
+        // When / then
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> users.create(badger))
+                .isInstanceOf(InvalidArgumentsException.class)
+                .hasStatus(InvalidArguments)
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_42001)
+                .hasStatusDescription("error: syntax error or access rule violation - invalid syntax")
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_42N12)
+                .hasStatusDescription(
+                        "error: syntax error or access rule violation - user already exists. A user with the name `badger` already exists.");
     }
 
     static class HangingListSnapshot extends ListSnapshot<User> {

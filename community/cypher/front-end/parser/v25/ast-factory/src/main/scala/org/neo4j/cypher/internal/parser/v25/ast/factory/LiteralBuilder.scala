@@ -25,13 +25,13 @@ import org.neo4j.cypher.internal.expressions.Infinity
 import org.neo4j.cypher.internal.expressions.ListLiteral
 import org.neo4j.cypher.internal.expressions.NaN
 import org.neo4j.cypher.internal.expressions.Null
+import org.neo4j.cypher.internal.expressions.ObfuscatedLiteral
 import org.neo4j.cypher.internal.expressions.SignedDecimalIntegerLiteral
 import org.neo4j.cypher.internal.expressions.SignedHexIntegerLiteral
 import org.neo4j.cypher.internal.expressions.SignedOctalIntegerLiteral
 import org.neo4j.cypher.internal.expressions.StringLiteral
 import org.neo4j.cypher.internal.expressions.True
 import org.neo4j.cypher.internal.parser.AstRuleCtx
-import org.neo4j.cypher.internal.parser.CypherErrorStrategy
 import org.neo4j.cypher.internal.parser.ast.util.Util.astSeq
 import org.neo4j.cypher.internal.parser.ast.util.Util.lastChild
 import org.neo4j.cypher.internal.parser.ast.util.Util.pos
@@ -49,33 +49,37 @@ trait LiteralBuilder extends Cypher25ParserListener {
   override def exitLiteral(ctx: Cypher25Parser.LiteralContext): Unit = {
     ctx.ast = ctx.children.get(0) match {
       case rule: AstRuleCtx => rule.ast
-      case token: TerminalNode => token.getSymbol.getType match {
-          case Cypher25Parser.TRUE                          => True()(pos(ctx))
-          case Cypher25Parser.FALSE                         => False()(pos(ctx))
-          case Cypher25Parser.INF | Cypher25Parser.INFINITY => Infinity()(pos(ctx))
-          case Cypher25Parser.NAN                           => NaN()(pos(ctx))
-          case Cypher25Parser.NULL                          => Null()(pos(ctx))
+      case token: TerminalNode =>
+        val pos = rangePos(ctx)
+        token.getSymbol.getType match {
+          case Cypher25Parser.TRUE                          => True()(pos)
+          case Cypher25Parser.FALSE                         => False()(pos)
+          case Cypher25Parser.INF | Cypher25Parser.INFINITY => Infinity()(pos)
+          case Cypher25Parser.NAN                           => NaN()(pos)
+          case Cypher25Parser.NULL                          => Null()(pos)
         }
       case other => throw new IllegalStateException(s"Unexpected child $other")
     }
   }
 
   final override def exitNumberLiteral(ctx: Cypher25Parser.NumberLiteralContext): Unit = {
+    val pos = rangePos(ctx)
     ctx.ast = lastChild[TerminalNode](ctx).getSymbol.getType match {
-      case Cypher25Parser.UNSIGNED_DECIMAL_INTEGER => SignedDecimalIntegerLiteral(ctx.getText)(pos(ctx))
-      case Cypher25Parser.DECIMAL_DOUBLE           => DecimalDoubleLiteral(ctx.getText)(pos(ctx))
-      case Cypher25Parser.UNSIGNED_HEX_INTEGER     => SignedHexIntegerLiteral(ctx.getText)(pos(ctx))
-      case Cypher25Parser.UNSIGNED_OCTAL_INTEGER   => SignedOctalIntegerLiteral(ctx.getText)(pos(ctx))
+      case Cypher25Parser.UNSIGNED_DECIMAL_INTEGER => SignedDecimalIntegerLiteral(ctx.getText)(pos)
+      case Cypher25Parser.DECIMAL_DOUBLE           => DecimalDoubleLiteral(ctx.getText)(pos)
+      case Cypher25Parser.UNSIGNED_HEX_INTEGER     => SignedHexIntegerLiteral(ctx.getText)(pos)
+      case Cypher25Parser.UNSIGNED_OCTAL_INTEGER   => SignedOctalIntegerLiteral(ctx.getText)(pos)
     }
   }
 
   final override def exitSignedIntegerLiteral(
     ctx: Cypher25Parser.SignedIntegerLiteralContext
   ): Unit = {
+    val pos = rangePos(ctx)
     ctx.ast = if (ctx.MINUS() != null) {
-      SignedDecimalIntegerLiteral("-" + ctx.UNSIGNED_DECIMAL_INTEGER().getText)(pos(ctx))
+      SignedDecimalIntegerLiteral("-" + ctx.UNSIGNED_DECIMAL_INTEGER().getText)(pos)
     } else {
-      SignedDecimalIntegerLiteral(ctx.UNSIGNED_DECIMAL_INTEGER().getText)(pos(ctx))
+      SignedDecimalIntegerLiteral(ctx.UNSIGNED_DECIMAL_INTEGER().getText)(pos)
     }
   }
 
@@ -95,6 +99,10 @@ trait LiteralBuilder extends Cypher25ParserListener {
     val text = ctx.start.getInputStream.getText(new Interval(ctx.start.getStartIndex + 1, ctx.stop.getStopIndex - 1))
     ctx.ast = StringLiteral(cypherStringToString(text, pos(ctx), exceptionFactory))(rangePos(ctx))
   }
+
+  override def exitObfuscatedLiteral(ctx: Cypher25Parser.ObfuscatedLiteralContext): Unit = {
+    ctx.ast = ObfuscatedLiteral()(rangePos(ctx))
+  }
 }
 
 object LiteralBuilder {
@@ -109,7 +117,12 @@ object LiteralBuilder {
    *
    * https://github.com/antlr/antlr4/blob/dev/doc/faq/lexical.md#how-do-i-replace-escape-characters-in-string-tokens
    */
-  final def cypherStringToString(input: String, p: InputPosition, exceptionFactory: CypherExceptionFactory): String = {
+  final def cypherStringToString(
+    input: String,
+    p: InputPosition,
+    exceptionFactory: CypherExceptionFactory,
+    passthroughEscapes: Set[Char] = Set.empty
+  ): String = {
     var pos = input.indexOf('\\')
     if (pos == -1) {
       input
@@ -119,17 +132,19 @@ object LiteralBuilder {
       var builder: java.lang.StringBuilder = null
       while (pos != -1) {
         if (pos == length - 1)
-          throw exceptionFactory.syntaxException(CypherErrorStrategy.quoteMismatchErrorMessage, p)
-        val replacement: Char = input.charAt(pos + 1) match {
-          case 't'  => '\t'
-          case 'b'  => '\b'
-          case 'n'  => '\n'
-          case 'r'  => '\r'
-          case 'f'  => '\f'
-          case '\'' => '\''
-          case '"'  => '"'
-          case '\\' => '\\'
-          case _    => Char.MinValue
+          throw exceptionFactory.stringLiteralWithInvalidQuotes(p)
+        val next = input.charAt(pos + 1)
+        val replacement: Char = next match {
+          case 't'                                 => '\t'
+          case 'b'                                 => '\b'
+          case 'n'                                 => '\n'
+          case 'r'                                 => '\r'
+          case 'f'                                 => '\f'
+          case '\''                                => '\''
+          case '"'                                 => '"'
+          case '\\'                                => '\\'
+          case c if passthroughEscapes.contains(c) => c
+          case _                                   => Char.MinValue
         }
         if (replacement != Char.MinValue) {
           if (builder == null) builder = new java.lang.StringBuilder(input.length)

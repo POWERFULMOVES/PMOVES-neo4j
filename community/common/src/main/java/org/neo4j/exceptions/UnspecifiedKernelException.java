@@ -20,16 +20,25 @@
 package org.neo4j.exceptions;
 
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.kernel.api.exceptions.Status;
 
 public class UnspecifiedKernelException extends KernelException {
 
-    @Deprecated
-    public UnspecifiedKernelException(Status statusCode, Throwable cause) {
-        super(statusCode, cause);
+    private UnspecifiedKernelException(ErrorGqlStatusObject gqlStatusObject, Status statusCode, Throwable cause) {
+        super(gqlStatusObject, statusCode, cause);
     }
 
-    public UnspecifiedKernelException(ErrorGqlStatusObject gqlStatusObject, Status statusCode, Throwable cause) {
-        super(gqlStatusObject, statusCode, cause);
+    public static UnspecifiedKernelException transactionRollbackFailed(Throwable e) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_40N01)
+                .build();
+        return new UnspecifiedKernelException(gql, Status.Transaction.TransactionRollbackFailed, e);
+    }
+
+    public static UnspecifiedKernelException unknownError(Throwable e) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_50N42)
+                .build();
+        return new UnspecifiedKernelException(gql, Status.General.UnknownError, e);
     }
 }

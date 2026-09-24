@@ -19,21 +19,26 @@
  */
 package org.neo4j.bolt.tls;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.neo4j.configuration.connectors.BoltConnector.EncryptionLevel.REQUIRED;
 
 import java.io.IOException;
-import java.util.Map;
+import org.assertj.core.api.Condition;
 import org.neo4j.bolt.test.annotation.BoltTestExtension;
 import org.neo4j.bolt.test.annotation.connection.initializer.Connected;
-import org.neo4j.bolt.test.annotation.connection.transport.preset.PlaintextTransportOnly;
+import org.neo4j.bolt.test.annotation.connection.transport.ExcludeTransport;
+import org.neo4j.bolt.test.annotation.connection.transport.IncludeTransport;
 import org.neo4j.bolt.test.annotation.setup.SettingsFunction;
 import org.neo4j.bolt.test.annotation.test.TransportTest;
+import org.neo4j.bolt.test.connection.setup.SettingBuilder;
+import org.neo4j.bolt.test.provider.ConnectionProvider;
 import org.neo4j.bolt.testing.assertions.BoltConnectionAssertions;
 import org.neo4j.bolt.testing.client.BoltTestConnection;
+import org.neo4j.bolt.testing.client.TransportType;
+import org.neo4j.bolt.testing.client.error.BoltTestClientClosedException;
 import org.neo4j.bolt.testing.messages.BoltWire;
 import org.neo4j.bolt.transport.Neo4jWithSocketExtension;
 import org.neo4j.configuration.connectors.BoltConnector;
-import org.neo4j.graphdb.config.Setting;
 import org.neo4j.test.extension.testdirectory.EphemeralTestDirectoryExtension;
 
 /**
@@ -46,16 +51,51 @@ import org.neo4j.test.extension.testdirectory.EphemeralTestDirectoryExtension;
 public class RequiredTransportSecurityIT {
 
     @SettingsFunction
-    static void customizeSettings(Map<Setting<?>, Object> settings) {
-        settings.put(BoltConnector.encryption_level, REQUIRED);
+    static void customizeSettings(SettingBuilder settings) {
+        settings.set(BoltConnector.encryption_level, REQUIRED);
     }
 
     @TransportTest
-    @PlaintextTransportOnly
+    @ExcludeTransport({TransportType.LOCAL, TransportType.UNIX, TransportType.WEBSOCKET_TLS, TransportType.TCP_TLS})
     void shouldCloseUnencryptedConnectionOnHandshakeWhenEncryptionIsRequired(
+            BoltWire wire, ConnectionProvider connectionProvider) throws IOException {
+        BoltTestConnection connection = connectionProvider.create();
+
+        try {
+            connection.connect();
+            connection.send(wire.getProtocolVersion());
+        } catch (RuntimeException e) {
+            assertThat(e)
+                    .isInstanceOf(BoltTestClientClosedException.class)
+                    .hasMessage("Failed to establish connection.");
+        }
+
+        BoltConnectionAssertions.assertThat(connection)
+                .isNot(protocolNegotiated())
+                .isEventuallyTerminated();
+    }
+
+    @TransportTest
+    @IncludeTransport({TransportType.LOCAL, TransportType.UNIX, TransportType.WEBSOCKET_TLS, TransportType.TCP_TLS})
+    void shouldHandshakeOnSafeConnectionsWhenEncryptionIsRequired(
             BoltWire wire, @Connected BoltTestConnection connection) throws IOException {
         connection.send(wire.getProtocolVersion());
 
-        BoltConnectionAssertions.assertThat(connection).isEventuallyTerminated();
+        BoltConnectionAssertions.assertThat(connection).is(protocolNegotiated());
+
+        connection.disconnect();
+    }
+
+    private static Condition<BoltTestConnection> protocolNegotiated() {
+        return new Condition<>(
+                c -> {
+                    try {
+                        c.receiveNegotiatedVersion();
+                        return true;
+                    } catch (RuntimeException e) {
+                        return false;
+                    }
+                },
+                "shouldn't receive negotiated version");
     }
 }

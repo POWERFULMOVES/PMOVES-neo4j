@@ -19,10 +19,14 @@
  */
 package org.neo4j.router;
 
+import static org.neo4j.fabric.executor.FabricExecutor.WRITING_IN_READ_NOT_ALLOWED_MSG;
+import static org.neo4j.kernel.api.exceptions.Status.Transaction.TransactionCommitFailed;
+
 import org.neo4j.fabric.executor.Location;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
 import org.neo4j.gqlstatus.ErrorMessageHolder;
+import org.neo4j.gqlstatus.GqlHelper;
 import org.neo4j.gqlstatus.GqlParams;
 import org.neo4j.gqlstatus.GqlRuntimeException;
 import org.neo4j.gqlstatus.GqlStatusInfoCodes;
@@ -33,22 +37,8 @@ public class QueryRouterException extends GqlRuntimeException implements Status.
     private final Status statusCode;
     private Long queryId;
 
-    @Deprecated
-    public QueryRouterException(Status statusCode, Throwable cause) {
-        super(ErrorMessageHolder.getOldCauseMessage(cause), cause);
-        this.statusCode = statusCode;
-        this.queryId = null;
-    }
-
     private QueryRouterException(ErrorGqlStatusObject gqlStatusObject, Status statusCode, Throwable cause) {
         super(gqlStatusObject, ErrorMessageHolder.getOldCauseMessage(cause), cause);
-        this.statusCode = statusCode;
-        this.queryId = null;
-    }
-
-    @Deprecated
-    public QueryRouterException(Status statusCode, String message, Object... parameters) {
-        super(String.format(message, parameters));
         this.statusCode = statusCode;
         this.queryId = null;
     }
@@ -60,18 +50,20 @@ public class QueryRouterException extends GqlRuntimeException implements Status.
         this.queryId = null;
     }
 
-    @Deprecated
-    public QueryRouterException(Status statusCode, String message, Throwable cause) {
-        super(message, cause);
-        this.statusCode = statusCode;
-        this.queryId = null;
-    }
-
     public QueryRouterException(
             ErrorGqlStatusObject gqlStatusObject, Status statusCode, String message, Throwable cause) {
         super(gqlStatusObject, message, cause);
         this.statusCode = statusCode;
         this.queryId = null;
+    }
+
+    public static <EX extends Throwable & Status.HasStatus> QueryRouterException wrapError(EX cause) {
+        if (cause instanceof ErrorGqlStatusObject gqlException && gqlException.gqlStatusObject() != null) {
+            return new QueryRouterException(gqlException, cause.status(), cause);
+        }
+
+        // This case can be removed once all errors has been ported to GQLSTATUS
+        return new QueryRouterException(GqlHelper.getDefaultObject(), cause.status(), cause);
     }
 
     public static QueryRouterException executeQueryInClosedTransaction(String legacyMessage) {
@@ -99,6 +91,43 @@ public class QueryRouterException extends GqlRuntimeException implements Status.
                 .withParam(GqlParams.StringParam.query, query)
                 .build();
         return new QueryRouterException(gql, Status.Transaction.ForbiddenDueToTransactionType, message);
+    }
+
+    public static QueryRouterException writingInReadAccessMode(String graph) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_08N03)
+                .withParam(GqlParams.StringParam.graph, graph)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N02)
+                        .build())
+                .build();
+        return new QueryRouterException(
+                gql, Status.Statement.AccessMode, WRITING_IN_READ_NOT_ALLOWED_MSG + ". Attempted write to %s", graph);
+    }
+
+    public static QueryRouterException writingToMultipleGraphs(String attemptedGraph, String currentGraph) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_08N03)
+                .withParam(GqlParams.StringParam.graph, attemptedGraph)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N03)
+                        .build())
+                .build();
+        return new QueryRouterException(
+                gql,
+                Status.Statement.AccessMode,
+                "Writing to more than one database per transaction is not allowed. Attempted write to %s, currently writing to %s",
+                attemptedGraph,
+                currentGraph);
+    }
+
+    public static QueryRouterException invalidAuthPassThroughToken() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42NFF)
+                .build();
+        return new QueryRouterException(
+                gql, Status.Security.Unauthorized, "The provided credentials could not be forwarded");
+    }
+
+    public static QueryRouterException transactionCommitFailed() {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_2DN01)
+                .build();
+        return new QueryRouterException(gql, TransactionCommitFailed, "Trying to commit closed transaction");
     }
 
     @Override

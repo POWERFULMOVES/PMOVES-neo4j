@@ -143,7 +143,7 @@ abstract class DefaultEntityTokenIndexCursor<SELF extends DefaultEntityTokenInde
     public boolean next() {
         entity = LongReference.NULL;
         entityFromIndex = LongReference.NULL;
-        final var hasNext = useMergeSort ? nextWithOrdering() : nextWithoutOrder();
+        boolean hasNext = useMergeSort ? nextWithOrdering() : nextWithoutOrder();
         if (hasNext && tracer != null) {
             traceNext(tracer, entity);
         }
@@ -172,9 +172,13 @@ abstract class DefaultEntityTokenIndexCursor<SELF extends DefaultEntityTokenInde
     }
 
     @Override
-    public void initState(Read read, TxStateHolder txStateHolder, AccessModeProvider accessModeProvider) {
+    public void initState(
+            Read read,
+            TxStateHolder txStateHolder,
+            AccessModeProvider accessModeProvider,
+            boolean includeChangesFromThisTransaction) {
         this.read = read;
-        this.txStateHolder = txStateHolder;
+        this.txStateHolder = includeChangesFromThisTransaction ? txStateHolder : TxStateHolder.EMPTY_TX_STATE;
         this.accessModeProvider = accessModeProvider;
     }
 
@@ -240,7 +244,7 @@ abstract class DefaultEntityTokenIndexCursor<SELF extends DefaultEntityTokenInde
             }
         }
 
-        final var nextId = sortedMergeJoin.next();
+        long nextId = sortedMergeJoin.next();
         if (nextId == LongReference.NULL) {
             return false;
         } else {

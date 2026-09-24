@@ -27,7 +27,6 @@ import static org.neo4j.kernel.api.index.IndexDirectoryStructure.directoriesByPr
 import java.util.concurrent.Callable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.neo4j.common.TokenNameLookup;
 import org.neo4j.index.internal.gbptree.GBPTree;
@@ -49,13 +48,13 @@ import org.neo4j.scheduler.JobMonitoringParams;
 import org.neo4j.scheduler.JobScheduler;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.extension.pagecache.PageCacheSupportExtension;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
 
 @TestDirectoryExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 public abstract class IndexTestUtil<KEY, VALUE, LAYOUT extends Layout<KEY, VALUE>> {
     static final long NON_EXISTENT_ENTITY_ID = 1_000_000_000;
 
@@ -114,7 +113,7 @@ public abstract class IndexTestUtil<KEY, VALUE, LAYOUT extends Layout<KEY, VALUE
 
     abstract LAYOUT layout();
 
-    private IndexFiles createIndexFiles(
+    protected IndexFiles createIndexFiles(
             FileSystemAbstraction fs, TestDirectory directory, IndexDescriptor indexDescriptor) {
         IndexDirectoryStructure indexDirectoryStructure =
                 directoriesByProvider(directory.directory("root")).forProvider(indexDescriptor.getIndexProvider());
@@ -122,15 +121,15 @@ public abstract class IndexTestUtil<KEY, VALUE, LAYOUT extends Layout<KEY, VALUE
     }
 
     GBPTree<KEY, VALUE> getTree() {
-        return new GBPTreeBuilder<>(pageCache, fs, indexFiles.getStoreFile(), layout).build();
+        return new GBPTreeBuilder<>(pageCache, fs, indexFiles.getStoreFile().baseSegment(), layout).build();
     }
 
     void assertFilePresent() {
-        assertTrue(fs.fileExists(indexFiles.getStoreFile()));
+        assertTrue(indexFiles.getStoreFile().exists(fs));
     }
 
     void assertFileNotPresent() {
-        assertFalse(fs.fileExists(indexFiles.getStoreFile()));
+        assertFalse(indexFiles.getStoreFile().exists(fs));
     }
 
     // Useful when debugging

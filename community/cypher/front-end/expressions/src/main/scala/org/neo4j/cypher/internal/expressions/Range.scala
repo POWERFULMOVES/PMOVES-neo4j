@@ -19,12 +19,12 @@ package org.neo4j.cypher.internal.expressions
 import org.neo4j.cypher.internal.util.ASTNode
 import org.neo4j.cypher.internal.util.InputPosition
 
-case class Range(lower: Option[UnsignedIntegerLiteral], upper: Option[UnsignedIntegerLiteral])(
+case class Range(lower: Option[PathLengthQuantifier], upper: Option[PathLengthQuantifier])(
   val position: InputPosition
 ) extends ASTNode with HasMappableExpressions[Range] {
 
   override def mapExpressions(f: Expression => Expression): Range = copy(
-    lower.map(f).asInstanceOf[Option[UnsignedIntegerLiteral]],
-    upper.map(f).asInstanceOf[Option[UnsignedIntegerLiteral]]
+    lower.map(f).asInstanceOf[Option[PathLengthQuantifier]],
+    upper.map(f).asInstanceOf[Option[PathLengthQuantifier]]
   )(this.position)
 }

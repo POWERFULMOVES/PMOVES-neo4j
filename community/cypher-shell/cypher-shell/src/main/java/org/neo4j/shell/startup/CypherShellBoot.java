@@ -34,7 +34,7 @@ import sun.misc.SignalHandler;
 
 public class CypherShellBoot {
 
-    private static final IntSet SUPPORTED_JVM_VERSIONS = IntSets.immutable.of(17, 21);
+    public static final IntSet SUPPORTED_JVM_VERSIONS = IntSets.immutable.of(21, 25);
 
     /**
      * IMPORTANT NOTE!
@@ -69,7 +69,7 @@ public class CypherShellBoot {
     private static void jvmCheck() {
         if (!SUPPORTED_JVM_VERSIONS.contains(Runtime.version().feature())) {
             System.err.println(
-                    "You are using an unsupported version of the Java runtime. Please use Java(TM) 17 or Java(TM) 21.");
+                    "You are using an unsupported version of the Java runtime. Please use Java(TM) 21 or Java(TM) 25.");
         }
     }
 
@@ -108,9 +108,12 @@ public class CypherShellBoot {
 
     private static List<String> extraJvmArguments() {
         return List.of(
-                "--add-opens", "java.base/java.net=ALL-UNNAMED",
-                "--add-opens", "java.base/java.lang=ALL-UNNAMED",
-                "--add-opens", "java.base/java.nio=ALL-UNNAMED");
+                "--add-opens",
+                "java.base/java.net=ALL-UNNAMED",
+                "--add-opens",
+                "java.base/java.lang=ALL-UNNAMED",
+                "--add-opens",
+                "java.base/java.nio=ALL-UNNAMED");
     }
 }
 

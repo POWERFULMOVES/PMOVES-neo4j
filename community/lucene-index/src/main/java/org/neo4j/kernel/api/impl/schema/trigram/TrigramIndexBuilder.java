@@ -20,32 +20,38 @@
 package org.neo4j.kernel.api.impl.schema.trigram;
 
 import java.util.function.Supplier;
-import org.apache.lucene.index.IndexWriter;
-import org.apache.lucene.index.IndexWriterConfig;
 import org.neo4j.configuration.Config;
 import org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker;
 import org.neo4j.function.Factory;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.kernel.api.impl.index.DatabaseIndex;
 import org.neo4j.kernel.api.impl.index.IndexWriterConfigBuilder;
-import org.neo4j.kernel.api.impl.index.IndexWriterConfigModes.TextModes;
+import org.neo4j.kernel.api.impl.index.IndexWriterConfigMode;
 import org.neo4j.kernel.api.impl.index.WritableDatabaseIndex;
 import org.neo4j.kernel.api.impl.index.builder.AbstractLuceneIndexBuilder;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneIndexWriter;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneIndexWriterConfig;
 import org.neo4j.kernel.api.impl.index.partition.WritableIndexPartitionFactory;
 import org.neo4j.kernel.api.impl.index.storage.PartitionedIndexStorage;
 import org.neo4j.kernel.api.index.ValueIndexReader;
+import org.neo4j.logging.LogProvider;
 
 public class TrigramIndexBuilder extends AbstractLuceneIndexBuilder<TrigramIndexBuilder> {
     private final IndexDescriptor descriptor;
     private final Config config;
-    private Supplier<IndexWriterConfig> writerConfigFactory;
+    private Supplier<LuceneIndexWriterConfig> writerConfigFactory;
 
-    private TrigramIndexBuilder(IndexDescriptor descriptor, DatabaseReadOnlyChecker readOnlyChecker, Config config) {
-        super(readOnlyChecker);
+    private TrigramIndexBuilder(
+            IndexDescriptor descriptor,
+            DatabaseReadOnlyChecker readOnlyChecker,
+            Config config,
+            LogProvider logProvider) {
+        super(readOnlyChecker, logProvider);
         this.descriptor = descriptor;
         this.config = config;
 
-        final var writerConfigBuilder = new IndexWriterConfigBuilder(TextModes.STANDARD, config);
+        IndexWriterConfigBuilder writerConfigBuilder =
+                new IndexWriterConfigBuilder(IndexWriterConfigMode.TEXT, config).withLogProvider(logProvider);
         this.writerConfigFactory = writerConfigBuilder::build;
     }
 
@@ -56,17 +62,20 @@ public class TrigramIndexBuilder extends AbstractLuceneIndexBuilder<TrigramIndex
      * @param descriptor The descriptor for this index
      */
     public static TrigramIndexBuilder create(
-            IndexDescriptor descriptor, DatabaseReadOnlyChecker readOnlyChecker, Config config) {
-        return new TrigramIndexBuilder(descriptor, readOnlyChecker, config);
+            IndexDescriptor descriptor,
+            DatabaseReadOnlyChecker readOnlyChecker,
+            Config config,
+            LogProvider logProvider) {
+        return new TrigramIndexBuilder(descriptor, readOnlyChecker, config, logProvider);
     }
 
     /**
-     * Specify {@link Factory} of lucene {@link IndexWriterConfig} to create {@link IndexWriter}s.
+     * Specify {@link Factory} of lucene {@link LuceneIndexWriterConfig} to create {@link LuceneIndexWriter}s.
      *
      * @param writerConfigFactory the supplier of writer configs
      * @return index builder
      */
-    TrigramIndexBuilder withWriterConfig(Supplier<IndexWriterConfig> writerConfigFactory) {
+    TrigramIndexBuilder withWriterConfig(Supplier<LuceneIndexWriterConfig> writerConfigFactory) {
         this.writerConfigFactory = writerConfigFactory;
         return this;
     }
@@ -78,8 +87,8 @@ public class TrigramIndexBuilder extends AbstractLuceneIndexBuilder<TrigramIndex
      */
     public DatabaseIndex<ValueIndexReader> build() {
         PartitionedIndexStorage storage = storageBuilder.build();
-        var index =
-                new TrigramIndex(storage, descriptor, new WritableIndexPartitionFactory(writerConfigFactory), config);
+        TrigramIndex index = new TrigramIndex(
+                storage, descriptor, new WritableIndexPartitionFactory(writerConfigFactory), config, logProvider);
         return new WritableDatabaseIndex<>(index, readOnlyChecker, permanentlyReadOnly);
     }
 }

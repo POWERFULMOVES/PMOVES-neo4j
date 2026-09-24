@@ -20,11 +20,11 @@
 package org.neo4j.internal.id;
 
 import java.io.IOException;
-import java.nio.file.Path;
 import java.util.function.Supplier;
 import org.neo4j.configuration.Config;
 import org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker;
 import org.neo4j.io.fs.FileSystemAbstraction;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.kernel.lifecycle.LifecycleAdapter;
 import org.neo4j.memory.MemoryTracker;
 
@@ -36,15 +36,15 @@ public class DefaultIdController extends LifecycleAdapter implements IdControlle
     public DefaultIdController() {}
 
     @Override
-    public void maintenance() {}
+    public void maintenance(int flags) {}
 
     @Override
     public void initialize(
             FileSystemAbstraction fs,
-            Path baseBufferPath,
+            StoreFile storeFile,
             Config config,
             Supplier<TransactionSnapshot> snapshotSupplier,
-            TransactionIdVisibilityBoundary visibilityBoundary,
+            VisibilityHorizonVisibilityBoundary visibilityBoundary,
             IdFreeCondition condition,
             MemoryTracker memoryTracker,
             DatabaseReadOnlyChecker databaseReadOnlyChecker)

@@ -19,25 +19,28 @@
  */
 package org.neo4j.cypher.internal.compiler.phases
 
-import org.neo4j.configuration.GraphDatabaseInternalSettings.RemoteBatchPropertiesImplementation
 import org.neo4j.cypher.internal.ast.Query
 import org.neo4j.cypher.internal.ast.Statement
 import org.neo4j.cypher.internal.ast.semantics.CachableSemanticTable
 import org.neo4j.cypher.internal.ast.semantics.SemanticState
 import org.neo4j.cypher.internal.ast.semantics.SemanticTable
+import org.neo4j.cypher.internal.ast.semantics.scoping.ScopeState
+import org.neo4j.cypher.internal.ast.semantics.scoping.WorkingScope
 import org.neo4j.cypher.internal.expressions.AutoExtractedParameter
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.frontend.PlannerName
 import org.neo4j.cypher.internal.frontend.phases.BaseState
+import org.neo4j.cypher.internal.frontend.phases.LocalDefinitionsDirectory
+import org.neo4j.cypher.internal.frontend.phases.PipelineDebugInfo
 import org.neo4j.cypher.internal.ir.PlannerQuery
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
-import org.neo4j.cypher.internal.options.CypherEagerAnalyzerOption
 import org.neo4j.cypher.internal.planner.spi.ImmutablePlanningAttribute
 import org.neo4j.cypher.internal.planner.spi.ImmutablePlanningAttributes
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.CachedPropertiesPerPlan
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.LabelAndRelTypeInfos
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributesCacheKey
+import org.neo4j.cypher.internal.rewriting.SimplePlanState
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.cypher.internal.util.ObfuscationMetadata
 import org.neo4j.cypher.internal.util.StepSequencer
@@ -46,10 +49,10 @@ import org.neo4j.cypher.internal.util.attribution.PartialAttribute
 
 /*
 This is the state that is used during query compilation. It accumulates more and more values as it passes through
-the compiler pipe line, finally ending up containing a logical plan.
+the compiler pipeline, finally ending up containing a logical plan.
 
 Normally, it is created with only the first three params as given, and the rest is built up while passing through
-the pipe line
+the pipeline
  */
 case class LogicalPlanState(
   queryText: String,
@@ -58,8 +61,11 @@ case class LogicalPlanState(
   anonymousVariableNameGenerator: AnonymousVariableNameGenerator,
   maybeProcedureSignatureVersion: Option[Long] = None,
   maybeStatement: Option[Statement] = None,
+  maybeScopeState: Option[ScopeState] = None,
+  maybeLocalDefinitions: Option[LocalDefinitionsDirectory] = None,
   maybeSemantics: Option[SemanticState] = None,
   maybeExtractedParams: Option[Map[AutoExtractedParameter, Expression]] = None,
+  maybeResolvedParams: Option[Set[String]] = None,
   maybeSemanticTable: Option[SemanticTable] = None,
   maybeQuery: Option[PlannerQuery] = None,
   maybeLogicalPlan: Option[LogicalPlan] = None,
@@ -67,9 +73,9 @@ case class LogicalPlanState(
   hasLoadCSV: Boolean = false,
   maybeReturnColumns: Option[Seq[String]] = None,
   maybeObfuscationMetadata: Option[ObfuscationMetadata] = None,
-  maybeEagerAnalyzerOption: Option[CypherEagerAnalyzerOption] = None,
-  maybeRemoteBatchPropertiesImplementation: Option[RemoteBatchPropertiesImplementation] = None
-) extends BaseState {
+  maybeDebugInfo: Option[PipelineDebugInfo] = None,
+  semanticsUpToDate: Boolean = false
+) extends BaseState with SimplePlanState {
 
   def query: PlannerQuery = maybeQuery getOrElse fail("The planner query")
   def logicalPlan: LogicalPlan = maybeLogicalPlan getOrElse fail("Logical plan")
@@ -83,12 +89,14 @@ case class LogicalPlanState(
         ImmutablePlanningAttributes.EffectiveCardinalities(planningAttributes.effectiveCardinalities),
         ImmutablePlanningAttributes.ProvidedOrders(planningAttributes.providedOrders),
         ImmutablePlanningAttributes.LeveragedOrders(planningAttributes.leveragedOrders),
+        ImmutablePlanningAttributes.StableLeafPlans(planningAttributes.stableLeafPlans),
         planningAttributes.labelAndRelTypeInfos,
         planningAttributes.cachedPropertiesPerPlan,
         planningAttributes.solveds.getOption(logicalPlan.id).exists(_.readOnly)
       ),
       anonymousVariableNameGenerator,
       statement(),
+      maybeScopeState.flatMap(_.explainScope),
       CachableSemanticTable(semanticTable()),
       logicalPlan,
       hasLoadCSV,
@@ -98,14 +106,22 @@ case class LogicalPlanState(
 
   override def withStatement(s: Statement): LogicalPlanState = copy(maybeStatement = Some(s))
   override def withReturnColumns(cols: Seq[String]): LogicalPlanState = copy(maybeReturnColumns = Some(cols))
+  override def withScopeState(s: ScopeState): LogicalPlanState = copy(maybeScopeState = Some(s))
+
+  override def withLocalDefinitions(localDefinitionsDirectory: LocalDefinitionsDirectory): LogicalPlanState =
+    copy(maybeLocalDefinitions = Some(localDefinitionsDirectory))
   override def withSemanticTable(s: SemanticTable): LogicalPlanState = copy(maybeSemanticTable = Some(s))
   override def withSemanticState(s: SemanticState): LogicalPlanState = copy(maybeSemantics = Some(s))
 
   override def withParams(p: Map[AutoExtractedParameter, Expression]): LogicalPlanState =
     copy(maybeExtractedParams = Some(p))
 
+  override protected def withResolvedParams(p: Set[String]): LogicalPlanState = copy(maybeResolvedParams = Some(p))
+
   override def withObfuscationMetadata(o: ObfuscationMetadata): LogicalPlanState =
     copy(maybeObfuscationMetadata = Some(o))
+
+  override def withDebugInfo(d: PipelineDebugInfo): LogicalPlanState = copy(maybeDebugInfo = Some(d))
 
   def withMaybeLogicalPlan(p: Option[LogicalPlan]): LogicalPlanState = copy(maybeLogicalPlan = p)
   def withMaybeQuery(q: Option[PlannerQuery]): LogicalPlanState = copy(maybeQuery = q)
@@ -116,8 +132,7 @@ case class LogicalPlanState(
   override def withProcedureSignatureVersion(generation: Option[Long]): LogicalPlanState =
     copy(maybeProcedureSignatureVersion = generation)
 
-  def withRemoteBatchPropertiesImplementation(remoteBatchPropertiesImplementation: RemoteBatchPropertiesImplementation)
-    : LogicalPlanState = copy(maybeRemoteBatchPropertiesImplementation = Some(remoteBatchPropertiesImplementation))
+  override def withSemanticsUpToDate(b: Boolean): BaseState = copy(semanticsUpToDate = b)
 }
 
 object LogicalPlanState {
@@ -127,15 +142,17 @@ object LogicalPlanState {
       queryText = state.queryText,
       plannerName = state.plannerName,
       planningAttributes = PlanningAttributes.newAttributes,
+      anonymousVariableNameGenerator = state.anonymousVariableNameGenerator,
       maybeProcedureSignatureVersion = state.maybeProcedureSignatureVersion,
       maybeStatement = state.maybeStatement,
+      maybeScopeState = state.maybeScopeState,
       maybeSemantics = state.maybeSemantics,
       maybeExtractedParams = state.maybeExtractedParams,
       maybeSemanticTable = state.maybeSemanticTable,
       accumulatedConditions = state.accumulatedConditions,
       maybeReturnColumns = state.maybeReturnColumns,
       maybeObfuscationMetadata = state.maybeObfuscationMetadata,
-      anonymousVariableNameGenerator = state.anonymousVariableNameGenerator
+      semanticsUpToDate = state.semanticsUpToDate
     )
 }
 
@@ -148,6 +165,7 @@ case class CachableLogicalPlanState(
   planningAttributes: CachablePlanningAttributes,
   anonymousVariableNameGenerator: AnonymousVariableNameGenerator,
   statement: Statement,
+  maybeExplainScope: Option[WorkingScope],
   semanticTable: CachableSemanticTable,
   logicalPlan: LogicalPlan,
   hasLoadCSV: Boolean = false,
@@ -158,6 +176,7 @@ case class CachablePlanningAttributes(
   effectiveCardinalities: ImmutablePlanningAttributes.EffectiveCardinalities,
   providedOrders: ImmutablePlanningAttributes.ProvidedOrders,
   leveragedOrders: ImmutablePlanningAttributes.LeveragedOrders,
+  stableLeafPlans: ImmutablePlanningAttributes.StableLeafPlans,
   labelAndRelTypeInfos: LabelAndRelTypeInfos,
   cachedPropertiesPerPlan: CachedPropertiesPerPlan,
   readOnly: Boolean
@@ -167,7 +186,8 @@ case class CachablePlanningAttributes(
     PlanningAttributesCacheKey(
       effectiveCardinalities,
       providedOrders,
-      leveragedOrders
+      leveragedOrders,
+      stableLeafPlans
     )
 
   // Let's not override the copy method of case classes
@@ -176,6 +196,7 @@ case class CachablePlanningAttributes(
       effectiveCardinalities, // Immutable
       providedOrders, // Immutable
       leveragedOrders, // Immutable
+      stableLeafPlans, // Immutable
       labelAndRelTypeInfos.clone[LabelAndRelTypeInfos],
       cachedPropertiesPerPlan.clone[CachedPropertiesPerPlan],
       readOnly

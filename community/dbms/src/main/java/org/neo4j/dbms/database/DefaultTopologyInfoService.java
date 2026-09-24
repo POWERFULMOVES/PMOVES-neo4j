@@ -22,11 +22,20 @@ package org.neo4j.dbms.database;
 import static org.neo4j.dbms.database.DatabaseDetails.ROLE_PRIMARY;
 import static org.neo4j.dbms.database.DatabaseDetails.TYPE_STANDARD;
 import static org.neo4j.dbms.database.DatabaseDetails.TYPE_SYSTEM;
+import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DATABASE_CREATED_AT_PROPERTY;
+import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DATABASE_DEFAULT_LANGUAGE_PROPERTY;
+import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DATABASE_LABEL;
+import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DATABASE_STARTED_AT_PROPERTY;
+import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DATABASE_STOPPED_AT_PROPERTY;
+import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DATABASE_UUID_PROPERTY;
 import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DatabaseAccess.READ_ONLY;
 import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DatabaseAccess.READ_WRITE;
+import static org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DatabaseStatus.ONLINE;
 
+import java.time.ZonedDateTime;
 import java.util.Collections;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.stream.Collectors;
 import org.neo4j.configuration.Config;
@@ -35,6 +44,7 @@ import org.neo4j.configuration.connectors.BoltConnector;
 import org.neo4j.configuration.connectors.HttpConnector;
 import org.neo4j.configuration.connectors.HttpsConnector;
 import org.neo4j.configuration.helpers.SocketAddress;
+import org.neo4j.cypher.internal.CypherVersion;
 import org.neo4j.dbms.DatabaseStateService;
 import org.neo4j.dbms.database.readonly.ReadOnlyDatabases;
 import org.neo4j.dbms.identity.ServerId;
@@ -48,14 +58,14 @@ public class DefaultTopologyInfoService implements TopologyInfoService {
     private final ReadOnlyDatabases readOnlyDatabases;
     private final ServerId serverId;
     private final Config config;
-    private final DatabaseStateService stateService;
+    private final DatabaseStateService<?> stateService;
     private final DefaultDatabaseDetailsExtrasProvider databaseDetailsExtrasProvider;
     private final SocketAddress fixBoltAddress;
 
     public DefaultTopologyInfoService(
             ServerId serverId,
             Config config,
-            DatabaseStateService stateService,
+            DatabaseStateService<?> stateService,
             ReadOnlyDatabases readOnlyDatabases,
             DefaultDatabaseDetailsExtrasProvider databaseDetailsExtrasProvider) {
         this.serverId = serverId;
@@ -93,12 +103,19 @@ public class DefaultTopologyInfoService implements TopologyInfoService {
     @Override
     public Set<DatabaseDetails> databases(
             Transaction transaction, Set<NamedDatabaseId> databaseIds, RequestedExtras requestedExtras) {
-        return databaseIds.stream().map(id -> database(id, requestedExtras)).collect(Collectors.toSet());
+        return databaseIds.stream()
+                .map(id -> database(id, requestedExtras, transaction))
+                .collect(Collectors.toSet());
     }
 
-    private DatabaseDetails database(NamedDatabaseId id, RequestedExtras detailsLevel) {
+    private DatabaseDetails database(NamedDatabaseId id, RequestedExtras detailsLevel, Transaction transaction) {
         var extraDetails = databaseDetailsExtrasProvider.extraDetails(
                 id.databaseId(), new RequestedExtras(false, detailsLevel.storeInfo()));
+        var node = Optional.ofNullable(transaction)
+                .map(t -> t.findNode(
+                        DATABASE_LABEL,
+                        DATABASE_UUID_PROPERTY,
+                        id.databaseId().uuid().toString()));
         return new DatabaseDetails(
                 Optional.of(serverId),
                 readOnlyDatabases.isReadOnly(id.databaseId()) ? READ_ONLY : READ_WRITE,
@@ -107,15 +124,24 @@ public class DefaultTopologyInfoService implements TopologyInfoService {
                 true,
                 stateService.stateOfDatabase(id).operatorState().description(),
                 stateService.causeOfFailure(id).map(Throwable::getMessage).orElse(""),
-                Optional.empty(),
-                Optional.of(0L),
+                OptionalLong.empty(),
+                OptionalLong.of(0L),
+                OptionalLong.empty(),
                 id,
+                ONLINE.statusName(),
                 id.isSystemDatabase() ? TYPE_SYSTEM : TYPE_STANDARD,
                 Collections.emptyMap(),
                 extraDetails.storeId(),
                 extraDetails.externalStoreId(),
+                null,
                 1,
-                0);
+                null,
+                0,
+                node.map(n -> (ZonedDateTime) n.getProperty(DATABASE_CREATED_AT_PROPERTY, null)),
+                node.map(n -> (ZonedDateTime) n.getProperty(DATABASE_STARTED_AT_PROPERTY, null)),
+                node.map(n -> (ZonedDateTime) n.getProperty(DATABASE_STOPPED_AT_PROPERTY, null)),
+                node.map(n -> n.getProperty(DATABASE_DEFAULT_LANGUAGE_PROPERTY, null))
+                        .flatMap(CypherVersion::fromStoredValueOptional));
     }
 
     private Optional<SocketAddress> address(Setting<Boolean> enabled, Setting<SocketAddress> advertisedAddress) {

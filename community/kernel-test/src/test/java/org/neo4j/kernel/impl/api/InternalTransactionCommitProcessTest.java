@@ -43,24 +43,33 @@ import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_CONSENSUS_I
 import java.io.IOException;
 import java.util.Collections;
 import org.junit.jupiter.api.Test;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.internal.kernel.api.exceptions.TransactionFailureException;
 import org.neo4j.io.pagecache.OutOfDiskSpaceException;
 import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.impl.api.txid.IdStoreTransactionIdGenerator;
-import org.neo4j.kernel.impl.transaction.log.CompleteCommandBatch;
-import org.neo4j.kernel.impl.transaction.log.FakeCommitment;
-import org.neo4j.kernel.impl.transaction.log.LogAppendEvent;
-import org.neo4j.kernel.impl.transaction.log.TestableTransactionAppender;
-import org.neo4j.kernel.impl.transaction.log.TransactionAppender;
-import org.neo4j.kernel.impl.transaction.log.TransactionCommitmentFactory;
 import org.neo4j.kernel.impl.transaction.tracing.TransactionWriteEvent;
+import org.neo4j.logging.AssertableLogProvider;
+import org.neo4j.logging.LogAssertions;
+import org.neo4j.logging.NullLogProvider;
+import org.neo4j.memory.EmptyMemoryTracker;
+import org.neo4j.memory.MemoryTracker;
 import org.neo4j.storageengine.api.CommandBatch;
+import org.neo4j.storageengine.api.Leases;
 import org.neo4j.storageengine.api.StorageEngine;
+import org.neo4j.storageengine.api.StorageEngineTransaction;
 import org.neo4j.storageengine.api.TransactionApplicationMode;
 import org.neo4j.storageengine.api.TransactionIdStore;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.test.LatestVersions;
+import org.neo4j.wal.CompleteCommandBatch;
+import org.neo4j.wal.FakeCommitment;
+import org.neo4j.wal.LogAppendEvent;
+import org.neo4j.wal.TestableTransactionAppender;
+import org.neo4j.wal.TransactionAppender;
+import org.neo4j.wal.TransactionCommitmentFactory;
 
 class InternalTransactionCommitProcessTest {
     private final TransactionWriteEvent transactionWriteEvent = TransactionWriteEvent.NULL;
@@ -68,25 +77,72 @@ class InternalTransactionCommitProcessTest {
     @Test
     void shouldFailWithProperMessageOnAppendException() throws Exception {
         // GIVEN
+        AssertableLogProvider logProvider = new AssertableLogProvider();
+
         TransactionAppender appender = mock(TransactionAppender.class);
+        StorageEngine storageEngine = mock(StorageEngine.class);
+        var commandCommitListeners = mock(CommandCommitListeners.class);
+
         IOException rootCause = new IOException("Mock exception");
         doThrow(new IOException(rootCause))
                 .when(appender)
-                .append(any(CompleteTransaction.class), any(LogAppendEvent.class));
-        StorageEngine storageEngine = mock(StorageEngine.class);
-        var commandCommitListeners = mock(CommandCommitListeners.class);
+                .register(any(CompleteTransaction.class), any(LogAppendEvent.class));
+
         TransactionCommitProcess commitProcess = new InternalTransactionCommitProcess(
-                appender, storageEngine, false, commandCommitListeners, () -> true);
+                appender, storageEngine, false, commandCommitListeners, () -> true, logProvider);
 
         // WHEN
         var mockedTransaction = mockedTransaction(mock(TransactionIdStore.class));
-        TransactionFailureException exception = assertThrows(
-                TransactionFailureException.class,
-                () -> commitProcess.commit(mockedTransaction, transactionWriteEvent, INTERNAL));
+        var exceptionAssert = ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> commitProcess.commit(
+                        mockedTransaction, transactionWriteEvent, INTERNAL, EmptyMemoryTracker.INSTANCE))
+                .isInstanceOf(TransactionFailureException.class)
+                .hasMessageContaining("Could not append transaction: ")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_2DN06)
+                .hasStatusDescription(
+                        "error: invalid transaction termination - failed to append transaction. There was an error on appending the transaction. See logs for more information.");
+        exceptionAssert.rootCause().isInstanceOf(IOException.class).hasMessageContaining("Mock exception");
 
-        assertThat(exception.getMessage()).contains("Could not append transaction: ");
-        assertTrue(contains(exception, rootCause.getMessage(), rootCause.getClass()));
-        verify(commandCommitListeners).registerFailure(mockedTransaction, exception);
+        verify(commandCommitListeners).registerFailure(mockedTransaction, exceptionAssert.getActual());
+
+        LogAssertions.assertThat(logProvider)
+                .containsMessageWithException("Could not append transaction: ", exceptionAssert.getActual());
+    }
+
+    @Test
+    void shouldFailWithProperMessageOnApplyException() throws Exception {
+        // GIVEN
+        TransactionAppender appender = mock(TransactionAppender.class);
+
+        AssertableLogProvider logProvider = new AssertableLogProvider();
+        StorageEngine storageEngine = mock(StorageEngine.class);
+        var commandCommitListeners = mock(CommandCommitListeners.class);
+
+        IOException rootCause = new IOException("Mock exception");
+        doThrow(new IOException(rootCause))
+                .when(storageEngine)
+                .apply(
+                        any(StorageEngineTransaction.class),
+                        any(TransactionApplicationMode.class),
+                        any(MemoryTracker.class));
+
+        TransactionCommitProcess commitProcess = new InternalTransactionCommitProcess(
+                appender, storageEngine, false, commandCommitListeners, () -> true, logProvider);
+
+        // WHEN
+        var mockedTransaction = mockedTransaction(mock(TransactionIdStore.class));
+        var exceptionAssert = ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> commitProcess.commit(
+                        mockedTransaction, transactionWriteEvent, INTERNAL, EmptyMemoryTracker.INSTANCE))
+                .isInstanceOf(TransactionFailureException.class)
+                .hasMessageContaining("Could not apply the transaction: ")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_2DN05)
+                .hasStatusDescription(
+                        "error: invalid transaction termination - failed to apply transaction. There was an error on applying the transaction. See logs for more information.");
+        exceptionAssert.rootCause().isInstanceOf(IOException.class).hasMessageContaining("Mock exception");
+
+        verify(commandCommitListeners).registerFailure(mockedTransaction, exceptionAssert.getActual());
+
+        LogAssertions.assertThat(logProvider)
+                .containsMessageWithException("Could not apply the transaction: ", exceptionAssert.getActual());
     }
 
     @Test
@@ -100,20 +156,20 @@ class InternalTransactionCommitProcessTest {
         StorageEngine storageEngine = mock(StorageEngine.class);
         doThrow(new IOException(rootCause))
                 .when(storageEngine)
-                .apply(any(CompleteTransaction.class), any(TransactionApplicationMode.class));
+                .apply(any(CompleteTransaction.class), any(TransactionApplicationMode.class), any(MemoryTracker.class));
         var commandCommitListeners = mock(CommandCommitListeners.class);
         TransactionCommitProcess commitProcess = new InternalTransactionCommitProcess(
-                appender, storageEngine, false, commandCommitListeners, () -> true);
+                appender, storageEngine, false, commandCommitListeners, () -> true, NullLogProvider.getInstance());
         CompleteTransaction transaction = mockedTransaction(transactionIdStore);
 
         // WHEN
         TransactionFailureException exception = assertThrows(
                 TransactionFailureException.class,
-                () -> commitProcess.commit(transaction, transactionWriteEvent, INTERNAL));
+                () -> commitProcess.commit(transaction, transactionWriteEvent, INTERNAL, EmptyMemoryTracker.INSTANCE));
         assertThat(exception.getMessage()).contains("Could not apply the transaction:");
         assertTrue(contains(exception, rootCause.getMessage(), rootCause.getClass()));
         verify(commandCommitListeners).registerFailure(transaction, exception);
-        verify(commandCommitListeners, never()).registerSuccess(any(), anyLong());
+        verify(commandCommitListeners, never()).registerSuccess(any());
 
         // THEN
         // we can't verify transactionCommitted since that's part of the TransactionAppender, which we have mocked
@@ -139,8 +195,8 @@ class InternalTransactionCommitProcessTest {
         when(transactionIdStore.nextCommittingTransactionId()).thenReturn(txId);
 
         var storageEngine = mock(StorageEngine.class);
-        var commitProcess =
-                new InternalTransactionCommitProcess(appender, storageEngine, false, NO_LISTENERS, () -> true);
+        var commitProcess = new InternalTransactionCommitProcess(
+                appender, storageEngine, false, NO_LISTENERS, () -> true, NullLogProvider.getInstance());
         var batch = new CompleteCommandBatch(
                 Collections.emptyList(),
                 UNKNOWN_CONSENSUS_INDEX,
@@ -148,6 +204,7 @@ class InternalTransactionCommitProcessTest {
                 -1,
                 -1,
                 -1,
+                Leases.NO_LEASES,
                 LatestVersions.LATEST_KERNEL_VERSION,
                 ANONYMOUS);
         var transactionToApply = new CompleteTransaction(
@@ -157,7 +214,8 @@ class InternalTransactionCommitProcessTest {
                 new FakeCommitment(txId, appendIndex, transactionIdStore, true),
                 new IdStoreTransactionIdGenerator(transactionIdStore));
 
-        assertThatThrownBy(() -> commitProcess.commit(transactionToApply, transactionWriteEvent, INTERNAL))
+        assertThatThrownBy(() -> commitProcess.commit(
+                        transactionToApply, transactionWriteEvent, INTERNAL, EmptyMemoryTracker.INSTANCE))
                 .rootCause()
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Append index was not generated for the batch yet.");
@@ -177,7 +235,7 @@ class InternalTransactionCommitProcessTest {
 
         var commandCommitListeners = mock(CommandCommitListeners.class);
         TransactionCommitProcess commitProcess = new InternalTransactionCommitProcess(
-                appender, storageEngine, false, commandCommitListeners, () -> true);
+                appender, storageEngine, false, commandCommitListeners, () -> true, NullLogProvider.getInstance());
         CompleteCommandBatch noCommandTx = new CompleteCommandBatch(
                 Collections.emptyList(),
                 UNKNOWN_CONSENSUS_INDEX,
@@ -185,6 +243,7 @@ class InternalTransactionCommitProcessTest {
                 -1,
                 -1,
                 -1,
+                Leases.NO_LEASES,
                 LatestVersions.LATEST_KERNEL_VERSION,
                 ANONYMOUS);
         noCommandTx.setAppendIndex(appendIndex);
@@ -197,7 +256,7 @@ class InternalTransactionCommitProcessTest {
                 StoreCursors.NULL,
                 new FakeCommitment(txId, appendIndex, transactionIdStore, true),
                 new IdStoreTransactionIdGenerator(transactionIdStore));
-        commitProcess.commit(transactionToApply, transactionWriteEvent, INTERNAL);
+        commitProcess.commit(transactionToApply, transactionWriteEvent, INTERNAL, EmptyMemoryTracker.INSTANCE);
 
         verify(transactionIdStore)
                 .transactionCommitted(
@@ -208,50 +267,74 @@ class InternalTransactionCommitProcessTest {
                         FakeCommitment.TIMESTAMP,
                         FakeCommitment.CONSENSUS_INDEX);
         verify(commandCommitListeners, never()).registerFailure(any(), any());
-        verify(commandCommitListeners).registerSuccess(transactionToApply, appendIndex);
+        verify(commandCommitListeners).registerSuccess(transactionToApply);
     }
 
     @Test
     void shouldFailWithOutOfDiskSpaceOnPreAllocationException() throws Exception {
+        AssertableLogProvider logProvider = new AssertableLogProvider();
+
         TransactionAppender appender = mock(TransactionAppender.class);
         StorageEngine storageEngine = mock(StorageEngine.class);
         doThrow(new OutOfDiskSpaceException("test out of disk"))
                 .when(storageEngine)
                 .preAllocateStoreFilesForCommands(any(), any());
         var commandCommitListeners = mock(CommandCommitListeners.class);
-        TransactionCommitProcess commitProcess =
-                new InternalTransactionCommitProcess(appender, storageEngine, true, commandCommitListeners, () -> true);
+        TransactionCommitProcess commitProcess = new InternalTransactionCommitProcess(
+                appender, storageEngine, true, commandCommitListeners, () -> true, logProvider);
 
         var transaction = mockedTransaction(mock(TransactionIdStore.class));
-        TransactionFailureException exception = assertThrows(
-                TransactionFailureException.class,
-                () -> commitProcess.commit(transaction, transactionWriteEvent, INTERNAL));
-        assertThat(exception.getMessage()).contains("Could not preallocate disk space ");
+        var exceptionAssert = ErrorGqlStatusObjectAssertions.assertThatThrownBy(() ->
+                        commitProcess.commit(transaction, transactionWriteEvent, INTERNAL, EmptyMemoryTracker.INSTANCE))
+                .isInstanceOf(TransactionFailureException.class)
+                .hasMessageContaining("Could not preallocate disk space ")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_51N59)
+                .hasStatusDescription(
+                        "error: system configuration or operation exception - internal resource exhaustion. The DBMS is unable to handle the request, please retry later or contact the system operator. More information is present in the logs.")
+                .hasStatus(Status.General.UnknownError);
         // FIXME ODP this is not the status we should end up with in the end
-        assertThat(exception.status()).isEqualTo(Status.General.UnknownError);
-        assertTrue(contains(exception, "test out of disk", OutOfDiskSpaceException.class));
-        verify(commandCommitListeners).registerFailure(transaction, exception);
+        exceptionAssert
+                .rootCause()
+                .isInstanceOf(OutOfDiskSpaceException.class)
+                .hasMessageContaining("test out of disk");
+
+        verify(commandCommitListeners).registerFailure(transaction, exceptionAssert.getActual());
+
+        LogAssertions.assertThat(logProvider)
+                .containsMessageWithException("Could not preallocate disk space ", exceptionAssert.getActual());
     }
 
     @Test
     void shouldNotReportOutOfDiskSpaceOnGeneralIOException() throws Exception {
+        AssertableLogProvider logProvider = new AssertableLogProvider();
+
         TransactionAppender appender = mock(TransactionAppender.class);
         StorageEngine storageEngine = mock(StorageEngine.class);
         doThrow(new IOException("IO exception other than out of disk"))
                 .when(storageEngine)
                 .preAllocateStoreFilesForCommands(any(), any());
         var commandCommitListeners = mock(CommandCommitListeners.class);
-        TransactionCommitProcess commitProcess =
-                new InternalTransactionCommitProcess(appender, storageEngine, true, commandCommitListeners, () -> true);
+        TransactionCommitProcess commitProcess = new InternalTransactionCommitProcess(
+                appender, storageEngine, true, commandCommitListeners, () -> true, logProvider);
 
         var transaction = mockedTransaction(mock(TransactionIdStore.class));
-        TransactionFailureException exception = assertThrows(
-                TransactionFailureException.class,
-                () -> commitProcess.commit(transaction, transactionWriteEvent, INTERNAL));
-        assertThat(exception.getMessage()).contains("Could not preallocate disk space ");
-        assertThat(exception.status()).isEqualTo(Status.Transaction.TransactionCommitFailed);
-        assertTrue(contains(exception, "IO exception other than out of disk", IOException.class));
-        verify(commandCommitListeners).registerFailure(transaction, exception);
+        var exceptionAssert = ErrorGqlStatusObjectAssertions.assertThatThrownBy(() ->
+                        commitProcess.commit(transaction, transactionWriteEvent, INTERNAL, EmptyMemoryTracker.INSTANCE))
+                .isInstanceOf(TransactionFailureException.class)
+                .hasMessageContaining("Could not preallocate disk space ")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_51N59)
+                .hasStatusDescription(
+                        "error: system configuration or operation exception - internal resource exhaustion. The DBMS is unable to handle the request, please retry later or contact the system operator. More information is present in the logs.")
+                .hasStatus(Status.Transaction.TransactionCommitFailed);
+        exceptionAssert
+                .rootCause()
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("IO exception other than out of disk");
+
+        verify(commandCommitListeners).registerFailure(transaction, exceptionAssert.getActual());
+
+        LogAssertions.assertThat(logProvider)
+                .containsMessageWithException("Could not preallocate disk space ", exceptionAssert.getActual());
     }
 
     @Test
@@ -260,8 +343,12 @@ class InternalTransactionCommitProcessTest {
         StorageEngine storageEngine = mock(StorageEngine.class);
         var commandCommitListeners = mock(CommandCommitListeners.class);
         TransactionCommitProcess commitProcess = new InternalTransactionCommitProcess(
-                appender, storageEngine, false, commandCommitListeners, () -> true);
-        commitProcess.commit(mockedTransaction(mock(TransactionIdStore.class)), transactionWriteEvent, INTERNAL);
+                appender, storageEngine, false, commandCommitListeners, () -> true, NullLogProvider.getInstance());
+        commitProcess.commit(
+                mockedTransaction(mock(TransactionIdStore.class)),
+                transactionWriteEvent,
+                INTERNAL,
+                EmptyMemoryTracker.INSTANCE);
 
         verify(storageEngine, never()).preAllocateStoreFilesForCommands(any(), any());
     }

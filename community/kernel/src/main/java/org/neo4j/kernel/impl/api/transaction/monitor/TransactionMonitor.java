@@ -51,7 +51,7 @@ public abstract class TransactionMonitor<T extends TransactionMonitor.MonitoredT
     }
 
     @Override
-    public void run() {
+    public synchronized void run() {
         checkActiveTransactions(getActiveTransactions(), clock.nanos());
         updateTransactionBoundaries();
     }
@@ -61,7 +61,7 @@ public abstract class TransactionMonitor<T extends TransactionMonitor.MonitoredT
     protected abstract Set<T> getActiveTransactions();
 
     private void checkExpiredTransaction(T transaction, long nowNanos) {
-        long transactionTimeoutNanos = transaction.timeout().timeout().toNanos();
+        long transactionTimeoutNanos = transaction.timeout().timeoutNanos();
         if (transactionTimeoutNanos > 0) {
             if (isTransactionExpired(transaction, nowNanos, transactionTimeoutNanos)
                     && !transaction.isSchemaTransaction()) {

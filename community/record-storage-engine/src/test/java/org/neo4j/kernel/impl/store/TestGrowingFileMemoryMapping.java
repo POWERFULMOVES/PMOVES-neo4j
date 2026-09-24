@@ -38,9 +38,9 @@ import org.neo4j.io.pagecache.PageCursor;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.store.cursor.CachedStoreCursors;
 import org.neo4j.kernel.impl.store.record.NodeRecord;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
@@ -81,7 +81,7 @@ class TestGrowingFileMemoryMapping {
                 NullLogProvider.getInstance(),
                 new CursorContextFactory(pageCacheTracer, EMPTY_CONTEXT_SUPPLIER),
                 false,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL);
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
 
         try (NeoStores neoStores = storeFactory.openAllNeoStores();
                 var storeCursors = new CachedStoreCursors(neoStores, CursorContext.NULL_CONTEXT)) {

@@ -33,13 +33,13 @@ import org.neo4j.graphdb.GraphDatabaseService;
 import org.neo4j.graphdb.RelationshipType;
 import org.neo4j.graphdb.Transaction;
 import org.neo4j.kernel.impl.MyRelTypes;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
 
 @TestDirectoryExtension
 class TestRecoveryRelationshipTypes {
@@ -54,16 +54,15 @@ class TestRecoveryRelationshipTypes {
         assertEquals(0, process.waitFor());
 
         // When
-        DatabaseManagementService managementService = new TestDatabaseManagementServiceBuilder(storeDir).build();
-        GraphDatabaseService db = managementService.database(DEFAULT_DATABASE_NAME);
+        try (DatabaseManagementService managementService = new TestDatabaseManagementServiceBuilder(storeDir).build()) {
+            GraphDatabaseService db = managementService.database(DEFAULT_DATABASE_NAME);
 
-        // Then
-        try (Transaction transaction = db.beginTx()) {
-            Iterator<RelationshipType> typeResourceIterator =
-                    transaction.getAllRelationshipTypes().iterator();
-            assertEquals(MyRelTypes.TEST.name(), typeResourceIterator.next().name());
-        } finally {
-            managementService.shutdown();
+            // Then
+            try (Transaction transaction = db.beginTx()) {
+                Iterator<RelationshipType> typeResourceIterator =
+                        transaction.getAllRelationshipTypes().iterator();
+                assertEquals(MyRelTypes.TEST.name(), typeResourceIterator.next().name());
+            }
         }
     }
 

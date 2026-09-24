@@ -42,10 +42,13 @@ public class PartitionedTokenIndexCursorScan<Cursor extends org.neo4j.internal.k
 
     @Override
     public boolean reservePartition(Cursor cursor, ExecutionContext executionContext) {
-        final var indexCursor = (InternalTokenIndexCursor) cursor;
+        InternalTokenIndexCursor indexCursor = (InternalTokenIndexCursor) cursor;
         indexCursor.initState(
-                executionContext.dataRead(), executionContext.txStateHolder(), executionContext.accessModeProvider());
-        final var indexProgressor = tokenScan.reservePartition(indexCursor, executionContext.cursorContext());
+                executionContext.dataRead(),
+                executionContext.txStateHolder(),
+                executionContext.accessModeProvider(),
+                true);
+        IndexProgressor indexProgressor = tokenScan.reservePartition(indexCursor, executionContext.cursorContext());
         if (indexProgressor == IndexProgressor.EMPTY) {
             return false;
         }

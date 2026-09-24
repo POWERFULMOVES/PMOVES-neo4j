@@ -20,19 +20,23 @@
 package org.neo4j.kernel.impl.api.chunk;
 
 import static org.neo4j.storageengine.AppendIndexProvider.UNKNOWN_APPEND_INDEX;
+import static org.neo4j.storageengine.api.LogPositionMetadata.NO_METADATA;
 import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_TX_ID;
 import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_TX_SEQUENCE_NUMBER;
 
 import java.util.function.LongConsumer;
 import org.neo4j.common.Subject;
 import org.neo4j.io.pagecache.context.CursorContext;
+import org.neo4j.kernel.availability.MvccIncompleteTransactionAvailabilityService;
+import org.neo4j.kernel.impl.api.ChunkedTransactionTracker;
 import org.neo4j.kernel.impl.api.txid.TransactionIdGenerator;
 import org.neo4j.kernel.impl.transaction.CommittedCommandBatchRepresentation;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
 import org.neo4j.storageengine.api.CommandBatch;
 import org.neo4j.storageengine.api.Commitment;
+import org.neo4j.storageengine.api.LogPositionMetadata;
 import org.neo4j.storageengine.api.StorageEngineTransaction;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
+import org.neo4j.wal.LogPosition;
 
 public class ChunkedTransaction implements StorageEngineTransaction {
 
@@ -42,12 +46,16 @@ public class ChunkedTransaction implements StorageEngineTransaction {
     private final StoreCursors storeCursors;
     private final Commitment commitment;
     private final TransactionIdGenerator transactionIdGenerator;
+    private final ChunkedTransactionTracker chunkedTransactionTracker;
+    private final MvccIncompleteTransactionAvailabilityService incompleteTransactionAvailability;
     private boolean idGenerated;
     private long lastBatchAppendIndex = UNKNOWN_APPEND_INDEX;
     private long transactionId = UNKNOWN_TX_ID;
+    private final LogPositionMetadata logPositionMetadata;
     private StorageEngineTransaction next;
     private long firstAppendIndex;
     private LongConsumer closedCallback;
+    private boolean fillGapsOnClose = false;
 
     public ChunkedTransaction(
             CursorContext cursorContext,
@@ -55,11 +63,44 @@ public class ChunkedTransaction implements StorageEngineTransaction {
             StoreCursors storeCursors,
             Commitment commitment,
             TransactionIdGenerator transactionIdGenerator) {
+        this(cursorContext, transactionSequenceNumber, NO_METADATA, storeCursors, commitment, transactionIdGenerator);
+    }
+
+    public ChunkedTransaction(
+            CursorContext cursorContext,
+            long transactionSequenceNumber,
+            LogPositionMetadata logPositionMetadata,
+            StoreCursors storeCursors,
+            Commitment commitment,
+            TransactionIdGenerator transactionIdGenerator) {
+        this(
+                cursorContext,
+                transactionSequenceNumber,
+                logPositionMetadata,
+                storeCursors,
+                commitment,
+                transactionIdGenerator,
+                null,
+                null);
+    }
+
+    public ChunkedTransaction(
+            CursorContext cursorContext,
+            long transactionSequenceNumber,
+            LogPositionMetadata logPositionMetadata,
+            StoreCursors storeCursors,
+            Commitment commitment,
+            TransactionIdGenerator transactionIdGenerator,
+            ChunkedTransactionTracker chunkedTransactionTracker,
+            MvccIncompleteTransactionAvailabilityService incompleteTransactionAvailability) {
         this.cursorContext = cursorContext;
         this.transactionSequenceNumber = transactionSequenceNumber;
+        this.logPositionMetadata = logPositionMetadata;
         this.storeCursors = storeCursors;
         this.commitment = commitment;
         this.transactionIdGenerator = transactionIdGenerator;
+        this.chunkedTransactionTracker = chunkedTransactionTracker;
+        this.incompleteTransactionAvailability = incompleteTransactionAvailability;
     }
 
     public ChunkedTransaction(
@@ -68,6 +109,25 @@ public class ChunkedTransaction implements StorageEngineTransaction {
             StoreCursors storeCursors) {
         this(committedCommandBatchRepresentation.txId(), UNKNOWN_TX_SEQUENCE_NUMBER, cursorContext, storeCursors);
         init((ChunkedCommandBatch) committedCommandBatchRepresentation.commandBatch());
+    }
+
+    public ChunkedTransaction(
+            long transactionId,
+            long transactionSequenceNumber,
+            long lastBatchAppendIndex,
+            CursorContext cursorContext,
+            StoreCursors storeCursors,
+            ChunkedCommandBatch chunk) {
+        this(
+                cursorContext,
+                transactionSequenceNumber,
+                storeCursors,
+                Commitment.NO_COMMITMENT,
+                TransactionIdGenerator.EXTERNAL_ID);
+        this.transactionId = transactionId;
+        this.lastBatchAppendIndex = lastBatchAppendIndex;
+        this.chunk = chunk;
+        this.idGenerated = true;
     }
 
     public ChunkedTransaction(
@@ -87,14 +147,25 @@ public class ChunkedTransaction implements StorageEngineTransaction {
 
     public ChunkedTransaction(
             long transactionId,
-            long appendIndex,
+            long lastBatchAppendIndex,
             long transactionSequenceNumber,
+            LogPositionMetadata logPositionMetadata,
             CursorContext cursorContext,
             StoreCursors storeCursors,
-            Commitment commitment) {
-        this(cursorContext, transactionSequenceNumber, storeCursors, commitment, TransactionIdGenerator.EXTERNAL_ID);
+            Commitment commitment,
+            ChunkedTransactionTracker chunkedTransactionTracker,
+            MvccIncompleteTransactionAvailabilityService incompleteTransactionAvailability) {
+        this(
+                cursorContext,
+                transactionSequenceNumber,
+                logPositionMetadata,
+                storeCursors,
+                commitment,
+                TransactionIdGenerator.EXTERNAL_ID,
+                chunkedTransactionTracker,
+                incompleteTransactionAvailability);
         this.transactionId = transactionId;
-        this.lastBatchAppendIndex = appendIndex;
+        this.lastBatchAppendIndex = lastBatchAppendIndex;
         this.idGenerated = true;
     }
 
@@ -109,10 +180,19 @@ public class ChunkedTransaction implements StorageEngineTransaction {
 
     @Override
     public long transactionId() {
+        return transactionId(transactionId);
+    }
+
+    @Override
+    public long transactionId(long externalId) {
         if (idGenerated) {
+            if (transactionId != externalId) {
+                throw new IllegalStateException(
+                        "Attempted to set transaction id when a different one has already been generated.");
+            }
             return transactionId;
         }
-        this.transactionId = transactionIdGenerator.nextId(transactionId);
+        transactionId = transactionIdGenerator.nextId(externalId);
         idGenerated = true;
         return transactionId;
     }
@@ -122,9 +202,12 @@ public class ChunkedTransaction implements StorageEngineTransaction {
         return chunk.chunkMetadata().chunkId();
     }
 
+    /*
+    Append index of the previous chunk, read from the current chunk's metadata. Used to write log entry headers and to walk backwards during rollback.
+     */
     @Override
     public long previousBatchAppendIndex() {
-        return chunk.chunkMetadata().previousBatchAppendIndex();
+        return chunk.previousBatchAppendIndex();
     }
 
     @Override
@@ -153,13 +236,41 @@ public class ChunkedTransaction implements StorageEngineTransaction {
     }
 
     @Override
+    public boolean fillGapsOnCloseIfRelevant() {
+        return this.fillGapsOnClose;
+    }
+
+    @Override
+    public void fillGapsOnCloseIfRelevant(boolean fillGapsOnClose) {
+        this.fillGapsOnClose = fillGapsOnClose;
+    }
+
+    @Override
     public void commit() {
         commitment.publishAsCommitedLastBatch();
+
+        if (chunkedTransactionTracker != null) {
+            chunkedTransactionTracker.registerChunkedTransaction(
+                    transactionId,
+                    firstAppendIndex(),
+                    lastBatchAppendIndex,
+                    chunkId(),
+                    chunk.kernelVersion(),
+                    chunk.getLeaseId());
+        }
+
+        if (!chunk.isFirst() && fillGapsOnClose) {
+            commitment.publishEmptyAsCommitted(chunk.chunkMetadata().chunkCommitTime());
+        }
+
         if (chunk.isLast()) {
-            commitment.publishAsCommitted(chunk.chunkMetadata().chunkCommitTime(), firstAppendIndex);
+            commitment.publishAsCommitted(chunk.chunkMetadata().chunkCommitTime(), firstAppendIndex());
         }
     }
 
+    /*
+    Append index assigned to the most recently appended chunk for this transaction.
+     */
     public long lastBatchAppendIndex() {
         return lastBatchAppendIndex;
     }
@@ -170,11 +281,18 @@ public class ChunkedTransaction implements StorageEngineTransaction {
     }
 
     @Override
+    public LogPositionMetadata logPositionMetadata() {
+        return logPositionMetadata;
+    }
+
+    @Override
     public void batchAppended(long appendIndex, LogPosition beforeStart, LogPosition positionAfter, int checksum) {
+        var versionContext = this.cursorContext.getVersionContext();
         if (chunk.isFirst()) {
-            this.cursorContext.getVersionContext().initWrite(transactionId);
+            versionContext.initWrite(transactionId);
             this.firstAppendIndex = appendIndex;
         }
+
         this.commitment.commit(
                 transactionId,
                 appendIndex,
@@ -185,6 +303,7 @@ public class ChunkedTransaction implements StorageEngineTransaction {
                 positionAfter,
                 checksum,
                 chunk.chunkMetadata().consensusIndex().longValue());
+        versionContext.initChunkId(chunkId());
         chunk.setAppendIndex(appendIndex);
         lastBatchAppendIndex = appendIndex;
     }
@@ -192,8 +311,21 @@ public class ChunkedTransaction implements StorageEngineTransaction {
     @Override
     public void close() {
         commitment.publishAsClosed();
-        if (chunk.isLast() && closedCallback != null) {
-            closedCallback.accept(transactionId);
+
+        if (!chunk.isFirst() && fillGapsOnClose) {
+            commitment.publishEmptyAsClosed();
+        }
+
+        if (chunk.isLast()) {
+            if (closedCallback != null) {
+                closedCallback.accept(transactionId);
+            }
+            if (chunkedTransactionTracker != null) {
+                chunkedTransactionTracker.completeTransaction(transactionId);
+            }
+            if (incompleteTransactionAvailability != null) {
+                incompleteTransactionAvailability.completeTransaction(transactionId);
+            }
         }
     }
 
@@ -212,13 +344,23 @@ public class ChunkedTransaction implements StorageEngineTransaction {
      * otherwise tx id sequences will go completely out of sync
      */
     @Override
-    public void updateClusteredInfo(long transactionId, long appendIndex) {
+    public void updateClusteredInfo(long transactionId, long appendIndex, long chunkId) {
         if (!idGenerated) {
             this.transactionId = transactionId;
             this.firstAppendIndex = appendIndex;
             cursorContext.getVersionContext().initWrite(transactionId);
             idGenerated = true;
         }
+        cursorContext.getVersionContext().initChunkId(chunkId);
         lastBatchAppendIndex = appendIndex;
+    }
+
+    private long firstAppendIndex() {
+        if (chunk.isFirst()) {
+            return firstAppendIndex;
+        }
+        return chunkedTransactionTracker != null
+                ? chunkedTransactionTracker.firstBatchAppendIndex(transactionId)
+                : firstAppendIndex;
     }
 }

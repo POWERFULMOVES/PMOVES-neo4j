@@ -21,7 +21,7 @@ package org.neo4j.bolt.test.extension.dependency;
 
 import java.io.IOException;
 import java.util.Collections;
-import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.extension.ExtensionContext;
@@ -30,6 +30,7 @@ import org.neo4j.bolt.dbapi.BoltGraphDatabaseManagementServiceSPI;
 import org.neo4j.bolt.protocol.common.connector.connection.ConnectionHandle;
 import org.neo4j.bolt.security.Authentication;
 import org.neo4j.bolt.security.basic.BasicAuthentication;
+import org.neo4j.bolt.test.connection.resolver.property.SimpleMutableTestPropertyContext;
 import org.neo4j.bolt.test.extension.db.ServerInstanceContext;
 import org.neo4j.bolt.testing.extension.dependency.StateMachineDependencyProvider;
 import org.neo4j.bolt.testing.mock.ConnectionMockFactory;
@@ -38,6 +39,7 @@ import org.neo4j.bolt.tx.TransactionManager;
 import org.neo4j.bolt.tx.TransactionManagerImpl;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
+import org.neo4j.internal.kernel.api.security.AbstractSecurityLog;
 import org.neo4j.kernel.api.security.AuthManager;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.storageengine.api.TransactionIdStore;
@@ -59,7 +61,11 @@ public class CommunityEditionStateMachineDependencyProvider implements StateMach
             Class<? extends TestDatabaseManagementServiceBuilder> defaultTestDatabaseManagementServiceBuilder,
             ExtensionContext context) {
         this.instanceContext = ServerInstanceContext.forExtensionContext(
-                context, defaultTestDatabaseManagementServiceBuilder, Collections.emptyList(), Collections.emptyList());
+                context,
+                new SimpleMutableTestPropertyContext(),
+                defaultTestDatabaseManagementServiceBuilder,
+                Collections.emptyList(),
+                Collections.emptyList());
     }
 
     private GraphDatabaseAPI getDatabaseAPI(ExtensionContext ctx) {
@@ -92,12 +98,12 @@ public class CommunityEditionStateMachineDependencyProvider implements StateMach
     }
 
     @Override
-    public Optional<Long> lastTransactionId(ExtensionContext ctx) {
+    public OptionalLong lastTransactionId(ExtensionContext ctx) {
         var gdb = this.getDatabaseAPI(ctx);
 
-        return Optional.of(gdb.getDependencyResolver()
+        return OptionalLong.of(gdb.getDependencyResolver()
                 .resolveDependency(TransactionIdStore.class)
-                .getLastClosedTransactionId());
+                .getHighestGapFreeClosedTransactionId());
     }
 
     @Override
@@ -119,7 +125,8 @@ public class CommunityEditionStateMachineDependencyProvider implements StateMach
 
         this.defaultDatabase =
                 dependencyResolver.resolveDependency(Config.class).get(GraphDatabaseSettings.initial_default_database);
-        this.authentication = new BasicAuthentication(authManager);
+        var securityLog = dependencyResolver.resolveDependency(AbstractSecurityLog.class);
+        this.authentication = new BasicAuthentication(authManager, securityLog);
         this.transactionManager = new TransactionManagerImpl(spi, clock);
     }
 

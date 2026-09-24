@@ -19,6 +19,7 @@
  */
 package org.neo4j.server.queryapi.tx;
 
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.neo4j.scheduler.JobMonitoringParams.systemJob;
 
@@ -30,13 +31,18 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.neo4j.driver.AuthToken;
 import org.neo4j.driver.Session;
 import org.neo4j.driver.TransactionConfig;
+import org.neo4j.driver.internal.InternalSession;
 import org.neo4j.scheduler.Group;
 import org.neo4j.scheduler.JobScheduler;
+import org.neo4j.server.queryapi.exception.TransactionConcurrentAccessException;
+import org.neo4j.server.queryapi.exception.TransactionIdCollisionException;
+import org.neo4j.server.queryapi.exception.TransactionNotFoundException;
 import org.neo4j.server.queryapi.metrics.QueryAPIMetricsMonitor;
+import org.neo4j.util.VisibleForTesting;
 
 public class QueryAPITransactionManager implements TransactionManager {
 
-    private final Map<String, Transaction> transactions = new ConcurrentHashMap<>();
+    private final Map<String, InternalTransaction> transactions = new ConcurrentHashMap<>();
     private final Duration timeout;
     private final QueryAPIMetricsMonitor monitor;
 
@@ -53,10 +59,16 @@ public class QueryAPITransactionManager implements TransactionManager {
 
     @Override
     public Transaction begin(
-            String txId, Session session, AuthToken authToken, String databaseName, TransactionConfig config)
+            String txId,
+            Session session,
+            AuthToken authToken,
+            String databaseName,
+            TransactionConfig config,
+            String txType)
             throws TransactionIdCollisionException {
         monitor.openTransaction();
-        var driverTransaction = session.beginTransaction(config);
+        var internalSession = (InternalSession) session; // needed to support txType
+        var driverTransaction = internalSession.beginTransaction(config, txType);
         var tx = new QueryAPITransaction(
                 txId,
                 driverTransaction,
@@ -81,7 +93,9 @@ public class QueryAPITransactionManager implements TransactionManager {
         var tx = transactions.get(transactionId);
 
         if (tx != null) {
-            if (tx.tryAcquire()) {
+            // Just wait a little bit since we might have some
+            // clash with beginTimeoutJob
+            if (tx.tryAcquire(20, MILLISECONDS)) {
                 if (tx.databaseName().equals(requestedDatabase)
                         && tx.authToken().equals(accessingUser)) {
                     return tx;
@@ -89,7 +103,7 @@ public class QueryAPITransactionManager implements TransactionManager {
                     tx.release();
                 }
             } else {
-                throw new TransactionConcurrentAccessException("Transaction was accessed concurrently");
+                throw new TransactionConcurrentAccessException();
             }
         }
         throw new TransactionNotFoundException(transactionId);
@@ -109,8 +123,8 @@ public class QueryAPITransactionManager implements TransactionManager {
         var tx = transactions.get(txId);
 
         if (tx != null) {
-            tx.close();
             transactions.remove(txId);
+            tx.close();
             monitor.closeTransaction();
             tx.release();
         }
@@ -119,8 +133,9 @@ public class QueryAPITransactionManager implements TransactionManager {
     @Override
     public void beginTimeoutJob() {
         var timeoutFrom = Instant.now();
-
-        for (Map.Entry<String, Transaction> tx : transactions.entrySet()) {
+        var it = transactions.entrySet().iterator();
+        while (it.hasNext()) {
+            var tx = it.next();
             if (tx.getValue().tryAcquire()) {
                 if (timeoutFrom.compareTo(tx.getValue().expiresAt()) > 0) {
                     removeTransaction(tx.getKey());
@@ -134,5 +149,15 @@ public class QueryAPITransactionManager implements TransactionManager {
     @Override
     public long openTransactionCount() {
         return transactions.size();
+    }
+
+    @Override
+    @VisibleForTesting
+    public void removeAllTransactions() {
+        var it = transactions.entrySet().iterator();
+        while (it.hasNext()) {
+            var tx = it.next();
+            removeTransaction(tx.getKey());
+        }
     }
 }

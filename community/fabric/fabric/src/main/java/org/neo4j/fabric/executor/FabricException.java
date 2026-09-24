@@ -19,12 +19,14 @@
  */
 package org.neo4j.fabric.executor;
 
+import static org.neo4j.fabric.executor.FabricExecutor.WRITING_IN_READ_NOT_ALLOWED_MSG;
 import static org.neo4j.kernel.api.exceptions.Status.Transaction.InvalidBookmark;
 
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
 import org.neo4j.gqlstatus.ErrorMessageHolder;
+import org.neo4j.gqlstatus.GqlHelper;
 import org.neo4j.gqlstatus.GqlParams;
 import org.neo4j.gqlstatus.GqlRuntimeException;
 import org.neo4j.gqlstatus.GqlStatusInfoCodes;
@@ -37,22 +39,8 @@ public class FabricException extends GqlRuntimeException implements Status.HasSt
 
     private static final String ROUTING_ENABLED_SETTING = GraphDatabaseSettings.routing_enabled.name();
 
-    @Deprecated
-    public FabricException(Status statusCode, Throwable cause) {
-        super(ErrorMessageHolder.getOldCauseMessage(cause), cause);
-        this.statusCode = statusCode;
-        this.queryId = null;
-    }
-
-    private FabricException(ErrorGqlStatusObject gqlStatusObject, Status statusCode, Throwable cause) {
+    public FabricException(ErrorGqlStatusObject gqlStatusObject, Status statusCode, Throwable cause) {
         super(gqlStatusObject, ErrorMessageHolder.getOldCauseMessage(cause), cause);
-        this.statusCode = statusCode;
-        this.queryId = null;
-    }
-
-    @Deprecated
-    public FabricException(Status statusCode, String message, Object... parameters) {
-        super(String.format(message, parameters));
         this.statusCode = statusCode;
         this.queryId = null;
     }
@@ -64,25 +52,10 @@ public class FabricException extends GqlRuntimeException implements Status.HasSt
         this.queryId = null;
     }
 
-    @Deprecated
-    public FabricException(Status statusCode, String message, Throwable cause) {
-        super(message, cause);
-        this.statusCode = statusCode;
-        this.queryId = null;
-    }
-
-    protected FabricException(
-            ErrorGqlStatusObject gqlStatusObject, Status statusCode, String message, Throwable cause) {
+    private FabricException(ErrorGqlStatusObject gqlStatusObject, Status statusCode, String message, Throwable cause) {
         super(gqlStatusObject, message, cause);
         this.statusCode = statusCode;
         this.queryId = null;
-    }
-
-    @Deprecated
-    public FabricException(Status statusCode, String message, Throwable cause, Long queryId) {
-        super(message, cause);
-        this.statusCode = statusCode;
-        this.queryId = queryId;
     }
 
     public FabricException(
@@ -93,7 +66,7 @@ public class FabricException extends GqlRuntimeException implements Status.HasSt
     }
 
     private <T extends Throwable & Status.HasStatus> FabricException(ErrorGqlStatusObject gqlStatusObject, T cause) {
-        super(gqlStatusObject, cause.getMessage(), cause);
+        super(gqlStatusObject, ErrorMessageHolder.getOldCauseMessage(cause), cause);
         this.statusCode = cause.status();
     }
 
@@ -101,7 +74,14 @@ public class FabricException extends GqlRuntimeException implements Status.HasSt
         if (localException instanceof ErrorGqlStatusObject gqlException && gqlException.gqlStatusObject() != null) {
             return new FabricException(gqlException, localException);
         }
-        return new FabricException(localException.status(), localException.getMessage(), localException);
+        return new FabricException(
+                GqlHelper.getDefaultObject(), localException.status(), localException.getMessage(), localException);
+    }
+
+    public static FabricException internalError(
+            String msgTitle, Status statusCode, String message, Object... parameters) {
+        var gql = GqlHelper.get50N00(msgTitle, message);
+        return new FabricException(gql, statusCode, message, parameters);
     }
 
     public static FabricException noLeaderAddress(String dbName) {
@@ -121,15 +101,10 @@ public class FabricException extends GqlRuntimeException implements Status.HasSt
                 .withParam(GqlParams.StringParam.cfgSetting, ROUTING_ENABLED_SETTING)
                 .build();
         return new FabricException(
-                gql,
-                Status.Cluster.NotALeader,
-                String.format(
-                        """
+                gql, Status.Cluster.NotALeader, String.format("""
                         No longer possible to write to database '%s' on this instance and unable to route write operation to leader. Server-side routing is disabled.
                         Either connect to the database directly using the driver (or interactively with the :use command),
-                        or enable server-side routing by setting `%s=true`""",
-                        dbName, ROUTING_ENABLED_SETTING),
-                dbName);
+                        or enable server-side routing by setting `%s=true`""", dbName, ROUTING_ENABLED_SETTING), dbName);
     }
 
     public static FabricException routingDisabled(String dbName) {
@@ -138,15 +113,10 @@ public class FabricException extends GqlRuntimeException implements Status.HasSt
                 .withParam(GqlParams.StringParam.cfgSetting, ROUTING_ENABLED_SETTING)
                 .build();
         return new FabricException(
-                gql,
-                Status.Cluster.Routing,
-                String.format(
-                        """
+                gql, Status.Cluster.Routing, String.format("""
          Unable to route to database '%s'. Server-side routing is disabled.
          Either connect to the database directly using the driver (or interactively with the :use command),
-         or enable server-side routing by setting `%s=true`""",
-                        dbName, ROUTING_ENABLED_SETTING),
-                dbName);
+         or enable server-side routing by setting `%s=true`""", dbName, ROUTING_ENABLED_SETTING), dbName);
     }
 
     public static FabricException failedToParseBookmark(Exception exception) {
@@ -214,6 +184,52 @@ public class FabricException extends GqlRuntimeException implements Status.HasSt
         var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_2DN03)
                 .build();
         return new FabricException(gql, statusCode, message);
+    }
+
+    public static FabricException databaseUnavailable(String databaseName) {
+        return new FabricException(
+                GqlHelper.getGql08N09(databaseName),
+                Status.General.DatabaseUnavailable,
+                String.format(
+                        "Unable to route to database '%s'. %s",
+                        databaseName, Status.General.DatabaseUnavailable.code().description()));
+    }
+
+    public static FabricException importingValuesInRemoteSubqueries(
+            String entityType, String variable, String graphName) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N16)
+                .withParam(GqlParams.StringParam.expr, variable)
+                .withParam(GqlParams.StringParam.graph, graphName)
+                .build();
+
+        return new FabricException(
+                gql,
+                Status.Statement.TypeError,
+                String.format("Importing %s values in remote subqueries is currently not supported", entityType));
+    }
+
+    public static FabricException writingInReadAccessMode(String graph) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_08N03)
+                .withParam(GqlParams.StringParam.graph, graph)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N02)
+                        .build())
+                .build();
+        return new FabricException(
+                gql, Status.Statement.AccessMode, WRITING_IN_READ_NOT_ALLOWED_MSG + ". Attempted write to %s", graph);
+    }
+
+    public static FabricException writingToMultipleGraphs(String attemptedGraph, String currentGraph) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_08N03)
+                .withParam(GqlParams.StringParam.graph, attemptedGraph)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N03)
+                        .build())
+                .build();
+        return new FabricException(
+                gql,
+                Status.Statement.AccessMode,
+                "Writing to more than one database per transaction is not allowed. Attempted write to %s, currently writing to %s",
+                attemptedGraph,
+                currentGraph);
     }
 
     @Override

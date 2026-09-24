@@ -19,6 +19,8 @@
  */
 package org.neo4j.bolt.protocol.common.fsm.transition.ready;
 
+import static org.neo4j.bolt.testing.util.ErrorUtil.useNewMessage;
+
 import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
@@ -34,14 +36,14 @@ import org.neo4j.bolt.protocol.common.fsm.States;
 import org.neo4j.bolt.protocol.common.fsm.error.AuthenticationStateTransitionException;
 import org.neo4j.bolt.protocol.common.fsm.error.TransactionStateTransitionException;
 import org.neo4j.bolt.protocol.common.fsm.transition.AbstractStateTransitionTest;
-import org.neo4j.bolt.protocol.common.message.AccessMode;
-import org.neo4j.bolt.protocol.common.message.request.transaction.RunMessage;
 import org.neo4j.bolt.security.error.AuthenticationException;
 import org.neo4j.bolt.tx.Transaction;
-import org.neo4j.bolt.tx.TransactionType;
 import org.neo4j.bolt.tx.error.TransactionCreationException;
 import org.neo4j.bolt.tx.error.TransactionException;
 import org.neo4j.bolt.tx.statement.Statement;
+import org.neo4j.boltmessages.AccessMode;
+import org.neo4j.boltmessages.TransactionType;
+import org.neo4j.boltmessages.request.transaction.RunMessage;
 import org.neo4j.kernel.api.exceptions.Status.Request;
 import org.neo4j.values.virtual.MapValue;
 
@@ -161,7 +163,8 @@ class CreateAutocommitStatementStateTransitionTest
      */
     @Test
     void shouldFailWithAuthenticationStateTransitionExceptionOnImpersonationError() throws AuthenticationException {
-        Mockito.doThrow(new AuthenticationException(Request.Invalid, "Something went wrong"))
+        Mockito.doThrow(AuthenticationException.internalError(
+                        this.getClass().getSimpleName(), "Something went wrong", Request.Invalid))
                 .when(this.connection)
                 .impersonate("bob");
 
@@ -178,7 +181,9 @@ class CreateAutocommitStatementStateTransitionTest
 
         Assertions.assertThatExceptionOfType(AuthenticationStateTransitionException.class)
                 .isThrownBy(() -> this.transition.process(this.context, request, this.responseHandler))
-                .withMessage("Something went wrong")
+                .withMessage(useNewMessage(
+                                "50N00: Internal exception raised CreateAutocommitStatementStateTransitionTest: Something went wrong")
+                        .whenLegacyFallbackTo("Something went wrong"))
                 .withCauseInstanceOf(AuthenticationException.class);
     }
 

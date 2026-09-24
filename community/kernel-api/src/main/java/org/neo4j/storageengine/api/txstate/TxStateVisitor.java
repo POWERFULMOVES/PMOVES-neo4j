@@ -21,8 +21,9 @@ package org.neo4j.storageengine.api.txstate;
 
 import java.util.function.Function;
 import org.eclipse.collections.api.IntIterable;
-import org.eclipse.collections.api.set.primitive.LongSet;
+import org.eclipse.collections.api.set.primitive.IntSet;
 import org.neo4j.exceptions.KernelException;
+import org.neo4j.graphdb.Vector;
 import org.neo4j.internal.kernel.api.Upgrade;
 import org.neo4j.internal.kernel.api.exceptions.schema.ConstraintValidationException;
 import org.neo4j.internal.schema.ConstraintDescriptor;
@@ -34,17 +35,18 @@ import org.neo4j.values.storable.ValueTuple;
  * A visitor for visiting the changes that have been made in a transaction.
  */
 public interface TxStateVisitor extends AutoCloseable {
+    record VectorStoreIdType(Vector.CoordinateType coordinate, int dimensions) {}
+
     void visitCreatedNode(long id);
 
     void visitDeletedNode(long id);
 
     void visitRelationshipModifications(RelationshipModifications modifications) throws ConstraintValidationException;
 
-    void visitNodePropertyChanges(
-            long id, Iterable<StorageProperty> added, Iterable<StorageProperty> changed, IntIterable removed)
+    void visitNodePropertyChanges(long id, Iterable<StorageProperty> added, IntIterable removed)
             throws ConstraintValidationException;
 
-    void visitNodeLabelChanges(long id, LongSet added, LongSet removed) throws ConstraintValidationException;
+    void visitNodeLabelChanges(long id, IntSet added, IntSet removed) throws ConstraintValidationException;
 
     void visitAddedIndex(IndexDescriptor element) throws KernelException;
 
@@ -64,6 +66,10 @@ public interface TxStateVisitor extends AutoCloseable {
 
     void visitKernelUpgrade(Upgrade.KernelUpgrade kernelUpgrade);
 
+    void visitCreateVectorStore(VectorStoreIdType vectorStoreToCreate);
+
+    void finishVisit() throws KernelException;
+
     @Override
     void close() throws KernelException;
 
@@ -79,13 +85,11 @@ public interface TxStateVisitor extends AutoCloseable {
                 throws ConstraintValidationException {}
 
         @Override
-        public void visitNodePropertyChanges(
-                long id, Iterable<StorageProperty> added, Iterable<StorageProperty> changed, IntIterable removed)
+        public void visitNodePropertyChanges(long id, Iterable<StorageProperty> added, IntIterable removed)
                 throws ConstraintValidationException {}
 
         @Override
-        public void visitNodeLabelChanges(long id, LongSet added, LongSet removed)
-                throws ConstraintValidationException {}
+        public void visitNodeLabelChanges(long id, IntSet added, IntSet removed) throws ConstraintValidationException {}
 
         @Override
         public void visitAddedIndex(IndexDescriptor index) throws KernelException {}
@@ -114,6 +118,12 @@ public interface TxStateVisitor extends AutoCloseable {
 
         @Override
         public void visitKernelUpgrade(Upgrade.KernelUpgrade kernelUpgrade) {}
+
+        @Override
+        public void visitCreateVectorStore(VectorStoreIdType vectorStoreToCreate) {}
+
+        @Override
+        public void finishVisit() {}
 
         @Override
         public void close() {}
@@ -152,15 +162,13 @@ public interface TxStateVisitor extends AutoCloseable {
         }
 
         @Override
-        public void visitNodePropertyChanges(
-                long id, Iterable<StorageProperty> added, Iterable<StorageProperty> changed, IntIterable removed)
+        public void visitNodePropertyChanges(long id, Iterable<StorageProperty> added, IntIterable removed)
                 throws ConstraintValidationException {
-            actual.visitNodePropertyChanges(id, added, changed, removed);
+            actual.visitNodePropertyChanges(id, added, removed);
         }
 
         @Override
-        public void visitNodeLabelChanges(long id, LongSet added, LongSet removed)
-                throws ConstraintValidationException {
+        public void visitNodeLabelChanges(long id, IntSet added, IntSet removed) throws ConstraintValidationException {
             actual.visitNodeLabelChanges(id, added, removed);
         }
 
@@ -202,6 +210,16 @@ public interface TxStateVisitor extends AutoCloseable {
         @Override
         public void visitKernelUpgrade(Upgrade.KernelUpgrade kernelUpgrade) {
             actual.visitKernelUpgrade(kernelUpgrade);
+        }
+
+        @Override
+        public void visitCreateVectorStore(VectorStoreIdType vectorStoreToCreate) {
+            actual.visitCreateVectorStore(vectorStoreToCreate);
+        }
+
+        @Override
+        public void finishVisit() throws KernelException {
+            actual.finishVisit();
         }
 
         @Override

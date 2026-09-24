@@ -19,22 +19,70 @@
  */
 package org.neo4j.cypher.internal.runtime.slotted.expressions
 
+import org.neo4j.cypher.internal.physicalplanning.ast
+import org.neo4j.cypher.internal.physicalplanning.ast.PrimitiveComparison
 import org.neo4j.cypher.internal.runtime.ReadableRow
 import org.neo4j.cypher.internal.runtime.interpreted.commands.AstNode
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Expression
 import org.neo4j.cypher.internal.runtime.interpreted.commands.predicates.IsMatchResult
 import org.neo4j.cypher.internal.runtime.interpreted.commands.predicates.Predicate
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.QueryState
+import org.neo4j.values.storable.Value
+import org.neo4j.values.storable.Values.booleanValue
 
-case class PrimitiveEquals(a: Expression, b: Expression) extends Predicate with SlottedExpression {
+sealed trait PrimitiveRuntimeComparison extends Predicate with SlottedExpression {
+  override def children: Seq[AstNode[_]] = Seq.empty
+  def compare(row: ReadableRow): Boolean
 
-  override def isMatch(ctx: ReadableRow, state: QueryState): IsMatchResult = {
-    val value1 = a(ctx, state)
-    val value2 = b(ctx, state)
-    IsMatchResult(value1 == value2)
+  final override def isMatch(row: ReadableRow, state: QueryState): IsMatchResult = {
+    IsMatchResult(compare(row))
   }
 
-  override def rewrite(f: Expression => Expression): Expression = f(PrimitiveEquals(a.rewrite(f), b.rewrite(f)))
+  final override def apply(row: ReadableRow, state: QueryState): Value =
+    booleanValue(compare(row))
+}
 
-  override def children: Seq[AstNode[_]] = Seq(a, b)
+object PrimitiveRuntimeComparison {
+
+  def create(in: PrimitiveComparison): PrimitiveRuntimeComparison = in match {
+    case ast.PrimitiveEquals(offset1, offset2)    => PrimitiveEquals(offset1, offset2)
+    case ast.PrimitiveNotEquals(offset1, offset2) => PrimitiveNotEquals(offset1, offset2)
+  }
+}
+
+case class PrimitiveEquals(slot1: Int, slot2: Int) extends PrimitiveRuntimeComparison {
+  override def compare(row: ReadableRow): Boolean = row.getLongAt(slot1) == row.getLongAt(slot2)
+  override def rewrite(f: Expression => Expression): Expression = f(PrimitiveEquals(slot1, slot2))
+}
+
+case class PrimitiveNotEquals(slot1: Int, slot2: Int) extends PrimitiveRuntimeComparison {
+
+  override def compare(row: ReadableRow): Boolean = row.getLongAt(slot1) != row.getLongAt(slot2)
+  override def rewrite(f: Expression => Expression): Expression = f(PrimitiveNotEquals(slot1, slot2))
+}
+
+case class PrimitiveAnds(predicates: Array[PrimitiveRuntimeComparison]) extends PrimitiveRuntimeComparison {
+
+  override def compare(row: ReadableRow): Boolean = {
+    var i = 0
+    while (i < predicates.length) {
+      if (!predicates(i).compare(row)) {
+        return false
+      }
+      i += 1
+    }
+    true
+  }
+
+  override def rewrite(f: Expression => Expression): Expression =
+    f(PrimitiveAnds(predicates.map(p => f(p).asInstanceOf[PrimitiveRuntimeComparison])))
+
+  override def children: Seq[AstNode[_]] = predicates
+
+}
+
+object PrimitiveAnds {
+
+  def create(in: Seq[PrimitiveComparison]): PrimitiveAnds =
+    PrimitiveAnds(in.map(PrimitiveRuntimeComparison.create).toArray)
 }

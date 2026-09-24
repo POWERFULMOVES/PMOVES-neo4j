@@ -36,11 +36,12 @@ import org.neo4j.cypher.internal.compiler.planner.logical.plans.AsPropertySeekab
 import org.neo4j.cypher.internal.compiler.planner.logical.plans.AsStringRangeSeekable
 import org.neo4j.cypher.internal.compiler.planner.logical.plans.AsValueRangeSeekable
 import org.neo4j.cypher.internal.compiler.planner.logical.plans.PrefixRangeSeekable
-import org.neo4j.cypher.internal.compiler.planner.logical.steps.OrLeafPlanner.WhereClausePredicate
+import org.neo4j.cypher.internal.compiler.planner.logical.schema.GraphSchemaOptimizations
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.IndexCompatiblePredicatesProviderContext
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.IndexMatch
-import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.NodeIndexLeafPlanner
-import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.RelationshipIndexLeafPlanner
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.leafplanner.OrLeafPlanner.WhereClausePredicate
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.leafplanner.index.NodeIndexLeafPlanner
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.leafplanner.index.RelationshipIndexLeafPlanner
 import org.neo4j.cypher.internal.expressions.Contains
 import org.neo4j.cypher.internal.expressions.ElementTypeName
 import org.neo4j.cypher.internal.expressions.EndsWith
@@ -66,7 +67,7 @@ import org.neo4j.cypher.internal.planner.spi.PlanContext
 import org.neo4j.cypher.internal.util.Foldable.FoldableAny
 import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.Selectivity
-import org.neo4j.internal.schema.constraints.SchemaValueType
+import org.neo4j.internal.schema.constraints.ConstrainableType
 
 import scala.annotation.tailrec
 
@@ -96,8 +97,14 @@ case class CompositeExpressionSelectivityCalculator(planContext: PlanContext) ex
     ExpressionSelectivityCalculator(planContext.statistics, combiner)
 
   private val nodeIndexMatchCache =
-    CachedFunction[QueryGraph, SemanticTable, IndexCompatiblePredicatesProviderContext, Set[IndexMatch]] {
-      (a, b, c) => findNodeIndexMatches(a, b, c)
+    CachedFunction[
+      QueryGraph,
+      SemanticTable,
+      IndexCompatiblePredicatesProviderContext,
+      GraphSchemaOptimizations,
+      Set[IndexMatch]
+    ] {
+      (a, b, c, gso) => findNodeIndexMatches(a, b, c, gso)
     }
 
   private val relationshipIndexMatchCache =
@@ -118,12 +125,12 @@ case class CompositeExpressionSelectivityCalculator(planContext: PlanContext) ex
     }
 
   private val getNodePropertiesWithTypeConstraint =
-    CachedFunction[LabelName, (ElementTypeName, Map[String, Seq[SchemaValueType]])] {
+    CachedFunction[LabelName, (ElementTypeName, Map[String, Seq[ConstrainableType]])] {
       label => label -> planContext.getNodePropertiesWithTypeConstraint(label.name)
     }
 
   private val getRelationshipPropertiesWithTypeConstraint =
-    CachedFunction[RelTypeName, (ElementTypeName, Map[String, Seq[SchemaValueType]])] {
+    CachedFunction[RelTypeName, (ElementTypeName, Map[String, Seq[ConstrainableType]])] {
       relTypeName => relTypeName -> planContext.getRelationshipPropertiesWithTypeConstraint(relTypeName.name)
     }
 
@@ -134,19 +141,18 @@ case class CompositeExpressionSelectivityCalculator(planContext: PlanContext) ex
     semanticTable: SemanticTable,
     indexPredicateProviderContext: IndexCompatiblePredicatesProviderContext,
     cardinalityModel: CardinalityModel,
-    argumentIds: Set[LogicalVariable]
+    argumentIds: Set[LogicalVariable],
+    graphSchemaOptimizations: GraphSchemaOptimizations
   ): Selectivity = {
 
     // The selections we get for cardinality estimation might contain partial predicates.
     // These are not recognized by the Leaf planners, so let's unwrap them.
     // This will also deduplicate if multiple partial predicates have the same coveredPredicate, since we are working with a Set.
-    val unwrappedSelections = selections.copy(predicates =
-      selections.predicates.map(pred =>
-        pred.copy(expr = pred.expr match {
-          case partial: PartialPredicate[_] => partial.coveredPredicate
-          case x                            => x
-        })
-      )
+    val unwrappedSelections = selections.map(pred =>
+      pred.copy(expr = pred.expr match {
+        case partial: PartialPredicate[_] => partial.coveredPredicate
+        case x                            => x
+      })
     )
 
     val existenceConstraints: Set[(ElementTypeName, String)] = {
@@ -155,7 +161,7 @@ case class CompositeExpressionSelectivityCalculator(planContext: PlanContext) ex
       forLabels ++ forRelationships
     }
 
-    val typeConstraints: Map[ElementTypeName, Map[String, Seq[SchemaValueType]]] = {
+    val typeConstraints: Map[ElementTypeName, Map[String, Seq[ConstrainableType]]] = {
       val forLabels = labelInfo.values.flatten.map(getNodePropertiesWithTypeConstraint).toMap
       val forRelationships = relTypeInfo.values.map(getRelationshipPropertiesWithTypeConstraint).toMap
       forLabels ++ forRelationships
@@ -169,7 +175,8 @@ case class CompositeExpressionSelectivityCalculator(planContext: PlanContext) ex
           .map(singleExpressionSelectivityCalculator(_, labelInfo, relTypeInfo, existenceConstraints, typeConstraints)(
             semanticTable,
             indexPredicateProviderContext,
-            cardinalityModel
+            cardinalityModel,
+            graphSchemaOptimizations
           ))
       combiner.andTogetherSelectivities(simpleSelectivities).getOrElse(Selectivity.ONE)
     }
@@ -196,19 +203,36 @@ case class CompositeExpressionSelectivityCalculator(planContext: PlanContext) ex
     val queryGraphs = getQueryGraphs(labelInfo, relTypeInfo, unwrappedSelections, argumentIds)
 
     // we search for index matches for each variable individually to increase the chance of cache hits
-    val indexMatches = {
-      queryGraphs.relQgs.flatMap(relationshipIndexMatchCache(_, semanticTable, indexPredicateProviderContext)) ++
-        queryGraphs.nodeQgs.flatMap(nodeIndexMatchCache(_, semanticTable, indexPredicateProviderContext))
-    } filter {
-      _.propertyPredicates.size > 1
-    }
+    val relationshipIndexMatches =
+      queryGraphs.relQgs.flatMap(relationshipIndexMatchCache(_, semanticTable, indexPredicateProviderContext)).toSet
+    val nodeIndexMatches =
+      queryGraphs.nodeQgs.flatMap(nodeIndexMatchCache(
+        _,
+        semanticTable,
+        indexPredicateProviderContext,
+        graphSchemaOptimizations
+      )).toSet
+    val allIndexMatches = relationshipIndexMatches.union(nodeIndexMatches)
+    val (atMostOnePropertyPredicate, twoOrMorePropertyPredicates) =
+      allIndexMatches.partition(_.propertyPredicates.size <= 1)
 
-    if (indexMatches.isEmpty) {
+    if (twoOrMorePropertyPredicates.isEmpty) {
       // If we match with no composite index we can use the singleExpressionSelectivityCalculator
       return fallback
     }
 
-    val selectivitiesForPredicates = indexMatches
+    val predicatesSolvedBySimpleIndexes =
+      atMostOnePropertyPredicate.flatMap(_.propertyPredicates).flatMap(_.solvedPredicate)
+
+    // No need to rely on composite indexes for predicates solved by simple indexes
+    val remainingPredicates = unwrappedSelections.flatPredicatesSet.diff(predicatesSolvedBySimpleIndexes)
+
+    if (remainingPredicates.isEmpty) {
+      // If there are no predicates to be solved by composite indexes, we can use the singleExpressionSelectivityCalculator
+      return fallback
+    }
+
+    val selectivitiesForPredicates = twoOrMorePropertyPredicates
       .groupBy(im => (im.indexDescriptor, im.variable))
       .values
       .flatMap { indexMatches =>
@@ -239,7 +263,7 @@ case class CompositeExpressionSelectivityCalculator(planContext: PlanContext) ex
 
     // Keep only index matches that have no overlaps - otherwise the math gets very complicated.
     val compositeDisjointPredicatesWithSelectivities =
-      greedyDisjointPredicatesWithSelectivities(selectivitiesForPredicates, unwrappedSelections.flatPredicatesSet)
+      greedyDisjointPredicatesWithSelectivities(selectivitiesForPredicates, remainingPredicates)
 
     val coveredPredicates = compositeDisjointPredicatesWithSelectivities.flatMap(_.solvedPredicates)
     val notCoveredPredicates = unwrappedSelections.flatPredicates.filter(!coveredPredicates.contains(_))
@@ -255,7 +279,8 @@ case class CompositeExpressionSelectivityCalculator(planContext: PlanContext) ex
       )(
         semanticTable,
         indexPredicateProviderContext,
-        cardinalityModel
+        cardinalityModel,
+        graphSchemaOptimizations
       ))
     // Use composite index selectivities for all covered predicates.
     val coveredPredicatesSelectivities =
@@ -303,7 +328,8 @@ case class CompositeExpressionSelectivityCalculator(planContext: PlanContext) ex
   private def findNodeIndexMatches(
     queryGraph: QueryGraph,
     semanticTable: SemanticTable,
-    indexPredicateProviderContext: IndexCompatiblePredicatesProviderContext
+    indexPredicateProviderContext: IndexCompatiblePredicatesProviderContext,
+    graphSchemaOptimizations: GraphSchemaOptimizations
   ): Set[IndexMatch] = {
     NodeIndexLeafPlanner.findIndexMatchesForQueryGraph(
       queryGraph,
@@ -312,6 +338,7 @@ case class CompositeExpressionSelectivityCalculator(planContext: PlanContext) ex
       indexPredicateProviderContext,
       InterestingOrderConfig.empty,
       ParallelExecutionProvidedOrderFactory,
+      graphSchemaOptimizations,
       // text indexes do not support composite indexes
       findTextIndexes = false,
       findRangeIndexes = true,
@@ -459,7 +486,7 @@ object CompositeExpressionSelectivityCalculator {
       // WHERE x.prop <, <=, >=, > that could benefit from an index
       case AsValueRangeSeekable(seekable) =>
         ExpressionSelectivityCalculator.getPropertyPredicateRangeSelectivity(
-          seekable,
+          seekable.head, // seekable.tail would be non-empty when the RHS is a property access. It is ignored for cardinality estimation here.
           assumedUniqueSelectivityPerPredicate
         )
 

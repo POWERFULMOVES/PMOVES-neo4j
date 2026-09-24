@@ -25,7 +25,7 @@ import static org.neo4j.kernel.database.NamedDatabaseId.NAMED_SYSTEM_DATABASE_ID
 import static org.neo4j.kernel.database.NamedDatabaseId.SYSTEM_DATABASE_NAME;
 
 import java.util.Optional;
-import org.neo4j.dbms.api.DatabaseManagementException;
+import org.neo4j.dbms.api.DatabaseManagementHelper;
 import org.neo4j.dbms.api.DatabaseNotFoundHelper;
 import org.neo4j.kernel.database.Database;
 import org.neo4j.kernel.database.NamedDatabaseId;
@@ -33,6 +33,7 @@ import org.neo4j.kernel.lifecycle.Lifecycle;
 import org.neo4j.kernel.lifecycle.LifecycleAdapter;
 import org.neo4j.logging.Log;
 import org.neo4j.logging.LogProvider;
+import org.neo4j.monitoring.ExceptionHandlerService;
 
 /**
  * System and default database manged only by lifecycles.
@@ -40,18 +41,21 @@ import org.neo4j.logging.LogProvider;
 public final class DatabaseLifecycles {
     private final DatabaseRepository<StandaloneDatabaseContext> databaseRepository;
     private final String defaultDatabaseName;
-    private final DatabaseContextFactory<StandaloneDatabaseContext, Optional<?>> databaseContextFactory;
+    private final DatabaseContextFactory<StandaloneDatabaseContext, NamedDatabaseId> databaseContextFactory;
     private final Log log;
+    private final ExceptionHandlerService exceptionHandlerService;
 
     public DatabaseLifecycles(
             DatabaseRepository<StandaloneDatabaseContext> databaseRepository,
             String defaultDatabaseName,
-            DatabaseContextFactory<StandaloneDatabaseContext, Optional<?>> databaseContextFactory,
-            LogProvider logProvider) {
+            DatabaseContextFactory<StandaloneDatabaseContext, NamedDatabaseId> databaseContextFactory,
+            LogProvider logProvider,
+            ExceptionHandlerService exceptionHandlerService) {
         this.databaseRepository = databaseRepository;
         this.defaultDatabaseName = defaultDatabaseName;
         this.databaseContextFactory = databaseContextFactory;
         this.log = logProvider.getLog(getClass());
+        this.exceptionHandlerService = exceptionHandlerService;
     }
 
     public Lifecycle systemDatabaseStarter() {
@@ -82,7 +86,8 @@ public final class DatabaseLifecycles {
                 .getByName(defaultDatabaseName)
                 .orElseThrow(() -> DatabaseNotFoundHelper.defaultDatabaseNotFound(defaultDatabaseName));
         if (databaseRepository.getDatabaseContext(defaultDatabaseId).isPresent()) {
-            throw new DatabaseManagementException(
+            throw DatabaseManagementHelper.internalError(
+                    this.getClass().getSimpleName(),
                     "Cannot initialize " + defaultDatabaseId + " because it already exists");
         }
         var context = createDatabase(defaultDatabaseId);
@@ -92,7 +97,7 @@ public final class DatabaseLifecycles {
     private StandaloneDatabaseContext createDatabase(NamedDatabaseId namedDatabaseId) {
         log.info("Creating '%s'.", namedDatabaseId);
         checkDatabaseLimit(namedDatabaseId);
-        StandaloneDatabaseContext databaseContext = databaseContextFactory.create(namedDatabaseId, Optional.empty());
+        StandaloneDatabaseContext databaseContext = databaseContextFactory.create(namedDatabaseId);
         databaseRepository.add(namedDatabaseId, databaseContext);
         return databaseContext;
     }
@@ -109,9 +114,13 @@ public final class DatabaseLifecycles {
             database.stop();
             log.info("Stopped '%s' successfully.", namedDatabaseId);
         } catch (Throwable t) {
-            log.error("Failed to stop " + namedDatabaseId, t);
-            context.fail(new DatabaseManagementException(
-                    format("An error occurred! Unable to stop `%s`.", namedDatabaseId), t));
+            String message = "Failed to stop " + namedDatabaseId;
+            logError(message, t);
+
+            context.fail(DatabaseManagementHelper.internalError(
+                    this.getClass().getSimpleName(),
+                    format("An error occurred! Unable to stop `%s`.", namedDatabaseId),
+                    t));
         }
     }
 
@@ -122,16 +131,22 @@ public final class DatabaseLifecycles {
             Database database = context.database();
             database.start();
         } catch (Throwable t) {
-            log.error("Failed to start " + namedDatabaseId, t);
+            logError("Failed to start " + namedDatabaseId, t);
             context.fail(UnableToStartDatabaseException.unableToStartDb(namedDatabaseId, t));
         }
     }
 
     private void checkDatabaseLimit(NamedDatabaseId namedDatabaseId) {
         if (databaseRepository.registeredDatabases().size() >= 2) {
-            throw new DatabaseManagementException(
+            throw DatabaseManagementHelper.internalError(
+                    this.getClass().getSimpleName(),
                     "Default database already exists. Fail to create another: " + namedDatabaseId);
         }
+    }
+
+    private void logError(String message, Throwable t) {
+        log.error(message, t);
+        exceptionHandlerService.raiseException(message, t);
     }
 
     private class SystemDatabaseStarter extends LifecycleAdapter {
@@ -173,8 +188,10 @@ public final class DatabaseLifecycles {
                 return;
             }
 
-            throw new DatabaseManagementException(
-                    "Failed to stop " + ctx.database().getNamedDatabaseId().name() + " database.", ctx.failureCause());
+            throw DatabaseManagementHelper.internalError(
+                    this.getClass().getSimpleName(),
+                    "Failed to stop " + ctx.database().getNamedDatabaseId().name() + " database.",
+                    ctx.failureCause());
         }
     }
 

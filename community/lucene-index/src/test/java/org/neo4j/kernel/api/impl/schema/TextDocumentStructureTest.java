@@ -19,81 +19,56 @@
  */
 package org.neo4j.kernel.api.impl.schema;
 
+import static org.apache.commons.lang3.RandomStringUtils.insecure;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.neo4j.kernel.api.impl.LuceneTestUtil.documentRepresentingProperties;
-import static org.neo4j.kernel.api.impl.LuceneTestUtil.newSeekQuery;
-import static org.neo4j.kernel.api.impl.schema.TextDocumentStructure.NODE_ID_KEY;
+import static org.neo4j.kernel.api.impl.index.lucene.LuceneDocumentsFactory.ENTITY_ID_KEY;
 import static org.neo4j.kernel.api.impl.schema.TextDocumentStructure.useFieldForUniquenessVerification;
-import static org.neo4j.kernel.api.impl.schema.ValueEncoding.String;
 
-import org.apache.commons.lang3.RandomStringUtils;
-import org.apache.lucene.document.Document;
-import org.apache.lucene.index.IndexWriter;
-import org.apache.lucene.search.BooleanQuery;
-import org.apache.lucene.search.ConstantScoreQuery;
-import org.apache.lucene.search.TermQuery;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneContext;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDocument;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDocumentsFactory;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneIndexWriter;
+import org.neo4j.values.storable.Values;
 
 class TextDocumentStructureTest {
-    @Test
-    void stringWithMaximumLengthShouldBeAllowed() {
-        String longestString = RandomStringUtils.randomAscii(IndexWriter.MAX_TERM_LENGTH);
-        Document document = documentRepresentingProperties(123, longestString);
-        assertEquals(longestString, document.getField(String.key(0)).stringValue());
+    @ParameterizedTest
+    @EnumSource
+    void stringWithMaximumLengthShouldBeAllowed(LuceneContext luceneContext) {
+        String longestString = insecure().nextAscii(LuceneIndexWriter.MAX_TERM_LENGTH);
+        LuceneDocument document =
+                luceneContext.documentsFactory().reusableTextDocument(123, Values.values(longestString));
+        assertEquals(longestString, document.get(LuceneDocumentsFactory.textValueKey(0)));
     }
 
-    @Test
-    void shouldBuildDocumentRepresentingStringProperty() {
+    @ParameterizedTest
+    @EnumSource
+    void shouldBuildDocumentRepresentingStringProperty(LuceneContext luceneContext) {
         // given
-        Document document = documentRepresentingProperties(123, "hello");
+        LuceneDocument document = luceneContext.documentsFactory().reusableTextDocument(123, Values.values("hello"));
 
         // then
-        assertEquals("123", document.get(NODE_ID_KEY));
-        assertEquals("hello", document.get(String.key(0)));
+        assertEquals("123", document.get(ENTITY_ID_KEY));
+        assertEquals("hello", document.get(LuceneDocumentsFactory.textValueKey(0)));
     }
 
-    @Test
-    void shouldBuildDocumentRepresentingMultipleStringProperties() {
+    @ParameterizedTest
+    @EnumSource
+    void shouldBuildDocumentRepresentingMultipleStringProperties(LuceneContext luceneContext) {
         // given
         String[] values = new String[] {"hello", "world"};
-        Document document = documentRepresentingProperties(123, (Object[]) values);
+        LuceneDocument document =
+                luceneContext.documentsFactory().reusableTextDocument(123, Values.values((Object[]) values));
 
         // then
-        assertEquals("123", document.get(NODE_ID_KEY));
-        assertThat(document.get(String.key(0))).isEqualTo(values[0]);
-        assertThat(document.get(String.key(1))).isEqualTo(values[1]);
-    }
-
-    @Test
-    void shouldBuildQueryRepresentingStringProperty() {
-        // given
-        BooleanQuery booleanQuery = (BooleanQuery) newSeekQuery("Characters");
-        ConstantScoreQuery query =
-                (ConstantScoreQuery) booleanQuery.clauses().get(0).getQuery();
-
-        // then
-        assertEquals("Characters", ((TermQuery) query.getQuery()).getTerm().text());
-    }
-
-    @Test
-    void shouldBuildQueryRepresentingMultipleProperties() {
-        // given
-        BooleanQuery booleanQuery = (BooleanQuery) newSeekQuery("foo", "bar");
-
-        ConstantScoreQuery fooScoreQuery =
-                (ConstantScoreQuery) booleanQuery.clauses().get(0).getQuery();
-        TermQuery fooTermQuery = (TermQuery) fooScoreQuery.getQuery();
-
-        ConstantScoreQuery barScoreQuery =
-                (ConstantScoreQuery) booleanQuery.clauses().get(1).getQuery();
-        TermQuery barTermQuery = (TermQuery) barScoreQuery.getQuery();
-
-        // then
-        assertEquals("foo", fooTermQuery.getTerm().text());
-        assertEquals("bar", barTermQuery.getTerm().text());
+        assertEquals("123", document.get(ENTITY_ID_KEY));
+        assertThat(document.get(LuceneDocumentsFactory.textValueKey(0))).isEqualTo(values[0]);
+        assertThat(document.get(LuceneDocumentsFactory.textValueKey(1))).isEqualTo(values[1]);
     }
 
     @Test

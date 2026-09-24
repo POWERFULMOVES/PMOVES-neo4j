@@ -30,6 +30,7 @@ import static org.neo4j.capabilities.Type.INTEGER;
 import static org.neo4j.configuration.SettingValueParsers.TRUE;
 import static org.neo4j.graphdb.Label.label;
 import static org.neo4j.internal.helpers.collection.Iterators.asList;
+import static org.neo4j.test.extension.SkipOnSpd.Note.incompatible;
 import static org.neo4j.values.storable.Values.stringValue;
 
 import java.util.List;
@@ -55,6 +56,7 @@ import org.neo4j.internal.kernel.api.procs.ProcedureCallContext;
 import org.neo4j.internal.kernel.api.procs.QualifiedName;
 import org.neo4j.kernel.api.QueryLanguage;
 import org.neo4j.kernel.impl.api.integrationtest.KernelIntegrationTest;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.values.AnyValue;
 import org.neo4j.values.storable.BooleanValue;
 import org.neo4j.values.storable.TextValue;
@@ -97,6 +99,7 @@ class BuiltInDbmsProceduresIT extends KernelIntegrationTest {
         });
     }
 
+    @SkipOnSpd(reason = "Assumes very specific settings")
     @Test
     void listClientConfig() throws Exception {
         QualifiedName procedureName = new QualifiedName("dbms", "clientConfig");
@@ -151,6 +154,7 @@ class BuiltInDbmsProceduresIT extends KernelIntegrationTest {
     }
 
     @Test
+    @SkipOnSpd(notes = incompatible, reason = "SPD brings in EE capabilities")
     void listCapabilities() throws KernelException {
         QualifiedName procedureName = new QualifiedName("dbms", "listCapabilities");
         Procedures procs = procs();
@@ -172,6 +176,7 @@ class BuiltInDbmsProceduresIT extends KernelIntegrationTest {
     }
 
     @Test
+    @SkipOnSpd(notes = incompatible, reason = "SPD brings in EE capabilities")
     void listCapabilitiesShouldNotReturnBlocked() throws KernelException {
         // set blocked capabilities
         Config config = dependencyResolver.resolveDependency(Config.class);
@@ -195,6 +200,7 @@ class BuiltInDbmsProceduresIT extends KernelIntegrationTest {
     }
 
     @Test
+    @SkipOnSpd(notes = incompatible, reason = "SPD brings in EE capabilities")
     void listCapabilitiesShouldReturnDynamicValues() throws KernelException {
         QualifiedName procedureName = new QualifiedName("dbms", "listCapabilities");
         var procs = procs();
@@ -236,6 +242,7 @@ class BuiltInDbmsProceduresIT extends KernelIntegrationTest {
     }
 
     @Test
+    @SkipOnSpd(notes = incompatible, reason = "SPD brings in EE capabilities")
     void listAllCapabilities() throws KernelException {
         QualifiedName procedureName = new QualifiedName("dbms", "listAllCapabilities");
         Procedures procs = procs();
@@ -264,6 +271,7 @@ class BuiltInDbmsProceduresIT extends KernelIntegrationTest {
     }
 
     @Test
+    @SkipOnSpd(notes = incompatible, reason = "SPD brings in EE capabilities")
     void listAllCapabilitiesShouldNotReturnBlocked() throws KernelException {
         // set blocked capabilities
         Config config = dependencyResolver.resolveDependency(Config.class);

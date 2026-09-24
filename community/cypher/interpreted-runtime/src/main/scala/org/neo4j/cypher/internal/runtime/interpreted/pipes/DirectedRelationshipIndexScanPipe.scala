@@ -28,24 +28,33 @@ import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.util.attribution.Id
 
 case class DirectedRelationshipIndexScanPipe(
-  ident: String,
-  startNode: String,
-  endNode: String,
+  ident: Option[String],
+  startNode: Option[String],
+  endNode: Option[String],
   relType: RelationshipTypeToken,
   properties: Array[IndexedProperty],
   queryIndexId: Int,
-  indexOrder: IndexOrder
+  indexOrder: IndexOrder,
+  includeChangesFromThisTransaction: Boolean
 )(val id: Id = Id.INVALID_ID) extends Pipe with IndexPipeWithValues {
 
   override val indexPropertyIndices: Array[Int] = properties.indices.filter(properties(_).shouldGetValue).toArray
 
-  override val indexCachedProperties: Array[CachedProperty] =
-    indexPropertyIndices.map(offset => properties(offset).asCachedProperty(ident))
+  override val indexCachedProperties: Array[CachedProperty] = ident match {
+    case Some(value) => indexPropertyIndices.map(offset => properties(offset).asCachedProperty(value))
+    case None        => Array.empty
+  }
+
   private val needsValues: Boolean = indexPropertyIndices.nonEmpty
 
   protected def internalCreateResults(state: QueryState): ClosingIterator[CypherRow] = {
     val baseContext = state.newRowWithArgument(rowFactory)
-    val cursor = state.query.relationshipIndexScan(state.queryIndexes(queryIndexId), needsValues, indexOrder)
-    new RelIndexIterator(state, startNode, endNode, baseContext, cursor)
+    val cursor = state.query.relationshipIndexScan(
+      state.queryIndexes(queryIndexId),
+      needsValues,
+      indexOrder,
+      includeChangesFromThisTransaction
+    )
+    new RelIndexIterator(startNode, endNode, baseContext, cursor)
   }
 }

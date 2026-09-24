@@ -19,7 +19,7 @@
  */
 package org.neo4j.kernel.recovery;
 
-import static org.apache.commons.lang3.RandomStringUtils.randomAlphanumeric;
+import static org.apache.commons.lang3.RandomStringUtils.secure;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -54,11 +54,6 @@ import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.kernel.database.DatabaseTracers;
 import org.neo4j.kernel.extension.ExtensionFactory;
 import org.neo4j.kernel.impl.transaction.CommittedCommandBatchRepresentation;
-import org.neo4j.kernel.impl.transaction.log.LoggingLogFileMonitor;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
-import org.neo4j.kernel.impl.transaction.log.files.LogFilesBuilder;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.logging.AssertableLogProvider;
 import org.neo4j.logging.LogAssertions;
@@ -71,6 +66,11 @@ import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.Neo4jLayoutExtension;
 import org.neo4j.test.extension.pagecache.PageCacheExtension;
 import org.neo4j.test.utils.TestDirectory;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.LoggingLogFileMonitor;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
+import org.neo4j.wal.files.LogFilesBuilder;
 
 @PageCacheExtension
 @Neo4jLayoutExtension
@@ -96,8 +96,8 @@ class ForwardRecoveryIT {
 
     @BeforeEach
     void setUp() {
-        databaseLayout = neo4jLayout.databaseLayout(DEFAULT_DATABASE_NAME);
         monitors = new Monitors();
+        databaseLayout = neo4jLayout.databaseLayout(DEFAULT_DATABASE_NAME);
         recoveryMonitorListener = new RecoveryMonitorListener(logProvider);
         monitors.addMonitorListener(new LoggingLogFileMonitor(logProvider.getLog(getClass())));
         monitors.addMonitorListener(recoveryMonitorListener);
@@ -216,8 +216,11 @@ class ForwardRecoveryIT {
     }
 
     private LogFiles buildLogFiles(DatabaseTracers databaseTracers) throws IOException {
-        return LogFilesBuilder.activeFilesBuilder(
-                        databaseLayout, fileSystem, LatestVersions.LATEST_KERNEL_VERSION_PROVIDER)
+        return LogFilesBuilder.readableBuilder(
+                        databaseLayout,
+                        fileSystem,
+                        LatestVersions.LATEST_KERNEL_VERSION_PROVIDER,
+                        LatestVersions.LATEST_LOG_FORMAT_PROVIDER)
                 .withCommandReaderFactory(StorageEngineFactory.selectStorageEngine(fileSystem, databaseLayout, null)
                         .commandReaderFactory())
                 .withDatabaseTracers(databaseTracers)
@@ -231,7 +234,9 @@ class ForwardRecoveryIT {
     protected GraphDatabaseAPI createDatabase(long logThreshold) {
         var builder = createBuilder(logThreshold);
         managementService = builder.build();
-        return (GraphDatabaseAPI) managementService.database(databaseLayout.getDatabaseName());
+        var database = (GraphDatabaseAPI) managementService.database(databaseLayout.getDatabaseName());
+        databaseLayout = database.databaseLayout();
+        return database;
     }
 
     private TestDatabaseManagementServiceBuilder createBuilder(long logThreshold) {
@@ -249,7 +254,7 @@ class ForwardRecoveryIT {
                 Node node1 = transaction.createNode();
                 Node node2 = transaction.createNode();
                 node1.createRelationshipTo(node2, withName("Type" + i));
-                node2.setProperty("a", randomAlphanumeric(5));
+                node2.setProperty("a", secure().nextAlphanumeric(5));
                 transaction.commit();
             }
         }

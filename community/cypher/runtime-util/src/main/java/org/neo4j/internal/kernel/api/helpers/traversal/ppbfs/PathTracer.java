@@ -56,7 +56,7 @@ public final class PathTracer<Row> extends PrefetchingIterator<Row> {
      */
     private boolean ready = false;
 
-    public PathTracer(MemoryTracker memoryTracker, TraversalMatchModeFactory tracker, PPBFSHooks hooks) {
+    public PathTracer(MemoryTracker memoryTracker, TraversalPathModeFactory tracker, PPBFSHooks hooks) {
         this.hooks = hooks;
         this.stack = new SignpostStack(memoryTracker, tracker.twoWaySignpostTracking(), hooks);
     }
@@ -98,7 +98,7 @@ public final class PathTracer<Row> extends PrefetchingIterator<Row> {
     }
 
     private void popAndPrune() {
-        var popped = stack.pop();
+        var popped = stack.popSignpost();
         if (popped == null) {
             return;
         }
@@ -123,23 +123,26 @@ public final class PathTracer<Row> extends PrefetchingIterator<Row> {
         }
 
         while (stack.hasNext()) {
-            if (!stack.pushNext()) {
+            if (!stack.pushSignpost()) {
                 popAndPrune();
             } else {
                 var sourceSignpost = stack.headSignpost();
-                if (stack.isValid() && !sourceSignpost.hasBeenTraced()) {
+                // Set minTargetDistance unconditionally — the distance to target is structural
+                // and correct regardless of trail validity. This enables propagation to create
+                // longer source lengths through the chain after BFS lengths are pruned.
+                if (!sourceSignpost.hasBeenTraced()) {
                     sourceSignpost.setMinTargetDistance(stack.lengthToTarget(), PGPathPropagatingBFS.Phase.Tracing);
                 }
 
                 if (stack.canAbandonTraceBranch()) {
                     hooks.skippingDuplicateRelationship(stack);
-                    stack.pop();
+                    stack.popSignpost();
                     // the order of these predicates is important since validate has side effects:
                 } else if (sourceSignpost.prevNode == sourceNode && stack.validate() && !isSaturated()) {
                     Preconditions.checkState(
                             stack.lengthFromSource() == 0,
                             "Attempting to return a path that does not reach the source");
-                    hooks.returnPath(stack);
+                    hooks.returned(stack);
                     return toRow.apply(stack);
                 }
             }

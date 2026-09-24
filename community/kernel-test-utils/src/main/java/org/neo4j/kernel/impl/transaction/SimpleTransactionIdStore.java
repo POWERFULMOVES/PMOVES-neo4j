@@ -19,17 +19,15 @@
  */
 package org.neo4j.kernel.impl.transaction;
 
-import static org.neo4j.kernel.impl.transaction.log.EmptyLogTailMetadata.EMPTY_APPEND_BATCH_INFO;
 import static org.neo4j.storageengine.AppendIndexProvider.BASE_APPEND_INDEX;
 import static org.neo4j.storageengine.api.LogVersionRepository.BASE_TX_LOG_BYTE_OFFSET;
 import static org.neo4j.storageengine.api.LogVersionRepository.BASE_TX_LOG_VERSION;
+import static org.neo4j.wal.EmptyLogTailMetadata.EMPTY_APPEND_BATCH_INFO;
 
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.neo4j.io.pagecache.context.TransactionIdSnapshot;
 import org.neo4j.kernel.KernelVersion;
-import org.neo4j.kernel.impl.transaction.log.AppendBatchInfo;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
 import org.neo4j.storageengine.api.ClosedBatchMetadata;
 import org.neo4j.storageengine.api.ClosedTransactionMetadata;
 import org.neo4j.storageengine.api.OpenTransactionMetadata;
@@ -39,6 +37,8 @@ import org.neo4j.storageengine.util.HighestAppendBatch;
 import org.neo4j.util.concurrent.ArrayQueueOutOfOrderSequence;
 import org.neo4j.util.concurrent.OutOfOrderSequence;
 import org.neo4j.util.concurrent.OutOfOrderSequence.Meta;
+import org.neo4j.wal.AppendBatchInfo;
+import org.neo4j.wal.LogPosition;
 
 /**
  * Simple implementation of a {@link TransactionIdStore}.
@@ -51,6 +51,7 @@ public class SimpleTransactionIdStore implements TransactionIdStore {
             new ArrayQueueOutOfOrderSequence(-1, 100, OutOfOrderSequence.EMPTY_META);
     private final AtomicReference<TransactionId> committedTransactionId = new AtomicReference<>(BASE_TRANSACTION_ID);
     private final HighestAppendBatch appendBatchInfo = new HighestAppendBatch(EMPTY_APPEND_BATCH_INFO);
+    private volatile long lowestAvailableCommittedTransactionId = TransactionIdStore.UNKNOWN_TX_ID;
 
     public SimpleTransactionIdStore() {
         this(
@@ -83,7 +84,8 @@ public class SimpleTransactionIdStore implements TransactionIdStore {
                 previousConsensusIndex,
                 previouslyCommittedTxLogByteOffset,
                 previouslyCommittedTxLogVersion,
-                appendIndex);
+                appendIndex,
+                previousConsensusIndex);
     }
 
     @Override
@@ -117,7 +119,7 @@ public class SimpleTransactionIdStore implements TransactionIdStore {
     }
 
     @Override
-    public long getLastClosedTransactionId() {
+    public long getHighestGapFreeClosedTransactionId() {
         return closedTransactionId.getHighestGapFreeNumber();
     }
 
@@ -127,13 +129,53 @@ public class SimpleTransactionIdStore implements TransactionIdStore {
     }
 
     @Override
-    public ClosedTransactionMetadata getLastClosedTransaction() {
+    public ClosedTransactionMetadata getHighestGapFreeClosedTransaction() {
         return new ClosedTransactionMetadata(closedTransactionId.get());
     }
 
     @Override
     public ClosedBatchMetadata getLastClosedBatch() {
         return new ClosedBatchMetadata(lastClosedBatch.get());
+    }
+
+    @Override
+    public void setLastCommittedAndClosedTransactionId(
+            long lastCommitedTxId,
+            long lastClosedTxId,
+            long[] notClosedTransactions,
+            long transactionAppendIndex,
+            KernelVersion kernelVersion,
+            int checksum,
+            long commitTimestamp,
+            long consensusIndex,
+            long byteOffset,
+            long logVersion,
+            long logsAppendIndex,
+            long lastClosedBatchConsensusIndex,
+            OpenTransactionMetadata earliestOpenTransactionMetadata,
+            OutOfOrderSequence.NumberWithMeta lastClosedTxIdInfo) {
+        committingTransactionId.set(lastCommitedTxId);
+        committedTransactionId.set(new TransactionId(
+                lastCommitedTxId, transactionAppendIndex, kernelVersion, checksum, commitTimestamp, consensusIndex));
+        var txMeta = new Meta(
+                logVersion,
+                byteOffset,
+                kernelVersion.version(),
+                checksum,
+                commitTimestamp,
+                consensusIndex,
+                transactionAppendIndex);
+        var batchMeta = new Meta(
+                logVersion,
+                byteOffset,
+                kernelVersion.version(),
+                UNKNOWN_TX_CHECKSUM,
+                UNKNOWN_TX_COMMIT_TIMESTAMP,
+                lastClosedBatchConsensusIndex,
+                logsAppendIndex);
+        lastClosedBatch.set(logsAppendIndex, batchMeta);
+        closedTransactionId.set(lastCommitedTxId, txMeta);
+        appendBatchInfo.set(logsAppendIndex, LogPosition.UNSPECIFIED, lastClosedBatchConsensusIndex);
     }
 
     @Override
@@ -146,11 +188,12 @@ public class SimpleTransactionIdStore implements TransactionIdStore {
             long consensusIndex,
             long byteOffset,
             long logVersion,
-            long appendIndex) {
+            long appendIndex,
+            long lastClosedBatchConsensusIndex) {
         committingTransactionId.set(transactionId);
         committedTransactionId.set(new TransactionId(
                 transactionId, transactionAppendIndex, kernelVersion, checksum, commitTimestamp, consensusIndex));
-        var meta = new Meta(
+        var txMeta = new Meta(
                 logVersion,
                 byteOffset,
                 kernelVersion.version(),
@@ -158,9 +201,17 @@ public class SimpleTransactionIdStore implements TransactionIdStore {
                 commitTimestamp,
                 consensusIndex,
                 transactionAppendIndex);
-        lastClosedBatch.set(appendIndex, meta);
-        closedTransactionId.set(transactionId, meta);
-        appendBatchInfo.set(appendIndex, LogPosition.UNSPECIFIED);
+        var batchMeta = new Meta(
+                logVersion,
+                byteOffset,
+                kernelVersion.version(),
+                UNKNOWN_TX_CHECKSUM,
+                UNKNOWN_TX_COMMIT_TIMESTAMP,
+                lastClosedBatchConsensusIndex,
+                appendIndex);
+        lastClosedBatch.set(appendIndex, batchMeta);
+        closedTransactionId.set(transactionId, txMeta);
+        appendBatchInfo.set(appendIndex, LogPosition.UNSPECIFIED, lastClosedBatchConsensusIndex);
     }
 
     @Override
@@ -192,7 +243,8 @@ public class SimpleTransactionIdStore implements TransactionIdStore {
             boolean firstBatch,
             boolean lastBatch,
             KernelVersion kernelVersion,
-            LogPosition logPositionAfter) {
+            LogPosition logPositionAfter,
+            long consensusIndex) {
         lastClosedBatch.offer(
                 appendIndex,
                 new Meta(
@@ -201,7 +253,7 @@ public class SimpleTransactionIdStore implements TransactionIdStore {
                         kernelVersion.version(),
                         UNKNOWN_TX_CHECKSUM,
                         UNKNOWN_TX_COMMIT_TIMESTAMP,
-                        UNKNOWN_CONSENSUS_INDEX,
+                        consensusIndex,
                         appendIndex));
     }
 
@@ -234,8 +286,9 @@ public class SimpleTransactionIdStore implements TransactionIdStore {
             boolean firstBatch,
             boolean lastBatch,
             LogPosition logPositionBefore,
-            LogPosition logPositionAfter) {
-        appendBatchInfo.offer(appendIndex, logPositionAfter);
+            LogPosition logPositionAfter,
+            long consensusIndex) {
+        appendBatchInfo.offer(appendIndex, logPositionAfter, consensusIndex);
     }
 
     @Override
@@ -251,5 +304,15 @@ public class SimpleTransactionIdStore implements TransactionIdStore {
     @Override
     public TransactionId getHighestEverClosedTransaction() {
         return committedTransactionId.get();
+    }
+
+    @Override
+    public void setLowestAvailableCommittedTransactionId(long transactionId) {
+        this.lowestAvailableCommittedTransactionId = transactionId;
+    }
+
+    @Override
+    public long getLowestAvailableCommittedTransactionId() {
+        return lowestAvailableCommittedTransactionId;
     }
 }

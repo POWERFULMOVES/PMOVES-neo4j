@@ -97,6 +97,11 @@ public final class CharValue extends TextValue {
     }
 
     @Override
+    public StringValue asStringValue() {
+        return Values.stringValue(stringValue());
+    }
+
+    @Override
     public int length() {
         return 1;
     }
@@ -166,7 +171,7 @@ public final class CharValue extends TextValue {
     @Override
     public ListValue split(String separator) {
         if (separator.equals(stringValue())) {
-            return EMPTY_SPLIT;
+            return emptySplit();
         } else {
             return list(this);
         }
@@ -175,7 +180,7 @@ public final class CharValue extends TextValue {
     @Override
     public ListValue split(List<String> separators) {
         if (separators.stream().anyMatch(sep -> sep.equals(stringValue()))) {
-            return EMPTY_SPLIT;
+            return emptySplit();
         } else {
             return list(this);
         }
@@ -186,6 +191,19 @@ public final class CharValue extends TextValue {
         assert find != null;
         assert replace != null;
         if (stringValue().equals(find)) {
+            return Values.stringValue(replace);
+        } else {
+            return this;
+        }
+    }
+
+    @Override
+    public TextValue replaceWithLimit(String find, String replace, int limit) {
+        assert find != null;
+        assert replace != null;
+        if (limit < 1) {
+            return this;
+        } else if (stringValue().equals(find)) {
             return Values.stringValue(replace);
         } else {
             return this;

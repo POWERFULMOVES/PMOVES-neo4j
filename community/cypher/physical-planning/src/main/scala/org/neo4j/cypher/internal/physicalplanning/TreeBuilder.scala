@@ -120,7 +120,8 @@ trait TreeBuilder[T, ARGUMENT] {
           outputStack.push(output)
 
         case (Some(left), Some(right)) if right eq left =>
-          throw new InternalException(
+          throw InternalException.internalError(
+            this.getClass.getSimpleName,
             s"Tried to map bad logical plan. LHS and RHS must never be the same: op: $current\nfull plan: $plan"
           )
 
@@ -137,6 +138,8 @@ trait TreeBuilder[T, ARGUMENT] {
           val output = onTwoChildPlanComingFromRight(current, leftOutput, rightOutput, argument)
           argumentStack.pop()
           outputStack.push(output)
+
+        case _ => throw InternalException.internalError(getClass.getSimpleName, "Incorrect tree traversal")
       }
 
       comingFrom = current

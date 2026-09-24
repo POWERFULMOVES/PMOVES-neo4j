@@ -36,16 +36,15 @@ class MigrateStoreCommandTest {
         try (var out = new PrintStream(baos)) {
             CommandLine.usage(command, new PrintStream(out), CommandLine.Help.Ansi.OFF);
         }
-        assertThat(baos.toString().trim())
-                .isEqualToIgnoringNewLines(
-                        """
+        assertThat(baos.toString().trim()).isEqualToIgnoringNewLines("""
                          Migrate a database
 
                          USAGE
 
                          migrate [-h] [--expand-commands] [--force-btree-indexes-to-range] [--verbose]
-                                 [--additional-config=<file>] [--pagecache=<size>]
-                                 [--to-format=standard|high_limit|aligned|block] <database>
+                                 [--additional-config=<file>] [--max-off-heap-memory=<size>]
+                                 [--pagecache=<size>] [--to-format=standard|high_limit|aligned|block]
+                                 <database>
 
                          DESCRIPTION
 
@@ -66,7 +65,9 @@ class MigrateStoreCommandTest {
                                                     Configuration file with additional configuration.
                                --expand-commands    Allow command expansion in config value evaluation.
                                --force-btree-indexes-to-range
-                                                    Special option for automatically turning all BTREE
+                                                    (Deprecated and will be removed. This option was
+                                                      only applicable when migrating from v4 to v5.)
+                                                      Special option for automatically turning all BTREE
                                                       indexes/constraints into RANGE. Be aware that
                                                       RANGE indexes are not always the optimal
                                                       replacement of BTREEs and performance may be
@@ -77,7 +78,19 @@ class MigrateStoreCommandTest {
                                                       start up following the migration and users should
                                                       monitor the successful completion of that process.
                            -h, --help               Show this help message and exit.
-                               --pagecache=<size>   The size of the page cache to use for the migration
+                               --max-off-heap-memory=<size>
+                                                    Maximum off-heap memory that the command can use for
+                                                      page cache and various caching data structures to
+                                                      improve performance. Use this option to tune the
+                                                      command memory usage; the command does not use the
+                                                      server.memory.pagecache.size configuration setting
+                                                      for this purpose. Values can be plain numbers,
+                                                      such as 10000000, or, for example, 20G for 20
+                                                      gigabytes, or 70%, which will amount to 70% of
+                                                      currently free memory on the machine.
+                                                      Default: 90%
+                               --pagecache=<size>   (Deprecated in favor of --max-off-heap-memory) The
+                                                      size of the page cache to use for the migration
                                                       process. The general rule is that values up to the
                                                       size of the database proportionally increase
                                                       performance.

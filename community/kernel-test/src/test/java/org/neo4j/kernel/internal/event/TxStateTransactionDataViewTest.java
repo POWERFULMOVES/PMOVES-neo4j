@@ -36,6 +36,7 @@ import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.neo4j.function.Predicates;
 import org.neo4j.graphdb.Entity;
 import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.Relationship;
@@ -43,11 +44,11 @@ import org.neo4j.graphdb.event.LabelEntry;
 import org.neo4j.graphdb.event.PropertyEntry;
 import org.neo4j.internal.kernel.api.TokenRead;
 import org.neo4j.internal.kernel.api.exceptions.PropertyKeyIdNotFoundKernelException;
-import org.neo4j.internal.kernel.api.security.AccessMode;
 import org.neo4j.internal.kernel.api.security.AuthSubject;
 import org.neo4j.internal.kernel.api.security.CommunitySecurityLog;
 import org.neo4j.internal.kernel.api.security.LoginContext;
 import org.neo4j.internal.kernel.api.security.SecurityContext;
+import org.neo4j.internal.kernel.api.security.StaticAccessMode;
 import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.api.security.AnonymousContext;
 import org.neo4j.kernel.api.txstate.TransactionState;
@@ -168,7 +169,7 @@ class TxStateTransactionDataViewTest {
         // Given
         int propertyKeyId = ops.propertyKeyTokenHolder().getOrCreateId("theKey");
         Value prevValue = Values.of("prevValue");
-        state.nodeDoChangeProperty(1L, propertyKeyId, Values.of("newValue"));
+        state.nodeDoAddProperty(1L, propertyKeyId, Values.of("newValue"));
         ops.withNode(1).properties("theKey", prevValue);
 
         // When
@@ -187,7 +188,7 @@ class TxStateTransactionDataViewTest {
         // Given
         int propertyKeyId = ops.propertyKeyTokenHolder().getOrCreateId("theKey");
         Value prevValue = Values.of("prevValue");
-        state.nodeDoRemoveProperty(1L, propertyKeyId);
+        state.nodeDoRemoveProperty(1L, propertyKeyId, Predicates.ALWAYS_TRUE_INT);
         ops.withNode(1).properties("theKey", prevValue);
 
         // When
@@ -205,7 +206,7 @@ class TxStateTransactionDataViewTest {
         // Given
         int propertyKeyId = ops.propertyKeyTokenHolder().getOrCreateId("theKey");
         Value prevValue = Values.of("prevValue");
-        state.relationshipDoRemoveProperty(1L, 0, 0, 0, propertyKeyId);
+        state.relationshipDoRemoveProperty(1L, 0, 0, 0, propertyKeyId, Predicates.ALWAYS_TRUE_INT);
         ops.withRelationship(1, 0, 0, 0).properties("theKey", prevValue);
 
         // When
@@ -223,7 +224,7 @@ class TxStateTransactionDataViewTest {
         // Given
         Value prevValue = Values.of("prevValue");
         int propertyKeyId = ops.propertyKeyTokenHolder().getOrCreateId("theKey");
-        state.relationshipDoReplaceProperty(1L, 0, 0, 0, propertyKeyId, prevValue, Values.of("newValue"));
+        state.relationshipDoAddProperty(1L, 0, 0, 0, propertyKeyId, Values.of("newValue"));
         ops.withRelationship(1, 0, 0, 0).properties("theKey", prevValue);
 
         // When
@@ -287,7 +288,8 @@ class TxStateTransactionDataViewTest {
                 .authorize(
                         LoginContext.IdLookup.EMPTY,
                         new PrivilegeDatabaseReferenceImpl(DEFAULT_DATABASE_NAME),
-                        CommunitySecurityLog.NULL_LOG);
+                        CommunitySecurityLog.NULL_LOG,
+                        0);
         when(transaction.securityContext()).thenReturn(securityContext);
 
         TxStateTransactionDataSnapshot transactionDataSnapshot = snapshot();
@@ -299,7 +301,7 @@ class TxStateTransactionDataViewTest {
         AuthSubject authSubject = mock(AuthSubject.class);
         when(authSubject.executingUser()).thenReturn("Christof");
         when(transaction.securityContext())
-                .thenReturn(new SecurityContext(authSubject, AccessMode.Static.FULL, EMBEDDED_CONNECTION, null));
+                .thenReturn(new SecurityContext(authSubject, StaticAccessMode.FULL, EMBEDDED_CONNECTION, null));
 
         TxStateTransactionDataSnapshot transactionDataSnapshot = snapshot();
         assertEquals("Christof", transactionDataSnapshot.username());
@@ -315,7 +317,7 @@ class TxStateTransactionDataViewTest {
     void shouldAccessExampleMetaData() {
         when(transaction.getMetaData()).thenReturn(genericMap("username", "Igor"));
         TxStateTransactionDataSnapshot transactionDataSnapshot =
-                new TxStateTransactionDataSnapshot(state, ops, transaction, true);
+                new TxStateTransactionDataSnapshot(state, ops, transaction, true, null);
         assertEquals(1, transactionDataSnapshot.metaData().size());
         assertThat(transactionDataSnapshot.metaData())
                 .as("Expected metadata map to contain defined username")
@@ -325,7 +327,7 @@ class TxStateTransactionDataViewTest {
     private static List<Long> idList(Iterable<? extends Entity> entities) {
         List<Long> out = new ArrayList<>();
         for (Entity entity : entities) {
-            out.add(entity instanceof Node ? entity.getId() : entity.getId());
+            out.add(entity.getId());
         }
         return out;
     }
@@ -343,6 +345,6 @@ class TxStateTransactionDataViewTest {
                         invocation.getArgument(1),
                         invocation.getArgument(2),
                         invocation.getArgument(3)));
-        return new TxStateTransactionDataSnapshot(state, ops, transaction, true);
+        return new TxStateTransactionDataSnapshot(state, ops, transaction, true, null);
     }
 }

@@ -21,6 +21,7 @@ package org.neo4j.csv.reader;
 
 import java.io.IOException;
 import java.io.Reader;
+import java.nio.file.Path;
 
 /**
  * Wraps a {@link Reader} into a {@link CharReadable}.
@@ -30,11 +31,19 @@ class WrappedCharReadable extends CharReadable.Adapter {
     private final Reader reader;
     private long position;
     private final String sourceDescription;
+    private final Path file;
+    private long lineNumber;
 
-    WrappedCharReadable(long length, Reader reader, String sourceDescription) {
+    WrappedCharReadable(long length, Reader reader, String sourceDescription, Path file) {
         this.length = length;
         this.reader = reader;
         this.sourceDescription = sourceDescription;
+        this.file = file;
+    }
+
+    @Override
+    public Path file() {
+        return file;
     }
 
     @Override
@@ -58,7 +67,18 @@ class WrappedCharReadable extends CharReadable.Adapter {
             totalRead += read;
         }
         position += totalRead;
+        lineNumber += countLines(into, offset, length);
         return totalRead == 0 && eof ? -1 : totalRead;
+    }
+
+    private long countLines(char[] buffer, int offset, int length) {
+        long lines = 0;
+        for (int i = 0; i < length; i++) {
+            if (buffer[offset + i] == '\n') {
+                lines++;
+            }
+        }
+        return lines;
     }
 
     @Override
@@ -69,6 +89,11 @@ class WrappedCharReadable extends CharReadable.Adapter {
     @Override
     public long position() {
         return position;
+    }
+
+    @Override
+    public long lineNumber() {
+        return lineNumber;
     }
 
     @Override

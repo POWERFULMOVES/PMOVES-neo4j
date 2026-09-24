@@ -22,6 +22,7 @@ package org.neo4j.internal.batchimport.input.csv;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import org.neo4j.batchimport.api.input.ApplicationMode;
 import org.neo4j.batchimport.api.input.Group;
 import org.neo4j.batchimport.api.input.InputEntityVisitor;
 import org.neo4j.internal.batchimport.input.InputEntity;
@@ -52,13 +53,18 @@ public class InputEntityArray implements InputEntityVisitor {
     }
 
     @Override
-    public boolean property(String key, Object value) {
-        return currentEntity().property(key, value);
+    public boolean property(String key, Object value, boolean identifier) {
+        return currentEntity().property(key, value, identifier);
     }
 
     @Override
-    public boolean property(int propertyKeyId, Object value) {
-        return currentEntity().property(propertyKeyId, value);
+    public boolean property(int propertyKeyId, Object value, boolean identifier) {
+        return currentEntity().property(propertyKeyId, value, identifier);
+    }
+
+    @Override
+    public boolean removedProperties(String[] keys) {
+        return currentEntity().removedProperties(keys);
     }
 
     @Override
@@ -79,6 +85,21 @@ public class InputEntityArray implements InputEntityVisitor {
     @Override
     public boolean labels(String[] labels) {
         return currentEntity().labels(labels);
+    }
+
+    @Override
+    public boolean labels(int[] labels) {
+        return currentEntity().labels(labels);
+    }
+
+    @Override
+    public boolean removedLabels(String[] labels) {
+        return currentEntity().removedLabels(labels);
+    }
+
+    @Override
+    public boolean removedLabels(int[] labels) {
+        return currentEntity().removedLabels(labels);
     }
 
     @Override
@@ -114,6 +135,11 @@ public class InputEntityArray implements InputEntityVisitor {
     @Override
     public boolean type(String type) {
         return currentEntity().type(type);
+    }
+
+    @Override
+    public boolean applicationMode(ApplicationMode mode) {
+        return currentEntity().applicationMode(mode);
     }
 
     @Override

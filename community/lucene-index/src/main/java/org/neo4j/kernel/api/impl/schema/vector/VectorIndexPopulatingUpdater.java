@@ -21,53 +21,59 @@ package org.neo4j.kernel.api.impl.schema.vector;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import org.neo4j.internal.schema.SchemaDescriptorSupplier;
-import org.neo4j.kernel.api.exceptions.index.IndexEntryConflictException;
-import org.neo4j.kernel.api.impl.schema.vector.VectorSimilarityFunctions.LuceneVectorSimilarityFunction;
-import org.neo4j.kernel.api.impl.schema.writer.LuceneIndexWriter;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDocumentsFactory;
+import org.neo4j.kernel.api.impl.schema.writer.LucenePartitionIndexWriter;
 import org.neo4j.kernel.api.index.IndexUpdater;
-import org.neo4j.kernel.api.vector.VectorCandidate;
 import org.neo4j.kernel.impl.index.schema.IndexUpdateIgnoreStrategy;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
+import org.neo4j.storageengine.api.UpdateMode;
 import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
+import org.neo4j.values.storable.Value;
 
 class VectorIndexPopulatingUpdater implements IndexUpdater {
-    private final LuceneIndexWriter writer;
+    private final LucenePartitionIndexWriter writer;
     private final IndexUpdateIgnoreStrategy ignoreStrategy;
     private final VectorDocumentStructure documentStructure;
-    private final LuceneVectorSimilarityFunction similarityFunction;
+    private final Neo4jVectorSimilarityFunction similarityFunction;
+    private final LuceneDocumentsFactory documentsFactory;
 
     VectorIndexPopulatingUpdater(
-            LuceneIndexWriter writer,
+            LucenePartitionIndexWriter writer,
             IndexUpdateIgnoreStrategy ignoreStrategy,
             VectorDocumentStructure documentStructure,
-            LuceneVectorSimilarityFunction similarityFunction) {
+            Neo4jVectorSimilarityFunction similarityFunction) {
         this.writer = writer;
         this.documentStructure = documentStructure;
         this.ignoreStrategy = ignoreStrategy;
         this.similarityFunction = similarityFunction;
+        this.documentsFactory = writer.documentsFactory();
     }
 
     @Override
-    public void process(IndexEntryUpdate<?> update) {
-        final var valueUpdate = asValueUpdate(update);
+    public void process(IndexEntryUpdate update) {
+        ValueIndexEntryUpdate valueUpdate = asValueUpdate(update);
         if (valueUpdate == null) {
             return;
         }
 
         try {
-            final var entityId = valueUpdate.getEntityId();
-            final var values = valueUpdate.values();
-            final var candidate = VectorCandidate.maybeFrom(values[0]);
-            final var updateMode = valueUpdate.updateMode();
+            long entityId = valueUpdate.getEntityId();
+            Value[] values = valueUpdate.values();
+            UpdateMode updateMode = valueUpdate.updateMode();
             switch (updateMode) {
-                case ADDED -> writer.updateDocument(
-                        VectorDocumentStructure.newTermForChangeOrRemove(entityId),
-                        documentStructure.createLuceneDocument(entityId, candidate, similarityFunction));
-                case CHANGED -> writer.updateOrDeleteDocument(
-                        VectorDocumentStructure.newTermForChangeOrRemove(entityId),
-                        documentStructure.createLuceneDocument(entityId, candidate, similarityFunction));
-                case REMOVED -> writer.deleteDocuments(VectorDocumentStructure.newTermForChangeOrRemove(entityId));
+                case ADDED ->
+                    writer.updateDocument(
+                            LuceneDocumentsFactory.ENTITY_ID_KEY,
+                            entityId,
+                            documentsFactory.createVectorDocument(
+                                    documentStructure, entityId, similarityFunction, values));
+                case CHANGED ->
+                    writer.updateOrDeleteDocument(
+                            LuceneDocumentsFactory.ENTITY_ID_KEY,
+                            entityId,
+                            documentsFactory.createVectorDocument(
+                                    documentStructure, entityId, similarityFunction, values));
+                case REMOVED -> writer.deleteDocuments(LuceneDocumentsFactory.ENTITY_ID_KEY, entityId);
             }
         } catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -75,12 +81,11 @@ class VectorIndexPopulatingUpdater implements IndexUpdater {
     }
 
     @Override
-    public <INDEX_KEY extends SchemaDescriptorSupplier> ValueIndexEntryUpdate<INDEX_KEY> asValueUpdate(
-            IndexEntryUpdate<INDEX_KEY> update) {
-        final var valueUpdate = IndexUpdater.super.asValueUpdate(update);
+    public ValueIndexEntryUpdate asValueUpdate(IndexEntryUpdate update) {
+        ValueIndexEntryUpdate valueUpdate = IndexUpdater.super.asValueUpdate(update);
         return !ignoreStrategy.ignore(valueUpdate) ? ignoreStrategy.toEquivalentUpdate(valueUpdate) : null;
     }
 
     @Override
-    public void close() throws IndexEntryConflictException {}
+    public void close() {}
 }

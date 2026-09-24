@@ -19,11 +19,10 @@
  */
 package org.neo4j.fabric;
 
-import static java.lang.String.format;
-
 import java.util.Optional;
 import java.util.function.Supplier;
 import org.neo4j.dbms.api.DatabaseNotFoundException;
+import org.neo4j.dbms.api.DatabaseNotFoundHelper;
 import org.neo4j.dbms.database.DatabaseContext;
 import org.neo4j.dbms.database.DatabaseContextProvider;
 import org.neo4j.fabric.config.FabricConfig;
@@ -66,23 +65,22 @@ public class FabricDatabaseManager {
         var databaseReference =
                 databaseReferenceRepo.getByAlias(databaseNameRaw).orElseThrow(databaseNotFound(databaseNameRaw));
         return getDatabaseContext(databaseReference)
-                .orElseThrow(() -> new UnavailableException(format("Database '%s' is unavailable.", databaseNameRaw)));
+                .orElseThrow(() -> UnavailableException.databaseUnavailable(
+                        databaseNameRaw, String.format("Database '%s' is unavailable.", databaseNameRaw)));
     }
 
     private Optional<? extends DatabaseContext> getDatabaseContext(DatabaseReference databaseReference) {
-        if (databaseReference instanceof DatabaseReferenceImpl.Composite) {
-            return databaseContextProvider.getDatabaseContext(
-                    ((DatabaseReferenceImpl.Composite) databaseReference).databaseId());
-        } else if (databaseReference instanceof DatabaseReferenceImpl.Internal) {
-            return databaseContextProvider.getDatabaseContext(
-                    ((DatabaseReferenceImpl.Internal) databaseReference).databaseId());
-        } else {
-            return Optional.empty();
-        }
+        return switch (databaseReference) {
+            case DatabaseReferenceImpl.Composite composite ->
+                databaseContextProvider.getDatabaseContext(composite.databaseId());
+            case DatabaseReferenceImpl.Internal internal ->
+                databaseContextProvider.getDatabaseContext(internal.databaseId());
+            default -> Optional.empty();
+        };
     }
 
     private static Supplier<DatabaseNotFoundException> databaseNotFound(String databaseNameRaw) {
-        return () -> new DatabaseNotFoundException("Database " + databaseNameRaw + " not found");
+        return () -> DatabaseNotFoundHelper.databaseNameNotFoundWithoutDot(databaseNameRaw);
     }
 
     public boolean isFabricDatabase(NamedDatabaseId databaseId) {

@@ -40,7 +40,7 @@ import org.neo4j.graphdb.Resource;
 import org.neo4j.internal.kernel.api.NodeCursor;
 import org.neo4j.internal.kernel.api.Procedures;
 import org.neo4j.internal.kernel.api.PropertyCursor;
-import org.neo4j.internal.kernel.api.RelationshipDataAccessor;
+import org.neo4j.internal.kernel.api.RelationshipCursor;
 import org.neo4j.internal.kernel.api.RelationshipScanCursor;
 import org.neo4j.internal.kernel.api.SchemaWrite;
 import org.neo4j.internal.kernel.api.TokenWrite;
@@ -186,10 +186,13 @@ public abstract class KernelIntegrationTest {
     }
 
     private void stopDb() throws TransactionFailureException {
-        if (kernelTransaction != null && kernelTransaction.isOpen()) {
-            kernelTransaction.close();
+        try {
+            if (kernelTransaction != null && kernelTransaction.isOpen()) {
+                kernelTransaction.close();
+            }
+        } finally {
+            managementService.shutdown();
         }
-        managementService.shutdown();
     }
 
     protected void restartDb() throws TransactionFailureException {
@@ -226,24 +229,27 @@ public abstract class KernelIntegrationTest {
             }
 
             return switch (direction) {
-                case OUTGOING -> outgoingIterator(
-                        transaction.cursors(),
-                        cursor,
-                        types,
-                        RelationshipDataAccessor::relationshipReference,
-                        transaction.cursorContext());
-                case INCOMING -> incomingIterator(
-                        transaction.cursors(),
-                        cursor,
-                        types,
-                        RelationshipDataAccessor::relationshipReference,
-                        transaction.cursorContext());
-                case BOTH -> allIterator(
-                        transaction.cursors(),
-                        cursor,
-                        types,
-                        RelationshipDataAccessor::relationshipReference,
-                        transaction.cursorContext());
+                case OUTGOING ->
+                    outgoingIterator(
+                            transaction.cursors(),
+                            cursor,
+                            types,
+                            RelationshipCursor::relationshipReference,
+                            transaction.cursorContext());
+                case INCOMING ->
+                    incomingIterator(
+                            transaction.cursors(),
+                            cursor,
+                            types,
+                            RelationshipCursor::relationshipReference,
+                            transaction.cursorContext());
+                case BOTH ->
+                    allIterator(
+                            transaction.cursors(),
+                            cursor,
+                            types,
+                            RelationshipCursor::relationshipReference,
+                            transaction.cursorContext());
             };
         }
     }

@@ -28,12 +28,16 @@ import org.neo4j.common.DependencyResolver;
 import org.neo4j.graphdb.security.URLAccessChecker;
 import org.neo4j.internal.kernel.api.exceptions.ProcedureException;
 import org.neo4j.internal.kernel.api.procs.ProcedureCallContext;
+import org.neo4j.internal.kernel.api.procs.ProcedureSignature;
 import org.neo4j.internal.kernel.api.procs.UserAggregationReducer;
 import org.neo4j.internal.kernel.api.procs.UserAggregationUpdater;
 import org.neo4j.internal.kernel.api.security.AccessMode;
 import org.neo4j.internal.kernel.api.security.AdminAccessMode;
+import org.neo4j.internal.kernel.api.security.PermissionState;
+import org.neo4j.internal.kernel.api.security.PrivilegeAction;
 import org.neo4j.internal.kernel.api.security.SecurityAuthorizationHandler;
 import org.neo4j.internal.kernel.api.security.SecurityContext;
+import org.neo4j.internal.kernel.api.security.StaticAccessMode;
 import org.neo4j.kernel.api.ExecutionContext;
 import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.api.procedure.Context;
@@ -47,6 +51,7 @@ import org.neo4j.kernel.impl.api.security.OverriddenAccessMode;
 import org.neo4j.kernel.impl.api.security.RestrictedAccessMode;
 import org.neo4j.kernel.impl.security.ProcedureUrlAccessChecker;
 import org.neo4j.kernel.impl.security.URIAccessRules;
+import org.neo4j.kernel.impl.security.WebURLAccessRule;
 import org.neo4j.kernel.impl.util.DefaultValueMapper;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.values.AnyValue;
@@ -74,8 +79,8 @@ public abstract class ProcedureCaller {
         }
 
         final SecurityContext securityContext = mode.shouldBoostFunction(id).allowsAccess()
-                ? securityContext().withMode(new OverriddenAccessMode(mode, AccessMode.Static.READ))
-                : securityContext().withMode(new RestrictedAccessMode(mode, AccessMode.Static.READ));
+                ? securityContext().withMode(new OverriddenAccessMode(mode, StaticAccessMode.READ))
+                : securityContext().withMode(new RestrictedAccessMode(mode, StaticAccessMode.READ));
 
         try (var ignore = overrideSecurityContext(securityContext)) {
             return procedureView.callFunction(prepareContext(securityContext, context), id, input);
@@ -103,8 +108,8 @@ public abstract class ProcedureCaller {
             boolean overrideAccessMode, AccessMode mode, int functionId, ProcedureCallContext context)
             throws ProcedureException {
         final SecurityContext securityContext = overrideAccessMode
-                ? securityContext().withMode(new OverriddenAccessMode(mode, AccessMode.Static.READ))
-                : securityContext().withMode(new RestrictedAccessMode(mode, AccessMode.Static.READ));
+                ? securityContext().withMode(new OverriddenAccessMode(mode, StaticAccessMode.READ))
+                : securityContext().withMode(new RestrictedAccessMode(mode, StaticAccessMode.READ));
 
         try (var ignore = overrideSecurityContext(securityContext)) {
             UserAggregationReducer aggregator =
@@ -161,7 +166,7 @@ public abstract class ProcedureCaller {
     }
 
     public ResourceRawIterator<AnyValue[], ProcedureException> callProcedure(
-            int id, AnyValue[] input, AccessMode.Static procedureMode, ProcedureCallContext procedureCallContext)
+            int id, AnyValue[] input, StaticAccessMode procedureMode, ProcedureCallContext procedureCallContext)
             throws ProcedureException {
         performCheckBeforeOperation();
 
@@ -175,7 +180,7 @@ public abstract class ProcedureCaller {
         SecurityContext procedureSecurityContext = mode.shouldBoostProcedure(id).allowsAccess()
                 ? securityContext
                         .withMode(new OverriddenAccessMode(mode, procedureMode))
-                        .withMode(AdminAccessMode.FULL)
+                        .withMode(boostedAdminAccessMode(securityContext))
                 : securityContext.withMode(new RestrictedAccessMode(mode, procedureMode));
 
         ResourceRawIterator<AnyValue[], ProcedureException> procedureCall;
@@ -184,6 +189,21 @@ public abstract class ProcedureCaller {
         }
 
         return createIterator(procedureSecurityContext, procedureCall);
+    }
+
+    /**
+     * EXECUTE BOOSTED grants every admin action unconditionally, since it's meant to boost data access
+     * (see {@link OverriddenAccessMode}), not bypass externalities like the secrets manager - so
+     * secrets-management actions are deferred to the pre-boost admin access mode instead of being boosted.
+     */
+    private static AdminAccessMode boostedAdminAccessMode(SecurityContext preBoostSecurityContext) {
+        return action -> PrivilegeAction.SECRETS_MANAGEMENT.satisfies(action.action())
+                ? preBoostSecurityContext.allowsAdminAction(action)
+                : PermissionState.EXPLICIT_GRANT;
+    }
+
+    public ProcedureSignature procedureSignature(int id) throws ProcedureException {
+        return procedureView.procedureSignature(id);
     }
 
     private ResourceRawIterator<AnyValue[], ProcedureException> createIterator(
@@ -225,15 +245,6 @@ public abstract class ProcedureCaller {
 
     abstract ClockContext clockContext();
 
-    URLAccessChecker urlAccessChecker() {
-        return new ProcedureUrlAccessChecker(
-                this.databaseDependencies
-                        .resolveDependency(URIAccessRules.class)
-                        .webAccess(),
-                securityAuthorizationHandler(),
-                securityContext());
-    }
-
     abstract ValueMapper<Object> createValueMapper();
 
     public abstract UserAggregationReducer createAggregationFunction(int id, ProcedureCallContext context)
@@ -241,6 +252,15 @@ public abstract class ProcedureCaller {
 
     abstract ResourceRawIterator<AnyValue[], ProcedureException> doCallProcedure(Context ctx, int id, AnyValue[] input)
             throws ProcedureException;
+
+    private Supplier<URLAccessChecker> urlAccessChecker() {
+        return () -> {
+            WebURLAccessRule webURLAccessRule = this.databaseDependencies
+                    .resolveDependency(URIAccessRules.class)
+                    .webAccess();
+            return new ProcedureUrlAccessChecker(webURLAccessRule, securityAuthorizationHandler(), securityContext());
+        };
+    }
 
     public static class ForTransactionScope extends ProcedureCaller {
 
@@ -341,7 +361,7 @@ public abstract class ProcedureCaller {
             AccessMode mode = checkAggregationFunctionAccessMode(id);
             // The FULL access mode returns true on all shouldBoost-calls,
             // but it doesn't need any boost here since it already supports all read operations.
-            boolean overrideAccessMode = mode != AccessMode.Static.FULL
+            boolean overrideAccessMode = mode != StaticAccessMode.FULL
                     && mode.shouldBoostAggregatingFunction(id).allowsAccess();
             if (overrideAccessMode) {
                 return createGenericAggregator(true, mode, id, context);

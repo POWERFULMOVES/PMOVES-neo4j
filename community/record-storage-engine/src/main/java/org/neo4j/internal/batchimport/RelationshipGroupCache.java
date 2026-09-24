@@ -76,7 +76,7 @@ public class RelationshipGroupCache
         }
         maxCacheLength = memoryLeftForGroupCache / GROUP_ENTRY_SIZE;
         this.cache = arrayFactory.newDynamicByteArray(
-                max(1_000, maxCacheLength / 100), new byte[GROUP_ENTRY_SIZE], memoryTracker);
+                (int) max(1_000, maxCacheLength / 100), new byte[GROUP_ENTRY_SIZE], memoryTracker);
     }
 
     /**
@@ -123,7 +123,7 @@ public class RelationshipGroupCache
         highCacheId = 0;
         for (long nodeId = fromNodeId; nodeId < highNodeId; nodeId++) {
             int count = groupCount(nodeId);
-            if (highCacheId + count > maxCacheLength) {
+            if (nodeId > fromNodeId && highCacheId + count > maxCacheLength) {
                 // Cannot include this one, so up until the previous is good
                 return this.toNodeId = nodeId;
             }
@@ -178,7 +178,7 @@ public class RelationshipGroupCache
             }
 
             if (desiredIndex == -1) {
-                int existingType = cache.get3ByteInt(candidateIndex, 1);
+                int existingType = to3ByteUnsignedInt(cache.get3ByteInt(candidateIndex, 1));
                 if (existingType == type) {
                     throw new IllegalStateException(
                             "Tried to put multiple groups with same type " + type + " for node " + owningNodeId);
@@ -216,8 +216,8 @@ public class RelationshipGroupCache
 
     private void moveRight(long fromIndex, long toIndex) {
         for (long index = toIndex; index > fromIndex; index--) {
-            cache.get(index - 1, scratch);
-            cache.set(index, scratch);
+            cache.getElement(index - 1, scratch);
+            cache.setElement(index, scratch);
         }
     }
 
@@ -244,7 +244,7 @@ public class RelationshipGroupCache
                         group = new RelationshipGroupRecord(-1)
                                 .initialize(
                                         true,
-                                        cache.get3ByteInt(cursor, 1),
+                                        to3ByteUnsignedInt(cache.get3ByteInt(cursor, 1)),
                                         cache.get6ByteLong(cursor, 1 + 3),
                                         cache.get6ByteLong(cursor, 1 + 3 + 6),
                                         cache.get6ByteLong(cursor, 1 + 3 + 6 + 6),
@@ -287,5 +287,9 @@ public class RelationshipGroupCache
     @Override
     public void close() {
         IOUtils.closeAllUnchecked(cache, offsets, groupCountCache);
+    }
+
+    private static int to3ByteUnsignedInt(int value) {
+        return value & 0xFFFFFF;
     }
 }

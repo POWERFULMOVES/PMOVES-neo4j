@@ -16,34 +16,77 @@
  */
 package org.neo4j.cypher.internal.ast
 
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.ASTSlicingPhrase.checkExpressionIsStaticInt
+import org.neo4j.cypher.internal.ast.ASTSlicingPhrase.checkExpressionIsStaticNumber
 import org.neo4j.cypher.internal.ast.Match.hintPrettifier
 import org.neo4j.cypher.internal.ast.ReturnItems.ReturnVariables
+import org.neo4j.cypher.internal.ast.ShowDatabase.ACCESS_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.ADDRESS_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.ALIASES_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.CONSTITUENTS_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.CREATION_TIME_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.CURRENT_PRIMARIES_COUNT_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.CURRENT_PROPERTY_SHARD_REPLICA_COUNT_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.CURRENT_SECONDARIES_COUNT_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.CURRENT_STATUS_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.DATABASE_ID_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.DEFAULT_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.DEFAULT_LANGUAGE_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.GRAPH_SHARDS_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.HOME_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.LAST_COMMITTED_TX_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.LAST_START_TIME_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.LAST_STOP_TIME_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.NAME_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.OPTIONS_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.PROPERTY_SHARDS_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.REPLICATION_LAG_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.REQUESTED_PRIMARIES_COUNT_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.REQUESTED_PROPERTY_SHARDS_REPLICA_COUNT_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.REQUESTED_SECONDARIES_COUNT_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.REQUESTED_STATUS_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.ROLE_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.SERVER_ID_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.SHARD_TX_LAG_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.STATUS_MSG_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.STORE_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.TYPE_COL
+import org.neo4j.cypher.internal.ast.ShowDatabase.WRITER_COL
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorFail
+import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorRetryThenFail
 import org.neo4j.cypher.internal.ast.connectedComponents.RichConnectedComponent
 import org.neo4j.cypher.internal.ast.prettifier.ExpressionStringifier
 import org.neo4j.cypher.internal.ast.prettifier.PatternStringifier
 import org.neo4j.cypher.internal.ast.prettifier.Prettifier
+import org.neo4j.cypher.internal.ast.semantics.*
+import org.neo4j.cypher.internal.ast.semantics.MapExtendedType
 import org.neo4j.cypher.internal.ast.semantics.Scope
 import org.neo4j.cypher.internal.ast.semantics.SemanticAnalysisTooling
+import org.neo4j.cypher.internal.ast.semantics.SemanticAnalysisToolingErrorWithGqlInfo
+import org.neo4j.cypher.internal.ast.semantics.SemanticAnalysisToolingErrorWithGqlInfo.variableAlreadyDeclaredError
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheck
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheck.fromState
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheck.success
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheck.when
+import org.neo4j.cypher.internal.ast.semantics.SemanticCheckContext
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheckResult
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheckable
 import org.neo4j.cypher.internal.ast.semantics.SemanticError
 import org.neo4j.cypher.internal.ast.semantics.SemanticErrorDef
 import org.neo4j.cypher.internal.ast.semantics.SemanticExpressionCheck
-import org.neo4j.cypher.internal.ast.semantics.SemanticExpressionCheck.FilteringExpressions
 import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.AllowClauseWithMixedLabelSyntax
 import org.neo4j.cypher.internal.ast.semantics.SemanticPatternCheck
 import org.neo4j.cypher.internal.ast.semantics.SemanticPatternCheck.error
 import org.neo4j.cypher.internal.ast.semantics.SemanticState
 import org.neo4j.cypher.internal.ast.semantics.SemanticState.ScopeLocation
+import org.neo4j.cypher.internal.ast.semantics.SymbolUse
 import org.neo4j.cypher.internal.ast.semantics.TypeGenerator
 import org.neo4j.cypher.internal.ast.semantics.iterableOnceSemanticChecking
 import org.neo4j.cypher.internal.ast.semantics.optionSemanticChecking
+import org.neo4j.cypher.internal.ast.semantics.scoping.ExpressionScope
+import org.neo4j.cypher.internal.ast.semantics.scoping.ProjectionExpressionContext
 import org.neo4j.cypher.internal.expressions.And
 import org.neo4j.cypher.internal.expressions.Ands
 import org.neo4j.cypher.internal.expressions.Contains
@@ -52,8 +95,8 @@ import org.neo4j.cypher.internal.expressions.EndsWith
 import org.neo4j.cypher.internal.expressions.Equals
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.Expression.SemanticContext
+import org.neo4j.cypher.internal.expressions.False
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
-import org.neo4j.cypher.internal.expressions.FunctionName
 import org.neo4j.cypher.internal.expressions.HasLabels
 import org.neo4j.cypher.internal.expressions.HasMappableExpressions
 import org.neo4j.cypher.internal.expressions.HasTypes
@@ -62,12 +105,13 @@ import org.neo4j.cypher.internal.expressions.InequalityExpression
 import org.neo4j.cypher.internal.expressions.IsNotNull
 import org.neo4j.cypher.internal.expressions.LabelOrRelTypeName
 import org.neo4j.cypher.internal.expressions.ListLiteral
+import org.neo4j.cypher.internal.expressions.Literal
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.MapExpression
+import org.neo4j.cypher.internal.expressions.MatchMode
 import org.neo4j.cypher.internal.expressions.MatchMode.DifferentRelationships
 import org.neo4j.cypher.internal.expressions.MatchMode.MatchMode
 import org.neo4j.cypher.internal.expressions.MatchMode.RepeatableElements
-import org.neo4j.cypher.internal.expressions.Namespace
 import org.neo4j.cypher.internal.expressions.NodePattern
 import org.neo4j.cypher.internal.expressions.NonPrefixedPatternPart
 import org.neo4j.cypher.internal.expressions.Not
@@ -75,12 +119,13 @@ import org.neo4j.cypher.internal.expressions.Or
 import org.neo4j.cypher.internal.expressions.Ors
 import org.neo4j.cypher.internal.expressions.ParenthesizedPath
 import org.neo4j.cypher.internal.expressions.PathConcatenation
+import org.neo4j.cypher.internal.expressions.PathMode
 import org.neo4j.cypher.internal.expressions.PathPatternPart
 import org.neo4j.cypher.internal.expressions.Pattern
 import org.neo4j.cypher.internal.expressions.PatternElement
 import org.neo4j.cypher.internal.expressions.PatternPart
 import org.neo4j.cypher.internal.expressions.PatternPart.Selector
-import org.neo4j.cypher.internal.expressions.ProcedureName
+import org.neo4j.cypher.internal.expressions.PrefixedPatternPart
 import org.neo4j.cypher.internal.expressions.Property
 import org.neo4j.cypher.internal.expressions.PropertyKeyName
 import org.neo4j.cypher.internal.expressions.QuantifiedPath
@@ -91,7 +136,9 @@ import org.neo4j.cypher.internal.expressions.ScopeExpression
 import org.neo4j.cypher.internal.expressions.ShortestPathsPatternPart
 import org.neo4j.cypher.internal.expressions.SimplePattern
 import org.neo4j.cypher.internal.expressions.StartsWith
+import org.neo4j.cypher.internal.expressions.StringInterpolation
 import org.neo4j.cypher.internal.expressions.StringLiteral
+import org.neo4j.cypher.internal.expressions.SubqueryExpression
 import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.expressions.containsAggregate
 import org.neo4j.cypher.internal.expressions.functions.Function.isIdFunction
@@ -102,15 +149,23 @@ import org.neo4j.cypher.internal.label_expressions.LabelExpression.Disjunctions
 import org.neo4j.cypher.internal.label_expressions.LabelExpression.DynamicLeaf
 import org.neo4j.cypher.internal.label_expressions.LabelExpression.Leaf
 import org.neo4j.cypher.internal.label_expressions.LabelExpressionPredicate
+import org.neo4j.cypher.internal.notification.CartesianProductNotification
+import org.neo4j.cypher.internal.notification.IdentifierShadowsVariableNotification
+import org.neo4j.cypher.internal.notification.RedundantOptionalSubquery
 import org.neo4j.cypher.internal.util.ASTNode
-import org.neo4j.cypher.internal.util.CartesianProductNotification
 import org.neo4j.cypher.internal.util.DeprecatedFeature
 import org.neo4j.cypher.internal.util.Foldable.FoldableAny
 import org.neo4j.cypher.internal.util.Foldable.SkipChildren
 import org.neo4j.cypher.internal.util.Foldable.TraverseChildren
+import org.neo4j.cypher.internal.util.FunctionName
 import org.neo4j.cypher.internal.util.InputPosition
-import org.neo4j.cypher.internal.util.RedundantOptionalSubquery
+import org.neo4j.cypher.internal.util.Namespace
+import org.neo4j.cypher.internal.util.ProcedureName
+import org.neo4j.cypher.internal.util.Rewritable.IteratorEq
+import org.neo4j.cypher.internal.util.Rewriter
+import org.neo4j.cypher.internal.util.bottomUp
 import org.neo4j.cypher.internal.util.collection.immutable.ListSet
+import org.neo4j.cypher.internal.util.helpers.LazyVal
 import org.neo4j.cypher.internal.util.helpers.StringHelper.RichString
 import org.neo4j.cypher.internal.util.symbols.CTAny
 import org.neo4j.cypher.internal.util.symbols.CTBoolean
@@ -126,8 +181,12 @@ import org.neo4j.cypher.internal.util.symbols.CTPath
 import org.neo4j.cypher.internal.util.symbols.CTRelationship
 import org.neo4j.cypher.internal.util.symbols.CTString
 import org.neo4j.cypher.internal.util.symbols.CypherType
-import org.neo4j.exceptions.SyntaxException
+import org.neo4j.cypher.internal.util.symbols.TypeSpec
+import org.neo4j.cypher.internal.util.symbols.invariantTypeSpec
+import org.neo4j.exceptions.InternalException
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation
 import org.neo4j.gqlstatus.GqlHelper
+import org.neo4j.gqlstatus.GqlStatusInfoCodes
 import org.neo4j.kernel.database.DatabaseReference
 import org.neo4j.kernel.database.NormalizedDatabaseName
 
@@ -143,19 +202,18 @@ sealed trait Clause extends ASTNode with SemanticCheckable with SemanticAnalysis
 
   final override def semanticCheck: SemanticCheck =
     clauseSpecificSemanticCheck chain
-      fromState(checkIfMixingLabelExpressionWithOldSyntax) chain
+      whenState(_.features.contains(AllowClauseWithMixedLabelSyntax))(
+        thenBranch = SemanticCheck.success,
+        elseBranch = fromState(checkIfMixingLabelExpressionWithOldSyntax)
+      ) chain
       when(shouldRunQPPChecks) {
         checkIfMixingLegacyVarLengthWithQPPs chain
-          checkIfMixingLegacyShortestWithPathSelectorOrMatchMode
+          checkIfMixingLegacyShortestWithGpmFeatures
       }
 
   protected def shouldRunQPPChecks: Boolean = true
 
   private val stringifier = ExpressionStringifier()
-
-  object SetExtractor {
-    def unapplySeq[T](s: Set[T]): Option[Seq[T]] = Some(s.toSeq)
-  }
 
   private def checkIfMixingLabelExpressionWithOldSyntax(
     state: SemanticState
@@ -167,9 +225,11 @@ sealed trait Clause extends ASTNode with SemanticCheckable with SemanticAnalysis
     case object ReadWrite extends UsageContext
 
     case class LegacyLabelExpression(labelExpression: LabelExpression) {
-      def replacementString: String = {
+      def labelExprAndReplacement: (String, String) = {
         val isOrColon = if (labelExpression.containsIs) "IS " else ":"
-        isOrColon + stringifier.stringifyLabelExpression(labelExpression.replaceColonSyntax)
+        val prettifiedLabelExpr = isOrColon + stringifier.stringifyLabelExpression(labelExpression)
+        val replacement = isOrColon + stringifier.stringifyLabelExpression(labelExpression.replaceColonSyntax)
+        (prettifiedLabelExpr, replacement)
       }
 
       def position: InputPosition = labelExpression.position
@@ -187,30 +247,23 @@ sealed trait Clause extends ASTNode with SemanticCheckable with SemanticAnalysis
 
       def semanticCheck: SemanticCheck = when(legacy.nonEmpty && gpm.nonEmpty) {
         // we prefer the new way, so we will only error on the "legacy" expressions
-        val maybeExplanation = legacy.map { ls =>
-          (ls.replacementString, ls.position)
-        } match {
-          case SetExtractor() => None
-          case SetExtractor((singleExpression, pos)) =>
-            Some((s"This expression could be expressed as $singleExpression.", pos))
-
-          case set: Set[(String, InputPosition)] =>
-            // we report all errors on the first position as we will later on throw away everything but the first error.
-            val replacement = set.map(_._1)
-            Some((s"These expressions could be expressed as ${replacement.mkString(", ")}.", set.head._2))
+        val detailsSet: Set[(String, String, InputPosition)] = legacy.map { ls =>
+          (ls.labelExprAndReplacement._1, ls.labelExprAndReplacement._2, ls.position)
         }
-        maybeExplanation match {
-          case Some((explanation, pos)) =>
+        val maybeErrorDetails =
+          if (detailsSet.isEmpty) None
+          else {
+            // we report all errors on the first position as we will later on throw away everything but the first error.
+            Some((detailsSet.map(_._1), detailsSet.map(_._2), detailsSet.head._3))
+          }
+        maybeErrorDetails match {
+          case Some((labelExpressions, replacements, pos)) =>
             // We may have multiple conflicts, both with IS and with label expression symbols.
             // We just look at the first GPM label expression and decide what conflict we report
             // based on whether it contains IS.
             val conflictWithIS = gpm.head.containsIs
-            SemanticError(
-              if (conflictWithIS) s"Mixing the IS keyword with colon (':') between labels is not allowed. $explanation"
-              else
-                s"Mixing label expression symbols ('|', '&', '!', and '%') with colon (':') between labels is not allowed. Please only use one set of symbols. $explanation",
-              pos
-            )
+            if (conflictWithIS) SemanticError.mixingColonAndIs(labelExpressions, replacements, pos)
+            else SemanticError.invalidLabelExpression(replacements, pos)
           case None => SemanticCheck.success
         }
       }
@@ -246,19 +299,19 @@ sealed trait Clause extends ASTNode with SemanticCheckable with SemanticAnalysis
 
       def sortLabelExpressionIntoPartition(
         labelExpression: LabelExpression,
-        isNode: Boolean
+        entityType: TypeSpec
       ): Acc = {
         val acc = if (labelExpression.containsIs) {
           // Only allowed in GPM
           withGPMExpression(labelExpression)
         } else this
 
-        acc.sortLabelExpressionIntoPartitionIgnoringIs(labelExpression, isNode)
+        acc.sortLabelExpressionIntoPartitionIgnoringIs(labelExpression, entityType)
       }
 
       private def sortLabelExpressionIntoPartitionIgnoringIs(
         labelExpression: LabelExpression,
-        isNode: Boolean
+        entityType: TypeSpec
       ): Acc = {
         labelExpression match {
           case _: Leaf =>
@@ -266,16 +319,23 @@ sealed trait Clause extends ASTNode with SemanticCheckable with SemanticAnalysis
             // Thus not adding to any partition.
             this
           case _: DynamicLeaf =>
-            // A dynamic leaf is neither GPM or legacy syntax.
+            // A dynamic leaf is neither GPM nor legacy syntax.
             // Thus not adding to any partition.
             this
-          case Disjunctions(children, _) if !isNode && children.forall(_.isInstanceOf[Leaf]) =>
+          case Disjunctions(children, _)
+            if entityType != CTNode.invariant && // We continue here with unknown types to play it safe
+              children.forall(child => child.isInstanceOf[Leaf] || child.isInstanceOf[DynamicLeaf]) =>
             // The disjunction for relationships is both GPM and legacy syntax.
+            // Or in case a children is a DynamicLeaf neither GPM nor legacy syntax.
             // Thus not adding to any partition.
             this
-          case x if isNode && x.containsGpmSpecificLabelExpression    => withGPMExpression(x)
-          case x if !isNode && x.containsGpmSpecificRelTypeExpression => withGPMExpression(x)
-          case x                                                      => withLegacyExpression(x)
+          case x =>
+            val isDefinitelyNode = entityType == CTNode.invariant
+            val isDefinitelyRel = entityType == CTRelationship.invariant
+            if (!isDefinitelyRel && !isDefinitelyNode) this // We don't know the type so we ignore this expression
+            else if (isDefinitelyNode && x.containsGpmSpecificLabelExpression) withGPMExpression(x)
+            else if (isDefinitelyRel && x.containsGpmSpecificRelTypeExpression) withGPMExpression(x)
+            else withLegacyExpression(x)
         }
       }
     }
@@ -299,22 +359,16 @@ sealed trait Clause extends ASTNode with SemanticCheckable with SemanticAnalysis
       // Partition label expressions into legacy and gpm.
 
       case NodePattern(_, Some(le), _, _) => acc =>
-          val partition =
-            acc.sortLabelExpressionIntoPartition(le, isNode = true)
-          TraverseChildren(partition)
+          TraverseChildren(acc.sortLabelExpressionIntoPartition(le, CTNode))
 
       case LabelExpressionPredicate(entity, le) => acc =>
-          val isNode = state.expressionType(entity).specified == CTNode.invariant
-          val partition = Function.chain[Acc](Seq(
+          SkipChildren(Function.chain[Acc](Seq(
             _.inReadContext(),
-            _.sortLabelExpressionIntoPartition(le, isNode = isNode)
-          ))(acc)
-          SkipChildren(partition)
+            _.sortLabelExpressionIntoPartition(le, state.expressionType(entity).specified)
+          ))(acc))
 
       case RelationshipPattern(_, Some(le), _, _, _, _) => acc =>
-          val partition =
-            acc.sortLabelExpressionIntoPartition(le, isNode = false)
-          TraverseChildren(partition)
+          TraverseChildren(acc.sortLabelExpressionIntoPartition(le, CTRelationship))
     }
 
     readPartitions.semanticCheck chain
@@ -325,16 +379,16 @@ sealed trait Clause extends ASTNode with SemanticCheckable with SemanticAnalysis
     val legacyVarLengthRelationships = this.folder.treeFold(Seq.empty[RelationshipPattern]) {
       case r @ RelationshipPattern(_, _, Some(_), _, _, _) => acc =>
           TraverseChildren(acc :+ r)
-        // We should traverse into subqeries to implement CIP-40 correctly.
-        // We don't, because changing this would break backwards compatibility.
+      // We should traverse into subqeries to implement CIP-40 correctly.
+      // We don't, because changing this would break backwards compatibility.
       // See the "GPM Sync Rolling Agenda" notes for Nov 23, 2023
       case _: SubqueryCall | _: FullSubqueryExpression => acc => SkipChildren(acc)
     }
     val hasQPP = this.folder.treeFold(false) {
       case _: QuantifiedPath => _ =>
           SkipChildren(true)
-        // We should traverse into subqeries to implement CIP-40 correctly.
-        // We don't, because changing this would break backwards compatibility.
+      // We should traverse into subqeries to implement CIP-40 correctly.
+      // We don't, because changing this would break backwards compatibility.
       // See the "GPM Sync Rolling Agenda" notes for Nov 23, 2023
       case _: SubqueryCall | _: FullSubqueryExpression => acc => SkipChildren(acc)
       case _                                           => acc => if (acc) SkipChildren(acc) else TraverseChildren(acc)
@@ -342,7 +396,8 @@ sealed trait Clause extends ASTNode with SemanticCheckable with SemanticAnalysis
 
     when(hasQPP) {
       legacyVarLengthRelationships.foldSemanticCheck { legacyVarLengthRelationship =>
-        error(
+        SemanticAnalysisToolingErrorWithGqlInfo.invalidUseOfVariableLengthRelationshipError(
+          "combination with quantified relationships ('()-->*()') or quantified path patterns ('(()-->())*')",
           "Mixing variable-length relationships ('-[*]-') with quantified relationships ('()-->*()') or quantified path patterns ('(()-->())*') is not allowed.",
           legacyVarLengthRelationship.position
         )
@@ -350,26 +405,29 @@ sealed trait Clause extends ASTNode with SemanticCheckable with SemanticAnalysis
     }
   }
 
-  private def checkIfMixingLegacyShortestWithPathSelectorOrMatchMode: SemanticCheck = {
+  private def checkIfMixingLegacyShortestWithGpmFeatures: SemanticCheck = {
     val legacyShortest = this.folder.findAllByClass[ShortestPathsPatternPart]
 
-    val hasPathSelectorOrMatchMode = this.folder.treeFold(false) {
-      case s: Selector if s.isBounded   => _ => SkipChildren(true)
+    val hasClashingGpmFeature = this.folder.treeFold(false) {
+      case s: Selector if s.isSelective => _ => SkipChildren(true)
       case DifferentRelationships(true) =>
         // Allow implicit match mode
         acc => if (acc) SkipChildren(acc) else TraverseChildren(acc)
       case _: MatchMode =>
         // Forbid explicit match mode
         _ => SkipChildren(true)
+      case pathMode: PathMode if !pathMode.implicitlyCreated =>
+        // Forbid explicit path mode
+        _ => SkipChildren(true)
+      // We should traverse into subqeries to implement CIP-40 correctly.
+      // We don't, because changing this would break backwards compatibility.
       case _ => acc => if (acc) SkipChildren(acc) else TraverseChildren(acc)
     }
 
-    when(hasPathSelectorOrMatchMode) {
+    when(hasClashingGpmFeature) {
       legacyShortest.foldSemanticCheck { legacyVarLengthRelationship =>
-        error(
-          "Mixing shortestPath/allShortestPaths with path selectors (e.g. 'ANY SHORTEST') or explicit match modes ('e.g. DIFFERENT RELATIONSHIPS') is not allowed.",
-          legacyVarLengthRelationship.position
-        )
+        val fun = if (legacyVarLengthRelationship.single) "shortestPath" else "allShortestPaths"
+        error(SemanticError.invalidUseOfShortestPath(fun, legacyVarLengthRelationship.position))
       }
     }
   }
@@ -379,10 +437,6 @@ sealed trait Clause extends ASTNode with SemanticCheckable with SemanticAnalysis
 
 sealed trait UpdateClause extends Clause with HasMappableExpressions[UpdateClause] {
   override def returnVariables: ReturnVariables = ReturnVariables.empty
-
-  protected def mixingIsWithMultipleLabelsMessage(statement: String, replacement: String): String = {
-    s"It is not supported to use the `IS` keyword together with multiple labels in `$statement`. Rewrite the expression as `$replacement`."
-  }
 }
 
 sealed trait CreateOrInsert extends UpdateClause {
@@ -412,13 +466,10 @@ case class LoadCSV(
   }
 
   private def typeCheck: SemanticCheck = {
-    val typ =
-      if (withHeaders)
-        CTMap
-      else
-        CTList(CTString)
-
-    declareVariable(variable, typ)
+    if (withHeaders) {
+      declareVariable(variable, MapExtendedType.getTypeSpec(CTMap, CTString.covariant))
+    } else
+      declareVariable(variable, CTList(CTString))
   }
 }
 
@@ -429,6 +480,13 @@ object LoadCSV {
     FtpUserPassConnectionStringRegex.matches(url)
   }
 
+  // A string-interpolated URL is only partially known at parse time, so it can't be matched
+  // against FtpUserPassConnectionStringRegex. Mark every literal in it sensitive rather than
+  // risk leaking a credential that happens to be spliced into the URL unredacted.
+  private val markLiteralsSensitive: Rewriter = bottomUp(Rewriter.lift {
+    case l: Literal => l.asSensitiveLiteral
+  })
+
   def fromUrl(
     withHeaders: Boolean,
     source: Expression,
@@ -437,6 +495,7 @@ object LoadCSV {
   )(position: InputPosition): LoadCSV = {
     val sensitiveSource = source match {
       case x: StringLiteral if isSensitiveUrl(x.value) => x.asSensitiveLiteral
+      case x: StringInterpolation                      => x.endoRewrite(markLiteralsSensitive)
       case x                                           => x
     }
     LoadCSV(withHeaders, sensitiveSource, variable, fieldTerminator)(position)
@@ -492,29 +551,31 @@ final case class UseGraph(graphReference: GraphReference)(val position: InputPos
   }
 
   private def checkWorkingGraph: SemanticCheck = {
-    SemanticCheck.fromFunctionWithContext((state, context) =>
-      if (state.workingGraph.isEmpty) {
+    SemanticCheck.fromFunctionWithContext { (state, context) =>
+      state.workingGraph match {
         // The session database reference is not forwarded in all places perform a semantic check.
         // Only record the working graph for the nested check if we know the session database
-        if (
-          context.sessionDatabaseReference != null && !repeatsSessionDatabaseReference(context.sessionDatabaseReference)
-        ) {
-          SemanticCheckResult.success(state.recordWorkingGraph(Some(graphReference)))
-        } else {
-          SemanticCheckResult.success(state)
-        }
-      } else {
-        if (state.workingGraph.get.semanticallyEqual(graphReference)) {
-          SemanticCheckResult.success(state)
-        } else {
-          SemanticCheckResult.error(
+        case None => context.sessionDatabaseReference match {
+            case Some(dbRef) if !repeatsSessionDatabaseReference(dbRef) =>
+              SemanticCheckResult.success(state.recordWorkingGraph(Some(graphReference)))
+            case _ => SemanticCheckResult.success(state)
+          }
+        case Some(workingGraph) =>
+          if (workingGraph.semanticallyEqual(graphReference)) SemanticCheckResult.success(state)
+          else SemanticCheckResult.error(
+            GqlHelper.getGql42001_42N74(
+              graphReference.position.offset,
+              graphReference.position.line,
+              graphReference.position.column,
+              graphReference.print,
+              workingGraph.print
+            ),
             state,
             "Nested subqueries must use the same graph as their parent query",
             graphReference.position
           )
-        }
       }
-    )
+    }
   }
 
   /**
@@ -523,8 +584,7 @@ final case class UseGraph(graphReference: GraphReference)(val position: InputPos
    *
    * USE comp // repeats session database
    * WITH "Pete" as pete
-   * CALL {
-   *   WITH pete
+   * CALL(pete) {
    *   USE comp.constituent // does not repeat session database
    *   MATCH (n { name: pete })
    *   RETURN n
@@ -539,7 +599,7 @@ final case class UseGraph(graphReference: GraphReference)(val position: InputPos
       case GraphDirectReference(catalogName) =>
         sessionDatabaseReference != null &&
         new NormalizedDatabaseName(catalogName.qualifiedNameString).equals(sessionDatabaseReference.fullName())
-      case GraphFunctionReference(_) => false
+      case GraphFunctionReference(_, _) => false
     }
   }
 
@@ -558,21 +618,27 @@ final case class UseGraph(graphReference: GraphReference)(val position: InputPos
             if (graphFunction.functionInvocation.arguments.size == 1) {
               checkSingleTargetGraph(graphFunction)
             } else {
+              val signature = GraphByElementId.signatures.head.getSignatureAsString
+              val givenArgs = graphFunction.functionInvocation.arguments.size
+              val name = graphFunction.functionInvocation.name
               SemanticCheck.error(
-                SemanticError(
-                  SyntaxException.wrongNumberOfArguments(
-                    1,
-                    graphFunction.functionInvocation.arguments.size,
-                    graphFunction.functionInvocation.name,
-                    GraphByElementId.signatures.head.getSignatureAsString
-                  ).getMessage,
-                  position
+                SemanticError.functionCallWrongNumberOfArguments(
+                  1,
+                  givenArgs,
+                  name,
+                  signature,
+                  s"argument of type ${GraphByElementId.signatures.head.argumentTypes.head.normalizedCypherTypeString()}",
+                  position,
+                  Some(
+                    s"The procedure or function call does not provide the required number of arguments; expected 1 but got $givenArgs. The procedure or function `$name` has the signature: `$signature`."
+                  )
                 )
               )
             }
           case _ =>
             SemanticCheck.fromFunctionWithContext { (semanticState, context) =>
               SemanticCheckResult.error(
+                GqlHelper.getGql42001_42N72(position.offset, position.line, position.column),
                 semanticState,
                 context.errorMessageProvider.createDynamicGraphReferenceUnsupportedError(graphReference.print),
                 position
@@ -638,7 +704,7 @@ final case class GraphDirectReference(catalogName: CatalogName)(val position: In
   }
 }
 
-final case class GraphFunctionReference(functionInvocation: FunctionInvocation)(
+final case class GraphFunctionReference(functionInvocation: FunctionInvocation, resolveByDisplayName: Boolean)(
   val position: InputPosition
 ) extends GraphReference with SemanticAnalysisTooling {
   override def print: String = ExpressionStringifier(_.asCanonicalStringVal).apply(functionInvocation)
@@ -667,7 +733,7 @@ final case class GraphFunctionReference(functionInvocation: FunctionInvocation)(
   override def isConstantForQuery: Boolean = functionInvocation.arguments.forall(_.isConstantForQuery)
 
   override def semanticallyEqual(other: Any): Boolean = other match {
-    case GraphFunctionReference(other) =>
+    case GraphFunctionReference(other, _) =>
       other.equals(functionInvocation) &&
       functionInvocation.arguments.forall(_.isConstantForQuery) &&
       other.arguments.forall(_.isConstantForQuery)
@@ -703,13 +769,22 @@ trait SingleRelTypeCheck {
 
   private def checkRelTypes(rel: RelationshipPattern): SemanticCheck =
     rel.labelExpression match {
-      case None                          => SemanticError(exactlyOneRelErrorMessage(self.name), rel.position)
+      case None =>
+        SemanticError.invalidNumberOfRelationshipTypes(self.name, rel.position, exactlyOneRelErrorMessage(self.name))
       case Some(Leaf(RelTypeName(_), _)) => success
       case Some(DynamicLeaf(DynamicRelTypeExpression(expr, _), _)) => expr match {
           case ListLiteral(list) if list.isEmpty =>
-            SemanticError(exactlyOneRelErrorMessage(self.name), rel.position)
+            SemanticError.invalidNumberOfRelationshipTypes(
+              self.name,
+              rel.position,
+              exactlyOneRelErrorMessage(self.name)
+            )
           case ListLiteral(list) if list.size != 1 =>
-            SemanticError(tooManyTypesRelErrorMessage("", "", self.name), rel.position)
+            SemanticError.invalidNumberOfRelationshipTypes(
+              self.name,
+              rel.position,
+              tooManyTypesRelErrorMessage("", "", self.name)
+            )
           case _ => success
         }
       case Some(other) =>
@@ -717,7 +792,11 @@ trait SingleRelTypeCheck {
         val (maybePlain, exampleString) =
           if (types.size == 1) ("plain ", s"like `:${types.head.name}` ")
           else ("", "")
-        SemanticError(tooManyTypesRelErrorMessage(maybePlain, exampleString, self.name), rel.position)
+        SemanticError.invalidNumberOfRelationshipTypes(
+          self.name,
+          rel.position,
+          tooManyTypesRelErrorMessage(maybePlain, exampleString, self.name)
+        )
     }
 }
 
@@ -729,17 +808,24 @@ case class Match(
   optional: Boolean,
   matchMode: MatchMode,
   pattern: Pattern.ForMatch,
-  hints: Seq[Hint],
-  where: Option[Where]
+  hints: Seq[AstHint],
+  where: Option[Where],
+  search: Option[Search]
 )(val position: InputPosition) extends Clause with SemanticAnalysisTooling {
   override def name = "MATCH"
 
   override def clauseSpecificSemanticCheck: SemanticCheck =
     noImplicitJoinsInQuantifiedPathPatterns chain
-      SemanticPatternCheck.check(Pattern.SemanticContext.Match, pattern) ifOkChain {
+      checkPathModes chain
+      SemanticPatternCheck.check(
+        Pattern.SemanticContext.Match,
+        pattern,
+        matchMode
+      ) ifOkChain {
         hints.semanticCheck chain
           uniqueHints chain
-          checkMatchMode chain
+          search.semanticCheck chain
+          (if (search.isDefined) search.get.patternChecks(pattern) else SemanticCheck.success) chain
           where.semanticCheck chain
           checkHints chain
           checkForCartesianProducts
@@ -769,22 +855,37 @@ case class Match(
       val allVariablesInSimplePatterns: Set[LogicalVariable] =
         simplePatterns.flatMap(_.allVariables).toSet
 
+      // Restores the user facing position of the variable when throwing errors in QPPs
+      def getActualPos(variable: LogicalVariable, paths: List[QuantifiedPath]): InputPosition = {
+        paths.flatMap(_.part.allVariables).find(_.name == variable.name).getOrElse(variable).position
+      }
+
       val semanticErrors =
         quantifiedPathsPerVariable.flatMap { case (variable, paths) =>
           List(
             Option.when(paths.size > 1) {
-              s"The variable `${variable.name}` occurs in multiple quantified path patterns and needs to be renamed."
+              SemanticError.variableAlreadyDeclared(
+                variable.name,
+                s"The variable `${variable.name}` occurs in multiple quantified path patterns and needs to be renamed.",
+                getActualPos(variable, paths)
+              )
             },
             Option.when(allVariablesInSimplePatterns.contains(variable)) {
-              s"The variable `${variable.name}` occurs both inside and outside a quantified path pattern and needs to be renamed."
+              SemanticError.variableAlreadyDeclared(
+                variable.name,
+                s"The variable `${variable.name}` occurs both inside and outside a quantified path pattern and needs to be renamed.",
+                getActualPos(variable, paths)
+              )
             },
             Option.when(state.symbol(variable.name).isDefined) {
               // Because one cannot refer to a variable defined in a subsequent clause, if the variable exists in the semantic state, then it must have been defined in a previous clause.
-              s"The variable `${variable.name}` is already defined in a previous clause, it cannot be referenced as a node or as a relationship variable inside of a quantified path pattern."
+              SemanticError.variableAlreadyDeclared(
+                variable.name,
+                s"The variable `${variable.name}` is already defined in a previous clause, it cannot be referenced as a node or as a relationship variable inside of a quantified path pattern.",
+                getActualPos(variable, paths)
+              )
             }
-          ).flatten.map { errorMessage =>
-            SemanticError(errorMessage, variable.position)
-          }
+          ).flatten
         }
 
       SemanticCheck.error(semanticErrors)
@@ -825,7 +926,7 @@ case class Match(
       .groupBy(identity)
       .collect {
         case (variable, identHints) if identHints.size > 1 =>
-          SemanticError("Multiple join hints for same variable are not supported", variable.position)
+          SemanticError.multipleJoinHintsForSameVariable(variable.asCanonicalStringVal, variable.position)
       }.toVector
 
     (state: SemanticState) => semantics.SemanticCheckResult(state, errors)
@@ -850,30 +951,153 @@ case class Match(
     semantics.SemanticCheckResult(newState, Seq.empty)
   }
 
-  private def checkMatchMode: SemanticCheck = {
-    whenState(!_.features.contains(SemanticFeature.MatchModes)) {
-      matchMode match {
-        case mode: DifferentRelationships if mode.implicitlyCreated => SemanticCheckResult.success(_)
-        case _ => error(s"Match modes such as `${matchMode.prettified}` are not supported yet.", matchMode.position)
-      }
-    } ifOkChain {
-      matchMode match {
-        case _: RepeatableElements     => checkRepeatableElements(_)
-        case _: DifferentRelationships => checkDifferentRelationships(_)
-      }
+  def checkMatchMode(state: SemanticState, cypherVersion: CypherVersion): Seq[SemanticError] = {
+    val scopeLocation = state.recordedScopes.getOrElse(this, state.currentScope)
+
+    (matchMode, cypherVersion) match {
+      case (mode: DifferentRelationships, CypherVersion.Cypher5) if mode.implicitlyCreated =>
+        checkDifferentRelationshipsSelectivePathPatternCount(false)
+      case (_, CypherVersion.Cypher5) =>
+        // explicit match mode but Cypher 5
+        Seq(SemanticError.matchModesNotSupportedInCypher5(matchMode.prettified, matchMode.position))
+      case (_: RepeatableElements, _) =>
+        checkRepeatableElements(scopeLocation)
+      case (_: DifferentRelationships, _) =>
+        checkDifferentRelationshipsSelectivePathPatternCount(true)
     }
   }
 
-  private def checkRepeatableElements(state: SemanticState): SemanticCheckResult = {
-    val errors = pattern.patternParts.collect {
-      case part if !part.isBounded =>
-        SemanticError(
-          "The pattern may yield an infinite number of rows under match mode REPEATABLE ELEMENTS, " +
-            "perhaps use a path selector or add an upper bound to your quantified path patterns.",
-          part.position
+  /**
+   * Under the match mode REPEATABLE ELEMENTS, StatefulShortestPath can go into infinite
+   * loops if there is a path pattern with unbounded quantifiers. As a result, we consider patterns
+   * with unbounded quantifiers — with or without selective path search — to be unsafe under REPEATABLE ELEMENTS.
+   */
+  private def checkRepeatableElements(scopeLocation: ScopeLocation): Seq[SemanticError] = {
+    val unboundedQuantifiersErrors = pattern.patternParts.collect {
+      case part if !part.isBounded => SemanticError.unsafeUsageOfRepeatableElements(part.position)
+    }
+
+    val interiorVariableErrors = checkStrictInteriorVariableOverlap(scopeLocation)
+    val selectivePathPatternPredicateErrors =
+      checkSelectivePathPatternPredicates(scopeLocation)
+
+    unboundedQuantifiersErrors ++ interiorVariableErrors ++ selectivePathPatternPredicateErrors
+  }
+
+  /**
+   * a strict interior variable of a shortest path pattern may not overlap with any other part of the pattern.
+   */
+  private def checkStrictInteriorVariableOverlap(scope: ScopeLocation): Seq[SemanticError] = {
+    val symbolDefinitions = scope.availableSymbolDefinitions
+    val variablesInPattern = pattern.patternParts.flatMap(_.allVariables).toSet
+    val variablesInPatternDeclaredInPreviousClause =
+      variablesInPattern.filterNot(symbolDefinitions contains SymbolUse(_))
+
+    /**
+     * keeping track of which variables were found and which of these were interior.
+     */
+    case class VariablesAndErrors(
+      // these are only the strict interior nodes from selective path patterns
+      strictInteriorVariables: Set[LogicalVariable] = Set.empty,
+      otherVariables: Set[LogicalVariable] = Set.empty,
+      errors: Seq[SemanticError] = Seq.empty
+    ) {
+      def addVariables(
+        newStrictInteriorVariables: Set[LogicalVariable],
+        newOtherVariables: Set[LogicalVariable]
+      ): VariablesAndErrors =
+        evaluateVariables(newStrictInteriorVariables, newOtherVariables)
+          .copy(
+            strictInteriorVariables = strictInteriorVariables ++ newStrictInteriorVariables,
+            otherVariables = otherVariables ++ newOtherVariables
+          )
+
+      private def evaluateVariables(
+        newInteriorVariables: Set[LogicalVariable],
+        newOtherVariables: Set[LogicalVariable]
+      ): VariablesAndErrors = {
+        // variables that are strict interior to an SPP (interior except the boundary nodes) and overlap with some other part of the pattern and were not defined already
+        val overlap =
+          (
+            (newOtherVariables intersect strictInteriorVariables) union
+              (newInteriorVariables intersect otherVariables) union
+              (newInteriorVariables intersect strictInteriorVariables)
+          ) -- variablesInPatternDeclaredInPreviousClause
+
+        val newErrors = overlap.map { variable =>
+          SemanticError.variableAlreadyDeclared(variable.name, variable.position)
+        }
+
+        copy(errors = errors ++ newErrors)
+      }
+    }
+
+    pattern
+      .patternParts
+      .foldLeft(VariablesAndErrors()) {
+        case (acc, patternPart) if patternPart.isSelective && !patternPart.element.isInstanceOf[QuantifiedPath] =>
+          acc.addVariables(patternPart.strictInteriorVariables, patternPart.boundaryNodes)
+        case (acc, patternPart) =>
+          acc.addVariables(Set.empty, patternPart.allVariables)
+      }
+      .errors
+  }
+
+  private val expressionStringifier = ExpressionStringifier(preferSingleQuotes = true)
+  private val patternStringifier = PatternStringifier(expressionStringifier)
+
+  /**
+   * A selective path pattern is not allowed to have predicates referencing element variables that are defined in another path pattern in the same graph pattern.
+   * It is allowed when the referenced variable is already bound by a previous clause.
+   */
+  private def checkSelectivePathPatternPredicates(scope: ScopeLocation): Seq[SemanticError] = {
+    case class PatternPartWithReferences(patternString: String, invalidReferences: Set[LogicalVariable])
+
+    val symbolDefinitions = scope.availableSymbolDefinitions
+    val variablesInPattern = pattern.patternParts.flatMap(_.allVariables).toSet
+
+    val variablesDefinedInPreviousClauses = symbolDefinitions.filterNot(variablesInPattern.map(SymbolUse(_)))
+    val selectivePatternPartWithReferences = pattern.patternParts.collect {
+      case patternPart if patternPart.isSelective =>
+        // `patternPart` is a selective path pattern therefore, we must make sure that all its dependencies are either internal or defined in previous clauses
+
+        val variablesDefinedInsideThisPatternPart = {
+          val singletons = patternPart.folder.treeCollect {
+            case QuantifiedPath(_, _, _, groupings) => groupings.map(_.singleton)
+          }
+
+          // allVariables contains all variables defined in this path pattern that are accessible from outside the path pattern
+          patternPart.allVariables ++
+            // ... whereas dependencies of the path pattern could also stem from inside a QPP and might reference the QPP's singletons.
+            // We therefore also include the singletons in the comparison.
+            // While singletons look the same as the grouping variables when writing the query, the Namespacer separates the two.
+            // Checks that the singletons are disjoint among each other and are not referenced from outside the QPP are done as part of other semantic checks.
+            singletons.flatten
+        }
+
+        PatternPartWithReferences(
+          patternStringifier(patternPart),
+          invalidReferences =
+            patternPart.dependencies
+              // allowed: references to variables in current path pattern
+              .filterNot(variablesDefinedInsideThisPatternPart)
+              // allowed: references to previously bounded variables
+              .filterNot(variablesDefinedInPreviousClauses.map(_.asVariable))
         )
     }
-    semantics.SemanticCheckResult(state, errors)
+
+    selectivePatternPartWithReferences
+      .filter(_.invalidReferences.nonEmpty)
+      .map { errorDetails =>
+        val invalidVars = errorDetails.invalidReferences.map(_.name)
+        SemanticError.invalidReferenceInParenthesizedPathPatternPredicate(
+          errorDetails.patternString,
+          invalidVars,
+          errorDetails.invalidReferences.head.position,
+          s"""From within a selective path pattern, one may only reference variables, that are already bound in a previous `MATCH` clause.
+             |In this case, `${invalidVars.head}` is defined in the same `MATCH` clause as ${errorDetails.patternString}.""".stripMargin
+        )
+      }
   }
 
   /**
@@ -882,32 +1106,77 @@ case class Match(
    * Therefore, once there is at least one path pattern with a selective selector, then we need to make sure
    * that there is no other path pattern beside it.
    */
-  private def checkDifferentRelationships(state: SemanticState): SemanticCheckResult = {
-    val errors = if (pattern.patternParts.size > 1) {
+  private def checkDifferentRelationshipsSelectivePathPatternCount(explicitMatchModesSupported: Boolean)
+    : Seq[SemanticError] = {
+    if (pattern.patternParts.size > 1) {
       pattern.patternParts
         .find(_.isSelective)
         .map(selectivePattern =>
-          SemanticError.invalidUseOfMultiplePathPatterns(
-            state.features.contains(SemanticFeature.MatchModes),
-            selectivePattern.position
-          )
+          SemanticError.invalidUseOfMultiplePathPatterns(selectivePattern.position, explicitMatchModesSupported)
         )
         .toSeq
     } else {
       Seq.empty
     }
-    semantics.SemanticCheckResult(state, errors)
+  }
+
+  private def checkPathModes: SemanticCheck =
+    checkMatchModePathModeCompatibility chain
+      checkNoPathModeMixing chain
+      checkNoPathModeVarLength
+
+  private def checkMatchModePathModeCompatibility: SemanticCheck =
+    matchMode match {
+      case _: MatchMode.RepeatableElements =>
+        val semanticErrors = pattern.patternParts.flatMap {
+          case PrefixedPatternPart(_, _: PathMode.Walk, _) =>
+            None
+          case PrefixedPatternPart(_, pathMode, _) =>
+            Some(SemanticError.unsupportedMatchModePathModeCombination(pathMode.prettified, pathMode.position))
+        }
+        SemanticCheck.error(semanticErrors)
+      case _ =>
+        SemanticCheck.success
+    }
+
+  private def checkNoPathModeMixing: SemanticCheck = {
+    val pathModes = pattern.patternParts.collect {
+      case PrefixedPatternPart(_, pathMode, _) => pathMode.prettified
+    }.toSet
+
+    when(pathModes.size > 1) {
+      SemanticCheck.error(SemanticError.unsupportedPathModeMixing(pathModes, pattern.position))
+    }
+  }
+
+  private def checkNoPathModeVarLength: SemanticCheck = {
+    val errors =
+      pattern.patternParts.flatMap {
+        case PrefixedPatternPart(_, pathMode, part) if !pathMode.implicitlyCreated =>
+          part.folder.treeFind[RelationshipPattern] {
+            case r: RelationshipPattern => !r.isSingleLength
+          }.map { relPattern =>
+            SemanticError.unsupportedPathModeWithVarLength(
+              patternStringifier(relPattern),
+              pathMode.prettified,
+              relPattern.position
+            )
+          }
+        case _ => None
+      }
+
+    SemanticCheck.error(errors)
   }
 
   private def checkHints: SemanticCheck = SemanticCheck.fromFunctionWithContext { (semanticState, context) =>
-    def getMissingEntityKindError(variable: String, labelOrRelTypeName: String, hint: UserHint): String = {
+    def getMissingEntityKindError(variable: String, labelOrRelTypeName: String, hint: AstHint): String = {
       val isNode = semanticState.isNode(variable)
       val typeName = if (isNode) "label" else "relationship type"
       val functionName = if (isNode) "labels" else "type"
       val operatorDescription = hint match {
         case _: UsingIndexHint => "index"
         case _: UsingScanHint  => s"$typeName scan"
-        case _: UsingJoinHint  => "join"
+        case hint => throw InternalException.internalError(this.getClass.getSimpleName, s"unexpected hint type $hint")
       }
       val typePredicates = getLabelAndRelTypePredicates(variable).distinct
       val foundTypePredicatesDescription = typePredicates match {
@@ -954,7 +1223,7 @@ case class Match(
 
     def getHintErrorForVariable(
       operatorDescription: String,
-      hint: UserHint,
+      hint: AstHint,
       missingThingDescription: String,
       foundThingsDescription: String,
       variable: String,
@@ -976,7 +1245,7 @@ case class Match(
 
     def getHintError(
       operatorDescription: String,
-      hint: UserHint,
+      hint: AstHint,
       missingThingDescription: String,
       foundThingsDescription: String,
       entityDescription: String,
@@ -994,31 +1263,61 @@ case class Match(
       )
     }
 
-    val error: Option[SemanticErrorDef] = hints.collectFirst {
-      case hint @ UsingIndexHint(Variable(variable), LabelOrRelTypeName(labelOrRelTypeName), _, _, _)
-        if !containsLabelOrRelTypePredicate(variable, labelOrRelTypeName) =>
-        val prettyHint = hintPrettifier.asString(hint)
-        val isNode = semanticState.isNode(variable)
-        val entity = if (isNode) "NODE" else "RELATIONSHIP"
-        val legacyMessage = getMissingEntityKindError(variable, labelOrRelTypeName, hint)
-        SemanticError.missingHintPredicate(legacyMessage, prettyHint, entity, variable, hint.position)
-      case hint @ UsingIndexHint(Variable(variable), LabelOrRelTypeName(_), properties, _, _)
-        if !containsPropertyPredicates(variable, properties) =>
-        val prettyHint = hintPrettifier.asString(hint)
-        val isNode = semanticState.isNode(variable)
-        val entity = if (isNode) "NODE" else "RELATIONSHIP"
-        SemanticError.missingHintPredicate(getMissingPropertyError(hint), prettyHint, entity, variable, hint.position)
-      case hint @ UsingScanHint(Variable(variable), LabelOrRelTypeName(labelOrRelTypeName))
-        if !containsLabelOrRelTypePredicate(variable, labelOrRelTypeName) =>
-        val prettyHint = hintPrettifier.asString(hint)
-        val isNode = semanticState.isNode(variable)
-        val entity = if (isNode) "NODE" else "RELATIONSHIP"
-        val legacyMessage = getMissingEntityKindError(variable, labelOrRelTypeName, hint)
-        SemanticError.missingHintPredicate(legacyMessage, prettyHint, entity, variable, hint.position)
-      case hint @ UsingJoinHint(_) if pattern.length == 0 =>
-        SemanticError.cannotUseJoinHint(hint, hintPrettifier.asString(hint))
+    val error: Option[SemanticErrorDef] = {
+      if (isUnfulfillable(where)) {
+        // If the query is unfulfillable, then it is rewritten in UnfulfillableQueryRewriter.
+        // The rewritten version might not have the element anymore where the hint is referring to, for example a label.
+        // In that case we should not throw an error based on this hint.
+        Option.empty
+      } else {
+        hints.collectFirst {
+          case hint @ UsingIndexHint(Variable(variable), LabelOrRelTypeName(labelOrRelTypeName), _, _, _)
+            if !containsLabelOrRelTypePredicate(variable, labelOrRelTypeName) =>
+            val prettyHint = hintPrettifier.asString(hint)
+            val isNode = semanticState.isNode(variable)
+            val entity = if (isNode) "NODE" else "RELATIONSHIP"
+            val legacyMessage = getMissingEntityKindError(variable, labelOrRelTypeName, hint)
+            SemanticError.missingHintPredicate(legacyMessage, prettyHint, entity, variable, hint.position)
+          case hint @ UsingIndexHint(Variable(variable), LabelOrRelTypeName(_), properties, _, _)
+            if !containsPropertyPredicates(variable, properties) =>
+            val prettyHint = hintPrettifier.asString(hint)
+            val isNode = semanticState.isNode(variable)
+            val entity = if (isNode) "NODE" else "RELATIONSHIP"
+            SemanticError.missingHintPredicate(
+              getMissingPropertyError(hint),
+              prettyHint,
+              entity,
+              variable,
+              hint.position
+            )
+          case hint @ UsingScanHint(Variable(variable), LabelOrRelTypeName(labelOrRelTypeName))
+            if !containsLabelOrRelTypePredicate(variable, labelOrRelTypeName) =>
+            val prettyHint = hintPrettifier.asString(hint)
+            val isNode = semanticState.isNode(variable)
+            val entity = if (isNode) "NODE" else "RELATIONSHIP"
+            val legacyMessage = getMissingEntityKindError(variable, labelOrRelTypeName, hint)
+            SemanticError.missingHintPredicate(legacyMessage, prettyHint, entity, variable, hint.position)
+          case hint @ UsingJoinHint(_) if pattern.length == 0 =>
+            SemanticError.cannotUseJoinHint(hint, hintPrettifier.asString(hint))
+        }
+      }
     }
     SemanticCheckResult(semanticState, error.toSeq)
+  }
+
+  private def isUnfulfillable(maybeWhere: Option[Where]): Boolean = {
+    if (maybeWhere.isEmpty) {
+      false
+    } else {
+      isUnfulfillable(maybeWhere.get.expression)
+    }
+  }
+
+  private def isUnfulfillable(expr: Expression): Boolean = {
+    expr match {
+      case _: False => true // UnfulfillableQueryRewriter should have removed all expressions and created only False
+      case _        => false // It might be fulfillable
+    }
   }
 
   private[ast] def containsPropertyPredicates(variable: String, propertiesInHint: Seq[PropertyKeyName]): Boolean = {
@@ -1074,6 +1373,8 @@ case class Match(
           _,
           Seq(Property(Variable(`variable`), PropertyKeyName(name)), _, _),
           _,
+          _,
+          _,
           _
         ) if namespace.equalsIgnoreCase("point") && functionName.equalsIgnoreCase("withinBBox") =>
         acc => SkipChildren(acc :+ name)
@@ -1087,6 +1388,8 @@ case class Match(
                   FunctionName(Namespace(List(namespace)), functionName),
                   _,
                   Seq(Property(Variable(id), PropertyKeyName(name)), _),
+                  _,
+                  _,
                   _,
                   _
                 )
@@ -1162,9 +1465,19 @@ case class Match(
     allLabels ++ allRelTypes
   }
 
-  def allExportedVariables: Set[LogicalVariable] = pattern.patternParts.folder.treeFold(Set.empty[LogicalVariable]) {
-    case _: ScopeExpression          => acc => SkipChildren(acc)
-    case logicalVar: LogicalVariable => acc => TraverseChildren(acc ++ Set(logicalVar))
+  def allExportedVariables: Set[LogicalVariable] = {
+
+    val patternVariables = pattern.patternParts.folder.treeFold(Set.empty[LogicalVariable]) {
+      case _: ScopeExpression          => acc => SkipChildren(acc)
+      case logicalVar: LogicalVariable => acc => TraverseChildren(acc ++ Set(logicalVar))
+    }
+
+    val maybeScoreVariable = search match {
+      case Some(Search(_, Some(score), _, _, _, _, _, _, _)) => Set(score)
+      case _                                                 => Set.empty
+    }
+
+    patternVariables ++ maybeScoreVariable
   }
 }
 
@@ -1191,6 +1504,12 @@ case class Merge(pattern: NonPrefixedPatternPart, actions: Seq[MergeAction], whe
     }
   }
 
+  private def checkNoPatternComprehensionInMergeSubClause: SemanticCheck = {
+    actions.folder.treeFindByClass[SubqueryExpression]
+      .map(subquery => SemanticCheck.error(SemanticError.invalidSubqueryInMerge(subquery.position)))
+      .getOrElse(success)
+  }
+
   override def clauseSpecificSemanticCheck: SemanticCheck = {
     val updatePattern = Pattern.ForUpdate(Seq(pattern))(pattern.position)
     SemanticPatternCheck.check(Pattern.SemanticContext.Merge, updatePattern) chain
@@ -1203,6 +1522,7 @@ case class Merge(pattern: NonPrefixedPatternPart, actions: Seq[MergeAction], whe
         if (state.semanticCheckHasRunOnce) success
         else checkNoSubqueryInMerge
       } chain
+      checkNoPatternComprehensionInMergeSubClause chain
       SemanticState.recordCurrentScope(updatePattern)
   }
 }
@@ -1284,8 +1604,7 @@ case class SetClause(items: Seq[SetItem])(val position: InputPosition) extends U
         case x => Seq(x)
       }
       val replacement = prettifier.prettifySetItems(setItems)
-      val gql = GqlHelper.getGql42001_42I29(name, replacement, position.line, position.column, position.offset)
-      SemanticError(gql, mixingIsWithMultipleLabelsMessage(name, replacement), position)
+      SemanticError.mixingIsWithMultipleLabels(name, replacement, position)
     }
   }
 }
@@ -1300,7 +1619,7 @@ case class Delete(expressions: Seq[Expression], forced: Boolean)(val position: I
 
   private def warnAboutDeletingLabels =
     expressions.filter(e => e.isInstanceOf[LabelExpressionPredicate]) map {
-      e => SemanticError("DELETE doesn't support removing labels from a node. Try REMOVE.", e.position)
+      e => SemanticError.invalidDelete(e.position)
     }
 
   override def mapExpressions(f: Expression => Expression): UpdateClause = copy(expressions.map(f))(this.position)
@@ -1310,7 +1629,7 @@ case class Remove(items: Seq[RemoveItem])(val position: InputPosition) extends U
   override def name = "REMOVE"
 
   override def clauseSpecificSemanticCheck: SemanticCheck =
-    items.semanticCheck chain checkIfMixingIsWithMultipleLabels
+    items.semanticCheck chain checkIfMixingIsWithMultipleLabels()
 
   override def mapExpressions(f: Expression => Expression): UpdateClause =
     copy(items.map(_.mapExpressions(f)))(this.position)
@@ -1342,8 +1661,7 @@ case class Remove(items: Seq[RemoveItem])(val position: InputPosition) extends U
         case x => Seq(x)
       }
       val replacement = prettifier.prettifyRemoveItems(removeItems)
-      val gql = GqlHelper.getGql42001_42I29(name, replacement, position.line, position.column, position.offset)
-      SemanticError(gql, mixingIsWithMultipleLabelsMessage(name, replacement), position)
+      SemanticError.mixingIsWithMultipleLabels(name, replacement, position)
     }
   }
 }
@@ -1382,37 +1700,83 @@ case class Foreach(
 case class Unwind(
   expression: Expression,
   variable: Variable
-)(val position: InputPosition) extends Clause with SemanticAnalysisTooling {
-  override def name = "UNWIND"
+)(val position: InputPosition, val useForInSyntax: Boolean = false) extends Clause with SemanticAnalysisTooling {
+  override def name: String = if (useForInSyntax) "FOR" else "UNWIND"
+
+  override def dup(children: Seq[AnyRef]): Unwind.this.type =
+    if (children.iterator eqElements this.treeChildren)
+      this
+    else {
+      children match {
+        case Seq(e: Expression, v: Variable) =>
+          copy(expression = e, variable = v)(position, useForInSyntax).asInstanceOf[this.type]
+        case _ =>
+          throw new IllegalStateException(
+            s"Failed rewriting $this\nTried using children: ${children.mkString(",")}"
+          )
+      }
+    }
 
   override def clauseSpecificSemanticCheck: SemanticCheck =
-    SemanticExpressionCheck.check(SemanticContext.Results, expression) chain
-      expectType(CTList(CTAny).covariant | CTAny.covariant, expression) ifOkChain
-      FilteringExpressions.failIfAggregating(expression) chain {
+    SemanticExpressionCheck.check(SemanticContext.Simple, expression) chain
+      expectType(CTList(CTAny).covariant | CTAny.covariant, expression) ifOkChain {
         val possibleInnerTypes: TypeGenerator = types(expression)(_).unwrapPotentialLists
         declareVariable(variable, possibleInnerTypes)
       }
 }
 
+sealed trait OptionalState
+case object NonOptional extends OptionalState
+case object Optional extends OptionalState
+case object RewrittenOptional extends OptionalState
+
 abstract class CallClause extends Clause {
   override def name = "CALL"
 
+  def procedureName: ProcedureName
   def containsNoUpdates: Boolean
   def yieldAll: Boolean
-  def optional: Boolean
+  def optionalState: OptionalState
+  def optional: Boolean = optionalState == Optional
+
+  def asUnresolvedCall: UnresolvedCall
+
+  def argumentCheck: SemanticCheck
+  def resultCheck: SemanticCheck
+  def invalidAggregationCheck: SemanticCheck
+
+  def checkArgumentForAggregation(expr: Expression): SemanticCheck =
+    expr.findAggregate match {
+      case Some(agg) =>
+        val prettifier = ExpressionStringifier()
+        SemanticCheck.error(
+          SemanticError.aggregateExpressionsNotAllowedInProcedureCallArgument(
+            prettifier(agg),
+            agg.position
+          )
+        )
+      case _ => success
+    }
+
+  override def clauseSpecificSemanticCheck: SemanticCheck =
+    argumentCheck chain resultCheck chain invalidAggregationCheck
 }
 
 case class UnresolvedCall(
-  procedureNamespace: Namespace,
-  procedureName: ProcedureName,
+  override val procedureName: ProcedureName,
   // None: No arguments given
   declaredArguments: Option[Seq[Expression]] = None,
   // None: No results declared  (i.e. no "YIELD" part or "YIELD *")
   declaredResult: Option[ProcedureResult] = None,
+  isStandalone: Boolean = false,
   // YIELD *
   override val yieldAll: Boolean = false,
-  override val optional: Boolean = false
+  override val optionalState: OptionalState = NonOptional
 )(val position: InputPosition) extends CallClause {
+
+  def fullName: String = procedureName.fullName
+
+  override def asUnresolvedCall: UnresolvedCall = this
 
   override def returnVariables: ReturnVariables =
     ReturnVariables(
@@ -1420,26 +1784,14 @@ case class UnresolvedCall(
       declaredResult.map(_.items.map(_.variable).toList).getOrElse(List.empty)
     )
 
-  override def clauseSpecificSemanticCheck: SemanticCheck = {
-    val argumentCheck = declaredArguments.map(
-      SemanticExpressionCheck.check(SemanticContext.Results, _)
-    ).getOrElse(success)
-    val resultsCheck = declaredResult.map(_.semanticCheck).getOrElse(success)
-    val invalidExpressionsCheck = declaredArguments.map(_.map {
-      case arg if arg.containsAggregate =>
-        SemanticCheck.error(
-          SemanticError(
-            """Procedure call cannot take an aggregating function as argument, please add a 'WITH' to your statement.
-              |For example:
-              |    MATCH (n:Person) WITH collect(n.name) AS names CALL proc(names) YIELD value RETURN value""".stripMargin,
-            position
-          )
-        )
-      case _ => success
-    }.foldLeft(success)(_ chain _)).getOrElse(success)
+  override val argumentCheck: SemanticCheck = declaredArguments.map(
+    // could this be checked with SemanticContext.Simple to make the invalidExpressionsCheck obsolete?
+    SemanticExpressionCheck.check(SemanticContext.Results, _)
+  ).getOrElse(success)
+  override val resultCheck: SemanticCheck = declaredResult.map(_.semanticCheck).getOrElse(success)
 
-    argumentCheck chain resultsCheck chain invalidExpressionsCheck
-  }
+  override val invalidAggregationCheck: SemanticCheck =
+    declaredArguments.getOrElse(Seq.empty).foldSemanticCheck(arg => checkArgumentForAggregation(arg))
 
   // At this stage we can't know this, so we assume the CALL is non updating,
   // it should be rechecked when the call is resolved
@@ -1450,8 +1802,8 @@ case class UnresolvedCall(
   def wrappedOptional(subqueryScope: ScopeLocation): SemanticCheck = {
     declaredResult.map(_.items.map(_.variable).toList).getOrElse(List.empty).foldSemanticCheck(result =>
       subqueryScope.localSymbol(result.name) match {
-        case Some(_) => error(
-            s"Variable `${result.name}` already declared",
+        case Some(_) => variableAlreadyDeclaredError(
+            result.name,
             result.position
           )
         case _ => success
@@ -1469,29 +1821,82 @@ sealed trait HorizonClause extends Clause with SemanticAnalysisTooling {
 object ProjectionClause {
 
   def unapply(arg: ProjectionClause)
-    : Option[(Boolean, ReturnItems, Option[OrderBy], Option[Skip], Option[Limit], Option[Where])] = {
+    : Option[(Boolean, ReturnItems, Option[GroupBy], Option[OrderBy], Option[Skip], Option[Limit], Option[Where])] = {
     arg match {
-      case With(distinct, ri, orderBy, skip, limit, where, _) => Some((distinct, ri, orderBy, skip, limit, where))
-      case Return(distinct, ri, orderBy, skip, limit, _, _)   => Some((distinct, ri, orderBy, skip, limit, None))
-      case Yield(ri, orderBy, skip, limit, where)             => Some((false, ri, orderBy, skip, limit, where))
+      case With(distinct, ri, groupBy, orderBy, skip, limit, where, _) =>
+        Some((distinct, ri, groupBy, orderBy, skip, limit, where))
+      case Return(distinct, ri, groupBy, orderBy, skip, limit, _, _, _) =>
+        Some((distinct, ri, groupBy, orderBy, skip, limit, None))
+      case Yield(ri, orderBy, skip, limit, where, _) => Some((false, ri, None, orderBy, skip, limit, where))
+    }
+  }
+
+  case class Subclauses(
+    groupBy: Option[GroupBy],
+    orderBy: Option[OrderBy],
+    skip: Option[Skip],
+    limit: Option[Limit],
+    where: Option[Where]
+  ) {
+
+    def sortAndPredicateExpressions: Seq[Expression] = {
+
+      val sortExpressions = orderBy.map(_.sortItems.map(_.expression)).toSeq.flatten
+      val predicateExpressions = where.map(_.expression)
+
+      (sortExpressions ++ predicateExpressions).toSeq
+    }
+
+    def hasSubclause: Boolean =
+      groupBy.isDefined || orderBy.isDefined || skip.isDefined || limit.isDefined || where.isDefined
+  }
+
+  case class Elements(
+    distinct: Boolean,
+    items: Seq[ReturnItem],
+    subclauses: Subclauses,
+    clauseType: ClauseType,
+    projectionType: ProjectionType
+  )
+
+  object Elements {
+
+    def apply(arg: ProjectionClause): Elements = {
+      arg match {
+        case With(distinct, ReturnItems(projectionType, items, _), groupBy, orderBy, skip, limit, where, withType) =>
+          Elements(distinct, items, Subclauses(groupBy, orderBy, skip, limit, where), withType, projectionType)
+        case Return(distinct, ReturnItems(projectionType, items, _), groupBy, orderBy, skip, limit, _, returnType, _) =>
+          Elements(distinct, items, Subclauses(groupBy, orderBy, skip, limit, None), returnType, projectionType)
+        case Yield(ReturnItems(projectionType, items, _), orderBy, skip, limit, where, yieldType) =>
+          Elements(distinct = false, items, Subclauses(None, orderBy, skip, limit, where), yieldType, projectionType)
+      }
     }
   }
 
   def checkAliasedReturnItems(returnItems: ReturnItems, clauseName: String): SemanticState => Seq[SemanticError] =
     state =>
-      returnItems match {
-        case li: ReturnItems =>
-          li.items.filter(item => item.alias.isEmpty).map(i => {
-            SemanticError.unaliasedReturnItem(clauseName, i.position)
-          })
-        case _ => Seq()
-      }
+      returnItems.items.filter {
+        case a: AliasedReturnItem => a.wasAutoAliased
+        case item                 => item.alias.isEmpty
+      }.map(i => {
+        SemanticError.unaliasedReturnItem(clauseName, i.position)
+      })
 }
 
 sealed trait ProjectionClause extends HorizonClause {
   def distinct: Boolean
 
   def returnItems: ReturnItems
+
+  private val isAggregatingLazy: LazyVal[Boolean] =
+    LazyVal(returnItems.directlyContainsAggregate || distinct || groupBy.isDefined)
+  def isAggregating: Boolean = isAggregatingLazy.value
+
+  private val hasExpandableSubclauseLazy: LazyVal[Boolean] =
+    LazyVal(groupBy.isDefined || orderBy.isDefined || where.isDefined)
+  def hasExpandableSubclause: Boolean = hasExpandableSubclauseLazy.value
+
+  def groupBy: Option[GroupBy]
 
   def orderBy: Option[OrderBy]
 
@@ -1510,15 +1915,26 @@ sealed trait ProjectionClause extends HorizonClause {
   def copyProjection(
     distinct: Boolean = this.distinct,
     returnItems: ReturnItems = this.returnItems,
+    groupBy: Option[GroupBy] = this.groupBy,
     orderBy: Option[OrderBy] = this.orderBy,
     skip: Option[Skip] = this.skip,
     limit: Option[Limit] = this.limit,
     where: Option[Where] = this.where
   ): ProjectionClause = {
     this match {
-      case w: With   => w.copy(distinct, returnItems, orderBy, skip, limit, where)(this.position)
-      case r: Return => r.copy(distinct, returnItems, orderBy, skip, limit, r.excludedNames)(this.position)
+      case w: With   => w.copy(distinct, returnItems, groupBy, orderBy, skip, limit, where)(this.position)
+      case r: Return => r.copy(distinct, returnItems, groupBy, orderBy, skip, limit, r.excludedNames)(this.position)
       case y: Yield  => y.copy(returnItems, orderBy, skip, limit, where)(this.position)
+    }
+  }
+
+  def withRewrittenType: ProjectionClause = {
+    this match {
+      case w @ With(_, _, _, _, _, _, _, flavour: FlavouredWithType) =>
+        w.copy(withType = AddedInRewriteGeneral(AddedWithOrigin.RewrittenFlavoured(flavour)))(this.position)
+      case w @ With(_, _, _, _, _, _, _, _) => w
+      case r: Return                        => r
+      case y: Yield                         => y
     }
   }
 
@@ -1534,15 +1950,16 @@ sealed trait ProjectionClause extends HorizonClause {
     SemanticCheck.fromState {
       (state: SemanticState) =>
         /**
-       * scopeToImportVariablesFrom will provide the scope to bring over only the variables that are needed from the
-       * previous scope
-       */
+         * scopeToImportVariablesFrom will provide the scope to bring over only the variables that are needed from the
+         * previous scope
+         */
         def runChecks(scopeToImportVariablesFrom: Scope): SemanticCheck = {
           returnItems.declareVariables(scopeToImportVariablesFrom) chain
-            orderBy.semanticCheck chain
+            groupBy.semanticCheck chain
+            checkOrderBy chain
             limit.semanticCheck chain
             skip.semanticCheck chain
-            where.semanticCheck
+            where.foldSemanticCheck(checkWhere)
         }
 
         // The two clauses ORDER BY and WHERE, following a WITH clause where there is no DISTINCT nor aggregation, have a special scope such that they
@@ -1620,27 +2037,31 @@ sealed trait ProjectionClause extends HorizonClause {
                 warnOnAccessToRestrictedVariableInOrderByOrWhere(state.currentScope.symbolNames)
               )
               SemanticCheckResult(checksResult.state, niceErrors)
-
             }
           }
 
         (isReturn, outerScope) match {
-          case (true, Some(outer)) => check.map { result =>
-              val outerScopeSymbolNames = outer.symbolNames
-              val outputSymbolNames = result.state.currentScope.scope.symbolNames
-              val alreadyDeclaredNames = outputSymbolNames.intersect(outerScopeSymbolNames)
-              val explicitReturnVariablesByName =
-                returnItems.returnVariables.explicitVariables.map(v => v.name -> v).toMap
-              val errors = alreadyDeclaredNames.map { name =>
-                val position = explicitReturnVariablesByName.getOrElse(name, returnItems).position
-                SemanticError.variableAlreadyDeclaredInOuterScope(name, position)
+          case (true, Some(outer)) => check.flatMap { result =>
+              val inImportingWith = this match {
+                case r: Return => r.context == ImportingWithSubqueryCall
+                case _         => true
               }
+              when(inImportingWith, check) { (_: SemanticState) =>
+                val outerScopeSymbolNames = outer.symbolNames
+                val outputSymbolNames = result.state.currentScope.scope.symbolNames
+                val alreadyDeclaredNames = outputSymbolNames.intersect(outerScopeSymbolNames)
+                val explicitReturnVariablesByName =
+                  returnItems.returnVariables.explicitVariables.map(v => v.name -> v).toMap
+                val errors = alreadyDeclaredNames.map { name =>
+                  val position = explicitReturnVariablesByName.getOrElse(name, returnItems).position
+                  SemanticError.variableAlreadyDeclaredInOuterScope(name, position)
+                }
 
-              SemanticCheckResult(result.state, result.errors ++ errors)
+                SemanticCheckResult(result.state, result.errors ++ errors)
+              }
             }
 
-          case _ =>
-            check
+          case _ => check
         }
     }
 
@@ -1659,35 +2080,135 @@ sealed trait ProjectionClause extends HorizonClause {
   ): SemanticErrorDef = {
     previousScopeVars.collectFirst {
       case name if error.msg.equals(s"Variable `$name` not defined") =>
-        error.withMsg(
-          s"In a WITH/RETURN with DISTINCT or an aggregation, it is not possible to access variables declared before the WITH/RETURN: $name"
-        )
+        error.withMsg(SemanticError.inaccessibleVariable(name, this.name, error.position))
     }.getOrElse(error)
   }
+
+  private def cypher25SubclauseExpressionCheck(
+    expression: Expression,
+    ctx: SemanticCheckContext
+  ): SemanticCheck = {
+    val standardCheck = SemanticExpressionCheck.check(SemanticContext.Results, expression)
+    val alias = ctx.scopeState.flatMap { scopeState =>
+      scopeState.scopeOfOpt(expression).collect {
+        case ExpressionScope(_, pec: ProjectionExpressionContext, _, _, _) => pec.projectionSpecification
+      }.flatMap(spec =>
+        spec.substituteFullExpression(expression, useLegacySubstitution = !spec.hasGroupBy, scopeState)
+      ).collect { case lv: LogicalVariable => lv }
+    }
+    alias match {
+      case Some(a) =>
+        standardCheck.map(result => SemanticCheckResult(result.state, Seq.empty)) chain
+          specifyType(types(a), expression)
+      case None =>
+        standardCheck
+    }
+  }
+
+  private def checkOrderBy: SemanticCheck =
+    SemanticCheck.fromContext { ctx =>
+      if (ctx.cypherVersion == CypherVersion.Cypher5) orderBy.semanticCheck
+      else orderBy.foldSemanticCheck(_.sortItems.foldSemanticCheck { si =>
+        cypher25SubclauseExpressionCheck(si.expression, ctx) chain
+          SemanticPatternCheck.checkValidPropertyKeyNames(
+            si.expression.folder.findAllByClass[Property].map(_.propertyKey)
+          )
+      })
+    }
+
+  private def checkWhere(wh: Where): SemanticCheck =
+    SemanticCheck.fromContext { ctx =>
+      if (ctx.cypherVersion == CypherVersion.Cypher5)
+        Where.checkExpression(wh.expression)
+      else
+        cypher25SubclauseExpressionCheck(wh.expression, ctx) chain
+          SemanticPatternCheck.checkValidPropertyKeyNames(
+            wh.expression.folder.findAllByClass[Property].map(_.propertyKey)
+          ) chain
+          SemanticExpressionCheck.expectType(CTBoolean.covariant, wh.expression)
+    }
 
   def verifyOrderByAggregationUse(fail: (String, InputPosition) => Nothing): Unit = {
     val aggregationInProjection = returnItems.containsAggregate
     val aggregationInOrderBy = orderBy.exists(_.sortItems.map(_.expression).exists(containsAggregate))
     if (!aggregationInProjection && aggregationInOrderBy)
-      fail(s"Cannot use aggregation in ORDER BY if there are no aggregate expressions in the preceding $name", position)
+      fail(name, position)
   }
 }
 
-// used for SHOW/TERMINATE commands
-sealed trait WithType
-case object DefaultWith extends WithType
-case object ParsedAsYield extends WithType
-case object AddedInRewrite extends WithType
+// used for SHOW/TERMINATE commands (and procedure calls against system)
+sealed trait ClauseType
+
+sealed trait YieldType extends ClauseType
+case object DefaultYield extends YieldType
+case object YieldAddedInRewrite extends YieldType
+
+sealed trait WithType extends ClauseType
+sealed trait MayBeImportingWithType
+sealed trait GenericWithType extends WithType
+sealed trait FlavouredWithType extends WithType
+sealed trait StarNotReferencing
+sealed trait OrderByOrPaginationWithType extends FlavouredWithType with StarNotReferencing
+case object DefaultWith extends GenericWithType with MayBeImportingWithType
+case object ParsedAsOrderBy extends OrderByOrPaginationWithType
+case object ParsedAsSkip extends OrderByOrPaginationWithType
+case object ParsedAsLimit extends OrderByOrPaginationWithType
+case object ParsedAsFilter extends FlavouredWithType with StarNotReferencing
+case object ParsedAsLet extends FlavouredWithType with StarNotReferencing
+case object ParsedAsYield extends WithType with YieldType
+case object AddedInRewriteShowCommands extends GenericWithType
+case object AddedInRewriteProcCall extends GenericWithType
+
+sealed trait AddedWithOrigin
+
+object AddedWithOrigin {
+  case class Synthesized(label: Option[String] = None) extends AddedWithOrigin
+  case class RewrittenFlavoured(flavour: FlavouredWithType) extends AddedWithOrigin
+}
+
+case class AddedInRewriteGeneral(origin: AddedWithOrigin = AddedWithOrigin.Synthesized())
+    extends GenericWithType with MayBeImportingWithType
+
+sealed trait ReturnType extends ClauseType {
+
+  def addedInRewrite: Boolean
+  def suppressInRendering: Boolean
+}
+
+case object DefaultReturn extends ReturnType {
+  override def addedInRewrite: Boolean = false
+  override def suppressInRendering: Boolean = false
+}
+
+case object ReturnAddedInRewrite extends ReturnType {
+  override def addedInRewrite: Boolean = true
+  override def suppressInRendering: Boolean = true
+}
+
+case object RenderedReturnAddedInRewrite extends ReturnType {
+  override def addedInRewrite: Boolean = true
+  override def suppressInRendering: Boolean = false
+}
 
 object With {
 
   def apply(returnItems: ReturnItems)(pos: InputPosition): With =
-    With(distinct = false, returnItems, None, None, None, None)(pos)
+    With(distinct = false, returnItems, None, None, None, None, None)(pos)
+
+  def apply(returnItems: ReturnItems, withType: WithType)(pos: InputPosition): With =
+    With(distinct = false, returnItems, None, None, None, None, None, withType)(pos)
+
+  def apply(returnItems: ReturnItems, where: Where, withType: WithType)(pos: InputPosition): With =
+    With(distinct = false, returnItems, None, None, None, None, Some(where), withType)(pos)
+
+  def apply(distinct: Boolean, returnItems: ReturnItems, withType: WithType)(pos: InputPosition): With =
+    With(distinct, returnItems, None, None, None, None, None, withType)(pos)
 }
 
 case class With(
   distinct: Boolean,
   returnItems: ReturnItems,
+  groupBy: Option[GroupBy],
   orderBy: Option[OrderBy],
   skip: Option[Skip],
   limit: Option[Limit],
@@ -1695,15 +2216,42 @@ case class With(
   withType: WithType = DefaultWith
 )(val position: InputPosition) extends ProjectionClause {
 
-  override def name = "WITH"
+  override def name: String = withType match {
+    case AddedInRewriteGeneral(AddedWithOrigin.RewrittenFlavoured(flavour)) => flavourName(flavour)
+    case AddedInRewriteGeneral(AddedWithOrigin.Synthesized(Some(label)))    => label
+    case flavour: FlavouredWithType                                         => flavourName(flavour)
+    case ParsedAsYield                                                      => "YIELD"
+    case _                                                                  => "WITH"
+  }
+
+  private def flavourName(flavour: FlavouredWithType): String = flavour match {
+    case ParsedAsOrderBy => "ORDER BY"
+    case ParsedAsSkip    => skip.get.name
+    case ParsedAsLimit   => limit.get.name
+    case ParsedAsFilter  => "FILTER"
+    case ParsedAsLet     => "LET"
+  }
 
   override def clauseSpecificSemanticCheck: SemanticCheck =
-    super.clauseSpecificSemanticCheck chain
-      ProjectionClause.checkAliasedReturnItems(returnItems, name) chain
-      SemanticPatternCheck.checkValidPropertyKeyNamesInReturnItems(returnItems)
+    super.clauseSpecificSemanticCheck chain checkProjectionItems(returnItems)
 
   override def withReturnItems(items: Seq[ReturnItem]): With =
-    this.copy(returnItems = ReturnItems(returnItems.includeExisting, items)(returnItems.position))(this.position)
+    this.copy(returnItems = ReturnItems(returnItems.projectionType, items)(returnItems.position))(this.position)
+
+  private def checkProjectionItems(returnItems: ReturnItems): SemanticCheck =
+    withType match {
+      // No user-provided projection items in these variants
+      case ParsedAsFilter | ParsedAsOrderBy | ParsedAsSkip | ParsedAsLimit => SemanticCheck.success
+      // In LET all projection items are aliased by definition of the syntax
+      case ParsedAsLet => checkLetItems(returnItems) chain
+          SemanticPatternCheck.checkValidPropertyKeyNamesInReturnItems(returnItems)
+      // Else
+      case _ => ProjectionClause.checkAliasedReturnItems(returnItems, name) chain
+          SemanticPatternCheck.checkValidPropertyKeyNamesInReturnItems(returnItems)
+    }
+
+  private def checkLetItems(returnItems: ReturnItems): SemanticCheck =
+    SemanticExpressionCheck.simple(returnItems.items.map(_.expression))
 }
 
 case class Finish()(val position: InputPosition) extends Clause with ClauseAllowedOnSystem {
@@ -1713,20 +2261,38 @@ case class Finish()(val position: InputPosition) extends Clause with ClauseAllow
   override def clauseSpecificSemanticCheck: SemanticCheck = SemanticCheck.success
 }
 
+trait UnaliasedNotAllowed { val msg: String }
+
 object Return {
 
   def apply(returnItems: ReturnItems)(pos: InputPosition): Return =
-    Return(distinct = false, returnItems, None, None, None)(pos)
+    Return(distinct = false, returnItems, None, None, None, None)(pos)
+
+  def apply(returnItems: ReturnItems, returnType: ReturnType)(pos: InputPosition): Return =
+    Return(distinct = false, returnItems, None, None, None, None, returnType = returnType)(pos)
+
+  // Unapply for RETURN * ...
+  object WithStar {
+
+    def unapply(ret: Return): Option[Return] = {
+      ret match {
+        case Return(_, ReturnItems(AdditiveProjection, _, _), _, _, _, _, _, _, _) => Some(ret)
+        case _                                                                     => None
+      }
+    }
+  }
 }
 
 case class Return(
   distinct: Boolean,
   returnItems: ReturnItems,
+  groupBy: Option[GroupBy],
   orderBy: Option[OrderBy],
   skip: Option[Skip],
   limit: Option[Limit],
   excludedNames: Set[String] = Set.empty,
-  addedInRewrite: Boolean = false // used for SHOW/TERMINATE commands
+  returnType: ReturnType = DefaultReturn, // used for SHOW/TERMINATE commands
+  context: UnaliasedNotAllowed = ImportingWithSubqueryCall
 )(val position: InputPosition) extends ProjectionClause with ClauseAllowedOnSystem {
 
   override def name = "RETURN"
@@ -1739,23 +2305,35 @@ case class Return(
 
   override def clauseSpecificSemanticCheck: SemanticCheck =
     super.clauseSpecificSemanticCheck chain
-      checkVariableScope chain
-      ProjectionClause.checkAliasedReturnItems(returnItems, "CALL { RETURN ... }") chain
+      ProjectionClause.checkAliasedReturnItems(
+        returnItems,
+        context.msg
+      ) chain
       SemanticPatternCheck.checkValidPropertyKeyNamesInReturnItems(returnItems)
 
   override def withReturnItems(items: Seq[ReturnItem]): Return =
-    this.copy(returnItems = ReturnItems(returnItems.includeExisting, items)(returnItems.position))(this.position)
+    this.copy(returnItems = ReturnItems(returnItems.projectionType, items)(returnItems.position))(this.position)
 
   def withReturnItems(returnItems: ReturnItems): Return =
     this.copy(returnItems = returnItems)(this.position)
 
-  private def checkVariableScope: SemanticState => Seq[SemanticError] = s =>
-    returnItems match {
-      case ReturnItems(star, _, _) if star && s.currentScope.isEmpty =>
-        Seq(SemanticError.invalidUseOfReturnStar(position))
-      case _ =>
-        Seq.empty
-    }
+  def convertToWith(context: Option[String] = Some("NEXT")): With =
+    With(
+      distinct,
+      returnItems,
+      groupBy,
+      orderBy,
+      skip,
+      limit,
+      None,
+      AddedInRewriteGeneral(AddedWithOrigin.Synthesized(context))
+    )(position)
+}
+
+case object Yield {
+
+  def apply(returnItems: ReturnItems)(position: InputPosition): Yield =
+    Yield(returnItems, None, None, None, None)(position)
 }
 
 case class Yield(
@@ -1763,17 +2341,22 @@ case class Yield(
   orderBy: Option[OrderBy],
   skip: Option[Skip],
   limit: Option[Limit],
-  where: Option[Where]
+  where: Option[Where],
+  yieldType: YieldType = DefaultYield
 )(val position: InputPosition) extends ProjectionClause with ClauseAllowedOnSystem {
   override def distinct: Boolean = false
+  override def groupBy: Option[GroupBy] = None
 
   override def name: String = "YIELD"
 
   override def withReturnItems(items: Seq[ReturnItem]): Yield =
-    this.copy(returnItems = ReturnItems(returnItems.includeExisting, items)(returnItems.position))(this.position)
+    this.copy(returnItems = ReturnItems(returnItems.projectionType, items)(returnItems.position))(this.position)
 
   def withReturnItems(returnItems: ReturnItems): Yield =
     this.copy(returnItems = returnItems)(this.position)
+
+  def withYieldType(yieldType: YieldType): Yield =
+    this.copy(yieldType = yieldType)(this.position)
 
   override def warnOnAccessToRestrictedVariableInOrderByOrWhere(previousScopeVars: Set[String])(error: SemanticErrorDef)
     : SemanticErrorDef = error
@@ -1804,10 +2387,14 @@ object SubqueryCall {
       extends ASTNode with SemanticCheckable with SemanticAnalysisTooling {
 
     override def semanticCheck: SemanticCheck =
-      declareVariable(reportAs, CTMap) chain specifyType(CTMap, reportAs)
+      declareVariable(reportAs, MapExtendedType.getTypeSpec(CTMap, CTString.covariant)) chain
+        specifyType(MapExtendedType.getTypeSpec(CTMap, CTString.covariant), reportAs)
   }
 
-  final case class InTransactionsErrorParameters(behaviour: InTransactionsOnErrorBehaviour)(
+  final case class InTransactionsErrorParameters(
+    behaviour: InTransactionsOnErrorBehaviour,
+    retryParameters: Option[InTransactionsRetryParameters]
+  )(
     val position: InputPosition
   ) extends ASTNode
 
@@ -1817,35 +2404,91 @@ object SubqueryCall {
     case object OnErrorContinue extends InTransactionsOnErrorBehaviour
     case object OnErrorBreak extends InTransactionsOnErrorBehaviour
     case object OnErrorFail extends InTransactionsOnErrorBehaviour
+    case object OnErrorRetryThenContinue extends InTransactionsOnErrorBehaviour
+    case object OnErrorRetryThenBreak extends InTransactionsOnErrorBehaviour
+    case object OnErrorRetryThenFail extends InTransactionsOnErrorBehaviour
+
+    def hasRetry(behaviour: InTransactionsOnErrorBehaviour): Boolean = behaviour match {
+      case OnErrorRetryThenContinue | OnErrorRetryThenBreak | OnErrorRetryThenFail => true
+      case _                                                                       => false
+    }
+  }
+
+  final case class InTransactionsRetryParameters(timeout: Option[Expression])(val position: InputPosition)
+      extends ASTNode
+      with SemanticCheckable {
+
+    override def semanticCheck: SemanticCheck = {
+      if (timeout.isEmpty) {
+        return SemanticCheck.success
+      }
+      checkExpressionIsStaticNumber(timeout.get, "RETRY ... SECONDS", acceptsZero = true, acceptsNegative = false)
+    }
+  }
+
+  sealed trait InTransactionsDisjointByMode
+
+  object InTransactionsDisjointByMode {
+    case object DisjointByAuto extends InTransactionsDisjointByMode
+    case object DisjointByNone extends InTransactionsDisjointByMode
+    final case class DisjointByExpressions(expressions: Seq[Expression]) extends InTransactionsDisjointByMode
+  }
+
+  final case class InTransactionsDisjointByParameters(mode: InTransactionsDisjointByMode)(val position: InputPosition)
+      extends ASTNode
+      with SemanticCheckable {
+
+    override def semanticCheck: SemanticCheck = mode match {
+      case InTransactionsDisjointByMode.DisjointByExpressions(expressions) =>
+        expressions.foldSemanticCheck { expression =>
+          val nonDeterministic =
+            if (!expression.isDeterministic) {
+              error(SemanticError.disjointByExpressionNotDeterministic(expression.position))
+            } else {
+              SemanticCheck.success
+            }
+          val containsSubquery =
+            if (expression.folder.treeExists { case _: SubqueryExpression => true }) {
+              error(SemanticError.disjointByExpressionContainsSubquery(expression.position))
+            } else {
+              SemanticCheck.success
+            }
+          nonDeterministic chain containsSubquery
+        }
+      case _ => SemanticCheck.success
+    }
   }
 
   final case class InTransactionsParameters(
     batchParams: Option[InTransactionsBatchParameters],
     concurrencyParams: Option[InTransactionsConcurrencyParameters],
     errorParams: Option[InTransactionsErrorParameters],
-    reportParams: Option[InTransactionsReportParameters]
+    reportParams: Option[InTransactionsReportParameters],
+    disjointByParams: Option[InTransactionsDisjointByParameters]
   )(val position: InputPosition) extends ASTNode with SemanticCheckable {
 
     override def semanticCheck: SemanticCheck = {
       val checkBatchParams = batchParams.foldSemanticCheck(_.semanticCheck)
       val checkConcurrencyParams = concurrencyParams.foldSemanticCheck(_.semanticCheck)
       val checkReportParams = reportParams.foldSemanticCheck(_.semanticCheck)
+      val checkRetryParams = errorParams.flatMap(_.retryParameters).foldSemanticCheck(_.semanticCheck)
+      val checkDisjointByParams = disjointByParams.foldSemanticCheck(_.semanticCheck)
 
       val checkErrorReportCombination: SemanticCheck = (errorParams, reportParams) match {
         case (None, Some(reportParams)) =>
-          error(
-            "REPORT STATUS can only be used when specifying ON ERROR CONTINUE or ON ERROR BREAK",
-            reportParams.position
-          )
-        case (Some(InTransactionsErrorParameters(OnErrorFail)), Some(reportParams)) =>
-          error(
-            "REPORT STATUS can only be used when specifying ON ERROR CONTINUE or ON ERROR BREAK",
-            reportParams.position
-          )
+          error(SemanticError.invalidReportStatus(reportParams.position))
+        case (Some(InTransactionsErrorParameters(OnErrorFail | OnErrorRetryThenFail, None)), Some(reportParams)) =>
+          error(SemanticError.invalidReportStatus(reportParams.position))
         case _ => SemanticCheck.success
       }
 
-      checkBatchParams chain checkConcurrencyParams chain checkReportParams chain checkErrorReportCombination
+      val checkDisjointByRequiresConcurrent: SemanticCheck = (disjointByParams, concurrencyParams) match {
+        case (Some(bb), None) =>
+          error(SemanticError.disjointByRequiresConcurrent(bb.position))
+        case _ => SemanticCheck.success
+      }
+
+      checkBatchParams chain checkConcurrencyParams chain checkReportParams chain checkRetryParams chain checkDisjointByParams chain checkErrorReportCombination chain checkDisjointByRequiresConcurrent
     }
   }
 
@@ -1864,7 +2507,7 @@ sealed trait SubqueryCall extends HorizonClause with SemanticAnalysisTooling {
 
   final override def clauseSpecificSemanticCheck: SemanticCheck = {
     wrappedCallProcedureCheck chain
-      checkSubquery chain
+      checkSubquery(optional) chain
       inTransactionsParameters.foldSemanticCheck {
         _.semanticCheck chain
           checkNoNestedCallInTransactions
@@ -1878,9 +2521,28 @@ sealed trait SubqueryCall extends HorizonClause with SemanticAnalysisTooling {
 
   def isCorrelated: Boolean
 
-  def checkSubquery: SemanticCheck
+  def checkSubquery(optional: Boolean): SemanticCheck
 
-  final protected def returnToOuterScope(outerScopeLocation: SemanticState.ScopeLocation): SemanticCheck = {
+  /**
+   * Semantically check the DISJOINT BY expressions against the subquery's import scope.
+   *
+   * DISJOINT BY expressions are evaluated in the inner scope of the CALL subquery, so they must be
+   * checked in a state where only the imported variables are visible. This complements the determinism
+   * and subquery-expression checks in [[SubqueryCall.InTransactionsDisjointByParameters.semanticCheck]]
+   * by validating the expression internals (function resolution, arity, types, no aggregations).
+   *
+   * Variable-resolution errors raised here are filtered out downstream (see
+   * VariableChecker.isNotImplementedCode) since the scoping pass owns them, so this does not produce
+   * duplicate "variable not defined" errors.
+   */
+  final protected def checkDisjointByExpressions(importScope: SemanticState): SemanticCheck =
+    inTransactionsParameters.flatMap(_.disjointByParams).map(_.mode) match {
+      case Some(SubqueryCall.InTransactionsDisjointByMode.DisjointByExpressions(expressions)) =>
+        withState(importScope)(expressions.foldSemanticCheck(SemanticExpressionCheck.simple))
+      case _ => SemanticCheck.success
+    }
+
+  final protected def returnToOuterScope(outerScopeLocation: SemanticState.ScopeLocation): SemanticCheck =
     SemanticCheck.fromFunction { innerState =>
       val innerCurrentScope = innerState.currentScope.scope
 
@@ -1896,7 +2558,6 @@ sealed trait SubqueryCall extends HorizonClause with SemanticAnalysisTooling {
 
       SemanticCheckResult.success(after)
     }
-  }
 
   // Used to throw the correct error message if the subquery is used to wrap an optional procedure call
   // See wrapOptionalCallProcedure.scala for more information.
@@ -1932,7 +2593,7 @@ sealed trait SubqueryCall extends HorizonClause with SemanticAnalysisTooling {
   private def checkNoNestedCallInTransactions: SemanticCheck = {
     val nestedCallInTransactions = SubqueryCall.findTransactionalSubquery(innerQuery)
     nestedCallInTransactions.foldSemanticCheck { nestedCallInTransactions =>
-      error("Nested CALL { ... } IN TRANSACTIONS is not supported", nestedCallInTransactions.position)
+      error(SemanticError.unsupportedNestingCIT(nestedCallInTransactions.position))
     }
   }
 
@@ -1944,10 +2605,12 @@ sealed trait SubqueryCall extends HorizonClause with SemanticAnalysisTooling {
         None
 
     nestedCallInTransactions.foldSemanticCheck { nestedCallInTransactions =>
-      error("CALL { ... } IN TRANSACTIONS nested in a regular CALL is not supported", nestedCallInTransactions.position)
+      error(SemanticError.unsupportedNestingCITInCall(nestedCallInTransactions.position))
     }
   }
 }
+
+case object ImportingWithSubqueryCall extends UnaliasedNotAllowed { override val msg = "CALL { RETURN ... }" }
 
 case class ImportingWithSubqueryCall(
   override val innerQuery: Query,
@@ -1959,13 +2622,13 @@ case class ImportingWithSubqueryCall(
     innerQuery.isCorrelated
   }
 
-  override def checkSubquery: SemanticCheck = {
+  override def checkSubquery(optional: Boolean): SemanticCheck = {
     for {
-      outerStateWithImports <- innerQuery.checkImportingWith
+      outerStateWithImports <- innerQuery.checkImportingWith(optional)
       // Create empty scope under root
       _ <- SemanticCheck.setState(outerStateWithImports.state.newBaseScope)
       // Check inner query. Allow it to import from outer scope
-      innerChecked <- innerQuery.semanticCheckImportingWithSubQueryContext(outerStateWithImports.state)
+      innerChecked <- innerQuery.semanticCheckImportingWithSubQueryContext(outerStateWithImports.state, optional)
       _ <- returnToOuterScope(outerStateWithImports.state.currentScope)
       // Declare variables that are in output from subquery
       merged <- declareOutputVariablesInOuterScope(innerChecked.state.currentScope.scope)
@@ -1989,102 +2652,110 @@ case class ImportingWithSubqueryCall(
   }
 }
 
+case object ScopeClauseSubqueryCall extends UnaliasedNotAllowed {
+  override val msg = "CALL () { RETURN ... }"
+
+  def apply(inner: Query, imports: Seq[LogicalVariable])(position: InputPosition): ScopeClauseSubqueryCall =
+    ScopeClauseSubqueryCall(inner, isImportingAll = false, imports, None, optional = false)(position)
+
+}
+
 case class ScopeClauseSubqueryCall(
   override val innerQuery: Query,
   isImportingAll: Boolean,
-  importedVariables: Seq[Variable],
+  importedVariables: Seq[LogicalVariable],
   override val inTransactionsParameters: Option[SubqueryCall.InTransactionsParameters],
-  override val optional: Boolean
+  override val optional: Boolean,
+  addedInRewriteOptionalCall: Boolean = false
 )(val position: InputPosition) extends SubqueryCall {
 
   override def isCorrelated: Boolean = {
     isImportingAll || importedVariables.nonEmpty
   }
 
-  override def checkSubquery: SemanticCheck = {
+  override def checkSubquery(optional: Boolean): SemanticCheck = {
     for {
       // Get current state
       current <- SemanticCheck.getState
-      // Checks for errors in imported variables
-      stateWithImports <- SemanticExpressionCheck.check(Expression.SemanticContext.Simple, importedVariables)
-      // Create empty scope under root
-      _ <- SemanticCheck.setState(current.state.newBaseScope)
-      // Import variables from outer to new scope
-      innerWithImports <- importVariables(stateWithImports.state)
+      // Checks for errors in imported variables and import into new baseScope
+      innerWithImports <- importVariables
+      // Check DISJOINT BY expressions against the import scope (only imported variables are visible)
+      disjointByChecked <- checkDisjointByExpressions(innerWithImports.state)
       // Check inner query
-      innerChecked <- innerQuery.semanticCheckInSubqueryContext(innerWithImports.state, current.state)
-      // Return to outer scope
-      returned <- returnToOuterScope(current.state.currentScope)
+      innerChecked <- innerQuery.semanticCheckInSubqueryContext(innerWithImports.state, current.state, optional)
+      _ <- recordCurrentScope(this)
       // Declare output variables from inner query in outer scope
-      merged <- declareOutputVariablesInOuterScope(returned.state, innerChecked.state)
+      merged <- declareOutputVariablesInOuterScope(current.state)
     } yield {
-      val importingScopeErrors = (stateWithImports.errors ++ innerChecked.errors).distinct
+      val importingScopeErrors = (innerWithImports.errors ++ innerChecked.errors).distinct
 
       // Avoid double errors if inner has errors
-      val allErrors = if (importingScopeErrors.nonEmpty) importingScopeErrors else merged.errors
+      val allErrors =
+        (if (importingScopeErrors.nonEmpty) importingScopeErrors else merged.errors) ++ disjointByChecked.errors
 
       // Keep errors from inner check and from variable declarations
       SemanticCheckResult(merged.state, allErrors)
     }
   }
 
-  def declareOutputVariablesInOuterScope(
-    returned: SemanticState,
-    inner: SemanticState
-  ): SemanticCheck = {
-    when(innerQuery.isReturning) {
-      val outerScopeSymbolNames = returned.currentScope.scope.symbolNames
-      val outputSymbolNames = innerQuery.finalScope(inner.currentScope.scope).symbolNames
-      val intersect = outputSymbolNames.intersect(outerScopeSymbolNames)
+  private def declareOutputVariablesInOuterScope(
+    outer: SemanticState
+  ): SemanticCheck = fromState { inner =>
+    val innerScope = inner.currentScope.scope
+    val innerFinalScope = innerQuery.finalScope(innerScope)
+    val importedSymbolNames = innerScope.symbolNames
 
-      innerQuery.getReturns.flatMap(v => intersect.map((v, _))).foldSemanticCheck { case (ret, name) =>
-        val position = ret.returnItems.items.find(_.name == name) match {
-          case _ @Some(AliasedReturnItem(_, variable)) => variable.position
-          case _                                       => ret.position
-        }
-
-        SemanticError(s"Variable `$name` already declared in outer scope", position)
-      }
-    } ifOkChain
+    returnToOuterScope(outer.currentScope) chain
       when(innerQuery.isReturning) {
-        val scopeForDeclaringVariables = innerQuery.finalScope(inner.currentScope.scope)
-        declareVariables(scopeForDeclaringVariables.symbolTable.values)
+        val outerScopeSymbolNames = outer.currentScope.symbolNames
+        val outputSymbolNames = innerFinalScope.symbolNames
+        val intersection = outputSymbolNames.intersect(outerScopeSymbolNames)
+        val difference =
+          if (innerQuery.returnVariables.includeExisting) intersection.diff(importedSymbolNames) else intersection
+
+        val filteredVariables =
+          innerFinalScope.symbolTable.values.filter(x => !importedSymbolNames.contains(x.name))
+
+        innerQuery.getReturns.flatMap(v => difference.map((v, _))).foldSemanticCheck {
+          case (ret, name) if !ret.returnType.addedInRewrite =>
+            ret.returnItems.items.find(_.name == name) match {
+              case Some(AliasedReturnItem(_, variable)) =>
+                SemanticError.variableAlreadyDeclaredInOuterScope(name, variable.position)
+              case None if ret.returnItems.includeExisting =>
+                SemanticError.variableAlreadyDeclaredInOuterScope(name, ret.position)
+              case _ => SemanticCheck.success
+            }
+          case _ => SemanticCheck.success
+        } ifOkChain declareVariables(filteredVariables)
       }
   }
 
-  def declareVariables(previousState: SemanticState): SemanticCheck =
-    if (isImportingAll) {
-      val previous = previousState.currentScope
-      (s: SemanticState) =>
-        val intermediate = s.importValuesFromScope(previous.parent.get.scope)
-          .importValuesFromScope(previous.scope)
-        SemanticCheckResult.success(intermediate)
-    } else {
-      importedVariables.foldSemanticCheck(item =>
-        declareVariable(item, previousState.expressionType(item).actual, previousState.symbol(item.name))
-      )
-    }
-
-  def importVariables(previousState: SemanticState): SemanticCheck = {
-    SemanticCheck.fromState {
-      (state: SemanticState) =>
-        /**
-         * scopeToImportVariablesFrom will provide the scope to bring over only the variables that are needed from the
-         * previous scope
-         */
-        for {
-          checksResult <- declareVariables(previousState)
-        } yield {
-          SemanticCheckResult(checksResult.state, Seq.empty)
+  private def importVariables: SemanticCheck =
+    SemanticExpressionCheck.simple(importedVariables) chain
+      fromState(previousState => {
+        SemanticCheck.setState(previousState.newBaseScope).flatMap { _ =>
+          val previous = previousState.currentScope
+          if (isImportingAll) {
+            (s: SemanticState) =>
+              val intermediate =
+                s.importValuesFromScope(previous.parent.get.scope).importValuesFromScope(previous.scope)
+              SemanticCheckResult.success(intermediate)
+          } else {
+            importedVariables.foldSemanticCheck(item =>
+              declareVariable(item, previousState.expressionType(item).actual, previousState.symbol(item.name))
+            )
+          }
         }
-    }
-  }
+      })
 }
 
 // Show and terminate command clauses
 
 sealed trait CommandClause extends Clause with SemanticAnalysisTooling {
   def unfilteredColumns: DefaultOrAllShowColumns
+
+  def getFilteredColumns(features: Set[SemanticFeature]): Seq[LogicalVariable] =
+    unfilteredColumns.columns.map(_.variable)
 
   // Yielded columns or yield *
   def yieldItems: List[CommandResultItem]
@@ -2094,16 +2765,20 @@ sealed trait CommandClause extends Clause with SemanticAnalysisTooling {
   protected def originalColumns: List[ShowAndTerminateColumn]
 
   // Used for semantic check
-  private lazy val columnsAsMap: Map[String, CypherType] =
-    originalColumns.map(column => column.name -> column.cypherType).toMap[String, CypherType]
+  private val columnsAsMapLazy: LazyVal[Map[String, CypherType]] =
+    LazyVal(originalColumns.map(column => column.name -> column.cypherType).toMap[String, CypherType])
+  protected def columnsAsMap: Map[String, CypherType] = columnsAsMapLazy.value
 
   override def clauseSpecificSemanticCheck: SemanticCheck =
     if (yieldItems.nonEmpty) yieldItems.foldSemanticCheck(_.semanticCheck(columnsAsMap))
     else semanticCheckFold(unfilteredColumns.columns)(sc => declareVariable(sc.variable, sc.cypherType))
 
   def where: Option[Where]
-
   def moveWhereToProjection: CommandClause
+
+  def yieldWith: Option[With]
+  def moveOutWith: CommandClause
+  def getClauseWithoutSubclauses: CommandClause
 }
 
 object CommandClause {
@@ -2147,6 +2822,15 @@ object CommandClause {
 
     (orderBy, where)
   }
+
+  // Check if the query should automatically be routed to the system database, for backwards compatibility reasons
+  def shouldRouteToSystem(clauses: Seq[Clause]): Boolean = clauses match {
+    case Seq(_: CommandClauseRouteToSystem, w: With, r: Return) =>
+      w.withType == ParsedAsYield || (w.withType == AddedInRewriteShowCommands && r.returnType.addedInRewrite)
+    case Seq(_: CommandClauseRouteToSystem, r: Return) =>
+      r.returnType.addedInRewrite
+    case _ => false
+  }
 }
 
 // Yield columns: keeps track of the original name and the yield variable (either same name or renamed)
@@ -2161,10 +2845,14 @@ case class CommandResultItem(originalName: String, aliasedVariable: LogicalVaria
       .getOrElse({
         SemanticCheck.error(SemanticError.yieldMissingColumn(
           originalName,
-          columns.keys.toList.asJavaCollection.stream().collect(Collectors.toList()),
+          columns.keys.toList.sorted.asJavaCollection.stream().collect(Collectors.toList()),
           position
         ))
       })
+  }
+
+  def toReturnItem: ReturnItem = {
+    AliasedReturnItem(Variable(originalName)(position, isIsolated = false), aliasedVariable)(position)
   }
 }
 
@@ -2176,49 +2864,81 @@ case class ShowAndTerminateColumn(name: String, cypherType: CypherType = CTStrin
 // Command clauses which can take strings or string expressions
 // For example, transaction ids or setting names
 sealed trait CommandClauseWithNames extends CommandClause {
-  // Either:
-  // - a list of strings
-  // - a single expression (resolving to a single string or a list of strings)
-  def names: Either[List[String], Expression]
+  // The potential strings or string expressions
+  def names: CommandClauseNames
+  // To anonymize the name
+  def withNames(names: CommandClauseNames): CommandClauseWithNames
 
   // Semantic check:
-  private def expressionCheck: SemanticCheck = names match {
-    case Right(e) => SemanticExpressionCheck.simple(e)
-    case _        => SemanticCheck.success
-  }
+  private def expressionCheck: SemanticCheck =
+    names.maybeExpression.map(e => SemanticExpressionCheck.simple(e))
+      .getOrElse(SemanticCheck.success)
 
   override def clauseSpecificSemanticCheck: SemanticCheck =
     expressionCheck chain super.clauseSpecificSemanticCheck
 }
 
+// The representation of the strings or string expressions for command clauses with names
+// - NoNames: no given names
+// - CommaSeparatedNames: a list of strings (stored as a ListLiteral with StringLiterals)
+// - ExpressionNames: a single expression (should resolve to a single string or a list of strings)
+sealed trait CommandClauseNames extends ASTNode {
+  def maybeExpression: Option[Expression]
+}
+
+case object NoNames extends CommandClauseNames {
+  val maybeExpression: Option[Expression] = None
+
+  // This represents nothing given so we don't really have a position
+  override def position: InputPosition = InputPosition.NONE
+}
+
+case class CommaSeparatedNames(names: ListLiteral) extends CommandClauseNames {
+  val maybeExpression: Option[Expression] = Some(names)
+
+  override def position: InputPosition = names.position
+}
+
+case class ExpressionNames(names: Expression) extends CommandClauseNames {
+  val maybeExpression: Option[Expression] = Some(names)
+
+  override def position: InputPosition = names.position
+}
+
 // For a query to be allowed to run on system it needs to consist of:
-// - only ClauseAllowedOnSystem clauses (or the WITH that was parsed as YIELD/added in rewriter for transaction commands)
+// - only ClauseAllowedOnSystem clauses (or the WITH that was parsed as YIELD/added in rewriter for commands)
 // - at least one CommandClauseAllowedOnSystem clause
 sealed trait ClauseAllowedOnSystem
 sealed trait CommandClauseAllowedOnSystem extends ClauseAllowedOnSystem
+sealed trait CommandClauseRouteToSystem extends CommandClauseAllowedOnSystem
 
 case class ShowIndexesClause(
-  briefConstraintColumns: List[ShowAndTerminateColumn],
-  allConstraintColumns: List[ShowAndTerminateColumn],
+  briefIndexColumns: List[ShowAndTerminateColumn],
+  allIndexColumns: List[ShowAndTerminateColumn],
   indexType: ShowIndexType,
   where: Option[Where],
   yieldItems: List[CommandResultItem],
-  yieldAll: Boolean
+  yieldAll: Boolean,
+  yieldWith: Option[With]
 )(val position: InputPosition) extends CommandClause {
   override def name: String = "SHOW INDEXES"
 
   private val useAllColumns = yieldItems.nonEmpty || yieldAll
 
   val originalColumns: List[ShowAndTerminateColumn] =
-    if (useAllColumns) allConstraintColumns else briefConstraintColumns
+    if (useAllColumns) allIndexColumns else briefIndexColumns
 
-  private val briefColumns = briefConstraintColumns.map(c => ShowColumn(c.name, c.cypherType)(position))
-  private val allColumns = allConstraintColumns.map(c => ShowColumn(c.name, c.cypherType)(position))
+  private val briefColumns = briefIndexColumns.map(c => ShowColumn(c.name, c.cypherType)(position))
+  private val allColumns = allIndexColumns.map(c => ShowColumn(c.name, c.cypherType)(position))
 
   val unfilteredColumns: DefaultOrAllShowColumns =
     DefaultOrAllShowColumns(useAllColumns, briefColumns, allColumns)
 
   override def moveWhereToProjection: CommandClause = copy(where = None)(position)
+  override def moveOutWith: CommandClause = copy(yieldWith = None)(position)
+
+  override def getClauseWithoutSubclauses: CommandClause =
+    copy(where = None, yieldItems = List.empty, yieldWith = None)(InputPosition.NONE)
 }
 
 object ShowIndexesClause {
@@ -2243,7 +2963,8 @@ object ShowIndexesClause {
     indexType: ShowIndexType,
     where: Option[Where],
     yieldItems: List[CommandResultItem],
-    yieldAll: Boolean
+    yieldAll: Boolean,
+    yieldWith: Option[With]
   )(position: InputPosition): ShowIndexesClause = {
     val briefCols = List(
       ShowAndTerminateColumn(idColumn, CTInteger),
@@ -2272,7 +2993,8 @@ object ShowIndexesClause {
       indexType,
       where,
       yieldItems,
-      yieldAll
+      yieldAll,
+      yieldWith
     )(position)
   }
 }
@@ -2283,7 +3005,8 @@ case class ShowConstraintsClause(
   constraintType: ShowConstraintType,
   where: Option[Where],
   yieldItems: List[CommandResultItem],
-  yieldAll: Boolean
+  yieldAll: Boolean,
+  yieldWith: Option[With]
 )(val position: InputPosition) extends CommandClause {
   override def name: String = "SHOW CONSTRAINTS"
 
@@ -2299,6 +3022,10 @@ case class ShowConstraintsClause(
     DefaultOrAllShowColumns(useAllColumns, briefColumns, allColumns)
 
   override def moveWhereToProjection: CommandClause = copy(where = None)(position)
+  override def moveOutWith: CommandClause = copy(yieldWith = None)(position)
+
+  override def getClauseWithoutSubclauses: CommandClause =
+    copy(where = None, yieldItems = List.empty, yieldWith = None)(InputPosition.NONE)
 }
 
 object ShowConstraintsClause {
@@ -2308,6 +3035,8 @@ object ShowConstraintsClause {
   val entityTypeColumn = "entityType"
   val labelsOrTypesColumn = "labelsOrTypes"
   val propertiesColumn = "properties"
+  val enforcedLabelColumn = "enforcedLabel"
+  val classificationColumn = "classification"
   val ownedIndexColumn = "ownedIndex"
   val propertyTypeColumn = "propertyType"
   val optionsColumn = "options"
@@ -2317,31 +3046,88 @@ object ShowConstraintsClause {
     constraintType: ShowConstraintType,
     where: Option[Where],
     yieldItems: List[CommandResultItem],
-    yieldAll: Boolean
+    yieldAll: Boolean,
+    yieldWith: Option[With],
+    returnCypher5Columns: Boolean
   )(position: InputPosition): ShowConstraintsClause = {
-    val briefCols = List(
-      ShowAndTerminateColumn(idColumn, CTInteger),
-      ShowAndTerminateColumn(nameColumn),
-      ShowAndTerminateColumn(typeColumn),
-      ShowAndTerminateColumn(entityTypeColumn),
-      ShowAndTerminateColumn(labelsOrTypesColumn, CTList(CTString)),
-      ShowAndTerminateColumn(propertiesColumn, CTList(CTString)),
-      ShowAndTerminateColumn(ownedIndexColumn),
-      ShowAndTerminateColumn(propertyTypeColumn)
+    val columns = List(
+      // (column, brief, availableInCypher5)
+      (ShowAndTerminateColumn(idColumn, CTInteger), true, true),
+      (ShowAndTerminateColumn(nameColumn), true, true),
+      (ShowAndTerminateColumn(typeColumn), true, true),
+      (ShowAndTerminateColumn(entityTypeColumn), true, true),
+      (ShowAndTerminateColumn(labelsOrTypesColumn, CTList(CTString)), true, true),
+      (ShowAndTerminateColumn(propertiesColumn, CTList(CTString)), true, true),
+      (ShowAndTerminateColumn(enforcedLabelColumn), true, false),
+      (ShowAndTerminateColumn(classificationColumn), false, false),
+      (ShowAndTerminateColumn(ownedIndexColumn), true, true),
+      (ShowAndTerminateColumn(propertyTypeColumn), true, true),
+      (ShowAndTerminateColumn(optionsColumn, CTMap), false, true),
+      (ShowAndTerminateColumn(createStatementColumn), false, true)
     )
-    val verboseCols = List(
-      ShowAndTerminateColumn(optionsColumn, CTMap),
-      ShowAndTerminateColumn(createStatementColumn)
-    )
+    val briefColumns =
+      columns.filter { case (_, brief, _) => brief }
+        .filter { case (_, _, availableInCypher5) => !returnCypher5Columns || availableInCypher5 }
+        .map { case (column, _, _) => column }
+    val allColumns =
+      columns.filter { case (_, _, availableInCypher5) => !returnCypher5Columns || availableInCypher5 }
+        .map { case (column, _, _) => column }
 
     ShowConstraintsClause(
-      briefCols,
-      briefCols ++ verboseCols,
+      briefColumns,
+      allColumns,
       constraintType,
       where,
       yieldItems,
-      yieldAll
+      yieldAll,
+      yieldWith
     )(position)
+  }
+}
+
+case class ShowCurrentGraphTypeClause(
+  originalColumns: List[ShowAndTerminateColumn],
+  asGraph: Boolean,
+  where: Option[Where],
+  yieldItems: List[CommandResultItem],
+  yieldAll: Boolean,
+  yieldWith: Option[With]
+)(val position: InputPosition) extends CommandClause {
+  override def name: String = if (asGraph) "SHOW CURRENT GRAPH TYPE AS GRAPH" else "SHOW CURRENT GRAPH TYPE"
+
+  private val columns = originalColumns.map(c => ShowColumn(c.name, c.cypherType)(position))
+
+  val unfilteredColumns: DefaultOrAllShowColumns =
+    DefaultOrAllShowColumns(useAllColumns = yieldItems.nonEmpty || yieldAll, columns, columns)
+
+  override def moveWhereToProjection: CommandClause = copy(where = None)(position)
+  override def moveOutWith: CommandClause = copy(yieldWith = None)(position)
+
+  override def getClauseWithoutSubclauses: CommandClause =
+    copy(where = None, yieldItems = List.empty, yieldWith = None)(InputPosition.NONE)
+}
+
+object ShowCurrentGraphTypeClause {
+  val specificationColumn = "specification"
+  val nodesColumn = "nodes"
+  val relationshipsColumn = "relationships"
+
+  def apply(
+    asGraph: Boolean,
+    where: Option[Where],
+    yieldItems: List[CommandResultItem],
+    yieldAll: Boolean,
+    yieldWith: Option[With]
+  )(position: InputPosition): ShowCurrentGraphTypeClause = {
+
+    val columns =
+      if (asGraph) List(
+        ShowAndTerminateColumn(nodesColumn, CTList(CTNode)),
+        ShowAndTerminateColumn(relationshipsColumn, CTList(CTRelationship))
+      )
+      else List(ShowAndTerminateColumn(specificationColumn))
+
+    ShowCurrentGraphTypeClause(columns, asGraph, where, yieldItems, yieldAll, yieldWith)(position)
   }
 }
 
@@ -2351,7 +3137,8 @@ case class ShowProceduresClause(
   executable: Option[ExecutableBy],
   where: Option[Where],
   yieldItems: List[CommandResultItem],
-  yieldAll: Boolean
+  yieldAll: Boolean,
+  yieldWith: Option[With]
 )(val position: InputPosition) extends CommandClause with CommandClauseAllowedOnSystem {
   override def name: String = "SHOW PROCEDURES"
 
@@ -2367,6 +3154,13 @@ case class ShowProceduresClause(
     DefaultOrAllShowColumns(useAllColumns, briefColumns, allColumns)
 
   override def moveWhereToProjection: CommandClause = copy(where = None)(position)
+  override def moveOutWith: CommandClause = copy(yieldWith = None)(position)
+
+  override def getClauseWithoutSubclauses: CommandClause =
+    copy(where = None, yieldItems = List.empty, yieldWith = None)(InputPosition.NONE)
+
+  override def clauseSpecificSemanticCheck: SemanticCheck =
+    executable.semanticCheck chain super.clauseSpecificSemanticCheck
 }
 
 object ShowProceduresClause {
@@ -2388,7 +3182,8 @@ object ShowProceduresClause {
     executable: Option[ExecutableBy],
     where: Option[Where],
     yieldItems: List[CommandResultItem],
-    yieldAll: Boolean
+    yieldAll: Boolean,
+    yieldWith: Option[With]
   )(position: InputPosition): ShowProceduresClause = {
     val briefCols = List(
       ShowAndTerminateColumn(nameColumn),
@@ -2414,7 +3209,8 @@ object ShowProceduresClause {
       executable,
       where,
       yieldItems,
-      yieldAll
+      yieldAll,
+      yieldWith
     )(position)
   }
 }
@@ -2426,7 +3222,8 @@ case class ShowFunctionsClause(
   executable: Option[ExecutableBy],
   where: Option[Where],
   yieldItems: List[CommandResultItem],
-  yieldAll: Boolean
+  yieldAll: Boolean,
+  yieldWith: Option[With]
 )(val position: InputPosition) extends CommandClause with CommandClauseAllowedOnSystem {
   override def name: String = "SHOW FUNCTIONS"
 
@@ -2442,6 +3239,13 @@ case class ShowFunctionsClause(
     DefaultOrAllShowColumns(useAllColumns, briefColumns, allColumns)
 
   override def moveWhereToProjection: CommandClause = copy(where = None)(position)
+  override def moveOutWith: CommandClause = copy(yieldWith = None)(position)
+
+  override def getClauseWithoutSubclauses: CommandClause =
+    copy(where = None, yieldItems = List.empty, yieldWith = None)(InputPosition.NONE)
+
+  override def clauseSpecificSemanticCheck: SemanticCheck =
+    executable.semanticCheck chain super.clauseSpecificSemanticCheck
 }
 
 object ShowFunctionsClause {
@@ -2463,7 +3267,8 @@ object ShowFunctionsClause {
     executable: Option[ExecutableBy],
     where: Option[Where],
     yieldItems: List[CommandResultItem],
-    yieldAll: Boolean
+    yieldAll: Boolean,
+    yieldWith: Option[With]
   )(position: InputPosition): ShowFunctionsClause = {
     val briefCols = List(
       ShowAndTerminateColumn(nameColumn),
@@ -2489,7 +3294,8 @@ object ShowFunctionsClause {
       executable,
       where,
       yieldItems,
-      yieldAll
+      yieldAll,
+      yieldWith
     )(position)
   }
 }
@@ -2499,13 +3305,15 @@ sealed trait TransactionsCommandClause extends CommandClauseWithNames with Comma
 case class ShowTransactionsClause(
   briefTransactionColumns: List[ShowAndTerminateColumn],
   allTransactionColumns: List[ShowAndTerminateColumn],
-  names: Either[List[String], Expression],
+  names: CommandClauseNames,
   where: Option[Where],
   yieldItems: List[CommandResultItem],
-  yieldAll: Boolean
+  yieldAll: Boolean,
+  yieldWith: Option[With]
 )(val position: InputPosition) extends TransactionsCommandClause {
 
   override def name: String = "SHOW TRANSACTIONS"
+  def withNames(names: CommandClauseNames): ShowTransactionsClause = copy(names = names)(position)
 
   private val useAllColumns = yieldItems.nonEmpty || yieldAll
 
@@ -2519,6 +3327,10 @@ case class ShowTransactionsClause(
     DefaultOrAllShowColumns(useAllColumns, briefColumns, allColumns)
 
   override def moveWhereToProjection: CommandClause = copy(where = None)(position)
+  override def moveOutWith: CommandClause = copy(yieldWith = None)(position)
+
+  override def getClauseWithoutSubclauses: CommandClause =
+    copy(where = None, yieldItems = List.empty, yieldWith = None)(InputPosition.NONE)
 }
 
 object ShowTransactionsClause {
@@ -2561,58 +3373,69 @@ object ShowTransactionsClause {
   val currentQueryPageHitsColumn = "currentQueryPageHits"
   val currentQueryPageFaultsColumn = "currentQueryPageFaults"
   val initializationStackTraceColumn = "initializationStackTrace"
+  val currentQueryProgressColumn = "currentQueryProgress"
 
   def apply(
-    ids: Either[List[String], Expression],
+    ids: CommandClauseNames,
     where: Option[Where],
     yieldItems: List[CommandResultItem],
     yieldAll: Boolean,
+    yieldWith: Option[With],
     returnCypher5Types: Boolean
   )(position: InputPosition): ShowTransactionsClause = {
     val columns = List(
-      // (column, brief)
-      (ShowAndTerminateColumn(databaseColumn), true),
-      (ShowAndTerminateColumn(transactionIdColumn), true),
-      (ShowAndTerminateColumn(currentQueryIdColumn), true),
-      (ShowAndTerminateColumn(outerTransactionIdColumn), false),
-      (ShowAndTerminateColumn(connectionIdColumn), true),
-      (ShowAndTerminateColumn(clientAddressColumn), true),
-      (ShowAndTerminateColumn(usernameColumn), true),
-      (ShowAndTerminateColumn(metaDataColumn, CTMap), false),
-      (ShowAndTerminateColumn(currentQueryColumn), true),
-      (ShowAndTerminateColumn(parametersColumn, CTMap), false),
-      (ShowAndTerminateColumn(plannerColumn), false),
-      (ShowAndTerminateColumn(runtimeColumn), false),
-      (ShowAndTerminateColumn(indexesColumn, CTList(CTMap)), false),
-      (ShowAndTerminateColumn(startTimeColumn, if (returnCypher5Types) CTString else CTDateTime), true),
-      (ShowAndTerminateColumn(currentQueryStartTimeColumn, if (returnCypher5Types) CTString else CTDateTime), false),
-      (ShowAndTerminateColumn(protocolColumn), false),
-      (ShowAndTerminateColumn(requestUriColumn), false),
-      (ShowAndTerminateColumn(statusColumn), true),
-      (ShowAndTerminateColumn(currentQueryStatusColumn), false),
-      (ShowAndTerminateColumn(statusDetailsColumn), false),
-      (ShowAndTerminateColumn(resourceInformationColumn, CTMap), false),
-      (ShowAndTerminateColumn(activeLockCountColumn, CTInteger), false),
-      (ShowAndTerminateColumn(currentQueryActiveLockCountColumn, CTInteger), false),
-      (ShowAndTerminateColumn(elapsedTimeColumn, CTDuration), true),
-      (ShowAndTerminateColumn(cpuTimeColumn, CTDuration), false),
-      (ShowAndTerminateColumn(waitTimeColumn, CTDuration), false),
-      (ShowAndTerminateColumn(idleTimeColumn, CTDuration), false),
-      (ShowAndTerminateColumn(currentQueryElapsedTimeColumn, CTDuration), false),
-      (ShowAndTerminateColumn(currentQueryCpuTimeColumn, CTDuration), false),
-      (ShowAndTerminateColumn(currentQueryWaitTimeColumn, CTDuration), false),
-      (ShowAndTerminateColumn(currentQueryIdleTimeColumn, CTDuration), false),
-      (ShowAndTerminateColumn(currentQueryAllocatedBytesColumn, CTInteger), false),
-      (ShowAndTerminateColumn(allocatedDirectBytesColumn, CTInteger), false),
-      (ShowAndTerminateColumn(estimatedUsedHeapMemoryColumn, CTInteger), false),
-      (ShowAndTerminateColumn(pageHitsColumn, CTInteger), false),
-      (ShowAndTerminateColumn(pageFaultsColumn, CTInteger), false),
-      (ShowAndTerminateColumn(currentQueryPageHitsColumn, CTInteger), false),
-      (ShowAndTerminateColumn(currentQueryPageFaultsColumn, CTInteger), false),
-      (ShowAndTerminateColumn(initializationStackTraceColumn), false)
+      // (column, brief, includedInCypher5)
+      (ShowAndTerminateColumn(databaseColumn), true, true),
+      (ShowAndTerminateColumn(transactionIdColumn), true, true),
+      (ShowAndTerminateColumn(currentQueryIdColumn), true, true),
+      (ShowAndTerminateColumn(outerTransactionIdColumn), false, true),
+      (ShowAndTerminateColumn(connectionIdColumn), true, true),
+      (ShowAndTerminateColumn(clientAddressColumn), true, true),
+      (ShowAndTerminateColumn(usernameColumn), true, true),
+      (ShowAndTerminateColumn(metaDataColumn, CTMap), false, true),
+      (ShowAndTerminateColumn(currentQueryColumn), true, true),
+      (ShowAndTerminateColumn(parametersColumn, CTMap), false, true),
+      (ShowAndTerminateColumn(plannerColumn), false, true),
+      (ShowAndTerminateColumn(runtimeColumn), false, true),
+      (ShowAndTerminateColumn(indexesColumn, CTList(CTMap)), false, true),
+      (ShowAndTerminateColumn(startTimeColumn, if (returnCypher5Types) CTString else CTDateTime), true, true),
+      (
+        ShowAndTerminateColumn(currentQueryStartTimeColumn, if (returnCypher5Types) CTString else CTDateTime),
+        false,
+        true
+      ),
+      (ShowAndTerminateColumn(protocolColumn), false, true),
+      (ShowAndTerminateColumn(requestUriColumn), false, true),
+      (ShowAndTerminateColumn(statusColumn), true, true),
+      (ShowAndTerminateColumn(currentQueryStatusColumn), false, true),
+      (ShowAndTerminateColumn(statusDetailsColumn), false, true),
+      (ShowAndTerminateColumn(resourceInformationColumn, CTMap), false, true),
+      (ShowAndTerminateColumn(activeLockCountColumn, CTInteger), false, true),
+      (ShowAndTerminateColumn(currentQueryActiveLockCountColumn, CTInteger), false, true),
+      (ShowAndTerminateColumn(elapsedTimeColumn, CTDuration), true, true),
+      (ShowAndTerminateColumn(cpuTimeColumn, CTDuration), false, true),
+      (ShowAndTerminateColumn(waitTimeColumn, CTDuration), false, true),
+      (ShowAndTerminateColumn(idleTimeColumn, CTDuration), false, true),
+      (ShowAndTerminateColumn(currentQueryElapsedTimeColumn, CTDuration), false, true),
+      (ShowAndTerminateColumn(currentQueryCpuTimeColumn, CTDuration), false, true),
+      (ShowAndTerminateColumn(currentQueryWaitTimeColumn, CTDuration), false, true),
+      (ShowAndTerminateColumn(currentQueryIdleTimeColumn, CTDuration), false, true),
+      (ShowAndTerminateColumn(currentQueryAllocatedBytesColumn, CTInteger), false, true),
+      (ShowAndTerminateColumn(allocatedDirectBytesColumn, CTInteger), false, true),
+      (ShowAndTerminateColumn(estimatedUsedHeapMemoryColumn, CTInteger), false, true),
+      (ShowAndTerminateColumn(pageHitsColumn, CTInteger), false, true),
+      (ShowAndTerminateColumn(pageFaultsColumn, CTInteger), false, true),
+      (ShowAndTerminateColumn(currentQueryPageHitsColumn, CTInteger), false, true),
+      (ShowAndTerminateColumn(currentQueryPageFaultsColumn, CTInteger), false, true),
+      (ShowAndTerminateColumn(initializationStackTraceColumn), false, true),
+      (ShowAndTerminateColumn(currentQueryProgressColumn), false, false)
     )
-    val briefColumns = columns.filter(_._2).map(_._1)
-    val allColumns = columns.map(_._1)
+    val showColumns = columns.filter { case (_, _, includedInCypher5) =>
+      // rename or create separate parameter
+      !returnCypher5Types || includedInCypher5
+    }.map { case (showColumn, brief, _) => (showColumn, brief) }
+    val briefColumns = showColumns.filter { case (_, brief) => brief }.map { case (column, _) => column }
+    val allColumns = showColumns.map { case (column, _) => column }
 
     ShowTransactionsClause(
       briefColumns,
@@ -2620,20 +3443,23 @@ object ShowTransactionsClause {
       ids,
       where,
       yieldItems,
-      yieldAll
+      yieldAll,
+      yieldWith
     )(position)
   }
 }
 
 case class TerminateTransactionsClause(
   originalColumns: List[ShowAndTerminateColumn],
-  names: Either[List[String], Expression],
+  names: CommandClauseNames,
   yieldItems: List[CommandResultItem],
   yieldAll: Boolean,
+  yieldWith: Option[With],
   wherePos: Option[InputPosition]
 )(val position: InputPosition) extends TransactionsCommandClause {
 
   override def name: String = "TERMINATE TRANSACTIONS"
+  def withNames(names: CommandClauseNames): TerminateTransactionsClause = copy(names = names)(position)
 
   private val columns = originalColumns.map(c => ShowColumn(c.name, c.cypherType)(position))
 
@@ -2641,7 +3467,11 @@ case class TerminateTransactionsClause(
     DefaultOrAllShowColumns(useAllColumns = yieldItems.nonEmpty || yieldAll, columns, columns)
 
   override def clauseSpecificSemanticCheck: SemanticCheck = when(wherePos.isDefined) {
+    val gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42N84)
+      .atPosition(wherePos.get.offset, wherePos.get.line, wherePos.get.column)
+      .build()
     error(
+      gql,
       "`WHERE` is not allowed by itself, please use `TERMINATE TRANSACTION ... YIELD ... WHERE ...` instead",
       wherePos.get
     )
@@ -2649,6 +3479,11 @@ case class TerminateTransactionsClause(
 
   override def where: Option[Where] = None
   override def moveWhereToProjection: CommandClause = this
+
+  override def moveOutWith: CommandClause = copy(yieldWith = None)(position)
+
+  override def getClauseWithoutSubclauses: CommandClause =
+    copy(yieldItems = List.empty, yieldWith = None)(InputPosition.NONE)
 }
 
 object TerminateTransactionsClause {
@@ -2657,9 +3492,10 @@ object TerminateTransactionsClause {
   val messageColumn = "message"
 
   def apply(
-    ids: Either[List[String], Expression],
+    ids: CommandClauseNames,
     yieldItems: List[CommandResultItem],
     yieldAll: Boolean,
+    yieldWith: Option[With],
     wherePos: Option[InputPosition]
   )(position: InputPosition): TerminateTransactionsClause = {
     // All columns are currently default
@@ -2674,6 +3510,7 @@ object TerminateTransactionsClause {
       ids,
       yieldItems,
       yieldAll,
+      yieldWith,
       wherePos
     )(position)
   }
@@ -2682,13 +3519,15 @@ object TerminateTransactionsClause {
 case class ShowSettingsClause(
   briefSettingColumns: List[ShowAndTerminateColumn],
   allSettingColumns: List[ShowAndTerminateColumn],
-  names: Either[List[String], Expression],
+  names: CommandClauseNames,
   where: Option[Where],
   yieldItems: List[CommandResultItem],
-  yieldAll: Boolean
+  yieldAll: Boolean,
+  yieldWith: Option[With]
 )(val position: InputPosition) extends CommandClauseWithNames with CommandClauseAllowedOnSystem {
 
   override def name: String = "SHOW SETTINGS"
+  def withNames(names: CommandClauseNames): ShowSettingsClause = copy(names = names)(position)
 
   private val useAllColumns = yieldItems.nonEmpty || yieldAll
 
@@ -2702,6 +3541,10 @@ case class ShowSettingsClause(
     DefaultOrAllShowColumns(useAllColumns, briefColumns, allColumns)
 
   override def moveWhereToProjection: CommandClause = copy(where = None)(position)
+  override def moveOutWith: CommandClause = copy(yieldWith = None)(position)
+
+  override def getClauseWithoutSubclauses: CommandClause =
+    copy(where = None, yieldItems = List.empty, yieldWith = None)(InputPosition.NONE)
 
   override def clauseSpecificSemanticCheck: SemanticCheck = {
     requireFeatureSupport(
@@ -2724,10 +3567,11 @@ object ShowSettingsClause {
   val isDeprecatedColumn = "isDeprecated"
 
   def apply(
-    names: Either[List[String], Expression],
+    names: CommandClauseNames,
     where: Option[Where],
     yieldItems: List[CommandResultItem],
-    yieldAll: Boolean
+    yieldAll: Boolean,
+    yieldWith: Option[With]
   )(position: InputPosition): ShowSettingsClause = {
     val defaultCols = List(
       ShowAndTerminateColumn(nameColumn),
@@ -2749,7 +3593,172 @@ object ShowSettingsClause {
       names,
       where,
       yieldItems,
-      yieldAll
+      yieldAll,
+      yieldWith
     )(position)
   }
+}
+
+// System graph only commands
+
+case class ShowDatabasesClause(
+  dbScope: DatabaseScope,
+  briefDatabaseColumns: List[ShowAndTerminateColumn],
+  allDatabaseColumns: List[ShowAndTerminateColumn],
+  where: Option[Where],
+  yieldItems: List[CommandResultItem],
+  yieldAll: Boolean,
+  yieldWith: Option[With]
+)(val position: InputPosition) extends CommandClause with CommandClauseRouteToSystem {
+
+  override def name: String = dbScope match {
+    case _: SingleNamedDatabaseScope                   => "SHOW DATABASE"
+    case _: AllDatabasesScope | _: NamedDatabasesScope => "SHOW DATABASES"
+    case _: DefaultDatabaseScope                       => "SHOW DEFAULT DATABASE"
+    case _: HomeDatabaseScope                          => "SHOW HOME DATABASE"
+  }
+
+  private val useAllColumns = yieldItems.nonEmpty || yieldAll
+
+  val originalColumns: List[ShowAndTerminateColumn] =
+    if (useAllColumns) allDatabaseColumns else briefDatabaseColumns
+
+  private val briefColumns = briefDatabaseColumns.map(c => ShowColumn(c.name, c.cypherType)(position))
+  private val allColumns = allDatabaseColumns.map(c => ShowColumn(c.name, c.cypherType)(position))
+
+  val unfilteredColumns: DefaultOrAllShowColumns =
+    DefaultOrAllShowColumns(useAllColumns, briefColumns, allColumns)
+
+  override def moveWhereToProjection: CommandClause = copy(where = None)(position)
+  override def moveOutWith: CommandClause = copy(yieldWith = None)(position)
+
+  override def getClauseWithoutSubclauses: CommandClause =
+    copy(where = None, yieldItems = List.empty, yieldWith = None)(position)
+
+  // Semantic check needs to be split to handle typing
+  override def clauseSpecificSemanticCheck: SemanticCheck = checkDbName() chain super.clauseSpecificSemanticCheck
+
+  private def checkDbName(): SemanticState => Either[SemanticError, SemanticState] = (s: SemanticState) => {
+    dbScope match {
+      case SingleNamedDatabaseScope(dbName: NamespacedName) =>
+        s.symbol(dbName.toString) match {
+          case None => Right(s)
+          case Some(_) =>
+            Right(s.addNotification(IdentifierShadowsVariableNotification(position, dbName.toString, name)))
+        }
+      case _ => Right(s)
+    }
+  }
+}
+
+object ShowDatabasesClause {
+
+  def apply(
+    dbScope: DatabaseScope,
+    where: Option[Where],
+    yieldItems: List[CommandResultItem],
+    yieldAll: Boolean,
+    yieldWith: Option[With],
+    cypher5ColumnsOnly: Boolean
+  )(position: InputPosition): ShowDatabasesClause = {
+
+    // (column, brief, showCypher5)
+    val cols: List[(ShowAndTerminateColumn, Boolean, Boolean)] = List(
+      (ShowAndTerminateColumn(NAME_COL), true, true),
+      (ShowAndTerminateColumn(TYPE_COL), true, true),
+      (ShowAndTerminateColumn(ALIASES_COL, CTList(CTString)), true, true),
+      (ShowAndTerminateColumn(ACCESS_COL), true, true),
+      (ShowAndTerminateColumn(DATABASE_ID_COL), false, true),
+      (ShowAndTerminateColumn(SERVER_ID_COL), false, true),
+      (ShowAndTerminateColumn(ADDRESS_COL), true, true),
+      (ShowAndTerminateColumn(ROLE_COL), true, true),
+      (ShowAndTerminateColumn(WRITER_COL, CTBoolean), true, true),
+      (ShowAndTerminateColumn(REQUESTED_STATUS_COL), true, true),
+      (ShowAndTerminateColumn(CURRENT_STATUS_COL), true, true),
+      (ShowAndTerminateColumn(STATUS_MSG_COL), true, true)
+    ) ++ (dbScope match {
+      case _: DefaultDatabaseScope => List.empty
+      case _: HomeDatabaseScope    => List.empty
+      case _ =>
+        List(
+          (ShowAndTerminateColumn(DEFAULT_COL, CTBoolean), true, true),
+          (ShowAndTerminateColumn(HOME_COL, CTBoolean), true, true)
+        )
+    }) ++ List(
+      (ShowAndTerminateColumn(CURRENT_PRIMARIES_COUNT_COL, CTInteger), false, true),
+      (ShowAndTerminateColumn(CURRENT_SECONDARIES_COUNT_COL, CTInteger), false, true),
+      (ShowAndTerminateColumn(CURRENT_PROPERTY_SHARD_REPLICA_COUNT_COL, CTInteger), false, false),
+      (ShowAndTerminateColumn(REQUESTED_PRIMARIES_COUNT_COL, CTInteger), false, true),
+      (ShowAndTerminateColumn(REQUESTED_SECONDARIES_COUNT_COL, CTInteger), false, true),
+      (ShowAndTerminateColumn(REQUESTED_PROPERTY_SHARDS_REPLICA_COUNT_COL, CTInteger), false, false),
+      (ShowAndTerminateColumn(CREATION_TIME_COL, CTDateTime), false, true),
+      (ShowAndTerminateColumn(LAST_START_TIME_COL, CTDateTime), false, true),
+      (ShowAndTerminateColumn(LAST_STOP_TIME_COL, CTDateTime), false, true),
+      (ShowAndTerminateColumn(STORE_COL), false, true),
+      (ShowAndTerminateColumn(LAST_COMMITTED_TX_COL, CTInteger), false, true),
+      (ShowAndTerminateColumn(REPLICATION_LAG_COL, CTInteger), false, true),
+      (ShowAndTerminateColumn(SHARD_TX_LAG_COL, CTInteger), false, false),
+      (ShowAndTerminateColumn(CONSTITUENTS_COL, CTList(CTString)), true, true),
+      (ShowAndTerminateColumn(GRAPH_SHARDS_COL, CTList(CTString)), false, false),
+      (ShowAndTerminateColumn(PROPERTY_SHARDS_COL, CTList(CTString)), false, false),
+      (ShowAndTerminateColumn(DEFAULT_LANGUAGE_COL), false, true),
+      (ShowAndTerminateColumn(OPTIONS_COL, CTMap), false, true)
+    )
+
+    val briefCols = cols.collect { case (col, true, showInCypher5) if !cypher5ColumnsOnly || showInCypher5 => col }
+    val allCols = cols.collect { case (col, _, showInCypher5) if !cypher5ColumnsOnly || showInCypher5 => col }
+
+    ShowDatabasesClause(
+      dbScope,
+      briefCols,
+      allCols,
+      where,
+      yieldItems,
+      yieldAll,
+      yieldWith
+    )(position)
+  }
+}
+
+object ShowDatabase {
+
+  // Must be the same for all rows of a database
+  val ALIASES_COL = "aliases"
+  val REQUESTED_STATUS_COL = "requestedStatus"
+  val DEFAULT_COL = "default"
+  val HOME_COL = "home"
+  val REQUESTED_PRIMARIES_COUNT_COL = "requestedPrimariesCount"
+  val REQUESTED_SECONDARIES_COUNT_COL = "requestedSecondariesCount"
+  val REQUESTED_PROPERTY_SHARDS_REPLICA_COUNT_COL = "requestedPropertyShardReplicas"
+  val CREATION_TIME_COL = "creationTime"
+  val LAST_START_TIME_COL = "lastStartTime"
+  val LAST_STOP_TIME_COL = "lastStopTime"
+  val CONSTITUENTS_COL = "constituents"
+  val GRAPH_SHARDS_COL = "graphShards"
+  val PROPERTY_SHARDS_COL = "propertyShards"
+  val DEFAULT_LANGUAGE_COL = "defaultLanguage"
+  val NAME_COL = "name"
+  val TYPE_COL = "type"
+  val CURRENT_PRIMARIES_COUNT_COL = "currentPrimariesCount"
+  val CURRENT_SECONDARIES_COUNT_COL = "currentSecondariesCount"
+  val CURRENT_PROPERTY_SHARD_REPLICA_COUNT_COL = "currentPropertyShardReplicas"
+  val OPTIONS_COL = "options"
+
+  // If present, must be the same for every row for a database
+  val DATABASE_ID_COL = "databaseID"
+  val STORE_COL = "store"
+
+  // Can/will/must be different for every row for a database
+  val ACCESS_COL = "access"
+  val ROLE_COL = "role"
+  val PROPERTY_SHARD_REPLICA_ROLE = "property shard replica"
+  val WRITER_COL = "writer"
+  val CURRENT_STATUS_COL = "currentStatus"
+  val STATUS_MSG_COL = "statusMessage"
+  val LAST_COMMITTED_TX_COL = "lastCommittedTxn"
+  val REPLICATION_LAG_COL = "replicationLag"
+  val SHARD_TX_LAG_COL = "shardTxnLag"
+  val SERVER_ID_COL = "serverID"
+  val ADDRESS_COL = "address"
+
 }

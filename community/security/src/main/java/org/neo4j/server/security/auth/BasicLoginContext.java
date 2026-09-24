@@ -24,18 +24,17 @@ import static org.neo4j.internal.kernel.api.security.AuthenticationResult.FAILUR
 import static org.neo4j.internal.kernel.api.security.AuthenticationResult.PASSWORD_CHANGE_REQUIRED;
 import static org.neo4j.internal.kernel.api.security.AuthenticationResult.TOO_MANY_ATTEMPTS;
 
-import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
-import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.graphdb.security.AuthorizationViolationException;
 import org.neo4j.internal.kernel.api.connectioninfo.ClientConnectionInfo;
 import org.neo4j.internal.kernel.api.security.AbstractSecurityLog;
+import org.neo4j.internal.kernel.api.security.AbstractSecurityLog.ContextInfo;
 import org.neo4j.internal.kernel.api.security.AccessMode;
 import org.neo4j.internal.kernel.api.security.AuthSubject;
 import org.neo4j.internal.kernel.api.security.AuthenticationResult;
 import org.neo4j.internal.kernel.api.security.LoginContext;
-import org.neo4j.internal.kernel.api.security.SecurityAuthorizationHandler;
 import org.neo4j.internal.kernel.api.security.SecurityContext;
-import org.neo4j.kernel.api.exceptions.Status;
+import org.neo4j.internal.kernel.api.security.SecurityExceptionLogger;
+import org.neo4j.internal.kernel.api.security.StaticAccessMode;
 import org.neo4j.kernel.database.PrivilegeDatabaseReference;
 import org.neo4j.kernel.impl.security.User;
 
@@ -48,13 +47,13 @@ public class BasicLoginContext extends LoginContext {
 
         switch (authenticationResult) {
             case SUCCESS:
-                accessMode = AccessMode.Static.FULL;
+                accessMode = StaticAccessMode.FULL;
                 break;
             case PASSWORD_CHANGE_REQUIRED:
-                accessMode = AccessMode.Static.CREDENTIALS_EXPIRED;
+                accessMode = StaticAccessMode.CREDENTIALS_EXPIRED;
                 break;
             default:
-                accessMode = AccessMode.Static.ACCESS;
+                accessMode = StaticAccessMode.ACCESS;
         }
     }
 
@@ -88,23 +87,26 @@ public class BasicLoginContext extends LoginContext {
 
     @Override
     public SecurityContext authorize(
-            IdLookup idLookup, PrivilegeDatabaseReference dbReference, AbstractSecurityLog securityLog) {
+            IdLookup idLookup,
+            PrivilegeDatabaseReference dbReference,
+            AbstractSecurityLog securityLog,
+            long timeOfEvaluationMillis) {
         String dbName = dbReference.name();
         SecurityContext securityContext = new SecurityContext(subject(), accessMode, connectionInfo(), dbName);
         if (subject().getAuthenticationResult().equals(FAILURE)
                 || subject().getAuthenticationResult().equals(TOO_MANY_ATTEMPTS)) {
-            securityLog.error(securityContext, String.format("Authentication failed for database '%s'.", dbName));
-            throw AuthorizationViolationException.permissionDeniedUnauthorized();
+            throw new SecurityExceptionLogger(securityLog)
+                    .logAndGet(
+                            securityContext,
+                            String.format("Authentication failed for database '%s'.", dbName),
+                            AuthorizationViolationException.permissionDeniedUnauthorized());
         } else if (!dbName.equals(SYSTEM_DATABASE_NAME)
                 && subject().getAuthenticationResult().equals(PASSWORD_CHANGE_REQUIRED)) {
-            String message = SecurityAuthorizationHandler.generateCredentialsExpiredMessage(
+            String message = AuthorizationViolationException.generateCredentialsExpiredMessage(
                     String.format("ACCESS on database '%s' is not allowed.", dbName));
-            securityLog.error(securityContext, message);
-            var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42NFF)
-                    .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42NFD)
-                            .build())
-                    .build();
-            throw new AuthorizationViolationException(gql, message, Status.Security.CredentialsExpired);
+            securityLog.error(ContextInfo.from(securityContext), message);
+            throw new SecurityExceptionLogger(securityLog)
+                    .logAndGet(securityContext, AuthorizationViolationException.credentialsExpired(message));
         }
         return securityContext;
     }

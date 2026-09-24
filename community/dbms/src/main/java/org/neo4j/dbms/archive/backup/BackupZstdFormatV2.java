@@ -23,10 +23,11 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import org.neo4j.dbms.archive.ArchiveFormat;
+import org.neo4j.dbms.archive.MagicSignature;
 import org.neo4j.dbms.archive.StandardCompressionFormat;
 
 public class BackupZstdFormatV2 implements BackupCompressionFormat {
-    static final String MAGIC_HEADER = ArchiveFormat.BACKUP_PREFIX + "ZV2";
+    static final MagicSignature MAGIC_HEADER = MagicSignature.of(ArchiveFormat.BACKUP_PREFIX + "ZV2");
 
     private BackupMetadataV2 metadata;
 
@@ -90,8 +91,14 @@ public class BackupZstdFormatV2 implements BackupCompressionFormat {
         var metadataVersion = inputStream.read();
         return switch (metadataVersion) {
             case BackupMetadataV2.VERSION -> BackupMetadataV2.readFromStream(inputStream);
-            default -> throw new IOException(
-                    String.format("Unsupported metadata version %d found in backup", metadataVersion));
+            default ->
+                throw new IOException(
+                        String.format("Unsupported metadata version %d found in backup", metadataVersion));
         };
+    }
+
+    @Override
+    public String toString() {
+        return "BackupZstdFormatV2{metadata=" + metadata + '}';
     }
 }

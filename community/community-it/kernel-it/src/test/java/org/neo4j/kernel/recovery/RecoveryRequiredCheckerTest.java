@@ -30,10 +30,10 @@ import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Collection;
 import java.util.function.Predicate;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
@@ -47,22 +47,25 @@ import org.neo4j.io.layout.CommonDatabaseStores;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.kernel.database.DatabaseTracers;
-import org.neo4j.kernel.impl.transaction.log.CheckpointInfo;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
+import org.neo4j.storageengine.api.StorageEngine;
 import org.neo4j.storageengine.api.StorageEngineFactory;
+import org.neo4j.storageengine.api.StorageFileSelection;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.extension.pagecache.PageCacheSupportExtension;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
+import org.neo4j.wal.CheckpointInfo;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.LogPosition;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
 
 @TestDirectoryExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class RecoveryRequiredCheckerTest {
     @RegisterExtension
     static PageCacheSupportExtension pageCacheExtension = new PageCacheSupportExtension();
@@ -81,6 +84,9 @@ class RecoveryRequiredCheckerTest {
     private Path storeDir;
 
     private StorageEngineFactory storageEngineFactory;
+    private Collection<Path> storeFiles;
+    private Collection<Path> mandatoryStoreFiles;
+    private Collection<Path> idFiles;
 
     @BeforeEach
     void setup() {
@@ -157,7 +163,7 @@ class RecoveryRequiredCheckerTest {
             checker = getRecoveryCheckerWithDefaultConfig(fileSystem, pageCache, storageEngineFactory);
             assertFalse(checker.isRecoveryRequiredAt(databaseLayout, INSTANCE));
 
-            fileSystem.deleteFileOrThrow(Iterables.first(databaseLayout.idFiles()));
+            fileSystem.deleteFileOrThrow(Iterables.first(idFiles));
 
             assertTrue(checker.isRecoveryRequiredAt(databaseLayout, INSTANCE));
         }
@@ -173,7 +179,7 @@ class RecoveryRequiredCheckerTest {
                     getRecoveryCheckerWithDefaultConfig(fileSystem, pageCache, storageEngineFactory);
             assertFalse(checker.isRecoveryRequiredAt(databaseLayout, INSTANCE));
 
-            for (Path idFile : databaseLayout.idFiles()) {
+            for (Path idFile : idFiles) {
                 fileSystem.deleteFileOrThrow(idFile);
             }
 
@@ -183,8 +189,8 @@ class RecoveryRequiredCheckerTest {
 
     @Test
     void doNotRequireCheckpointWhenOldestNotCompletedPositionIsEqualToCheckpointedPosition() throws IOException {
-        var managementService = new TestDatabaseManagementServiceBuilder(testDirectory.directory("test")).build();
-        try {
+        try (var managementService =
+                new TestDatabaseManagementServiceBuilder(testDirectory.directory("test")).build()) {
             var db = (GraphDatabaseAPI) managementService.database(DEFAULT_DATABASE_NAME);
 
             databaseLayout = db.databaseLayout();
@@ -205,8 +211,6 @@ class RecoveryRequiredCheckerTest {
             assertEquals(
                     latestCheckpoint.transactionLogPosition(),
                     latestCheckpoint.oldestNotVisibleTransactionLogPosition());
-        } finally {
-            managementService.shutdown();
         }
 
         try (PageCache pageCache = pageCacheExtension.getPageCache(fileSystem)) {
@@ -244,7 +248,7 @@ class RecoveryRequiredCheckerTest {
                     getRecoveryCheckerWithDefaultConfig(fileSystem, pageCache, storageEngineFactory);
             assertFalse(checker.isRecoveryRequiredAt(databaseLayout, INSTANCE));
 
-            final var path = random.among(databaseLayout.mandatoryStoreFiles().stream()
+            final var path = random.among(mandatoryStoreFiles.stream()
                     .filter(Predicate.not(databaseLayout.pathForExistsMarker()::equals))
                     .toList());
             fileSystem.deleteFileOrThrow(path);
@@ -264,9 +268,11 @@ class RecoveryRequiredCheckerTest {
                     getRecoveryCheckerWithDefaultConfig(fileSystem, pageCache, storageEngineFactory);
             assertFalse(checker.isRecoveryRequiredAt(databaseLayout, INSTANCE));
 
-            fileSystem.deleteFileOrThrow(databaseLayout.pathForStore(CommonDatabaseStores.COUNTS));
-            fileSystem.deleteFileOrThrow(databaseLayout.pathForStore(CommonDatabaseStores.SCHEMAS));
-            fileSystem.deleteFileOrThrow(databaseLayout.pathForStore(CommonDatabaseStores.RELATIONSHIP_TYPE_TOKENS));
+            databaseLayout.pathForStore(CommonDatabaseStores.COUNTS).delete(fileSystem);
+            databaseLayout.pathForStore(CommonDatabaseStores.SCHEMAS).delete(fileSystem);
+            databaseLayout
+                    .pathForStore(CommonDatabaseStores.RELATIONSHIP_TYPE_TOKENS)
+                    .delete(fileSystem);
 
             assertTrue(checker.isRecoveryRequiredAt(databaseLayout, INSTANCE));
         }
@@ -283,7 +289,7 @@ class RecoveryRequiredCheckerTest {
                     getRecoveryCheckerWithDefaultConfig(fileSystem, pageCache, storageEngineFactory);
             assertFalse(checker.isRecoveryRequiredAt(databaseLayout, INSTANCE));
 
-            fileSystem.deleteFileOrThrow(databaseLayout.pathForStore(CommonDatabaseStores.COUNTS));
+            databaseLayout.pathForStore(CommonDatabaseStores.COUNTS).delete(fileSystem);
 
             assertFalse(checker.isRecoveryRequiredAt(databaseLayout, INSTANCE));
         }
@@ -300,9 +306,139 @@ class RecoveryRequiredCheckerTest {
                     getRecoveryCheckerWithDefaultConfig(fileSystem, pageCache, storageEngineFactory);
             assertFalse(checker.isRecoveryRequiredAt(databaseLayout, INSTANCE));
 
-            fileSystem.deleteFileOrThrow(databaseLayout.pathForStore(CommonDatabaseStores.INDEX_STATISTICS));
+            databaseLayout.pathForStore(CommonDatabaseStores.INDEX_STATISTICS).delete(fileSystem);
 
             assertFalse(checker.isRecoveryRequiredAt(databaseLayout, INSTANCE));
+        }
+    }
+
+    @Test
+    void recoveryRequiredWithMaxLogPositionIfNoCheckpointAtMaxLogPosition() throws Exception {
+        LogPosition logPositionAfterCheckpoint;
+        try (var managementService =
+                new TestDatabaseManagementServiceBuilder(testDirectory.directory("test")).build()) {
+            var db = (GraphDatabaseAPI) managementService.database(DEFAULT_DATABASE_NAME);
+
+            databaseLayout = db.databaseLayout();
+            var dependencyResolver = db.getDependencyResolver();
+            storageEngineFactory = dependencyResolver.resolveDependency(StorageEngineFactory.class);
+            var logFiles = dependencyResolver.resolveDependency(LogFiles.class);
+            var checkPointer = dependencyResolver.resolveDependency(CheckPointer.class);
+
+            checkPointer.forceCheckPoint(new SimpleTriggerInfo("Test"));
+
+            try (Transaction tx = db.beginTx()) {
+                tx.createNode();
+                tx.commit();
+            }
+
+            logPositionAfterCheckpoint = logFiles.logMetadataProvider()
+                    .getHighestGapFreeClosedTransaction()
+                    .logPosition();
+        }
+        RecoveryHelpers.removeLastCheckpointRecordFromLogFile(databaseLayout, fileSystem);
+
+        try (PageCache pageCache = pageCacheExtension.getPageCache(fileSystem)) {
+            RecoveryRequiredChecker checker = new RecoveryRequiredChecker(
+                    fileSystem,
+                    pageCache,
+                    Config.defaults(),
+                    storageEngineFactory,
+                    DatabaseTracers.EMPTY,
+                    RecoveryPredicate.untilPosition(logPositionAfterCheckpoint));
+            assertTrue(checker.isRecoveryRequiredAt(databaseLayout, INSTANCE));
+        }
+    }
+
+    @Test
+    void recoveryNotRequiredWhenAtMaxLogPosition() throws Exception {
+        CheckpointInfo latestCheckpoint;
+        try (var managementService =
+                new TestDatabaseManagementServiceBuilder(testDirectory.directory("test")).build()) {
+            var db = (GraphDatabaseAPI) managementService.database(DEFAULT_DATABASE_NAME);
+
+            databaseLayout = db.databaseLayout();
+            var dependencyResolver = db.getDependencyResolver();
+            storageEngineFactory = dependencyResolver.resolveDependency(StorageEngineFactory.class);
+            var logFiles = dependencyResolver.resolveDependency(LogFiles.class);
+            var checkPointer = dependencyResolver.resolveDependency(CheckPointer.class);
+
+            try (Transaction tx = db.beginTx()) {
+                tx.createNode();
+                tx.commit();
+            }
+
+            checkPointer.forceCheckPoint(new SimpleTriggerInfo("Test"));
+
+            latestCheckpoint =
+                    logFiles.getCheckpointFile().findLatestCheckpoint().orElseThrow();
+
+            try (Transaction tx = db.beginTx()) {
+                tx.createNode();
+                tx.commit();
+            }
+        }
+        RecoveryHelpers.removeLastCheckpointRecordFromLogFile(databaseLayout, fileSystem);
+
+        try (PageCache pageCache = pageCacheExtension.getPageCache(fileSystem)) {
+            RecoveryRequiredChecker checker = new RecoveryRequiredChecker(
+                    fileSystem,
+                    pageCache,
+                    Config.defaults(),
+                    storageEngineFactory,
+                    DatabaseTracers.EMPTY,
+                    RecoveryPredicate.untilPosition(latestCheckpoint.transactionLogPosition()));
+            assertFalse(checker.isRecoveryRequiredAt(databaseLayout, INSTANCE));
+        }
+    }
+
+    @Test
+    void recoveryRequiredWhenCheckpointAtMaxLogPositionButSeveralStoreFilesAreMissing() throws Exception {
+        CheckpointInfo latestCheckpoint;
+        try (var managementService =
+                new TestDatabaseManagementServiceBuilder(testDirectory.directory("test")).build()) {
+            var db = (GraphDatabaseAPI) managementService.database(DEFAULT_DATABASE_NAME);
+
+            databaseLayout = db.databaseLayout();
+            var dependencyResolver = db.getDependencyResolver();
+            storageEngineFactory = dependencyResolver.resolveDependency(StorageEngineFactory.class);
+            var logFiles = dependencyResolver.resolveDependency(LogFiles.class);
+            var checkPointer = dependencyResolver.resolveDependency(CheckPointer.class);
+
+            try (Transaction tx = db.beginTx()) {
+                tx.createNode();
+                tx.commit();
+            }
+
+            checkPointer.forceCheckPoint(new SimpleTriggerInfo("Test"));
+
+            latestCheckpoint =
+                    logFiles.getCheckpointFile().findLatestCheckpoint().orElseThrow();
+
+            try (Transaction tx = db.beginTx()) {
+                tx.createNode();
+                tx.commit();
+            }
+        }
+        RecoveryHelpers.removeLastCheckpointRecordFromLogFile(databaseLayout, fileSystem);
+
+        try (PageCache pageCache = pageCacheExtension.getPageCache(fileSystem)) {
+            RecoveryRequiredChecker checker = new RecoveryRequiredChecker(
+                    fileSystem,
+                    pageCache,
+                    Config.defaults(),
+                    storageEngineFactory,
+                    DatabaseTracers.EMPTY,
+                    RecoveryPredicate.untilPosition(latestCheckpoint.transactionLogPosition()));
+            assertFalse(checker.isRecoveryRequiredAt(databaseLayout, INSTANCE));
+
+            databaseLayout.pathForStore(CommonDatabaseStores.COUNTS).delete(fileSystem);
+            databaseLayout.pathForStore(CommonDatabaseStores.SCHEMAS).delete(fileSystem);
+            databaseLayout
+                    .pathForStore(CommonDatabaseStores.RELATIONSHIP_TYPE_TOKENS)
+                    .delete(fileSystem);
+
+            assertTrue(checker.isRecoveryRequiredAt(databaseLayout, INSTANCE));
         }
     }
 
@@ -312,14 +448,14 @@ class RecoveryRequiredCheckerTest {
             RecoveryRequiredChecker recoveryChecker =
                     getRecoveryChecker(ephemeralFs, pageCache, storageEngineFactory, config);
 
-            assertThat(recoveryChecker.isRecoveryRequiredAt(DatabaseLayout.of(config), INSTANCE))
+            assertThat(recoveryChecker.isRecoveryRequiredAt(
+                            DatabaseLayout.of(config, databaseLayout.getDatabaseName()), INSTANCE))
                     .isEqualTo(true);
 
-            DatabaseManagementService managementService = new TestDatabaseManagementServiceBuilder(storeDir)
+            try (DatabaseManagementService managementService = new TestDatabaseManagementServiceBuilder(storeDir)
                     .setFileSystem(ephemeralFs)
                     .setConfig(config)
-                    .build();
-            managementService.shutdown();
+                    .build()) {}
 
             assertThat(recoveryChecker.isRecoveryRequiredAt(databaseLayout, INSTANCE))
                     .isEqualTo(false);
@@ -331,13 +467,13 @@ class RecoveryRequiredCheckerTest {
     }
 
     private void assertAllIdFilesExist() {
-        for (Path idFile : databaseLayout.idFiles()) {
+        for (Path idFile : idFiles) {
             assertTrue(fileSystem.fileExists(idFile), "ID file " + idFile + " does not exist");
         }
     }
 
     private void assertStoreFilesExist() {
-        for (Path file : databaseLayout.storeFiles()) {
+        for (Path file : storeFiles) {
             assertTrue(fileSystem.fileExists(file), "Store file " + file + " does not exist");
         }
     }
@@ -352,7 +488,8 @@ class RecoveryRequiredCheckerTest {
             PageCache pageCache,
             StorageEngineFactory storageEngineFactory,
             Config config) {
-        return new RecoveryRequiredChecker(fileSystem, pageCache, config, storageEngineFactory, DatabaseTracers.EMPTY);
+        return new RecoveryRequiredChecker(
+                fileSystem, pageCache, config, storageEngineFactory, DatabaseTracers.EMPTY, RecoveryPredicate.ALL);
     }
 
     private EphemeralFileSystemAbstraction createSomeDataAndCrash(Path store, Config config) throws IOException {
@@ -390,19 +527,24 @@ class RecoveryRequiredCheckerTest {
     }
 
     private void startStopAndCreateDefaultData() {
-        DatabaseManagementService managementService = startDatabase(fileSystem, storeDir);
-        try {
-            GraphDatabaseService database = managementService.database(DEFAULT_DATABASE_NAME);
+        try (DatabaseManagementService managementService = startDatabase(fileSystem, storeDir)) {
+            var database = (GraphDatabaseAPI) managementService.database(DEFAULT_DATABASE_NAME);
             try (Transaction transaction = database.beginTx()) {
                 transaction.createNode();
                 transaction.commit();
             }
 
-            databaseLayout = ((GraphDatabaseAPI) database).databaseLayout();
-            storageEngineFactory =
-                    ((GraphDatabaseAPI) database).getDependencyResolver().resolveDependency(StorageEngineFactory.class);
-        } finally {
-            managementService.shutdown();
+            databaseLayout = database.databaseLayout();
+            storageEngineFactory = database.getDependencyResolver().resolveDependency(StorageEngineFactory.class);
+            storeFiles = database.getDependencyResolver()
+                    .resolveDependency(StorageEngine.class)
+                    .listStorageFiles(new StorageFileSelection(true, true, false));
+            mandatoryStoreFiles = database.getDependencyResolver()
+                    .resolveDependency(StorageEngine.class)
+                    .listStorageFiles(new StorageFileSelection(true, true, false, false));
+            idFiles = database.getDependencyResolver()
+                    .resolveDependency(StorageEngine.class)
+                    .listStorageFiles(new StorageFileSelection(false, false, true));
         }
     }
 }

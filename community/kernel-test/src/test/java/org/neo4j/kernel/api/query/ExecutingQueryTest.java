@@ -37,10 +37,14 @@ import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import org.junit.jupiter.api.Test;
+import org.neo4j.cypher.internal.CypherVersion;
+import org.neo4j.graphdb.InputPosition;
 import org.neo4j.internal.helpers.MathUtil;
 import org.neo4j.internal.kernel.api.connectioninfo.ClientConnectionInfo;
 import org.neo4j.io.pagecache.tracing.cursor.PageCursorCounters;
+import org.neo4j.kernel.api.query.QueryObfuscator.ObfuscatedQuery;
 import org.neo4j.kernel.database.NamedDatabaseId;
 import org.neo4j.lock.LockTracer;
 import org.neo4j.lock.LockWaitEvent;
@@ -80,13 +84,22 @@ class ExecutingQueryTest {
         assertEquals("planning", query.snapshot().status());
 
         // when
-        query.onCompilationCompleted(new CompilerInfo("the-planner", "the-runtime", emptyList()), null, null, 0);
+        query.onCompilationCompleted(
+                new CompilerInfo(
+                        "the-planner",
+                        "2026.04",
+                        RuntimeName.INTERPRETED,
+                        emptyList(),
+                        CypherVersion.Legacy.legacyVersion()),
+                null,
+                null,
+                0);
 
         // then
         assertEquals("planned", query.snapshot().status());
 
         // when
-        query.onExecutionStarted(new FakeMemoryTracker());
+        query.onExecutionStarted(new FakeMemoryTracker(), null);
 
         // then
         assertEquals("running", query.snapshot().status());
@@ -112,7 +125,16 @@ class ExecutingQueryTest {
 
         // when
         clock.forward(16, TimeUnit.MICROSECONDS);
-        query.onCompilationCompleted(new CompilerInfo("the-planner", "the-runtime", emptyList()), null, null, 0);
+        query.onCompilationCompleted(
+                new CompilerInfo(
+                        "the-planner",
+                        "2026.04",
+                        RuntimeName.INTERPRETED,
+                        emptyList(),
+                        CypherVersion.Legacy.legacyVersion()),
+                null,
+                null,
+                0);
         clock.forward(200, TimeUnit.MICROSECONDS);
 
         // then
@@ -125,8 +147,17 @@ class ExecutingQueryTest {
     void shouldReportWaitTime() {
         // given
         query.onObfuscatorReady(null, 0);
-        query.onCompilationCompleted(new CompilerInfo("the-planner", "the-runtime", emptyList()), null, null, 0);
-        query.onExecutionStarted(new FakeMemoryTracker());
+        query.onCompilationCompleted(
+                new CompilerInfo(
+                        "the-planner",
+                        "2026.04",
+                        RuntimeName.INTERPRETED,
+                        emptyList(),
+                        CypherVersion.Legacy.legacyVersion()),
+                null,
+                null,
+                0);
+        query.onExecutionStarted(new FakeMemoryTracker(), null);
 
         // then
         assertEquals("running", query.snapshot().status());
@@ -201,7 +232,7 @@ class ExecutingQueryTest {
                 () -> lockCount,
                 () -> 0,
                 () -> 1,
-                Thread.currentThread().getId(),
+                Thread.currentThread().threadId(),
                 Thread.currentThread().getName(),
                 LockTracer.NONE,
                 clock,
@@ -230,7 +261,7 @@ class ExecutingQueryTest {
                 () -> lockCount,
                 () -> 0,
                 () -> 1,
-                Thread.currentThread().getId(),
+                Thread.currentThread().threadId(),
                 Thread.currentThread().getName(),
                 LockTracer.NONE,
                 clock,
@@ -282,6 +313,97 @@ class ExecutingQueryTest {
     }
 
     @Test
+    void exposesDefaultAndFullyObfuscatedViews() {
+        QueryObfuscator obfuscator = new QueryObfuscator() {
+            @Override
+            public String obfuscateText(String rawQueryText, int preparserOffset) {
+                return rawQueryText;
+            }
+
+            @Override
+            public Function<InputPosition, InputPosition> obfuscatePosition(String rawQueryText, int preparserOffset) {
+                return Function.identity();
+            }
+
+            @Override
+            public MapValue obfuscateParameters(MapValue rawQueryParameters) {
+                return rawQueryParameters;
+            }
+
+            @Override
+            public ObfuscatedQuery defaultObfuscatedQuery(
+                    String rawQueryText, MapValue rawQueryParameters, int offset) {
+                return new ObfuscatedQuery("default-view", rawQueryParameters, Function.identity());
+            }
+
+            @Override
+            public ObfuscatedQuery fullyObfuscatedQuery(String rawQueryText, MapValue rawQueryParameters, int offset) {
+                return new ObfuscatedQuery("all-view", rawQueryParameters, Function.identity());
+            }
+
+            @Override
+            public ObfuscatedQuery typedObfuscatedQuery(
+                    String rawQueryText, MapValue rawQueryParameters, int offset, ObfuscatedLiteralRenderer renderer) {
+                return new ObfuscatedQuery("typed-view", rawQueryParameters, Function.identity());
+            }
+        };
+
+        query.onObfuscatorReady(obfuscator, 0);
+
+        assertThat(query.obfuscatedQueryText()).contains("default-view");
+        assertThat(query.fullyObfuscatedQueryText()).isEqualTo("all-view");
+
+        QuerySnapshot snapshot = query.snapshot();
+        assertThat(snapshot.obfuscatedQueryText()).contains("default-view");
+        assertThat(snapshot.typedObfuscatedQueryText(typeName -> typeName)).contains("typed-view");
+    }
+
+    @Test
+    void obfuscatedViewsEmptyBeforeObfuscatorReady() {
+        assertThat(query.obfuscatedQueryText()).isEmpty();
+        assertThat(query.fullyObfuscatedQueryText()).isEmpty();
+    }
+
+    @Test
+    void obfuscationFailureDegradesToAbsentViewsEvenOnError() {
+        // A StackOverflowError (e.g. on a deeply nested expression) must degrade to absent views, not escape
+        // the accessors and crash the consumer building a log line or fleet slice.
+        QueryObfuscator throwingError = new QueryObfuscator() {
+            @Override
+            public String obfuscateText(String rawQueryText, int preparserOffset) {
+                throw new StackOverflowError("deeply nested");
+            }
+
+            @Override
+            public Function<InputPosition, InputPosition> obfuscatePosition(String rawQueryText, int preparserOffset) {
+                throw new StackOverflowError("deeply nested");
+            }
+
+            @Override
+            public MapValue obfuscateParameters(MapValue rawQueryParameters) {
+                throw new StackOverflowError("deeply nested");
+            }
+
+            @Override
+            public ObfuscatedQuery typedObfuscatedQuery(
+                    String rawQueryText,
+                    MapValue rawQueryParameters,
+                    int preparserOffset,
+                    ObfuscatedLiteralRenderer renderer) {
+                throw new StackOverflowError("deeply nested");
+            }
+        };
+
+        query.onObfuscatorReady(throwingError, 0);
+
+        assertThat(query.obfuscatedQueryText()).isEmpty();
+        assertThat(query.fullyObfuscatedQueryText()).isEmpty();
+        assertThat(query.snapshot().obfuscatedQueryText()).isEmpty();
+        assertThat(query.snapshot().typedObfuscatedQueryText(typeName -> typeName))
+                .isEmpty();
+    }
+
+    @Test
     void includeQueryExecutorThreadName() {
         String queryDescription = query.toString();
         assertTrue(queryDescription.contains(
@@ -297,7 +419,7 @@ class ExecutingQueryTest {
 
     @Test
     void shouldNotAllowStartingExecutionWithoutCompilation() {
-        assertThatIllegalStateException().isThrownBy(() -> query.onExecutionStarted(null));
+        assertThatIllegalStateException().isThrownBy(() -> query.onExecutionStarted(null, null));
     }
 
     @Test
@@ -310,7 +432,7 @@ class ExecutingQueryTest {
         query.onCompilationCompleted(null, null, null, 0);
         assertEquals("planned", query.snapshot().status());
 
-        query.onExecutionStarted(new FakeMemoryTracker());
+        query.onExecutionStarted(new FakeMemoryTracker(), null);
         assertEquals("running", query.snapshot().status());
 
         query.onRetryAttempted();
@@ -475,7 +597,7 @@ class ExecutingQueryTest {
                 () -> lockCount,
                 page::hits,
                 page::faults,
-                Thread.currentThread().getId(),
+                Thread.currentThread().threadId(),
                 Thread.currentThread().getName(),
                 LockTracer.NONE,
                 clock,

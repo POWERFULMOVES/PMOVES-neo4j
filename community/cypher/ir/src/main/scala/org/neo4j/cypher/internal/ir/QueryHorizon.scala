@@ -22,23 +22,25 @@ package org.neo4j.cypher.internal.ir
 import org.neo4j.cypher.internal.ast.AliasedReturnItem
 import org.neo4j.cypher.internal.ast.CommandClause
 import org.neo4j.cypher.internal.ast.GraphReference
-import org.neo4j.cypher.internal.ast.Hint
+import org.neo4j.cypher.internal.ast.IrHint
 import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsParameters
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.Parameter
 import org.neo4j.cypher.internal.expressions.StringLiteral
 import org.neo4j.cypher.internal.expressions.Variable
-import org.neo4j.cypher.internal.frontend.phases.ResolvedCall
-import org.neo4j.cypher.internal.ir.ast.IRExpression
+import org.neo4j.cypher.internal.frontend.phases.ResolvedNonLocalCall
 import org.neo4j.cypher.internal.ir.helpers.ExpressionConverters.PredicateConverter
 import org.neo4j.cypher.internal.util.Foldable
 import org.neo4j.cypher.internal.util.Foldable.FoldableAny
 import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.cypher.internal.util.collection.immutable.ListSet
 
 sealed trait QueryHorizon extends Foldable {
 
   def exposedSymbols(coveredIds: Set[LogicalVariable]): Set[LogicalVariable]
+
+  def importedSymbolsFromLastCallSubquery: Set[LogicalVariable]
 
   def dependingExpressions: Iterable[Expression]
 
@@ -46,8 +48,9 @@ sealed trait QueryHorizon extends Foldable {
 
   def readOnly = true
 
-  def allHints: Set[Hint]
-  def withoutHints(hintsToIgnore: Set[Hint]): QueryHorizon
+  def allHints: ListSet[IrHint]
+  def withoutHints(hintsToIgnore: ListSet[IrHint]): QueryHorizon
+  def withoutImpliedExpressions: QueryHorizon
 
   /**
    * @return whether this horizon is the final projection of a single top-level planner query.
@@ -70,81 +73,67 @@ sealed trait QueryHorizon extends Foldable {
       case _                   => false
     }
   }
-
-  /**
-   * @return all recursively included query graphs, with leaf information for Eagerness analysis.
-   *         Query graphs from pattern expressions and pattern comprehensions will generate variable names that might clash with existing names, so this method
-   *         is not safe to use for planning pattern expressions and pattern comprehensions.
-   */
-  protected def getAllQGsWithLeafInfo: Seq[QgWithLeafInfo] = {
-    val filtered = dependingExpressions.filter(!_.isInstanceOf[Variable]).toSeq
-    val iRExpressions: Seq[QgWithLeafInfo] = filtered.folder.findAllByClass[IRExpression].flatMap((e: IRExpression) =>
-      e.query.allQGsWithLeafInfo
-    )
-    QgWithLeafInfo.qgWithNoStableIdentifierAndOnlyLeaves(
-      getQueryGraphFromDependingExpressions,
-      isProjectionInFinalPosition
-    ) +: iRExpressions
-  }
-
-  protected def getQueryGraphFromDependingExpressions: QueryGraph = {
-    val dependencies = dependingExpressions
-      .flatMap(_.dependencies)
-      .toSet
-
-    QueryGraph(
-      argumentIds = dependencies,
-      selections = Selections.from(dependingExpressions)
-    )
-  }
-
-  lazy val allQueryGraphs: Seq[QgWithLeafInfo] = getAllQGsWithLeafInfo
 }
 
-final case class PassthroughAllHorizon() extends QueryHorizon {
+final case class PassthroughAllHorizon(importedSymbolsFromLastCallSubquery: Set[LogicalVariable]) extends QueryHorizon {
   override def exposedSymbols(coveredIds: Set[LogicalVariable]): Set[LogicalVariable] = coveredIds
 
   override def dependingExpressions: Seq[Expression] = Seq.empty
 
-  override lazy val allQueryGraphs: Seq[QgWithLeafInfo] = Seq.empty
+  override def allHints: ListSet[IrHint] = ListSet.empty
 
-  override def allHints: Set[Hint] = Set.empty
+  override def withoutHints(hintsToIgnore: ListSet[IrHint]): QueryHorizon = this
 
-  override def withoutHints(hintsToIgnore: Set[Hint]): QueryHorizon = this
+  override def withoutImpliedExpressions: QueryHorizon = this
 }
 
-case class UnwindProjection(variable: LogicalVariable, exp: Expression) extends QueryHorizon {
+case class UnwindProjection(
+  variable: LogicalVariable,
+  exp: Expression,
+  importedSymbolsFromLastCallSubquery: Set[LogicalVariable]
+) extends QueryHorizon {
   override def exposedSymbols(coveredIds: Set[LogicalVariable]): Set[LogicalVariable] = coveredIds + variable
 
   override def dependingExpressions: Seq[Expression] = Seq(exp)
 
-  override def allHints: Set[Hint] = Set.empty
+  override def allHints: ListSet[IrHint] = ListSet.empty
 
-  override def withoutHints(hintsToIgnore: Set[Hint]): QueryHorizon = this
+  override def withoutHints(hintsToIgnore: ListSet[IrHint]): QueryHorizon = this
+
+  override def withoutImpliedExpressions: QueryHorizon = this
+
 }
 
 case class LoadCSVProjection(
   variable: LogicalVariable,
   url: Expression,
   format: CSVFormat,
-  fieldTerminator: Option[StringLiteral]
+  fieldTerminator: Option[StringLiteral],
+  importedSymbolsFromLastCallSubquery: Set[LogicalVariable]
 ) extends QueryHorizon {
   override def exposedSymbols(coveredIds: Set[LogicalVariable]): Set[LogicalVariable] = coveredIds + variable
 
   override def dependingExpressions: Seq[Expression] = Seq(url)
 
-  override def allHints: Set[Hint] = Set.empty
+  override def allHints: ListSet[IrHint] = ListSet.empty
 
-  override def withoutHints(hintsToIgnore: Set[Hint]): QueryHorizon = this
+  override def withoutHints(hintsToIgnore: ListSet[IrHint]): QueryHorizon = this
+
+  override def withoutImpliedExpressions: QueryHorizon = this
+
 }
 
+/**
+ * @param importedSymbolsFromLastCallSubquery Variables like a,b,c that the previous `CALL(a,b,c) {}` imported. These will go out of scope unless they are also in `importedVariables`.
+ */
 case class CallSubqueryHorizon(
   callSubquery: PlannerQuery,
   correlated: Boolean,
   yielding: Boolean,
   inTransactionsParameters: Option[InTransactionsParameters],
   optional: Boolean,
-  importedVariables: Set[LogicalVariable]
+  importedVariables: Set[LogicalVariable],
+  importedSymbolsFromLastCallSubquery: Set[LogicalVariable]
 ) extends QueryHorizon {
 
   override def exposedSymbols(coveredIds: Set[LogicalVariable]): Set[LogicalVariable] = {
@@ -156,17 +145,18 @@ case class CallSubqueryHorizon(
 
   override def readOnly: Boolean = callSubquery.readOnly
 
-  override def allHints: Set[Hint] = callSubquery.allHints
+  override def allHints: ListSet[IrHint] = callSubquery.allHints
 
-  override def withoutHints(hintsToIgnore: Set[Hint]): QueryHorizon =
+  override def withoutHints(hintsToIgnore: ListSet[IrHint]): QueryHorizon =
     copy(callSubquery = callSubquery.withoutHints(hintsToIgnore))
+
+  override def withoutImpliedExpressions: QueryHorizon =
+    copy(callSubquery = callSubquery.withoutImpliedExpressions)
 
   /**
    * We don't analyze the subquery but just assume that it's doing reads.
    */
   override def couldContainRead: Boolean = true
-
-  override lazy val allQueryGraphs: Seq[QgWithLeafInfo] = super.getAllQGsWithLeafInfo ++ callSubquery.allQGsWithLeafInfo
 }
 
 sealed abstract class QueryProjection extends QueryHorizon {
@@ -196,9 +186,18 @@ sealed abstract class QueryProjection extends QueryHorizon {
     withSelection(selections = selections ++ newSelections)
   }
 
-  override def allHints: Set[Hint] = Set.empty
+  def addPredicates(predicates: Iterable[Expression]): QueryProjection = {
+    val newSelections = Selections(predicates.flatMap(_.asPredicates).toSet)
+    withSelection(selections = selections ++ newSelections)
+  }
 
-  override def withoutHints(hintsToIgnore: Set[Hint]): QueryHorizon = this
+  override def allHints: ListSet[IrHint] = ListSet.empty
+
+  override def withoutHints(hintsToIgnore: ListSet[IrHint]): QueryHorizon = this
+
+  override def withoutImpliedExpressions: QueryHorizon = this
+
+  override def importedSymbolsFromLastCallSubquery: Set[LogicalVariable] = importedExposedSymbols
 }
 
 object QueryProjection {
@@ -243,7 +242,7 @@ object QueryProjection {
 
   def forVariables(variables: Set[LogicalVariable]): Seq[AliasedReturnItem] =
     variables.toIndexedSeq.map(variable =>
-      AliasedReturnItem(variable, variable)(InputPosition.NONE)
+      AliasedReturnItem(variable, variable)(InputPosition.NONE, AliasedReturnItem.wasAutoAliasedDefault)
     )
 }
 
@@ -290,7 +289,10 @@ final case class AggregatingQueryProjection(
   queryPagination: QueryPagination = QueryPagination.empty,
   selections: Selections = Selections(),
   position: QueryProjection.Position = QueryProjection.Position.Intermediate,
-  importedExposedSymbols: Set[LogicalVariable] = Set.empty
+  importedExposedSymbols: Set[LogicalVariable] = Set.empty,
+  // not needed for correctness, can be planned as an optimization
+  optionalPreprocessing: AggregatingQueryProjection.OptionalPreprocessing =
+    AggregatingQueryProjection.OptionalPreprocessing.Passthrough
 ) extends QueryProjection {
 
   assert(
@@ -319,6 +321,32 @@ final case class AggregatingQueryProjection(
 
   override def withImportedExposedSymbols(symbols: Set[LogicalVariable]): QueryProjection =
     copy(importedExposedSymbols = symbols)
+}
+
+object AggregatingQueryProjection {
+
+  // not needed for correctness, can be planned as an optimization
+  sealed trait OptionalPreprocessing {
+
+    final def expressions: Seq[Expression] = this match {
+      case OptionalPreprocessing.Passthrough =>
+        Seq.empty
+      case OptionalPreprocessing.FilterAndLimit(filter, limit) =>
+        filter.toSeq :+ limit
+    }
+
+    final def mapExpressions(f: Expression => Expression): OptionalPreprocessing = this match {
+      case OptionalPreprocessing.Passthrough =>
+        this
+      case OptionalPreprocessing.FilterAndLimit(filter, limit) =>
+        OptionalPreprocessing.FilterAndLimit(filter.map(f), f(limit))
+    }
+  }
+
+  object OptionalPreprocessing {
+    case object Passthrough extends OptionalPreprocessing
+    final case class FilterAndLimit(filter: Option[Expression], limit: Expression) extends OptionalPreprocessing
+  }
 }
 
 final case class DistinctQueryProjection(
@@ -389,7 +417,10 @@ case class RunQueryAtProjection(
     copy(importedExposedSymbols = symbols)
 }
 
-case class CommandProjection(clause: CommandClause) extends QueryHorizon {
+case class CommandProjection(
+  clause: CommandClause,
+  importedSymbolsFromLastCallSubquery: Set[LogicalVariable]
+) extends QueryHorizon {
 
   override def exposedSymbols(coveredIds: Set[LogicalVariable]): Set[LogicalVariable] = {
     val columns = clause match {
@@ -402,11 +433,14 @@ case class CommandProjection(clause: CommandClause) extends QueryHorizon {
 
   override def dependingExpressions: Seq[Expression] = Seq()
 
-  override def allHints: Set[Hint] = Set.empty
+  override def allHints: ListSet[IrHint] = ListSet.empty
 
-  override def withoutHints(hintsToIgnore: Set[Hint]): QueryHorizon = this
+  override def withoutHints(hintsToIgnore: ListSet[IrHint]): QueryHorizon = this
+
+  override def withoutImpliedExpressions: QueryHorizon = this
+
 }
 
 abstract class AbstractProcedureCallProjection extends QueryHorizon {
-  val call: ResolvedCall
+  val call: ResolvedNonLocalCall
 }

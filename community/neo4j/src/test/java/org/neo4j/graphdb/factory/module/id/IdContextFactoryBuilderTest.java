@@ -20,9 +20,9 @@
 package org.neo4j.graphdb.factory.module.id;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.eclipse.collections.api.factory.Sets.immutable;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.neo4j.configuration.Config.defaults;
@@ -51,8 +51,12 @@ import org.neo4j.internal.recordstorage.RecordIdType;
 import org.neo4j.io.fs.DefaultFileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.database.DatabaseIdContext;
+import org.neo4j.kernel.database.IdContextFactory;
+import org.neo4j.kernel.database.IdGeneratorSettings;
 import org.neo4j.kernel.lifecycle.LifeSupport;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.scheduler.JobScheduler;
@@ -83,21 +87,25 @@ class IdContextFactoryBuilderTest {
 
     @Test
     void requireFileSystemWhenIdGeneratorFactoryNotProvided() {
-        NullPointerException exception = assertThrows(NullPointerException.class, () -> IdContextFactoryBuilder.of(
-                        null, jobScheduler, null, PageCacheTracer.NULL)
-                .build());
-        assertThat(exception.getMessage()).contains("File system is required");
+        assertThatThrownBy(() -> IdContextFactoryBuilder.of(null, jobScheduler, PageCacheTracer.NULL)
+                        .build())
+                .isInstanceOf(NullPointerException.class)
+                .hasMessageContaining("File system is required");
     }
 
     @Test
     void createContextWithCustomIdGeneratorFactoryWhenProvided() throws IOException {
         IdGeneratorFactory idGeneratorFactory = mock(IdGeneratorFactory.class);
         Config config = defaults();
-        IdContextFactory contextFactory = IdContextFactoryBuilder.of(fs, jobScheduler, config, PageCacheTracer.NULL)
-                .withIdGenerationFactoryProvider((i1, i2) -> idGeneratorFactory)
+        IdContextFactory contextFactory = IdContextFactoryBuilder.of(fs, jobScheduler, PageCacheTracer.NULL)
+                .withIdGenerationFactoryProvider((dbConfig, i1, i2, directToCache, multiVersion) -> idGeneratorFactory)
                 .build();
         DatabaseIdContext idContext = contextFactory.createIdContext(
-                from("database", UUID.randomUUID()), CONTEXT_FACTORY, new DatabaseConfig(config), true);
+                from("database", UUID.randomUUID()),
+                CONTEXT_FACTORY,
+                new DatabaseConfig(config),
+                new IdGeneratorSettings(true, true),
+                false);
 
         IdGeneratorFactory bufferedGeneratorFactory = idContext.getIdGeneratorFactory();
         assertThat(idContext.getIdController()).isInstanceOf(BufferedIdController.class);
@@ -106,21 +114,21 @@ class IdContextFactoryBuilderTest {
         ((BufferingIdGeneratorFactory) bufferedGeneratorFactory)
                 .initialize(
                         fs,
-                        testDirectory.file("buffer"),
+                        new StoreFile(testDirectory.file("buffer")),
                         config,
                         () -> new IdController.TransactionSnapshot(10, 0, 0),
-                        () -> 9,
+                        new TestVisibilityHorizonVisibilityBoundary(),
                         s -> true,
                         EmptyMemoryTracker.INSTANCE);
         life.add(idContext.getIdController());
-        Path file = testDirectory.file("a");
+        StoreFile storeFile = new StoreFile(testDirectory.file("a"));
         RecordIdType idType = RecordIdType.NODE;
         LongSupplier highIdSupplier = () -> 0;
         int maxId = 100;
 
         idGeneratorFactory.open(
                 pageCache,
-                file,
+                storeFile,
                 idType,
                 highIdSupplier,
                 maxId,
@@ -133,7 +141,7 @@ class IdContextFactoryBuilderTest {
         verify(idGeneratorFactory)
                 .open(
                         pageCache,
-                        file,
+                        storeFile,
                         idType,
                         highIdSupplier,
                         maxId,
@@ -149,12 +157,16 @@ class IdContextFactoryBuilderTest {
         IdGeneratorFactory idGeneratorFactory = mock(IdGeneratorFactory.class);
         Function<IdGeneratorFactory, IdGeneratorFactory> factoryWrapper = ignored -> idGeneratorFactory;
 
-        IdContextFactory contextFactory = IdContextFactoryBuilder.of(fs, jobScheduler, defaults(), PageCacheTracer.NULL)
+        IdContextFactory contextFactory = IdContextFactoryBuilder.of(fs, jobScheduler, PageCacheTracer.NULL)
                 .withFactoryWrapper(factoryWrapper)
                 .build();
 
         DatabaseIdContext idContext = contextFactory.createIdContext(
-                from("database", UUID.randomUUID()), CONTEXT_FACTORY, new DatabaseConfig(defaults()), true);
+                from("database", UUID.randomUUID()),
+                CONTEXT_FACTORY,
+                new DatabaseConfig(defaults()),
+                new IdGeneratorSettings(true, true),
+                false);
 
         assertSame(idGeneratorFactory, idContext.getIdGeneratorFactory());
     }
@@ -164,18 +176,22 @@ class IdContextFactoryBuilderTest {
         PageCacheTracer cacheTracer = new DefaultPageCacheTracer();
         CursorContextFactory contextFactory = new CursorContextFactory(cacheTracer, EMPTY_CONTEXT_SUPPLIER);
         Config config = defaults();
-        var idContextFactory = IdContextFactoryBuilder.of(fs, jobScheduler, config, cacheTracer)
-                .build();
+        var idContextFactory =
+                IdContextFactoryBuilder.of(fs, jobScheduler, cacheTracer).build();
         var idContext = idContextFactory.createIdContext(
-                from("test", UUID.randomUUID()), contextFactory, new DatabaseConfig(config), true);
+                from("test", UUID.randomUUID()),
+                contextFactory,
+                new DatabaseConfig(config),
+                new IdGeneratorSettings(true, true),
+                false);
         var idGeneratorFactory = idContext.getIdGeneratorFactory();
         var idController = idContext.getIdController();
         idController.initialize(
                 fs,
-                testDirectory.file("buffer"),
+                new StoreFile(testDirectory.file("buffer")),
                 config,
                 () -> new IdController.TransactionSnapshot(10, 0, 0),
-                () -> 9,
+                new TestVisibilityHorizonVisibilityBoundary(),
                 s -> true,
                 EmptyMemoryTracker.INSTANCE,
                 writable());
@@ -185,7 +201,17 @@ class IdContextFactoryBuilderTest {
         RecordIdType idType = RecordIdType.NODE;
 
         try (IdGenerator idGenerator = idGeneratorFactory.create(
-                pageCache, file, idType, 1, false, 100, false, config, contextFactory, immutable.empty(), SINGLE_IDS)) {
+                pageCache,
+                new StoreFile(file),
+                idType,
+                1,
+                false,
+                100,
+                false,
+                config,
+                contextFactory,
+                immutable.empty(),
+                SINGLE_IDS)) {
             idGenerator.start(FreeIds.NO_FREE_IDS, NULL_CONTEXT);
             try (var marker = idGenerator.transactionalMarker(NULL_CONTEXT)) {
                 marker.markDeleted(1);
@@ -201,6 +227,19 @@ class IdContextFactoryBuilderTest {
             assertThat(cacheTracer.pins() - initialPins).isGreaterThan(0);
             assertThat(cacheTracer.unpins() - initialUnpins).isGreaterThan(0);
             assertThat(cacheTracer.hits() - initialHits).isGreaterThan(0);
+        }
+    }
+
+    private static class TestVisibilityHorizonVisibilityBoundary
+            implements IdController.VisibilityHorizonVisibilityBoundary {
+        @Override
+        public long oldestCleanupHorizon() {
+            return 9;
+        }
+
+        @Override
+        public long oldestVisibilityHorizon() {
+            return 9;
         }
     }
 }

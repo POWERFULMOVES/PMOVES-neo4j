@@ -22,6 +22,8 @@ package org.neo4j.cypher.internal.runtime.spec.tests
 import org.neo4j.cypher.internal.CypherRuntime
 import org.neo4j.cypher.internal.RuntimeContext
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.WalkParameters
+import org.neo4j.cypher.internal.logical.plans.Expand.ExpandAll
+import org.neo4j.cypher.internal.logical.plans.Expand.ExpandInto
 import org.neo4j.cypher.internal.logical.plans.IndexOrderNone
 import org.neo4j.cypher.internal.runtime.spec.Edition
 import org.neo4j.cypher.internal.runtime.spec.GraphCreation.ComplexGraph
@@ -30,9 +32,7 @@ import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.cypher.internal.runtime.spec.tests.RepeatWalkTestBase.`(aa) ((e)<-[rrr]-(f)){1,}) (g)`
 import org.neo4j.cypher.internal.runtime.spec.tests.RepeatWalkTestBase.`(b) ((d)-[rr]->(aa:A) WHERE EXISTS {...} ){1,} (a)`
 import org.neo4j.cypher.internal.runtime.spec.tests.RepeatWalkTestBase.`(b_inner)((bb)-[rr]->(aa:A)){0,}(a)`
-import org.neo4j.cypher.internal.runtime.spec.tests.RepeatWalkTestBase.`(firstMiddle) [(a)-[r1]->(b:MIDDLE)]{0, *} (middle:MIDDLE:LOOP)`
 import org.neo4j.cypher.internal.runtime.spec.tests.RepeatWalkTestBase.`(me) ((b)-[r]->(c) WHERE EXISTS {...} ){1,} (you)`
-import org.neo4j.cypher.internal.runtime.spec.tests.RepeatWalkTestBase.`(me) [(a)-[r]->()-[]->(b)]{0,*} (you)`
 import org.neo4j.cypher.internal.runtime.spec.tests.RepeatWalkTestBase.`(me) [(a)-[r]->(b)]{0,*} (you)`
 import org.neo4j.cypher.internal.runtime.spec.tests.RepeatWalkTestBase.`(me) [(a)-[r]->(b)]{0,1} (you)`
 import org.neo4j.cypher.internal.runtime.spec.tests.RepeatWalkTestBase.`(me) [(a)-[r]->(b)]{0,2} (you)`
@@ -41,8 +41,6 @@ import org.neo4j.cypher.internal.runtime.spec.tests.RepeatWalkTestBase.`(me) [(a
 import org.neo4j.cypher.internal.runtime.spec.tests.RepeatWalkTestBase.`(me) [(a)-[r]->(b)]{2,2} (you)`
 import org.neo4j.cypher.internal.runtime.spec.tests.RepeatWalkTestBase.`(me) [(a)-[r]->(b)]{3,5} (you)`
 import org.neo4j.cypher.internal.runtime.spec.tests.RepeatWalkTestBase.`(me)( (b)-[r]->(c) WHERE EXISTS { (b)( (bb)-[rr]->(aa:A) ){0,}(a) } ){0,}(you)`
-import org.neo4j.cypher.internal.runtime.spec.tests.RepeatWalkTestBase.`(middle) [(c)-[r2]->(d:LOOP)]{0, *} (end:LOOP)`
-import org.neo4j.cypher.internal.runtime.spec.tests.RepeatWalkTestBase.`(start:START) [()-[]->(:MIDDLE)]{1, 1} (firstMiddle:MIDDLE)`
 import org.neo4j.cypher.internal.runtime.spec.tests.RepeatWalkTestBase.`(you) [(b)<-[r]-(a)]{0, *} (me)`
 import org.neo4j.cypher.internal.runtime.spec.tests.RepeatWalkTestBase.`(you) [(c)-[rr]->(d)]{0,1} (other)`
 import org.neo4j.cypher.internal.runtime.spec.tests.RepeatWalkTestBase.`(you) [(c)-[rr]->(d)]{0,2} (other)`
@@ -55,6 +53,13 @@ import org.neo4j.graphdb.Node
 import org.neo4j.graphdb.Relationship
 import org.neo4j.graphdb.RelationshipType
 import org.neo4j.graphdb.RelationshipType.withName
+import org.neo4j.internal.kernel.api.procs.Neo4jTypes
+import org.neo4j.internal.kernel.api.procs.QualifiedName
+import org.neo4j.internal.kernel.api.procs.UserFunctionSignature
+import org.neo4j.kernel.api.procedure.CallableUserFunction.BasicUserFunction
+import org.neo4j.kernel.api.procedure.Context
+import org.neo4j.kernel.impl.util.ValueUtils
+import org.neo4j.values.AnyValue
 import org.neo4j.values.virtual.VirtualValues.pathReference
 
 import java.util
@@ -354,7 +359,7 @@ abstract class RepeatWalkTestBase[CONTEXT <: RuntimeContext](
       .produceResults("me", "you", "a", "b", "r", "path")
       .projection(Map("path" -> qppPath(varFor("me"), Seq(varFor("a"), varFor("r")), varFor("you"))))
       .repeatWalk(`(me) [(a)-[r]->(b)]{0,2} (you)`)
-      .|.filterExpressionOrString("b_inner.prop = me.prop")
+      .|.filter("b_inner.prop = me.prop")
       .|.expandAll("(a_inner)-[r_inner]->(b_inner)")
       .|.argument("me", "a_inner")
       .allNodeScan("me")
@@ -500,7 +505,7 @@ abstract class RepeatWalkTestBase[CONTEXT <: RuntimeContext](
       val r2 = n2.createRelationshipTo(n3, RelationshipType.withName("R"))
       (n1, n2, n3, r1, r2)
     }
-    val `() ((a)->[r]->(b)->[s]->(c))+ ()` : WalkParameters = WalkParameters(
+    val `() ((a)->[r]->(b)->[s]->(c))+ ()`: WalkParameters = WalkParameters(
       min = 1,
       max = Unlimited,
       start = "anon_start",
@@ -509,12 +514,15 @@ abstract class RepeatWalkTestBase[CONTEXT <: RuntimeContext](
       innerEnd = "c_inner",
       groupNodes = Set(("b_inner", "b"), ("c_inner", "c"), ("a_inner", "a")),
       groupRelationships = Set(("r_inner", "r"), ("s_inner", "s")),
-      reverseGroupVariableProjections = false
+      reverseGroupVariableProjections = false,
+      innerRelationships = Set(("r_inner"), ("s_inner")),
+      ExpandAll,
+      accumulators = Set.empty
     )
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("a", "b", "c", "r", "s")
       .repeatWalk(`() ((a)->[r]->(b)->[s]->(c))+ ()`)
-      .|.filterExpressionOrString("not s_inner = r_inner")
+      .|.filter("not s_inner = r_inner")
       .|.expandAll("(b_inner)-[s_inner]->(c_inner)")
       .|.expandAll("(a_inner)-[r_inner]->(b_inner)")
       .|.argument("a", "anon_start")
@@ -635,6 +643,115 @@ abstract class RepeatWalkTestBase[CONTEXT <: RuntimeContext](
     ))
   }
 
+  test("should work with into") {
+    // (n1:START) → (n2) → (n3) → (n4)
+    val (n1, n2, n3, n4, r12, r23, r34) = smallChainGraph
+
+    val `(me) [(a)-[r]->(b)]{0,*} (you) ExpandInto` = `(me) [(a)-[r]->(b)]{0,*} (you)`
+      .copy(expansionMode = ExpandInto)
+
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("me", "a", "b", "r")
+      .projection(Map("path" -> qppPath(varFor("me"), Seq(varFor("a"), varFor("r")), varFor("me"))))
+      .repeatWalk(`(me) [(a)-[r]->(b)]{0,*} (you) ExpandInto`)
+      .|.expandAll("(a_inner)-[r_inner]->(b_inner)")
+      .|.argument("me", "a_inner")
+      .cartesianProduct()
+      .|.nodeByIdSeek("you", Set.empty, n4.getId)
+      .nodeByLabelScan("me", "START", IndexOrderNone)
+      .build()
+
+    // when
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("me", "a", "b", "r").withRows(inAnyOrder(
+      Seq(
+        Array(n1, listOf(n1, n2, n3), listOf(n2, n3, n4), listOf(r12, r23, r34))
+      )
+    ))
+  }
+
+  test("should work with into when end node is projected from user function") {
+    // (n1:START) → (n2) → (n3) → (n4)
+    val (n1, n2, n3, _, r12, r23, _) = smallChainGraph
+
+    val userFunction = new BasicUserFunction(
+      UserFunctionSignature.functionSignature(new QualifiedName("user.custom.getSingleNode"))
+        .out(Neo4jTypes.NTNode).threadSafe().build()
+    ) {
+
+      override def apply(ctx: Context, input: Array[AnyValue]): AnyValue = {
+        ValueUtils.of(n3)
+      }
+    }
+
+    registerFunction(userFunction)
+    // Refresh the transaction so its ProcedureView snapshot includes the function we just registered.
+    restartTx()
+
+    val `(me) [(a)-[r]->(b)]{0,*} (you) ExpandInto` = `(me) [(a)-[r]->(b)]{0,*} (you)`
+      .copy(expansionMode = ExpandInto)
+
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("me", "a", "b", "r", "you")
+      .projection(Map("path" -> qppPath(varFor("me"), Seq(varFor("a"), varFor("r")), varFor("me"))))
+      .repeatWalk(`(me) [(a)-[r]->(b)]{0,*} (you) ExpandInto`)
+      .|.expandAll("(a_inner)-[r_inner]->(b_inner)")
+      .|.argument("me", "a_inner")
+      .projection(Map("you" -> function("user.custom.getSingleNode")))
+      .nodeByLabelScan("me", "START", IndexOrderNone)
+      .build()
+
+    // when
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("me", "a", "b", "r", "you").withRows(inAnyOrder(
+      Seq(
+        Array(n1, listOf(n1, n2), listOf(n2, n3), listOf(r12, r23), n3)
+      )
+    ))
+  }
+
+  test("should work with into when null is projected from user function") {
+    // (n1:START) → (n2) → (n3) → (n4)
+    smallChainGraph
+
+    val userFunction = new BasicUserFunction(
+      UserFunctionSignature.functionSignature(new QualifiedName("user.custom.getSingleNode"))
+        .out(Neo4jTypes.NTNode).threadSafe().build()
+    ) {
+
+      override def apply(ctx: Context, input: Array[AnyValue]): AnyValue = {
+        ValueUtils.of(null)
+      }
+    }
+
+    registerFunction(userFunction)
+    // Refresh the transaction so its ProcedureView snapshot includes the function we just registered.
+    restartTx()
+
+    val `(me) [(a)-[r]->(b)]{0,*} (you) ExpandInto` = `(me) [(a)-[r]->(b)]{0,*} (you)`
+      .copy(expansionMode = ExpandInto)
+
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("me", "a", "b", "r", "you")
+      .projection(Map("path" -> qppPath(varFor("me"), Seq(varFor("a"), varFor("r")), varFor("me"))))
+      .repeatWalk(`(me) [(a)-[r]->(b)]{0,*} (you) ExpandInto`)
+      .|.expandAll("(a_inner)-[r_inner]->(b_inner)")
+      .|.argument("me", "a_inner")
+      .projection(Map("you" -> function("user.custom.getSingleNode")))
+      .nodeByLabelScan("me", "START", IndexOrderNone)
+      .build()
+
+    // when
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("me", "a", "b", "r", "you").withNoRows()
+  }
+
   test("should work with filter on rhs 1") {
     // (n1:START) → (n2) → (n3) → (n4)
     val (n1, n2, n3, n4, r12, r23, r34) = smallChainGraph
@@ -643,7 +760,7 @@ abstract class RepeatWalkTestBase[CONTEXT <: RuntimeContext](
       .produceResults("me", "you", "a", "b", "r")
       .projection(Map("path" -> qppPath(varFor("me"), Seq(varFor("a"), varFor("r")), varFor("you"))))
       .repeatWalk(`(me) [(a)-[r]->(b)]{0,2} (you)`)
-      .|.filterExpressionOrString(s"id(b_inner)<>${n3.getId}")
+      .|.filter(s"id(b_inner)<>${n3.getId}")
       .|.expandAll("(a_inner)-[r_inner]->(b_inner)")
       .|.argument("me", "a_inner")
       .nodeByLabelScan("me", "START", IndexOrderNone)
@@ -671,7 +788,7 @@ abstract class RepeatWalkTestBase[CONTEXT <: RuntimeContext](
       .repeatWalk(`(me) [(a)-[r]->(b)]{0,2} (you)`)
       .|.unwind("[1] AS ignore") // pipelined specific: does not need a filtering morsel
       .|.nonFuseable() // pipelined specific: force break to test where RHS output receives normal Morsel but RHS leaf requires FilteringMorsel
-      .|.filterExpressionOrString(s"id(b_inner)<>${n3.getId}")
+      .|.filter(s"id(b_inner)<>${n3.getId}")
       .|.expandAll("(a_inner)-[r_inner]->(b_inner)")
       .|.argument("me", "a_inner")
       .nodeByLabelScan("me", "START", IndexOrderNone)
@@ -988,7 +1105,7 @@ abstract class RepeatWalkTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("me", "you", "a", "b", "c", "r", "rr")
       .repeatWalk(RepeatWalkTestBase.`(me) [(a)-[r]->(b)<-[rr]-(c)]{0,1} (you)`)
-      .|.filterExpressionOrString("not rr_inner = r_inner")
+      .|.filter("not rr_inner = r_inner")
       .|.expandAll("(b_inner)<-[rr_inner]-(c_inner)")
       .|.expandAll("(a_inner)-[r_inner]->(b_inner)")
       .|.argument("me", "a_inner")
@@ -1020,12 +1137,12 @@ abstract class RepeatWalkTestBase[CONTEXT <: RuntimeContext](
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("me", "you", "a", "b", "c", "d", "r", "rr", "rrr")
       .repeatWalk(RepeatWalkTestBase.`(me) [(a)-[r]->(b)-[rr]->(c)<-[rrr]-(d)]{0,1} (you)`)
-      .|.filterExpressionOrString(
+      .|.filter(
         "not rrr_inner = r_inner",
         "not rrr_inner = rr_inner"
       )
       .|.expandAll("(c_inner)<-[rrr_inner]-(d_inner)")
-      .|.filterExpressionOrString("not rr_inner = r_inner")
+      .|.filter("not rr_inner = r_inner")
       .|.expandAll("(b_inner)-[rr_inner]->(c_inner)")
       .|.expandAll("(a_inner)-[r_inner]->(b_inner)")
       .|.argument("me", "a_inner")
@@ -1178,6 +1295,156 @@ abstract class RepeatWalkTestBase[CONTEXT <: RuntimeContext](
     )
   }
 
+  test("should work with allReduce accumulator") {
+    // (n1:START) → (n2) → (n3) → (n4)
+    val (n1, n2, n3, n4, r12, r23, r34) = smallChainGraph
+
+    val `(me) [(a)-[r]->(b)]{0,2} (you) allReduce(acc=[],acc+b,NOT n3 IN acc)` =
+      RepeatWalkTestBase.createMeYouWalkParameters(
+        min = 0,
+        max = Limited(2),
+        accumulators = Set(("[]", "currAcc", "nextAcc"))
+      )
+
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("me", "you", "a", "b", "r", "path")
+      .projection(Map("path" -> qppPath(varFor("me"), Seq(varFor("a"), varFor("r")), varFor("you"))))
+      .repeatWalk(`(me) [(a)-[r]->(b)]{0,2} (you) allReduce(acc=[],acc+b,NOT n3 IN acc)`)
+      .|.filter(s"NOT ${n3.getId} IN nextAcc")
+      .|.projection("currAcc + [id(b_inner)] AS nextAcc")
+      .|.expandAll("(a_inner)-[r_inner]->(b_inner)")
+      .|.argument("me", "a_inner")
+      .nodeByLabelScan("me", "START", IndexOrderNone)
+      .build()
+
+    // when
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("me", "you", "a", "b", "r", "path").withRows(inAnyOrder(
+      Seq(
+        Array(n1, n1, emptyList(), emptyList(), emptyList(), pathReference(Array(n1.getId), Array.empty[Long])),
+        Array(n1, n2, listOf(n1), listOf(n2), listOf(r12), pathReference(Array(n1.getId, n2.getId), Array(r12.getId)))
+      )
+    ))
+  }
+
+  test("should work with allReduce variable accumulator") {
+    // (n1:START) → (n2) → (n3) → (n4)
+    val (n1, n2, n3, n4, r12, r23, r34) = smallChainGraph
+
+    val `(me) [(a)-[r]->(b)]{0,2} (you) allReduce(acc=initialAcc,acc+b,[n2]=acc)` =
+      RepeatWalkTestBase.createMeYouWalkParameters(
+        min = 0,
+        max = Limited(2),
+        accumulators = Set(("initialAcc", "currAcc", "nextAcc"))
+      )
+
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("me", "you", "a", "b", "r", "path")
+      .projection(Map("path" -> qppPath(varFor("me"), Seq(varFor("a"), varFor("r")), varFor("you"))))
+      .repeatWalk(`(me) [(a)-[r]->(b)]{0,2} (you) allReduce(acc=initialAcc,acc+b,[n2]=acc)`)
+      .|.filter(s"[${n2.getId}]=nextAcc")
+      .|.projection("currAcc + [id(b_inner)] AS nextAcc")
+      .|.expandAll("(a_inner)-[r_inner]->(b_inner)")
+      .|.argument("me", "a_inner")
+      .projection(s"[] AS initialAcc")
+      .nodeByLabelScan("me", "START", IndexOrderNone)
+      .build()
+
+    // when
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("me", "you", "a", "b", "r", "path").withRows(inAnyOrder(
+      Seq(
+        Array(n1, n1, emptyList(), emptyList(), emptyList(), pathReference(Array(n1.getId), Array.empty[Long])),
+        Array(n1, n2, listOf(n1), listOf(n2), listOf(r12), pathReference(Array(n1.getId, n2.getId), Array(r12.getId)))
+      )
+    ))
+  }
+
+  test("should work with allReduce node property accumulator") {
+    // (n1:START) → (n2) → (n3) → (n4)
+    val (n1, n2, n3, n4, r12, r23, r34) = givenGraph {
+      val (n1, n2, n3, n4, r12, r23, r34) = smallChainGraph
+      n1.setProperty("prop", 1)
+      n2.setProperty("prop", 2)
+      n3.setProperty("prop", 3) // row passing through n3 will be filtered out
+      n4.setProperty("prop", 4)
+      (n1, n2, n3, n4, r12, r23, r34)
+    }
+
+    val `(me) [(a)-[r]->(b)]{0,2} (you) allReduce(acc=initialAcc,acc+b.prop,[2]=acc)` =
+      RepeatWalkTestBase.createMeYouWalkParameters(
+        min = 0,
+        max = Limited(2),
+        accumulators = Set(("initialAcc", "currAcc", "nextAcc"))
+      )
+
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("me", "you", "a", "b", "r", "path")
+      .projection(Map("path" -> qppPath(varFor("me"), Seq(varFor("a"), varFor("r")), varFor("you"))))
+      .repeatWalk(`(me) [(a)-[r]->(b)]{0,2} (you) allReduce(acc=initialAcc,acc+b.prop,[2]=acc)`)
+      .|.filter("[2]=nextAcc") // filter out row passing through n3
+      .|.projection("currAcc + [b_inner.prop] AS nextAcc")
+      .|.expandAll("(a_inner)-[r_inner]->(b_inner)")
+      .|.argument("me", "a_inner")
+      .projection(s"[] AS initialAcc")
+      .nodeByLabelScan("me", "START", IndexOrderNone)
+      .build()
+
+    // when
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("me", "you", "a", "b", "r", "path").withRows(inAnyOrder(
+      Seq(
+        Array(n1, n1, emptyList(), emptyList(), emptyList(), pathReference(Array(n1.getId), Array.empty[Long])),
+        Array(n1, n2, listOf(n1), listOf(n2), listOf(r12), pathReference(Array(n1.getId, n2.getId), Array(r12.getId)))
+      )
+    ))
+  }
+
+  test("should work with allReduce accumulator where accumulator is accessed before allReduce projection") {
+    // NOTE: accumulator should never be accessed early in the RHS like this
+    //       the test is just intended to test slot allocation
+
+    // (n1:START) → (n2) → (n3) → (n4)
+    val (n1, n2, n3, n4, r12, r23, r34) = smallChainGraph
+
+    val `(me) [(a)-[r]->(b)]{0,2} (you) allReduce(acc=[],acc+b,NOT n3 IN acc)` =
+      RepeatWalkTestBase.createMeYouWalkParameters(
+        min = 0,
+        max = Limited(2),
+        accumulators = Set(("[]", "currAcc", "nextAcc"))
+      )
+
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("me", "you", "a", "b", "r", "path")
+      .projection(Map("path" -> qppPath(varFor("me"), Seq(varFor("a"), varFor("r")), varFor("you"))))
+      .repeatWalk(`(me) [(a)-[r]->(b)]{0,2} (you) allReduce(acc=[],acc+b,NOT n3 IN acc)`)
+      .|.filter(s"NOT ${n3.getId} IN nextAcc")
+      .|.projection("currAcc + id(b_inner) AS nextAcc")
+      .|.expandAll("(a_inner)-[r_inner]->(b_inner)")
+      .|.nonFuseable() // noop, just intended to force pipeline break
+      .|.filter("currAcc IS NOT NULL")
+      .|.argument("me", "a_inner", "currAcc")
+      .nodeByLabelScan("me", "START", IndexOrderNone)
+      .build()
+
+    // when
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("me", "you", "a", "b", "r", "path").withRows(inAnyOrder(
+      Seq(
+        Array(n1, n1, emptyList(), emptyList(), emptyList(), pathReference(Array(n1.getId), Array.empty[Long])),
+        Array(n1, n2, listOf(n1), listOf(n2), listOf(r12), pathReference(Array(n1.getId, n2.getId), Array(r12.getId)))
+      )
+    ))
+  }
+
   protected def listOf(values: AnyRef*): util.List[AnyRef] = RepeatWalkTestBase.listOf(values: _*)
 
   //  (n0:START)                                                  (n6:LOOP)
@@ -1224,7 +1491,11 @@ abstract class RepeatWalkTestBase[CONTEXT <: RuntimeContext](
 object RepeatWalkTestBase {
   def listOf(values: AnyRef*): util.List[AnyRef] = java.util.List.of[AnyRef](values: _*)
 
-  private def createMeYouWalkParameters(min: Int, max: UpperBound): WalkParameters = {
+  def createMeYouWalkParameters(
+    min: Int,
+    max: UpperBound,
+    accumulators: Set[(String, String, String)] = Set.empty
+  ): WalkParameters = {
     WalkParameters(
       min,
       max,
@@ -1234,7 +1505,10 @@ object RepeatWalkTestBase {
       innerEnd = "b_inner",
       groupNodes = Set(("a_inner", "a"), ("b_inner", "b")),
       groupRelationships = Set(("r_inner", "r")),
-      reverseGroupVariableProjections = false
+      reverseGroupVariableProjections = false,
+      innerRelationships = Set("r_inner"),
+      ExpandAll,
+      accumulators = accumulators
     )
   }
 
@@ -1248,44 +1522,47 @@ object RepeatWalkTestBase {
       innerEnd = "d_inner",
       groupNodes = Set(("c_inner", "c"), ("d_inner", "d")),
       groupRelationships = Set(("rr_inner", "rr")),
-      reverseGroupVariableProjections = false
+      reverseGroupVariableProjections = false,
+      innerRelationships = Set(("rr_inner")),
+      ExpandAll,
+      accumulators = Set.empty
     )
   }
 
-  val `(me) [(a)-[r]->(b)]{0,1} (you)` : WalkParameters =
+  val `(me) [(a)-[r]->(b)]{0,1} (you)`: WalkParameters =
     createMeYouWalkParameters(min = 0, max = Limited(1))
 
-  val `(me) [(a)-[r]->(b)]{0,2} (you)` : WalkParameters =
+  val `(me) [(a)-[r]->(b)]{0,2} (you)`: WalkParameters =
     createMeYouWalkParameters(min = 0, max = Limited(2))
 
-  val `(me) [(a)-[r]->(b)]{0,3} (you)` : WalkParameters =
+  val `(me) [(a)-[r]->(b)]{0,3} (you)`: WalkParameters =
     createMeYouWalkParameters(min = 0, max = Limited(3))
 
-  val `(me) [(a)-[r]->(b)]{0,*} (you)` : WalkParameters =
+  val `(me) [(a)-[r]->(b)]{0,*} (you)`: WalkParameters =
     createMeYouWalkParameters(min = 0, max = Unlimited)
 
-  val `(me) [(a)-[r]->(b)]{1,1} (you)` : WalkParameters =
+  val `(me) [(a)-[r]->(b)]{1,1} (you)`: WalkParameters =
     createMeYouWalkParameters(min = 1, max = Limited(1))
 
-  val `(me) [(a)-[r]->(b)]{1,2} (you)` : WalkParameters =
+  val `(me) [(a)-[r]->(b)]{1,2} (you)`: WalkParameters =
     createMeYouWalkParameters(min = 1, max = Limited(2))
 
-  val `(me) [(a)-[r]->(b)]{2,2} (you)` : WalkParameters =
+  val `(me) [(a)-[r]->(b)]{2,2} (you)`: WalkParameters =
     createMeYouWalkParameters(min = 2, max = Limited(2))
 
-  val `(me) [(a)-[r]->(b)]{3,5} (you)` : WalkParameters =
+  val `(me) [(a)-[r]->(b)]{3,5} (you)`: WalkParameters =
     createMeYouWalkParameters(min = 3, max = Limited(5))
 
-  val `(you) [(c)-[rr]->(d)]{0,1} (other)` : WalkParameters =
+  val `(you) [(c)-[rr]->(d)]{0,1} (other)`: WalkParameters =
     createYouOtherWalkParameters(min = 0, max = Limited(1))
 
-  val `(you) [(c)-[rr]->(d)]{0,2} (other)` : WalkParameters =
+  val `(you) [(c)-[rr]->(d)]{0,2} (other)`: WalkParameters =
     createYouOtherWalkParameters(min = 0, max = Limited(2))
 
-  val `(you) [(c)-[rr]->(d)]{1,2} (other)` : WalkParameters =
+  val `(you) [(c)-[rr]->(d)]{1,2} (other)`: WalkParameters =
     createYouOtherWalkParameters(min = 1, max = Limited(2))
 
-  val `(me) [(a)-[r]->()-[]->(b)]{0,*} (you)` : WalkParameters = WalkParameters(
+  val `(me) [(a)-[r]->()-[]->(b)]{0,*} (you)`: WalkParameters = WalkParameters(
     min = 0,
     max = Unlimited,
     start = "me",
@@ -1294,10 +1571,13 @@ object RepeatWalkTestBase {
     innerEnd = "b_inner",
     groupNodes = Set(("a_inner", "a"), ("b_inner", "b")),
     groupRelationships = Set(("r_inner", "r")),
-    reverseGroupVariableProjections = false
+    reverseGroupVariableProjections = false,
+    innerRelationships = Set("r_inner"),
+    ExpandAll,
+    accumulators = Set.empty
   )
 
-  val `(start:START) [()-[]->(:MIDDLE)]{1, 1} (firstMiddle:MIDDLE)` : WalkParameters = WalkParameters(
+  val `(start:START) [()-[]->(:MIDDLE)]{1, 1} (firstMiddle:MIDDLE)`: WalkParameters = WalkParameters(
     min = 1,
     max = Limited(1),
     start = "start",
@@ -1306,10 +1586,13 @@ object RepeatWalkTestBase {
     innerEnd = "anon_end_inner",
     groupNodes = Set(),
     groupRelationships = Set(),
-    reverseGroupVariableProjections = false
+    reverseGroupVariableProjections = false,
+    innerRelationships = Set("r_inner"),
+    ExpandAll,
+    accumulators = Set.empty
   )
 
-  val `(firstMiddle) [(a)-[r1]->(b:MIDDLE)]{0, *} (middle:MIDDLE:LOOP)` : WalkParameters = WalkParameters(
+  val `(firstMiddle) [(a)-[r1]->(b:MIDDLE)]{0, *} (middle:MIDDLE:LOOP)`: WalkParameters = WalkParameters(
     min = 0,
     max = Unlimited,
     start = "firstMiddle",
@@ -1318,10 +1601,13 @@ object RepeatWalkTestBase {
     innerEnd = "b_inner",
     groupNodes = Set(("a_inner", "a"), ("b_inner", "b")),
     groupRelationships = Set(("r1_inner", "r1")),
-    reverseGroupVariableProjections = false
+    reverseGroupVariableProjections = false,
+    innerRelationships = Set("r1_inner"),
+    ExpandAll,
+    accumulators = Set.empty
   )
 
-  val `(middle) [(c)-[r2]->(d:LOOP)]{0, *} (end:LOOP)` : WalkParameters = WalkParameters(
+  val `(middle) [(c)-[r2]->(d:LOOP)]{0, *} (end:LOOP)`: WalkParameters = WalkParameters(
     min = 0,
     max = Unlimited,
     start = "middle",
@@ -1330,10 +1616,13 @@ object RepeatWalkTestBase {
     innerEnd = "d_inner",
     groupNodes = Set(("c_inner", "c"), ("d_inner", "d")),
     groupRelationships = Set(("r2_inner", "r2")),
-    reverseGroupVariableProjections = false
+    reverseGroupVariableProjections = false,
+    innerRelationships = Set("r2_inner"),
+    ExpandAll,
+    accumulators = Set.empty
   )
 
-  val `(you) [(b)<-[r]-(a)]{0, *} (me)` : WalkParameters =
+  val `(you) [(b)<-[r]-(a)]{0, *} (me)`: WalkParameters =
     WalkParameters(
       min = 0,
       max = Unlimited,
@@ -1343,10 +1632,13 @@ object RepeatWalkTestBase {
       innerEnd = "a_inner",
       groupNodes = Set(("a_inner", "a"), ("b_inner", "b")),
       groupRelationships = Set(("r_inner", "r")),
-      reverseGroupVariableProjections = true
+      reverseGroupVariableProjections = true,
+      innerRelationships = Set("r_inner"),
+      ExpandAll,
+      accumulators = Set.empty
     )
 
-  val `(me) [(a)-[r]->(b)<-[rr]-(c)]{0,1} (you)` : WalkParameters =
+  val `(me) [(a)-[r]->(b)<-[rr]-(c)]{0,1} (you)`: WalkParameters =
     WalkParameters(
       min = 0,
       max = UpperBound.Limited(1),
@@ -1356,10 +1648,13 @@ object RepeatWalkTestBase {
       innerEnd = "c_inner",
       groupNodes = Set(("a_inner", "a"), ("b_inner", "b"), ("c_inner", "c")),
       groupRelationships = Set(("r_inner", "r"), ("rr_inner", "rr")),
-      reverseGroupVariableProjections = false
+      reverseGroupVariableProjections = false,
+      innerRelationships = Set("r_inner", "rr_inner"),
+      ExpandAll,
+      accumulators = Set.empty
     )
 
-  val `(me) ((b)-[r]->(c) WHERE EXISTS {...} ){1,} (you)` : WalkParameters = WalkParameters(
+  val `(me) ((b)-[r]->(c) WHERE EXISTS {...} ){1,} (you)`: WalkParameters = WalkParameters(
     1,
     UpperBound.Unlimited,
     "me",
@@ -1368,10 +1663,13 @@ object RepeatWalkTestBase {
     "c_inner",
     Set(("b_inner", "b"), ("c_inner", "c")),
     Set(("r_inner", "r")),
-    false
+    false,
+    innerRelationships = Set("r_inner"),
+    ExpandAll,
+    accumulators = Set.empty
   )
 
-  val `(b) ((d)-[rr]->(aa:A) WHERE EXISTS {...} ){1,} (a)` : WalkParameters = WalkParameters(
+  val `(b) ((d)-[rr]->(aa:A) WHERE EXISTS {...} ){1,} (a)`: WalkParameters = WalkParameters(
     1,
     UpperBound.Unlimited,
     "b_inner",
@@ -1380,10 +1678,13 @@ object RepeatWalkTestBase {
     "aa_inner",
     Set(("d_inner", "d"), ("aa_inner", "aa")),
     Set(("rr_inner", "rr")),
-    false
+    false,
+    innerRelationships = Set("rr_inner"),
+    ExpandAll,
+    accumulators = Set.empty
   )
 
-  val `(aa) ((e)<-[rrr]-(f)){1,}) (g)` : WalkParameters = WalkParameters(
+  val `(aa) ((e)<-[rrr]-(f)){1,}) (g)`: WalkParameters = WalkParameters(
     1,
     UpperBound.Unlimited,
     "aa_inner",
@@ -1392,10 +1693,13 @@ object RepeatWalkTestBase {
     "f_inner",
     Set(("e_inner", "e"), ("f_inner", "f")),
     Set(("rrr_inner", "rrr")),
-    false
+    false,
+    innerRelationships = Set("rrr_inner"),
+    ExpandAll,
+    accumulators = Set.empty
   )
 
-  val `(me)( (b)-[r]->(c) WHERE EXISTS { (b)( (bb)-[rr]->(aa:A) ){0,}(a) } ){0,}(you)` : WalkParameters =
+  val `(me)( (b)-[r]->(c) WHERE EXISTS { (b)( (bb)-[rr]->(aa:A) ){0,}(a) } ){0,}(you)`: WalkParameters =
     WalkParameters(
       min = 0,
       max = UpperBound.Unlimited,
@@ -1405,10 +1709,13 @@ object RepeatWalkTestBase {
       innerEnd = "c_inner",
       groupNodes = Set(("b_inner", "b"), ("c_inner", "c")),
       groupRelationships = Set(("r_inner", "r")),
-      reverseGroupVariableProjections = false
+      reverseGroupVariableProjections = false,
+      innerRelationships = Set("r_inner"),
+      ExpandAll,
+      accumulators = Set.empty
     )
 
-  val `(me) [(a)-[r]->(b)-[rr]->(c)<-[rrr]-(d)]{0,1} (you)` : WalkParameters =
+  val `(me) [(a)-[r]->(b)-[rr]->(c)<-[rrr]-(d)]{0,1} (you)`: WalkParameters =
     WalkParameters(
       min = 0,
       max = UpperBound.Limited(1),
@@ -1418,10 +1725,13 @@ object RepeatWalkTestBase {
       innerEnd = "d_inner",
       groupNodes = Set(("a_inner", "a"), ("b_inner", "b"), ("c_inner", "c"), ("d_inner", "d")),
       groupRelationships = Set(("r_inner", "r"), ("rr_inner", "rr"), ("rrr_inner", "rrr")),
-      reverseGroupVariableProjections = false
+      reverseGroupVariableProjections = false,
+      innerRelationships = Set("r_inner", "rr_inner", "rrr_inner"),
+      ExpandAll,
+      accumulators = Set.empty
     )
 
-  val `(b_inner)((bb)-[rr]->(aa:A)){0,}(a)` : WalkParameters = WalkParameters(
+  val `(b_inner)((bb)-[rr]->(aa:A)){0,}(a)`: WalkParameters = WalkParameters(
     min = 0,
     max = UpperBound.Unlimited,
     start = "b_inner",
@@ -1430,7 +1740,10 @@ object RepeatWalkTestBase {
     innerEnd = "aa_inner",
     groupNodes = Set(("bb_inner", "bb"), ("aa_inner", "aa")),
     groupRelationships = Set(("rr_inner", "rr")),
-    reverseGroupVariableProjections = false
+    reverseGroupVariableProjections = false,
+    innerRelationships = Set("rr_inner"),
+    ExpandAll,
+    accumulators = Set.empty
   )
 }
 
@@ -1920,7 +2233,7 @@ trait OrderedWalkTestBase[CONTEXT <: RuntimeContext] {
     // (n1:START) ↗
     val (n0, n1, n2, n3, n4, r02, r12, r23, r34) = smallDoubleChainGraph
 
-    val `() ((a)->[r]->(b)->[s]->(c))+ ()` : WalkParameters = WalkParameters(
+    val `() ((a)->[r]->(b)->[s]->(c))+ ()`: WalkParameters = WalkParameters(
       min = 1,
       max = Unlimited,
       start = "anon_start",
@@ -1929,7 +2242,10 @@ trait OrderedWalkTestBase[CONTEXT <: RuntimeContext] {
       innerEnd = "c_inner",
       groupNodes = Set(("b_inner", "b"), ("c_inner", "c"), ("a_inner", "a")),
       groupRelationships = Set(("r_inner", "r"), ("s_inner", "s")),
-      reverseGroupVariableProjections = false
+      reverseGroupVariableProjections = false,
+      innerRelationships = Set("r_inner", "s_inner"),
+      ExpandAll,
+      accumulators = Set.empty
     )
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("a", "b", "c", "r", "s")
@@ -2573,7 +2889,7 @@ trait OrderedWalkTestBase[CONTEXT <: RuntimeContext] {
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("me", "you", "a", "b", "c", "d", "r", "rr", "rrr")
       .repeatWalk(RepeatWalkTestBase.`(me) [(a)-[r]->(b)-[rr]->(c)<-[rrr]-(d)]{0,1} (you)`).withLeveragedOrder()
-      .|.filterExpressionOrString(
+      .|.filter(
         "not rrr_inner = rr_inner",
         "not rrr_inner = r_inner"
       )

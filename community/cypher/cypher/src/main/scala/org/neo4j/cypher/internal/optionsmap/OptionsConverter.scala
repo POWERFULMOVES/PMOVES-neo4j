@@ -26,12 +26,12 @@ import org.neo4j.cypher.internal.ast.Options
 import org.neo4j.cypher.internal.ast.OptionsMap
 import org.neo4j.cypher.internal.ast.OptionsParam
 import org.neo4j.cypher.internal.evaluator.Evaluator.expressionEvaluator
+import org.neo4j.cypher.internal.evaluator.StaticEvaluation
 import org.neo4j.cypher.internal.expressions.Expression
-import org.neo4j.gqlstatus.GqlHelper.getGql22G03_22N27
-import org.neo4j.gqlstatus.GqlParams
+import org.neo4j.cypher.internal.runtime.CypherRow
+import org.neo4j.internal.kernel.api.Procedures
 import org.neo4j.kernel.api.exceptions.InvalidArgumentsException
 import org.neo4j.values.AnyValue
-import org.neo4j.values.utils.PrettyPrinter
 import org.neo4j.values.virtual.MapValue
 import org.neo4j.values.virtual.MapValueBuilder
 import org.neo4j.values.virtual.VirtualValues
@@ -40,25 +40,32 @@ import java.util.Locale
 
 trait OptionsConverter[T] {
 
-  private def evaluate(version: CypherVersion, expression: Expression, params: MapValue): AnyValue = {
-    expressionEvaluator(version).evaluate(expression, params)
+  private def evaluate(
+    version: CypherVersion,
+    expression: Expression,
+    params: MapValue,
+    procedures: Option[Procedures]
+  ): AnyValue = {
+    procedures.map(StaticEvaluation.from(_, version).evaluate(expression, params, CypherRow.empty))
+      .getOrElse(expressionEvaluator(version).evaluate(expression, params))
   }
 
   def convert(
     version: CypherVersion,
     options: Options,
     params: MapValue,
-    config: Option[Config] = None
+    config: Option[Config] = None,
+    procedures: Option[Procedures] = None
   ): OptionsConverterResult[T] = options match {
     case NoOptions if hasMandatoryOptions =>
       // If there are mandatory options we should call convert with empty options to throw expected errors
       convert(VirtualValues.EMPTY_MAP, config, version)
     case NoOptions => Nothing
-    case OptionsMap(map) => convert(
-        VirtualValues.map(
-          map.keys.map(_.toLowerCase(Locale.ROOT)).toArray,
-          map.view.mapValues(evaluate(version, _, params)).values.toArray
-        ),
+    case OptionsMap(map) =>
+      val builder = new MapValueBuilder()
+      map.foreach(kv => builder.add(kv._1.toLowerCase(Locale.ROOT), evaluate(version, kv._2, params, procedures)))
+      convert(
+        builder.build(),
         config,
         version
       )
@@ -69,14 +76,7 @@ trait OptionsConverter[T] {
           val builder = new MapValueBuilder()
           mv.foreach((k, v) => builder.add(k.toLowerCase(Locale.ROOT), v))
           convert(builder.build(), config, version)
-        case _ =>
-          val pp = new PrettyPrinter
-          opsMap.writeTo(pp)
-          val gql = getGql22G03_22N27(pp.value, GqlParams.StringParam.cmd.process("OPTIONS"), java.util.List.of("MAP"))
-          throw new InvalidArgumentsException(
-            gql,
-            s"Could not $operation with options '$opsMap'. Expected a map value."
-          )
+        case _ => throw InvalidArgumentsException.invalidOptionsExpectedMap(operation, opsMap)
       }
   }
 

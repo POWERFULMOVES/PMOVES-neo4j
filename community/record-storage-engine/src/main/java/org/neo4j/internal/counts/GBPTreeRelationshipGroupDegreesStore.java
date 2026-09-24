@@ -25,7 +25,6 @@ import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAM
 import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.file.OpenOption;
-import java.nio.file.Path;
 import org.eclipse.collections.api.set.ImmutableSet;
 import org.neo4j.index.internal.gbptree.GBPTree;
 import org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector;
@@ -33,8 +32,10 @@ import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.impl.store.record.RelationshipGroupRecord;
+import org.neo4j.kernel.recovery.RecoveryStartupChecker;
 import org.neo4j.logging.InternalLogProvider;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.storageengine.api.RelationshipDirection;
@@ -50,7 +51,7 @@ public class GBPTreeRelationshipGroupDegreesStore extends GBPTreeGenericCountsSt
 
     public GBPTreeRelationshipGroupDegreesStore(
             PageCache pageCache,
-            Path file,
+            StoreFile storeFile,
             FileSystemAbstraction fileSystem,
             RecoveryCleanupWorkCollector recoveryCollector,
             DegreesRebuilder rebuilder,
@@ -61,11 +62,12 @@ public class GBPTreeRelationshipGroupDegreesStore extends GBPTreeGenericCountsSt
             InternalLogProvider userLogProvider,
             CursorContextFactory contextFactory,
             PageCacheTracer pageCacheTracer,
-            ImmutableSet<OpenOption> openOptions)
+            ImmutableSet<OpenOption> openOptions,
+            RecoveryStartupChecker recoveryStartupChecker)
             throws IOException {
         super(
                 pageCache,
-                file,
+                storeFile,
                 fileSystem,
                 recoveryCollector,
                 new RebuilderWrapper(rebuilder),
@@ -77,7 +79,8 @@ public class GBPTreeRelationshipGroupDegreesStore extends GBPTreeGenericCountsSt
                 userLogProvider,
                 contextFactory,
                 pageCacheTracer,
-                openOptions);
+                openOptions,
+                recoveryStartupChecker);
     }
 
     @Override
@@ -165,7 +168,7 @@ public class GBPTreeRelationshipGroupDegreesStore extends GBPTreeGenericCountsSt
     public static void dump(
             PageCache pageCache,
             FileSystemAbstraction fileSystem,
-            Path file,
+            StoreFile storeFile,
             PrintStream out,
             CursorContextFactory contextFactory,
             PageCacheTracer pageCacheTracer,
@@ -174,7 +177,7 @@ public class GBPTreeRelationshipGroupDegreesStore extends GBPTreeGenericCountsSt
         GBPTreeGenericCountsStore.dump(
                 pageCache,
                 fileSystem,
-                file,
+                storeFile,
                 out,
                 DEFAULT_DATABASE_NAME,
                 NAME,

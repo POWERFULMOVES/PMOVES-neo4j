@@ -19,22 +19,31 @@
  */
 package org.neo4j.cypher.internal.runtime.spec.tests
 
+import org.neo4j.configuration.GraphDatabaseInternalSettings
 import org.neo4j.cypher.internal.CypherRuntime
 import org.neo4j.cypher.internal.RuntimeContext
 import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.coerceToPredicate
+import org.neo4j.cypher.internal.notification.AggregationSkippedNull
+import org.neo4j.cypher.internal.notification.DeprecatedBooleanCoercion
+import org.neo4j.cypher.internal.notification.RuntimeUnsatisfiableRelationshipTypeExpression
 import org.neo4j.cypher.internal.runtime.spec.Edition
 import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RecordingRuntimeResult
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
-import org.neo4j.cypher.internal.util.AggregationSkippedNull
-import org.neo4j.cypher.internal.util.DeprecatedBooleanCoercion
-import org.neo4j.cypher.internal.util.RuntimeUnsatisfiableRelationshipTypeExpression
 import org.neo4j.graphdb.RelationshipType
+
+object RuntimeNotificationsTestBase
 
 abstract class RuntimeNotificationsTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT]
-) extends RuntimeTestSuite[CONTEXT](edition, runtime) {
+) extends RuntimeTestSuite[CONTEXT](
+      edition.copyWith(
+        additionalConfigs =
+          GraphDatabaseInternalSettings.cypher_warn_on_aggregation_skip_null -> Boolean.box(true)
+      ),
+      runtime
+    ) {
 
   private def average(values: Double*): Double = values.sum / values.size
 
@@ -43,7 +52,7 @@ abstract class RuntimeNotificationsTestBase[CONTEXT <: RuntimeContext](
     values.map(e => (e - m) * (e - m)).sum
   }
 
-  private val unaryAggregations = Seq(
+  private val unaryAggregations: Seq[(String, Any)] = Seq(
     ("count", 5),
     ("avg", average(1.0, 2.0, 3.0, 4.0, 5.0)),
     ("max", 5.0),
@@ -146,7 +155,7 @@ abstract class RuntimeNotificationsTestBase[CONTEXT <: RuntimeContext](
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("i")
-      .filterExpression(coerceToPredicate("[]"))
+      .filter(coerceToPredicate("[]"))
       .unwind("[1, 2, 3, 4, 5] AS i")
       .argument()
       .build()
@@ -167,7 +176,7 @@ abstract class RuntimeNotificationsTestBase[CONTEXT <: RuntimeContext](
 
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("r")
-      .filterExpression(hasDynamicType(varFor("r"), literal(Seq("A", "B", "C"))))
+      .filter(hasDynamicType(varFor("r"), literal(Seq("A", "B", "C"))))
       .allRelationshipsScan("()-[r]-()")
       .build()
 

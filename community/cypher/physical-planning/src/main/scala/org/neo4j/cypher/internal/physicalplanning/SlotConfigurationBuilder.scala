@@ -19,11 +19,9 @@
  */
 package org.neo4j.cypher.internal.physicalplanning
 
-import org.eclipse.collections.api.list.primitive.MutableIntList
-import org.eclipse.collections.impl.list.mutable.primitive.IntArrayList
 import org.neo4j.cypher.internal.expressions.ASTCachedProperty
 import org.neo4j.cypher.internal.expressions.LogicalVariable
-import org.neo4j.cypher.internal.macros.AssertMacros
+import org.neo4j.cypher.internal.macros.AssertMacros3
 import org.neo4j.cypher.internal.physicalplanning.SlotConfiguration.ApplyPlanSlotKey
 import org.neo4j.cypher.internal.physicalplanning.SlotConfiguration.CachedPropertySlotKey
 import org.neo4j.cypher.internal.physicalplanning.SlotConfiguration.DuplicatedSlotKey
@@ -58,7 +56,6 @@ object SlotConfigurationBuilder {
  * @see [[SlotConfiguration]]
  */
 final class SlotConfigurationBuilder private (
-  // Note, make sure to sync cachedPropertyOffsets when adding mutating calls to this map
   private val slots: mutable.Map[SlotKey, Slot],
   var numberOfLongs: Int,
   var numberOfReferences: Int,
@@ -96,15 +93,6 @@ final class SlotConfigurationBuilder private (
       SlotWithKeyAndAliases(key, slot, Set.empty)
   }
 
-// Contains all slot offsets of cached property slots, for fast access.
-  // NOTE! This needs to stay in sync with the content of `slots` (for entries with a CachedPropertySlotKey)
-  private val cachedPropertyOffsets: MutableIntList = {
-    val offsets = slots.iterator
-      .collect { case (CachedPropertySlotKey(_), slot) => slot.offset }
-      .toArray
-    IntArrayList.newListWith(offsets: _*)
-  }
-
   // For each existing variable key, a mapping to all aliases.
   // If x is added first, and y and z are aliases of x, the mapping will look like "x" -> Set("y", "z")
   // Contains only information about VariableSlotKeys
@@ -122,7 +110,10 @@ final class SlotConfigurationBuilder private (
     require(!finalized)
     val slot = slots.getOrElse(
       VariableSlotKey(existingKey),
-      throw new SlotAllocationFailed(s"Tried to alias non-existing slot '$existingKey' with alias '$newKey'")
+      throw SlotAllocationFailed.internalError(
+        this.getClass.getSimpleName,
+        s"Tried to alias non-existing slot '$existingKey' with alias '$newKey'"
+      )
     )
     markNotDiscarded(slot)
     val maybeOldSlot = slots.put(VariableSlotKey(newKey), slot)
@@ -154,7 +145,7 @@ final class SlotConfigurationBuilder private (
    * NOTE: method can only test keys that are either 'original key' or alias, MUST NOT be called on keys that are neither (i.e., do not exist in the configuration).
    */
   private def isAlias(key: String): Boolean = {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(
       get(key).isDefined,
       s"Ran `isAlias` on $key which is not part of the slot configuration."
     )
@@ -199,7 +190,10 @@ final class SlotConfigurationBuilder private (
       // Find original key
       val originalKey = slotAliases.collectFirst {
         case (slotKey, aliases) if aliases.contains(key) => slotKey
-      }.getOrElse(throw new InternalException(s"No original key found for alias $key"))
+      }.getOrElse(throw InternalException.internalError(
+        this.getClass.getSimpleName,
+        s"No original key found for alias $key"
+      ))
       replaceExistingSlot(originalKey, existingSlot, modifiedSlot)
     }
   }
@@ -223,7 +217,8 @@ final class SlotConfigurationBuilder private (
           LongSlot(offset, nullable, newSlot.typ)
         case (RefSlot(offset, nullable, _), false, true) =>
           RefSlot(offset, nullable, newSlot.typ)
-        case config => throw new InternalException(s"Unexpected slot configuration: $config")
+        case config =>
+          throw InternalException.internalError(this.getClass.getSimpleName, s"Unexpected slot configuration: $config")
       }
       replaceExistingSlot(key, existingSlot, modifiedSlot)
     }
@@ -234,7 +229,7 @@ final class SlotConfigurationBuilder private (
   }
 
   def newLong(key: String, nullable: Boolean, typ: CypherType): SlotConfigurationBuilder = {
-    AssertMacros.checkOnlyWhenAssertionsAreEnabled(
+    AssertMacros3.checkOnlyWhenAssertionsAreEnabled(
       typ == CTNode || typ == CTRelationship,
       s"Invalid type: $typ. Part of the runtime implementation depends on this, for example pipelined ForEach"
     )
@@ -243,7 +238,8 @@ final class SlotConfigurationBuilder private (
     slots.get(VariableSlotKey(key)) match {
       case Some(existingSlot) =>
         if (!existingSlot.isTypeCompatibleWith(slot)) {
-          throw new InternalException(
+          throw InternalException.internalError(
+            this.getClass.getSimpleName,
             s"Tried overwriting already taken variable name '$key' as $slot (was: $existingSlot)"
           )
         }
@@ -298,7 +294,8 @@ final class SlotConfigurationBuilder private (
       case Some(existingSlot) =>
         markNotDiscarded(existingSlot)
         if (!existingSlot.isTypeCompatibleWith(slot)) {
-          throw new InternalException(
+          throw InternalException.internalError(
+            this.getClass.getSimpleName,
             s"Tried overwriting already taken variable name '$key' as $slot (was: $existingSlot)"
           )
         }
@@ -333,7 +330,6 @@ final class SlotConfigurationBuilder private (
 
       case None =>
         slots.put(slotKey, RefSlot(numberOfReferences, nullable = false, CTAny))
-        cachedPropertyOffsets.add(numberOfReferences)
         numberOfReferences = numberOfReferences + 1
     }
     this

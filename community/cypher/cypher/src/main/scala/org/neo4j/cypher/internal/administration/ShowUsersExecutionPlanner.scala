@@ -19,24 +19,21 @@
  */
 package org.neo4j.cypher.internal.administration
 
-import org.neo4j.cypher.internal.AdministrationCommandRuntime.authIdPropKey
-import org.neo4j.cypher.internal.AdministrationCommandRuntime.authProviderPropKey
-import org.neo4j.cypher.internal.AdministrationCommandRuntime.authRelType
 import org.neo4j.cypher.internal.AdministrationCommandRuntime.internalKey
-import org.neo4j.cypher.internal.AdministrationCommandRuntime.userLabel
-import org.neo4j.cypher.internal.AdministrationCommandRuntime.userNamePropKey
-import org.neo4j.cypher.internal.AdministrationCommandRuntime.userPwChangeReqPropKey
+import org.neo4j.cypher.internal.AdministrationCommandRuntimeContext
 import org.neo4j.cypher.internal.AdministrationShowCommandUtils
 import org.neo4j.cypher.internal.ExecutionEngine
 import org.neo4j.cypher.internal.ExecutionPlan
-import org.neo4j.cypher.internal.administration.ShowUsersExecutionPlanner.getAuthCypher
 import org.neo4j.cypher.internal.ast.Return
 import org.neo4j.cypher.internal.ast.Yield
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.procs.ParameterTransformer
 import org.neo4j.cypher.internal.procs.SystemCommandExecutionPlan
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_CREDENTIALS_EXPIRED_PROPERTY
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_NAME_PROPERTY
+import org.neo4j.dbms.systemgraph.SecurityGraphDbmsModel.USER_TAGS_PROPERTY
 import org.neo4j.internal.kernel.api.security.SecurityAuthorizationHandler
-import org.neo4j.server.security.systemgraph.SecurityGraphHelper.NATIVE_AUTH
 import org.neo4j.values.storable.Values
 import org.neo4j.values.virtual.VirtualValues
 
@@ -45,45 +42,19 @@ case class ShowUsersExecutionPlanner(
   securityAuthorizationHandler: SecurityAuthorizationHandler
 ) {
 
-  def planShowUsers(
-    symbols: List[LogicalVariable],
-    withAuth: Boolean,
-    yields: Option[Yield],
-    returns: Option[Return],
-    sourcePlan: Option[ExecutionPlan]
-  ): ExecutionPlan = {
-
-    // Community should only have native auth,
-    // but if for some reason there is external auth it might be nice to show regardless
-    val (authMatch, authColumns) = if (withAuth) getAuthCypher("u") else ("", "")
-
-    SystemCommandExecutionPlan(
-      "ShowUsers",
-      normalExecutionEngine,
-      securityAuthorizationHandler,
-      s"""MATCH (u:$userLabel)
-         |$authMatch
-         |WITH u.$userNamePropKey as user, null as roles, u.$userPwChangeReqPropKey AS passwordChangeRequired, null as suspended, null as home
-         |$authColumns
-         |${AdministrationShowCommandUtils.generateReturnClause(symbols, yields, returns, Seq("user"))}
-         |""".stripMargin,
-      VirtualValues.EMPTY_MAP,
-      source = sourcePlan
-    )
-  }
-
   def planShowCurrentUser(
     symbols: List[LogicalVariable],
     yields: Option[Yield],
-    returns: Option[Return]
+    returns: Option[Return],
+    context: AdministrationCommandRuntimeContext
   ): ExecutionPlan = {
     val currentUserKey = internalKey("currentUser")
     SystemCommandExecutionPlan(
       "ShowCurrentUser",
       normalExecutionEngine,
       securityAuthorizationHandler,
-      s"""MATCH (u:$userLabel)
-         |WITH u.$userNamePropKey as user, null as roles, u.$userPwChangeReqPropKey AS passwordChangeRequired, null as suspended, null as home
+      s"""MATCH (u:$USER)
+         |WITH u.$USER_NAME_PROPERTY as user, null as roles, u.$USER_CREDENTIALS_EXPIRED_PROPERTY AS passwordChangeRequired, null as suspended, null as home, [t IN coalesce(u.$USER_TAGS_PROPERTY, []) | t] as tags
          |WHERE user = $$`$currentUserKey`
          |${AdministrationShowCommandUtils.generateReturnClause(symbols, yields, returns, Seq("user"))}
          |""".stripMargin,
@@ -93,43 +64,17 @@ case class ShowUsersExecutionPlanner(
           Array(currentUserKey),
           Array(Values.utf8Value(securityContext.subject().executingUser()))
         )
-      )
+      ),
+      cypherVersion = context.runtimeContext.cypherVersion
     )
   }
 }
 
 object ShowUsersExecutionPlanner {
 
-  /** Get auth Cypher strings for show users, both match statement and additional return columns
-   *
-   * @param userVariable the user node variable
-   * @return return tuple of strings, the first one is the match statement and the second is the return columns (starting with ,)
-   */
-  def getAuthCypher(userVariable: String): (String, String) = {
-    val authProviderExpression =
-      s"""CASE
-         | WHEN auth.$authProviderPropKey IS NULL THEN
-         |  CASE
-         |   WHEN $userVariable.$userPwChangeReqPropKey IS NULL THEN null
-         |   ELSE '$NATIVE_AUTH'
-         |  END
-         | ELSE auth.$authProviderPropKey
-         |END""".stripMargin
-    val authExpression =
-      s"""CASE
-         | WHEN auth.$authProviderPropKey IS NULL THEN
-         |  CASE
-         |   WHEN $userVariable.$userPwChangeReqPropKey IS NULL THEN null
-         |   ELSE {password: '***', changeRequired: $userVariable.$userPwChangeReqPropKey}
-         |  END
-         | WHEN auth.$authProviderPropKey = '$NATIVE_AUTH' THEN {password: '***', changeRequired: $userVariable.$userPwChangeReqPropKey}
-         | ELSE {id: auth.$authIdPropKey}
-         |END""".stripMargin
-
-    (
-      s"""OPTIONAL MATCH ($userVariable)-[:$authRelType]->(auth)
-         |WITH *, $authProviderExpression AS provider, $authExpression AS auth""".stripMargin,
-      ", provider, auth"
-    )
-  }
+  def getTagsColumnCypher(userVariable: String, allowedToSeeTagsKey: String): String =
+    s"""CASE $$`$allowedToSeeTagsKey`
+       |  WHEN true THEN [t IN coalesce($userVariable.$USER_TAGS_PROPERTY, []) | t]
+       |  ELSE null
+       |END AS tags""".stripMargin
 }

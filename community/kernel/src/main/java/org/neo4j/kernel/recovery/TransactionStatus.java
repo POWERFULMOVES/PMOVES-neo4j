@@ -22,5 +22,6 @@ package org.neo4j.kernel.recovery;
 public enum TransactionStatus {
     ROLLED_BACK,
     INCOMPLETE,
+    INCOMPLETE_RECOVERABLE,
     RECOVERABLE,
 }

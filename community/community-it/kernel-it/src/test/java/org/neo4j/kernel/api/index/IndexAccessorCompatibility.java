@@ -23,7 +23,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.neo4j.internal.kernel.api.IndexQueryConstraints.constrained;
 import static org.neo4j.internal.kernel.api.IndexQueryConstraints.unconstrained;
-import static org.neo4j.io.memory.ByteBufferFactory.heapBufferFactory;
 import static org.neo4j.io.pagecache.context.CursorContextFactory.NULL_CONTEXT_FACTORY;
 import static org.neo4j.kernel.impl.index.schema.IndexUsageTracking.NO_USAGE_TRACKING;
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
@@ -49,9 +48,10 @@ import org.neo4j.internal.schema.IndexQuery.IndexQueryType;
 import org.neo4j.internal.schema.StorageEngineIndexingBehaviour;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.kernel.api.exceptions.index.IndexEntryConflictException;
+import org.neo4j.kernel.api.schema.SchemaTestUtil;
 import org.neo4j.kernel.impl.api.index.IndexSamplingConfig;
 import org.neo4j.kernel.impl.api.index.IndexUpdateMode;
-import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.storageengine.api.schema.SimpleEntityValueClient;
 import org.neo4j.values.ElementIdMapper;
 import org.neo4j.values.storable.RandomValues;
@@ -76,7 +76,7 @@ abstract class IndexAccessorCompatibility extends PropertyIndexProviderCompatibi
         IndexPopulator populator = indexProvider.getPopulator(
                 descriptor,
                 indexSamplingConfig,
-                heapBufferFactory(1024),
+                SchemaTestUtil.defaultHeapBufferFactory(),
                 INSTANCE,
                 tokenNameLookup,
                 ElementIdMapper.PLACEHOLDER,
@@ -115,25 +115,39 @@ abstract class IndexAccessorCompatibility extends PropertyIndexProviderCompatibi
     ValueType[] randomSetOfSupportedAndSortableTypes() {
         ValueType[] types = RandomValues.excluding(testSuite.supportedValueTypes(), type -> switch (type) {
             case STRING, STRING_ARRAY -> true; // exclude strings outside the Basic Multilingual Plane
-            default -> switch (type.valueGroup) {
-                case GEOMETRY, GEOMETRY_ARRAY, DURATION, DURATION_ARRAY -> true; // exclude spacial types
-                default -> false;
-            };
+            default ->
+                switch (type.valueGroup) {
+                    case GEOMETRY, GEOMETRY_ARRAY, DURATION, DURATION_ARRAY -> true; // exclude spacial types
+                    default -> false;
+                };
         });
 
         return random.randomValues().selection(types, 2, types.length, false);
     }
 
+    RandomValues randomValues(int numPropertiesPerPage) {
+        return RandomValues.create(
+                random.random(),
+                RandomValues.newConfigurationBuilder()
+                        .maxVectorNumBytes(RandomValues.MAX_NUM_BYTES_IN_INDEX_KEY / (numPropertiesPerPage + 1))
+                        .build());
+    }
+
     protected List<Long> query(PropertyIndexQuery... predicates) throws Exception {
-        var list = queryNoSort(predicates);
+        List<Long> list = queryNoSort(predicates);
         Collections.sort(list);
         return list;
     }
 
     protected List<Long> queryNoSort(PropertyIndexQuery... predicates) throws Exception {
-        try (ValueIndexReader reader = accessor.newValueReader(NO_USAGE_TRACKING)) {
-            SimpleEntityValueClient nodeValueClient = new SimpleEntityValueClient();
-            reader.query(nodeValueClient, QueryContext.NULL_CONTEXT, unconstrained(), predicates);
+        try (ValueIndexReader reader = accessor.newValueReader(NO_USAGE_TRACKING);
+                SimpleEntityValueClient nodeValueClient = new SimpleEntityValueClient()) {
+            reader.query(
+                    nodeValueClient,
+                    QueryContext.NULL_CONTEXT,
+                    CursorContext.NULL_CONTEXT,
+                    unconstrained(),
+                    predicates);
             List<Long> list = new LinkedList<>();
             while (nodeValueClient.next()) {
                 long entityId = nodeValueClient.reference;
@@ -148,7 +162,8 @@ abstract class IndexAccessorCompatibility extends PropertyIndexProviderCompatibi
     protected AutoCloseable query(SimpleEntityValueClient client, IndexOrder order, PropertyIndexQuery... predicates)
             throws Exception {
         ValueIndexReader reader = accessor.newValueReader(NO_USAGE_TRACKING);
-        reader.query(client, QueryContext.NULL_CONTEXT, constrained(order, false), predicates);
+        reader.query(
+                client, QueryContext.NULL_CONTEXT, CursorContext.NULL_CONTEXT, constrained(order, false), predicates);
         return reader;
     }
 
@@ -157,8 +172,8 @@ abstract class IndexAccessorCompatibility extends PropertyIndexProviderCompatibi
         if (order == IndexOrder.NONE) {
             actualIds = query(predicates);
         } else {
-            SimpleEntityValueClient client = new SimpleEntityValueClient();
-            try (AutoCloseable ignore = query(client, order, predicates)) {
+            try (SimpleEntityValueClient client = new SimpleEntityValueClient();
+                    AutoCloseable ignore = query(client, order, predicates)) {
                 actualIds = assertClientReturnValuesInOrder(client, order);
             }
         }
@@ -232,20 +247,14 @@ abstract class IndexAccessorCompatibility extends PropertyIndexProviderCompatibi
      * Commit these updates to the index. Also store the values, which currently are stored for all types except geometry,
      * so therefore it's done explicitly here so that we can filter on them later.
      */
-    void updateAndCommit(Collection<ValueIndexEntryUpdate<?>> updates) throws IndexEntryConflictException {
+    void updateAndCommit(Collection<EagerValueIndexEntryUpdate> updates) throws IndexEntryConflictException {
         try (IndexUpdater updater = accessor.newUpdater(IndexUpdateMode.ONLINE, CursorContext.NULL_CONTEXT, false)) {
-            for (ValueIndexEntryUpdate<?> update : updates) {
+            for (EagerValueIndexEntryUpdate update : updates) {
                 updater.process(update);
                 switch (update.updateMode()) {
-                    case ADDED:
-                    case CHANGED:
-                        committedValues.put(update.getEntityId(), update.values());
-                        break;
-                    case REMOVED:
-                        committedValues.remove(update.getEntityId());
-                        break;
-                    default:
-                        throw new IllegalArgumentException("Unknown update mode " + update.updateMode());
+                    case ADDED, CHANGED -> committedValues.put(update.getEntityId(), update.values());
+                    case REMOVED -> committedValues.remove(update.getEntityId());
+                    default -> throw new IllegalArgumentException("Unknown update mode " + update.updateMode());
                 }
             }
         }

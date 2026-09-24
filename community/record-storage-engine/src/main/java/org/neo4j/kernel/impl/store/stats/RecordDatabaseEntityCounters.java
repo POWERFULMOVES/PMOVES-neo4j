@@ -24,17 +24,20 @@ import static org.neo4j.token.api.TokenConstants.ANY_RELATIONSHIP_TYPE;
 
 import org.neo4j.counts.CountsStore;
 import org.neo4j.internal.id.IdGeneratorFactory;
-import org.neo4j.internal.id.SchemaIdType;
 import org.neo4j.internal.recordstorage.RecordIdType;
+import org.neo4j.internal.schema.SchemaCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 
 public class RecordDatabaseEntityCounters implements StoreEntityCounters {
     private final IdGeneratorFactory idGeneratorFactory;
     private final CountsStore countsStore;
+    private final SchemaCache schemaCache;
 
-    public RecordDatabaseEntityCounters(IdGeneratorFactory idGeneratorFactory, CountsStore countsStore) {
+    public RecordDatabaseEntityCounters(
+            IdGeneratorFactory idGeneratorFactory, CountsStore countsStore, SchemaCache schemaCache) {
         this.idGeneratorFactory = idGeneratorFactory;
         this.countsStore = countsStore;
+        this.schemaCache = schemaCache;
     }
 
     @Override
@@ -54,7 +57,7 @@ public class RecordDatabaseEntityCounters implements StoreEntityCounters {
 
     @Override
     public long relationshipTypes(CursorContext cursorContext) {
-        return idGeneratorFactory.get(SchemaIdType.RELATIONSHIP_TYPE_TOKEN).getHighId();
+        return idGeneratorFactory.get(RecordIdType.RELATIONSHIP_TYPE_TOKEN).getHighId();
     }
 
     @Override
@@ -65,6 +68,16 @@ public class RecordDatabaseEntityCounters implements StoreEntityCounters {
     @Override
     public long allRelationshipsCountStore(CursorContext cursorContext) {
         return countsStore.relationshipCount(ANY_LABEL, ANY_RELATIONSHIP_TYPE, ANY_LABEL, cursorContext);
+    }
+
+    @Override
+    public int indexCountWithoutLookup() {
+        return schemaCache.numberOfIndexesWithoutLookup();
+    }
+
+    @Override
+    public int constraintCount() {
+        return schemaCache.numberOfConstraints();
     }
 
     @Override
@@ -79,6 +92,6 @@ public class RecordDatabaseEntityCounters implements StoreEntityCounters {
 
     @Override
     public long estimateLabels() {
-        return idGeneratorFactory.get(SchemaIdType.LABEL_TOKEN).getHighId();
+        return idGeneratorFactory.get(RecordIdType.LABEL_TOKEN).getHighId();
     }
 }

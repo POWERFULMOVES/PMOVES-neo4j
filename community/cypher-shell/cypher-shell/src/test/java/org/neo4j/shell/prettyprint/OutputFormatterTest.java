@@ -20,23 +20,23 @@
 package org.neo4j.shell.prettyprint;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.neo4j.driver.internal.summary.InternalProfiledPlan.PROFILED_PLAN_FROM_VALUE;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.neo4j.bolt.connection.BoltProtocolVersion;
+import org.neo4j.bolt.connection.BoltServerAddress;
 import org.neo4j.driver.Query;
 import org.neo4j.driver.Value;
 import org.neo4j.driver.Values;
-import org.neo4j.driver.internal.BoltServerAddress;
-import org.neo4j.driver.internal.messaging.v5.BoltProtocolV5;
 import org.neo4j.driver.internal.summary.InternalDatabaseInfo;
+import org.neo4j.driver.internal.summary.InternalQueryProfile;
 import org.neo4j.driver.internal.summary.InternalResultSummary;
 import org.neo4j.driver.internal.summary.InternalServerInfo;
 import org.neo4j.driver.internal.value.ListValue;
 import org.neo4j.driver.internal.value.MapValue;
-import org.neo4j.driver.summary.ProfiledPlan;
 import org.neo4j.driver.summary.QueryType;
 import org.neo4j.driver.summary.ResultSummary;
 
@@ -47,10 +47,10 @@ class OutputFormatterTest {
         Value filter = buildOperator("Filter", 1402, 280, labelScan);
         Value planMap = buildOperator("ProduceResults", 0, 280, filter);
 
-        ProfiledPlan plan = PROFILED_PLAN_FROM_VALUE.apply(planMap);
+        var plan = InternalQueryProfile.PROFILE_FROM_VALUE.apply(planMap);
         ResultSummary summary = new InternalResultSummary(
                 new Query("PROFILE MATCH (n:LABEL) WHERE 20 < n.age < 35 return n"),
-                new InternalServerInfo("agent", new BoltServerAddress("localhost:7687"), BoltProtocolV5.VERSION),
+                new InternalServerInfo("agent", new BoltServerAddress("localhost:7687"), new BoltProtocolVersion(5, 0)),
                 new InternalDatabaseInfo("neo4j"),
                 QueryType.READ_ONLY,
                 null,
@@ -74,7 +74,7 @@ class OutputFormatterTest {
         operatorMap.put("dbHits", Values.value(dbHits));
         operatorMap.put("rows", Values.value(rows));
         if (child != null) {
-            operatorMap.put("children", new ListValue(child));
+            operatorMap.put("children", new ListValue(List.of(child)));
         }
         return new MapValue(operatorMap);
     }

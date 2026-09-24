@@ -21,6 +21,7 @@ package org.neo4j.cypher.internal.runtime
 
 import org.eclipse.collections.api.iterator.LongIterator
 import org.neo4j.collection.ResourceRawIterator
+import org.neo4j.cypher.internal.macros.ControlFlowMacros3.doWhile
 import org.neo4j.cypher.internal.runtime.ClosingIterator.MemoryTrackingEagerBatchingIterator.INIT_CHUNK_SIZE
 import org.neo4j.function.Suppliers
 import org.neo4j.io.IOUtils
@@ -124,11 +125,32 @@ abstract class ClosingIterator[+T] extends AutoCloseable {
    */
   final def close(): Unit = {
     if (!closed) {
-      if (resources != null) {
-        IOUtils.closeAll(resources)
+      var err: Throwable = null
+      try {
+        if (resources != null) {
+          IOUtils.closeAll(resources)
+        }
+      } catch {
+        case t: Throwable =>
+          err = t
       }
-      closeMore()
+
+      try {
+        closeMore()
+      } catch {
+        case t: Throwable =>
+          if (err != null) {
+            err.addSuppressed(t)
+          } else {
+            err = t
+          }
+      }
+
       closed = true
+
+      if (err != null) {
+        throw err
+      }
     }
   }
 
@@ -167,7 +189,7 @@ abstract class ClosingIterator[+T] extends AutoCloseable {
       self.close()
       cur match {
         case closingIterator: ClosingIterator[_] => closingIterator.close()
-        case _                                   =>
+        case null                                =>
       }
     }
   }
@@ -180,10 +202,10 @@ abstract class ClosingIterator[+T] extends AutoCloseable {
     private var hdDefined: Boolean = false
 
     override protected[this] def innerHasNext: Boolean = hdDefined || {
-      do {
+      doWhile {
         if (!self.hasNext) return false
         hd = self.next()
-      } while (!p(hd))
+      }(!p(hd))
       hdDefined = true
       true
     }
@@ -209,7 +231,7 @@ abstract class ClosingIterator[+T] extends AutoCloseable {
    * 
    * Note!! If `that` is never materialised it will not be closed!
    */
-  def addAllLazy[B >: T](that: () => ClosingIterator[B]): ClosingIterator[B] = new ClosingIterator[B] {
+  infix def addAllLazy[B >: T](that: () => ClosingIterator[B]): ClosingIterator[B] = new ClosingIterator[B] {
     // We read this into a lazy local variable here to avoid creating a new `that` iterator multiple times.
     // This is OK, since we expect to close both sides anyway.
     private val lazyThat = Suppliers.lazySingleton(() => that.apply())
@@ -453,6 +475,14 @@ abstract class ClosingLongIterator extends LongIterator {
     }
     _hasNext
   }
+
+  def mapToObj[A](mapper: Long => A): ClosingIterator[A] = new ClosingIterator[A] {
+    override protected[this] def closeMore(): Unit = ClosingLongIterator.this.close()
+
+    override def next(): A = mapper(ClosingLongIterator.this.next)
+
+    override protected[this] def innerHasNext: Boolean = ClosingLongIterator.this.hasNext
+  }
 }
 
 object ClosingLongIterator {
@@ -463,8 +493,8 @@ object ClosingLongIterator {
     override def next(): Long = throw new NoSuchElementException("next on empty iterator")
   }
 
-  def emptyClosingRelationshipIterator: ClosingLongIterator with RelationshipIterator =
-    new ClosingLongIterator with RelationshipIterator {
+  def emptyClosingRelationshipIterator: ClosingRelationshipIterator =
+    new ClosingRelationshipIterator {
       override def close(): Unit = ()
 
       override protected[this] def innerHasNext: Boolean = false

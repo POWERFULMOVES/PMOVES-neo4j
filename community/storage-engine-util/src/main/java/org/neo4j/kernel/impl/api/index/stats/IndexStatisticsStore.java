@@ -26,10 +26,10 @@ import static org.neo4j.kernel.impl.api.index.stats.IndexStatisticsKey.TYPE_USAG
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.OpenOption;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
 import org.eclipse.collections.api.set.ImmutableSet;
@@ -40,6 +40,7 @@ import org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector;
 import org.neo4j.index.internal.gbptree.TreeFileNotFoundException;
 import org.neo4j.index.internal.gbptree.Writer;
 import org.neo4j.internal.helpers.progress.ProgressMonitorFactory;
+import org.neo4j.io.async.AsyncBlockAccessor;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.CommonDatabaseStores;
 import org.neo4j.io.layout.DatabaseLayout;
@@ -47,6 +48,7 @@ import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.PageCacheOpenOptions;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.api.index.IndexSample;
@@ -67,7 +69,7 @@ public class IndexStatisticsStore extends LifecycleAdapter
 
     private final PageCache pageCache;
     private final FileSystemAbstraction fileSystem;
-    private final Path path;
+    private final StoreFile storeFile;
     private final RecoveryCleanupWorkCollector recoveryCleanupWorkCollector;
     private final String databaseName;
     private final PageCacheTracer pageCacheTracer;
@@ -77,6 +79,8 @@ public class IndexStatisticsStore extends LifecycleAdapter
     // Let IndexStatisticsValue be immutable in this map so that checkpoint doesn't have to coordinate with concurrent
     // writers. It's assumed that the data in this map will be so small that everything can just be in it always.
     private final ConcurrentHashMap<IndexStatisticsKey, IndexStatisticsValue> cache = new ConcurrentHashMap<>();
+    private final AtomicLong checkpointedChangeCounter = new AtomicLong();
+    private final AtomicLong changeCounter = new AtomicLong();
 
     public IndexStatisticsStore(
             PageCache pageCache,
@@ -103,7 +107,7 @@ public class IndexStatisticsStore extends LifecycleAdapter
     public IndexStatisticsStore(
             PageCache pageCache,
             FileSystemAbstraction fileSystem,
-            Path path,
+            StoreFile storeFile,
             RecoveryCleanupWorkCollector recoveryCleanupWorkCollector,
             boolean readOnly,
             String databaseName,
@@ -113,7 +117,7 @@ public class IndexStatisticsStore extends LifecycleAdapter
             throws IOException {
         this.pageCache = pageCache;
         this.fileSystem = fileSystem;
-        this.path = path;
+        this.storeFile = storeFile;
         this.recoveryCleanupWorkCollector = recoveryCleanupWorkCollector;
         this.databaseName = databaseName;
         this.pageCacheTracer = pageCacheTracer;
@@ -128,7 +132,7 @@ public class IndexStatisticsStore extends LifecycleAdapter
             tree = new GBPTree<>(
                     pageCache,
                     fileSystem,
-                    path,
+                    storeFile,
                     layout,
                     MultiRootGBPTree.NO_MONITOR,
                     MultiRootGBPTree.NO_HEADER_READER,
@@ -144,8 +148,8 @@ public class IndexStatisticsStore extends LifecycleAdapter
             }
         } catch (TreeFileNotFoundException e) {
             throw new IllegalStateException(
-                    "Index statistics store file could not be found, most likely this database needs to be recovered, file:"
-                            + path,
+                    "Index statistics store file could not be found, "
+                            + "most likely this database needs to be recovered, file:" + storeFile,
                     e);
         }
     }
@@ -163,11 +167,16 @@ public class IndexStatisticsStore extends LifecycleAdapter
         newValue.set(IndexStatisticsValue.INDEX_USAGE_LAST_READ, added.lastRead());
         newValue.set(IndexStatisticsValue.INDEX_USAGE_READ_COUNT, added.readCount());
         newValue.set(IndexStatisticsValue.INDEX_USAGE_TRACKED_SINCE, added.trackedSince());
+        newValue.set(IndexStatisticsValue.INDEX_USAGE_READ_WITH_FILTER_COUNT, added.readWithFilterCount());
         cache.compute(new IndexStatisticsKey(indexId, TYPE_USAGE), (key, currentValue) -> {
             if (currentValue != null) {
                 newValue.set(
                         IndexStatisticsValue.INDEX_USAGE_READ_COUNT,
                         added.readCount() + currentValue.get(IndexStatisticsValue.INDEX_USAGE_READ_COUNT));
+                newValue.set(
+                        IndexStatisticsValue.INDEX_USAGE_READ_WITH_FILTER_COUNT,
+                        added.readWithFilterCount()
+                                + currentValue.get(IndexStatisticsValue.INDEX_USAGE_READ_WITH_FILTER_COUNT));
                 newValue.set(
                         IndexStatisticsValue.INDEX_USAGE_TRACKED_SINCE,
                         Long.min(
@@ -179,6 +188,11 @@ public class IndexStatisticsStore extends LifecycleAdapter
             }
             return newValue;
         });
+        markChanged();
+    }
+
+    private void markChanged() {
+        changeCounter.incrementAndGet();
     }
 
     /**
@@ -201,6 +215,7 @@ public class IndexStatisticsStore extends LifecycleAdapter
                 stats -> new IndexUsageStats(
                         stats.get(IndexStatisticsValue.INDEX_USAGE_LAST_READ),
                         stats.get(IndexStatisticsValue.INDEX_USAGE_READ_COUNT),
+                        stats.get(IndexStatisticsValue.INDEX_USAGE_READ_WITH_FILTER_COUNT),
                         stats.get(IndexStatisticsValue.INDEX_USAGE_TRACKED_SINCE)));
     }
 
@@ -227,11 +242,13 @@ public class IndexStatisticsStore extends LifecycleAdapter
         value.set(IndexStatisticsValue.INDEX_SAMPLE_UPDATES_COUNT, sample.updates());
         value.set(IndexStatisticsValue.INDEX_SAMPLE_INDEX_SIZE, sample.indexSize());
         cache.put(new IndexStatisticsKey(indexId, TYPE_SAMPLE), value);
+        markChanged();
     }
 
     public void removeIndex(long indexId) {
         cache.remove(new IndexStatisticsKey(indexId, TYPE_SAMPLE));
         cache.remove(new IndexStatisticsKey(indexId, TYPE_USAGE));
+        markChanged();
     }
 
     public void incrementIndexUpdates(long indexId, long delta) {
@@ -242,6 +259,7 @@ public class IndexStatisticsStore extends LifecycleAdapter
                     copy.get(IndexStatisticsValue.INDEX_SAMPLE_UPDATES_COUNT) + delta);
             return copy;
         });
+        markChanged();
     }
 
     @Override
@@ -250,17 +268,20 @@ public class IndexStatisticsStore extends LifecycleAdapter
             scanTree(
                     (key, value) -> {
                         switch (key.getType()) {
-                            case TYPE_SAMPLE -> visitor.visitSampleStatistics(
-                                    key.getIndexId(),
-                                    value.get(IndexStatisticsValue.INDEX_SAMPLE_UNIQUE_VALUES),
-                                    value.get(IndexStatisticsValue.INDEX_SAMPLE_SIZE),
-                                    value.get(IndexStatisticsValue.INDEX_SAMPLE_UPDATES_COUNT),
-                                    value.get(IndexStatisticsValue.INDEX_SAMPLE_INDEX_SIZE));
-                            case TYPE_USAGE -> visitor.visitUsageStatistics(
-                                    key.getIndexId(),
-                                    value.get(IndexStatisticsValue.INDEX_USAGE_LAST_READ),
-                                    value.get(IndexStatisticsValue.INDEX_USAGE_READ_COUNT),
-                                    value.get(IndexStatisticsValue.INDEX_USAGE_TRACKED_SINCE));
+                            case TYPE_SAMPLE ->
+                                visitor.visitSampleStatistics(
+                                        key.getIndexId(),
+                                        value.get(IndexStatisticsValue.INDEX_SAMPLE_UNIQUE_VALUES),
+                                        value.get(IndexStatisticsValue.INDEX_SAMPLE_SIZE),
+                                        value.get(IndexStatisticsValue.INDEX_SAMPLE_UPDATES_COUNT),
+                                        value.get(IndexStatisticsValue.INDEX_SAMPLE_INDEX_SIZE));
+                            case TYPE_USAGE ->
+                                visitor.visitUsageStatistics(
+                                        key.getIndexId(),
+                                        value.get(IndexStatisticsValue.INDEX_USAGE_LAST_READ),
+                                        value.get(IndexStatisticsValue.INDEX_USAGE_READ_COUNT),
+                                        value.get(IndexStatisticsValue.INDEX_USAGE_READ_WITH_FILTER_COUNT),
+                                        value.get(IndexStatisticsValue.INDEX_USAGE_TRACKED_SINCE));
                             default -> throw new IllegalArgumentException("Unknown key type for " + key);
                         }
                     },
@@ -270,11 +291,19 @@ public class IndexStatisticsStore extends LifecycleAdapter
         }
     }
 
-    public void checkpoint(FileFlushEvent flushEvent, CursorContext cursorContext) throws IOException {
+    public void checkpoint(
+            FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext)
+            throws IOException {
         // There's an assumption that there will never be concurrent calls to checkpoint. This is guarded outside.
-        clearTree(cursorContext);
-        writeCacheContentsIntoTree(cursorContext);
-        tree.checkpoint(flushEvent, cursorContext);
+        long checkpointedChangeCounter = this.checkpointedChangeCounter.get();
+        long changeCounter = this.changeCounter.get();
+        if (checkpointedChangeCounter != changeCounter) {
+            clearTree(cursorContext);
+            writeCacheContentsIntoTree(cursorContext);
+        }
+
+        tree.checkpoint(flushEvent, asyncBlockAccessor, cursorContext);
+        this.checkpointedChangeCounter.set(changeCounter);
     }
 
     @Override
@@ -325,8 +354,8 @@ public class IndexStatisticsStore extends LifecycleAdapter
         }
     }
 
-    public Path storeFile() {
-        return path;
+    public StoreFile storeFile() {
+        return storeFile;
     }
 
     @Override

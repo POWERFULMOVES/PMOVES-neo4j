@@ -33,6 +33,7 @@ import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.PagedFile;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
 import org.neo4j.io.pagecache.tracing.cursor.PageCursorTracer;
 import org.neo4j.test.extension.Inject;
@@ -54,14 +55,14 @@ class OffloadStoreTracingTest {
     private OffloadStoreImpl<RawBytes, RawBytes> offloadStore;
     private CursorContext cursorContext;
     private PagedFile pagedFile;
-    private FreeListIdProvider idProvider;
+    private FreelistIdProvider idProvider;
 
     @BeforeEach
     void setUp() throws IOException {
         cursorContext = contextFactory.create("testCursorTracer");
-        pagedFile = pageCache.map(testDirectory.createFile("file"), pageCache.pageSize(), "neo4j");
+        pagedFile = pageCache.map(new StoreFile(testDirectory.createFile("file")), pageCache.pageSize(), "neo4j");
         OffloadPageCursorFactory pcFactory = pagedFile::io;
-        idProvider = new FreeListIdProvider(pagedFile.payloadSize());
+        idProvider = new FreelistIdProvider(pagedFile);
         idProvider.initializeAfterCreation(bind(pagedFile, PagedFile.PF_SHARED_WRITE_LOCK, cursorContext), 10);
         offloadStore = new OffloadStoreImpl<>(layout, idProvider, pcFactory, ALWAYS_TRUE, pageCache.pageSize());
     }

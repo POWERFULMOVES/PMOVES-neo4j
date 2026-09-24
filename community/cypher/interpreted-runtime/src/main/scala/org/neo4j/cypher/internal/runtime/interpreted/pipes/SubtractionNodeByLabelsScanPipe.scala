@@ -26,8 +26,8 @@ import org.neo4j.cypher.internal.runtime.ClosingLongIterator
 import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.runtime.PrimitiveLongHelper
 import org.neo4j.cypher.internal.runtime.QueryContext
-import org.neo4j.cypher.internal.runtime.interpreted.TransactionBoundQueryContext.PrimitiveCursorIterator
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.SubtractionNodeByLabelsScanPipe.subtractionIterator
+import org.neo4j.cypher.internal.runtime.iterators.PrimitiveCursorIterator
 import org.neo4j.cypher.internal.util.attribution.Id
 import org.neo4j.internal.kernel.api.TokenReadSession
 import org.neo4j.internal.kernel.api.helpers.SubtractionNodeLabelIndexCursor.ascendingSubtractionNodeLabelIndexCursor
@@ -39,14 +39,21 @@ case class SubtractionNodeByLabelsScanPipe(
   ident: String,
   positiveLabels: Seq[LazyLabel],
   negativeLabels: Seq[LazyLabel],
-  indexOrder: IndexOrder
-)(val id: Id =
-  Id.INVALID_ID)
+  indexOrder: IndexOrder,
+  includeChangesFromThisTransaction: Boolean
+)(val id: Id = Id.INVALID_ID)
     extends Pipe {
 
   protected def internalCreateResults(state: QueryState): ClosingIterator[CypherRow] = {
     val nodes =
-      subtractionIterator(state.query, positiveLabels, negativeLabels, indexOrder, state.nodeLabelTokenReadSession.get)
+      subtractionIterator(
+        state.query,
+        positiveLabels,
+        negativeLabels,
+        indexOrder,
+        state.nodeLabelTokenReadSession.get,
+        includeChangesFromThisTransaction
+      )
     val baseContext = state.newRowWithArgument(rowFactory)
     PrimitiveLongHelper.map(nodes, n => rowFactory.copyWith(baseContext, ident, VirtualValues.node(n)))
   }
@@ -59,7 +66,8 @@ object SubtractionNodeByLabelsScanPipe {
     positiveLabels: Seq[LazyLabel],
     negativeLabels: Seq[LazyLabel],
     indexOrder: IndexOrder,
-    tokenReadSession: TokenReadSession
+    tokenReadSession: TokenReadSession,
+    includeChangesFromThisTransaction: Boolean
   ): ClosingLongIterator = {
     val posTokens = positiveLabels.map(l => l.getId(query)).toArray
     val negTokens = negativeLabels.map(l => l.getId(query)).toArray
@@ -83,7 +91,8 @@ object SubtractionNodeByLabelsScanPipe {
           posTokens,
           negTokens,
           posCursors,
-          negCursors
+          negCursors,
+          includeChangesFromThisTransaction
         )
       case _ =>
         ascendingSubtractionNodeLabelIndexCursor(
@@ -93,7 +102,8 @@ object SubtractionNodeByLabelsScanPipe {
           posTokens,
           negTokens,
           posCursors,
-          negCursors
+          negCursors,
+          includeChangesFromThisTransaction
         )
     }
 

@@ -16,15 +16,19 @@
  */
 package org.neo4j.cypher.internal.expressions.functions
 
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.expressions.FunctionTypeSignature
+import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.symbols.CTFloat
 import org.neo4j.cypher.internal.util.symbols.CTList
 import org.neo4j.cypher.internal.util.symbols.CTNumber
+import org.neo4j.cypher.internal.util.symbols.CTVector
+import org.neo4j.cypher.internal.util.symbols.ClosedDynamicUnionType
 
 case object VectorSimilarityEuclidean extends Function {
   override def name = "vector.similarity.euclidean"
 
-  override val signatures = Vector(
+  override val signatures: Vector[FunctionTypeSignature] = Vector(
     FunctionTypeSignature(
       function = this,
       names = Vector("a", "b"),
@@ -34,7 +38,26 @@ case object VectorSimilarityEuclidean extends Function {
         "Returns a `FLOAT` representing the similarity between the argument vectors based on their Euclidean distance.",
       category = Category.VECTOR,
       argumentDescriptions =
-        Map("a" -> "A list representing the first vector.", "b" -> "A list representing the second vector.")
+        Map("a" -> "A list representing the first vector.", "b" -> "A list representing the second vector."),
+      scopes = Set(CypherVersion.Cypher5)
+    ),
+    FunctionTypeSignature(
+      function = this,
+      names = Vector("a", "b"),
+      argumentTypes = Vector(
+        ClosedDynamicUnionType(Set(CTList(CTNumber), CTVector))(InputPosition.NONE),
+        ClosedDynamicUnionType(Set(CTList(CTNumber), CTVector))(InputPosition.NONE)
+      ),
+      outputType = CTFloat,
+      description =
+        "Returns a `FLOAT` representing the similarity between the argument vectors based on their Euclidean distance.",
+      category = Category.VECTOR,
+      argumentDescriptions =
+        Map(
+          "a" -> "A vector or list value representing the first vector.",
+          "b" -> "A vector or list value representing the second vector."
+        ),
+      scopes = Set(CypherVersion.Cypher25)
     )
   )
 }

@@ -29,12 +29,13 @@ import static org.neo4j.index.SabotageNativeIndex.nativeIndexDirectoryStructure;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
+import org.eclipse.collections.api.set.ImmutableSet;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.graphdb.ConstraintViolationException;
 import org.neo4j.graphdb.Label;
@@ -52,12 +53,12 @@ import org.neo4j.test.extension.DbmsController;
 import org.neo4j.test.extension.DbmsExtension;
 import org.neo4j.test.extension.ExtensionCallback;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.values.storable.CoordinateReferenceSystem;
 import org.neo4j.values.storable.Values;
 
 @DbmsExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 public class IndexFailureOnStartupTest {
     private static final Label PERSON = Label.label("Person");
 
@@ -113,7 +114,7 @@ public class IndexFailureOnStartupTest {
     class ArchiveIndex {
 
         @ExtensionCallback
-        void configure(TestDatabaseManagementServiceBuilder builder) {
+        static void configure(TestDatabaseManagementServiceBuilder builder) {
             builder.setConfig(GraphDatabaseInternalSettings.archive_failed_index, true);
         }
 
@@ -146,7 +147,7 @@ public class IndexFailureOnStartupTest {
     }
 
     private void sabotageNativeIndexAndRestartDbms() {
-        var openOptions = db.getDependencyResolver()
+        ImmutableSet<OpenOption> openOptions = db.getDependencyResolver()
                 .resolveDependency(StorageEngine.class)
                 .getOpenOptions();
         controller.restartDbms(db.databaseName(), builder -> {

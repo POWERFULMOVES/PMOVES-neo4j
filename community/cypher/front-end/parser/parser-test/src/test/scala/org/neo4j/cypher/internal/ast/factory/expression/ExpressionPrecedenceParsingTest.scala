@@ -16,14 +16,16 @@
  */
 package org.neo4j.cypher.internal.ast.factory.expression
 
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.CollectExpression
 import org.neo4j.cypher.internal.ast.CountExpression
 import org.neo4j.cypher.internal.ast.ExistsExpression
+import org.neo4j.cypher.internal.ast.PrecedenceLevelsTestBase
 import org.neo4j.cypher.internal.ast.Statements
+import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher25
 import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
+import org.neo4j.cypher.internal.ast.test.util.AstParsing.ParserInTest
 import org.neo4j.cypher.internal.ast.test.util.AstParsingTestBase
-import org.neo4j.cypher.internal.ast.test.util.LegacyAstParsingTestSupport
 import org.neo4j.cypher.internal.expressions.AllPropertiesSelector
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.ListSlice
@@ -35,7 +37,7 @@ import org.neo4j.cypher.internal.util.symbols.BooleanType
 import org.neo4j.cypher.internal.util.symbols.CTAny
 import org.neo4j.cypher.internal.util.symbols.StringType
 
-class ExpressionPrecedenceParsingTest extends AstParsingTestBase with LegacyAstParsingTestSupport {
+class ExpressionPrecedenceParsingTest extends AstParsingTestBase with PrecedenceLevelsTestBase {
 
   /**
    * Precedence in Cypher:
@@ -44,12 +46,12 @@ class ExpressionPrecedenceParsingTest extends AstParsingTestBase with LegacyAstP
    * 10: AND
    * 9: NOT
    * 8: =, !=, <>, <, >, <=, >=
-   * 7: =~, STARS WITH, ENDS WITH, CONTAINS, IN, IS NULL, IS NOT NULL, IS ::, IS NOT ::, IS NORMALIZED, IS NOT NORMALIZED
+   * 7: =~, STARS WITH, ENDS WITH, CONTAINS, IN, IS NULL, IS NOT NULL, IS ::, IS NOT ::, IS NORMALIZED, IS NOT NORMALIZED, :Label (Cypher 25),
    * 6: +, -, ||
    * 5: *, /, %
    * 4: POW
    * 3: +(unary), -(unary)
-   * 2: .prop, :Label, [expr], [..]
+   * 2: .prop, :Label (Cypher 5), [expr], [..]
    * 1: literal, parameter, CASE, COUNT, EXISTS, COLLECT, map projection, list comprehension, pattern comprehension,
    * reduce, all, any, none, single, pattern, shortest path, (expr), functions, variables
    */
@@ -83,7 +85,7 @@ class ExpressionPrecedenceParsingTest extends AstParsingTestBase with LegacyAstP
     "NOT 1 < 2 = 3 <= (NOT 4) <> 5 >= 6 > 7" should parseTo[Expression](
       not(ands(
         lessThan(literalInt(1), literalInt(2)),
-        eq(literalInt(2), literalInt(3)),
+        equals(literalInt(2), literalInt(3)),
         lessThanOrEqual(literalInt(3), not(literalInt(4))),
         notEquals(not(literalInt(4)), literalInt(5)),
         greaterThanOrEqual(literalInt(5), literalInt(6)),
@@ -104,7 +106,7 @@ class ExpressionPrecedenceParsingTest extends AstParsingTestBase with LegacyAstP
       "CONTAINS 's' <> 'string' IS NOT NULL <= 'string' IN list = y IS TYPED BOOLEAN = 1 IS NOT TYPED BOOLEAN" +
       " = 'string' IS NORMALIZED = 'string' IS NOT NORMALIZED" should parseTo[Expression](
         ands(
-          eq(
+          equals(
             startsWith(literalString("string"), literalString("s")),
             regex(literalString("string"), literalString("s?"))
           ),
@@ -128,19 +130,19 @@ class ExpressionPrecedenceParsingTest extends AstParsingTestBase with LegacyAstP
             isNotNull(literalString("string")),
             in(literalString("string"), varFor("list"))
           ),
-          eq(
+          equals(
             in(literalString("string"), varFor("list")),
             isTyped(varFor("y"), BooleanType(isNullable = true)(pos))
           ),
-          eq(
+          equals(
             isTyped(varFor("y"), BooleanType(isNullable = true)(pos)),
             isNotTyped(literalInt(1), BooleanType(isNullable = true)(pos))
           ),
-          eq(
+          equals(
             isNotTyped(literalInt(1), BooleanType(isNullable = true)(pos)),
             isNormalized(literalString("string"), NFCNormalForm)
           ),
-          eq(
+          equals(
             isNormalized(literalString("string"), NFCNormalForm),
             isNotNormalized(literalString("string"), NFCNormalForm)
           )
@@ -211,19 +213,16 @@ class ExpressionPrecedenceParsingTest extends AstParsingTestBase with LegacyAstP
     )
 
     // (2 + 3) IN [(2 - 1)]
-    "2 + 3 IN [2 - 1]" should parse[Expression].toAsts {
-      case Cypher5JavaCc =>
-        in(add(literalInt(2), literalInt(3)), listOf(subtract(literalInt(2), literalInt(1))))
-      case _ =>
-        in(add(literalInt(2), literalInt(3)), listOf(subtract(literalInt(2), literalInt(1))))
-    }
+    "2 + 3 IN [2 - 1]" should parseTo[Expression](
+      in(add(literalInt(2), literalInt(3)), listOf(subtract(literalInt(2), literalInt(1))))
+    )
     // (1 + 2) IS NOT NULL
     "1 + 2 IS NOT NULL" should parseTo[Expression](isNotNull(add(literalInt(1), literalInt(2))))
 
     // (1 - 2) IS NULL
     "1 - 2 IS NULL" should parseTo[Expression](isNull(subtract(literalInt(1), literalInt(2))))
 
-    //  ([true] + n.p) :: STRING
+    // ([true] + n.p) :: STRING
     " [true] + n.p :: STRING" should parseIn[Expression] {
       case Cypher5 => _.toAst(
           isTyped(
@@ -244,6 +243,63 @@ class ExpressionPrecedenceParsingTest extends AstParsingTestBase with LegacyAstP
     // (3 - 4) IS NOT TYPED BOOLEAN
     "3 - 4 IS NOT :: BOOLEAN" should parseTo[Expression](
       isNotTyped(subtract(literalInt(3), literalInt(4)), BooleanType(isNullable = true)(pos))
+    )
+  }
+
+  test("label predicate moved to precedence 7") {
+    // [1,'abc',3] + (n:A)  in Cypher5
+    // ([1,'abc',3] + n):A  in Cypher25 and after
+    "[1,'abc',3] + n:A" should parseIn[Expression] {
+      case Cypher5 => _.toAst(
+          add(
+            listOf(literalInt(1), literalString("abc"), literalInt(3)),
+            labelExpressionPredicate(
+              varFor("n"),
+              labelOrRelTypeLeaf("A", containsIs = false)
+            )
+          )
+        )
+      // ≥ Cypher25
+      case _ => _.toAst(
+          labelExpressionPredicate(
+            add(
+              listOf(literalInt(1), literalString("abc"), literalInt(3)),
+              varFor("n")
+            ),
+            labelOrRelTypeLeaf("A", containsIs = false)
+          )
+        )
+    }
+
+    // [1,'abc',3] + (n IS A)  in Cypher5
+    // ([1,'abc',3] + n) IS A  in Cypher25 and after
+    "[1,'abc',3] + n IS A" should parseIn[Expression] {
+      case Cypher5 => _.toAst(
+          add(
+            listOf(literalInt(1), literalString("abc"), literalInt(3)),
+            labelExpressionPredicate(
+              varFor("n"),
+              labelOrRelTypeLeaf("A", containsIs = true)
+            )
+          )
+        )
+      // ≥ Cypher25
+      case _ => _.toAst(
+          labelExpressionPredicate(
+            add(
+              listOf(literalInt(1), literalString("abc"), literalInt(3)),
+              varFor("n")
+            ),
+            labelOrRelTypeLeaf("A", containsIs = true)
+          )
+        )
+    }
+
+    "n:A = n IS B" should parseTo[Expression](
+      equals(
+        labelExpressionPredicate(varFor("n"), labelOrRelTypeLeaf("A")),
+        labelExpressionPredicate(varFor("n"), labelOrRelTypeLeaf("B", containsIs = true))
+      )
     )
   }
 
@@ -291,12 +347,22 @@ class ExpressionPrecedenceParsingTest extends AstParsingTestBase with LegacyAstP
   }
 
   test("precedence 3 vs 2") {
-    // -(list[+(expr:Label)])
-    "-list[+expr:Label]" should parseTo[Expression] {
-      unarySubtract(containerIndex(
-        varFor("list"),
-        unaryAdd(labelExpressionPredicate(varFor("expr"), labelOrRelTypeLeaf("Label")))
-      ))
+    // -(list[+(expr:Label)])  in Cypher5
+    // -(list[(+expr):Label])  in Cypher25 and after
+    "-list[+expr:Label]" should parseIn[Expression] {
+      case Cypher5 => _.toAst(
+          unarySubtract(containerIndex(
+            varFor("list"),
+            unaryAdd(labelExpressionPredicate(varFor("expr"), labelOrRelTypeLeaf("Label")))
+          ))
+        )
+      // ≥ Cypher25
+      case _ => _.toAst(
+          unarySubtract(containerIndex(
+            varFor("list"),
+            labelExpressionPredicate(unaryAdd(varFor("expr")), labelOrRelTypeLeaf("Label"))
+          ))
+        )
     }
 
     // +(list[-(x.y)..+(5)])
@@ -357,7 +423,7 @@ class ExpressionPrecedenceParsingTest extends AstParsingTestBase with LegacyAstP
             )
           )(pos, None, None),
           Some(
-            eq(
+            equals(
               MapProjection(varFor("x"), List(AllPropertiesSelector()(pos)))(pos),
               CountExpression(
                 singleQuery(
@@ -379,14 +445,17 @@ class ExpressionPrecedenceParsingTest extends AstParsingTestBase with LegacyAstP
           relationshipChain(nodePat(Some("a")), relPat(), nodePat(Some("b"))),
           single = true
         )(pos)),
-        caseExpression(Some(varFor("x")), Some(literalInt(2)), (equals(varFor("x"), trueLiteral), literalInt(1)))
+        caseExpression(
+          Some(varFor("x")),
+          Some(literalInt(2)),
+          equals(varFor("x"), trueLiteral) -> literalInt(1)
+        )
       )
     }
 
     // parenthesized variables: (EXISTS) {RETURN 42}
     "(EXISTS) {RETURN 42}" should parseIn[Expression] {
-      case Cypher5JavaCc => _.withoutErrors
-      case _             => _.withMessageStart("Invalid input '{'")
+      case _ => _.withMessageStart("Invalid input '{'")
     }
 
     // parenthesized variables: (x).prop + y
@@ -407,6 +476,40 @@ class ExpressionPrecedenceParsingTest extends AstParsingTestBase with LegacyAstP
         ),
         varFor("y", isIsolated = true)
       )
+    }
+  }
+
+  def parserOfVersion(parserInTest: ParserInTest, cypherVersion: CypherVersion): Boolean =
+    (parserInTest, cypherVersion) match {
+      case (Cypher25, CypherVersion.Cypher25) => true
+      case (Cypher5, CypherVersion.Cypher5)   => true
+      case (_, _)                             => false
+    }
+
+  {
+    val cases: Seq[(Expression, String, Set[CypherVersion])] =
+      all2LevelCombinationsWithRandomBase(
+        innerFilter = IsParseable,
+        outerFilter = IsParseable
+      ) ++
+        sampledNLevelCombinationsWithRandomBase(500, 5, IsParseable)
+
+    val casesPerVersion = cases.flatMap {
+      case (expectedAst, cypher, versions) =>
+        versions.map(v => (expectedAst, cypher, v))
+    }
+
+    for {
+      ((expectedAst, cypher, version), idx) <- casesPerVersion.zipWithIndex
+    } {
+      test(s"[$idx] ${version.description} should parse ```$cypher``` to expected AST") {
+        withClue(expectedAst) {
+          cypher should parseIn[Expression] {
+            case p if parserOfVersion(p, version) => _.toAst(expectedAst)
+            case _                                => _.ignored
+          }
+        }
+      }
     }
   }
 }

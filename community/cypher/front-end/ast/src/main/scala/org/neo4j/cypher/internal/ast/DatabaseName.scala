@@ -16,14 +16,16 @@
  */
 package org.neo4j.cypher.internal.ast
 
+import org.neo4j.cypher.internal.ast.prettifier.ExpressionStringifier
+import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.Parameter
 import org.neo4j.cypher.internal.util.ASTNode
 import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.cypher.internal.util.helpers.LazyVal
 import org.neo4j.exceptions.ParameterWrongTypeException
-import org.neo4j.gqlstatus.GqlHelper.getGql22G03_22N27
-import org.neo4j.gqlstatus.GqlParams
+import org.neo4j.values.AnyValue
+import org.neo4j.values.storable.NoValue
 import org.neo4j.values.storable.TextValue
-import org.neo4j.values.utils.PrettyPrinter
 import org.neo4j.values.virtual.MapValue
 
 import java.util
@@ -32,6 +34,14 @@ import scala.jdk.CollectionConverters.ListHasAsScala
 
 sealed trait DatabaseName extends ASTNode {
   def asLegacyName: Either[String, Parameter]
+}
+
+object DatabaseName {
+
+  def apply(either: Either[String, Parameter])(pos: InputPosition): DatabaseName = either match {
+    case Left(name)   => NamespacedName(name)(pos)
+    case Right(param) => ParameterName(param)(pos)
+  }
 }
 
 case class NamespacedName(nameComponents: List[String], namespace: Option[String])(val position: InputPosition)
@@ -55,31 +65,71 @@ object NamespacedName {
   def apply(name: String)(pos: InputPosition): NamespacedName = NamespacedName(List(name), None)(pos)
 }
 
-case class ParameterName(parameter: Parameter)(val position: InputPosition) extends DatabaseName {
+case class ParameterName(expression: Expression)(val position: InputPosition) extends DatabaseName {
+  private val parameterLazy: LazyVal[Parameter] = LazyVal(expression.asInstanceOf[Parameter])
+  def parameter: Parameter = parameterLazy.value
+
+  // This will not work if the parameter has been slotted (ParameterFromSlot), but that is only used for SHOW DATABASES
+  // and in that case we will not use this method
   override def asLegacyName: Either[String, Parameter] = Right(parameter)
 
-  def getNameParts(params: MapValue, defaultNamespace: String): (Option[String], String, String) = {
-    val paramValue = params.get(parameter.name)
-    if (!paramValue.isInstanceOf[TextValue]) {
-      val pp = new PrettyPrinter
-      paramValue.writeTo(pp)
-      val gql =
-        getGql22G03_22N27(pp.value, GqlParams.StringParam.param.process(parameter.name), java.util.List.of("STRING"))
-      throw new ParameterWrongTypeException(
-        gql,
-        s"Expected parameter $$${parameter.name} to have type String but was $paramValue"
+  def getNameParts(
+    params: ParameterProvider,
+    defaultNamespace: String,
+    emulateGetNameFields: Boolean = false,
+    allowAndPassThroughNullInput: Boolean = false
+  ): (Option[String], String, String, String) = {
+    val paramValue = params.get(expression)
+    if (allowAndPassThroughNullInput && paramValue.isInstanceOf[NoValue]) {
+      (None, null, null, null)
+    } else if (!paramValue.isInstanceOf[TextValue]) {
+      throw ParameterWrongTypeException.expectedParameterToBeString42N51(
+        false,
+        // On the SHOW DATABASE path, we might be using slotted parameters
+        params.getName(expression),
+        String.valueOf(paramValue),
+        paramValue.prettify()
       )
     } else {
-      val nameParts = paramValue.asInstanceOf[TextValue].stringValue().split('.')
+      def backtick(s: String) = ExpressionStringifier().backtick(s)
+      val paramStringValue = paramValue.asInstanceOf[TextValue].stringValue()
+      val namePartsSplit = paramStringValue.split('.')
+      // To not lose trailing dots we add in the empty string that followed it
+      val nameParts = if (paramStringValue.endsWith(".")) namePartsSplit :+ "" else namePartsSplit
       if (nameParts.length == 1) {
-        (None, nameParts(0), nameParts(0))
+        (None, nameParts(0), nameParts(0), backtick(nameParts(0)))
+      } else if (emulateGetNameFields) {
+        val displayName = paramValue.asInstanceOf[TextValue].stringValue()
+        val quotedDisplayName = backtick(displayName)
+        (None, displayName, displayName, quotedDisplayName)
       } else {
         val displayName =
           if (nameParts(0).equals(defaultNamespace))
             nameParts.tail.mkString(".")
-          else paramValue.asInstanceOf[TextValue].stringValue()
-        (Some(nameParts(0)), nameParts.tail.mkString("."), displayName)
+          else paramStringValue
+        val quotedDisplayName = {
+          val name = backtick(nameParts.tail.mkString("."))
+          if (nameParts(0).equals(defaultNamespace)) name
+          else s"${backtick(nameParts(0))}.$name"
+        }
+        (Some(nameParts(0)), nameParts.tail.mkString("."), displayName, quotedDisplayName)
       }
     }
+  }
+}
+
+trait ParameterProvider {
+  val get: PartialFunction[Expression, AnyValue]
+  val getName: PartialFunction[Expression, String]
+}
+
+case class MapBasedParameterProvider(mapValue: MapValue) extends ParameterProvider {
+
+  override val get: PartialFunction[Expression, AnyValue] = {
+    case p: Parameter => mapValue.get(p.name)
+  }
+
+  override val getName: PartialFunction[Expression, String] = {
+    case p: Parameter => p.name
   }
 }

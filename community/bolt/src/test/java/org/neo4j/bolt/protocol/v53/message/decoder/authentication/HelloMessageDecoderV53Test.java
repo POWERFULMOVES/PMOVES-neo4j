@@ -19,17 +19,18 @@
  */
 package org.neo4j.bolt.protocol.v53.message.decoder.authentication;
 
-import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.neo4j.bolt.protocol.common.message.decoder.authentication.DefaultHelloMessageDecoderTest;
-import org.neo4j.bolt.protocol.common.message.notifications.SelectiveNotificationsConfig;
 import org.neo4j.bolt.testing.mock.ConnectionMockFactory;
+import org.neo4j.boltmessages.notifications.SelectiveNotificationsConfig;
+import org.neo4j.kernel.impl.query.NotificationConfiguration;
 import org.neo4j.packstream.error.reader.PackstreamReaderException;
 import org.neo4j.packstream.io.PackstreamBuf;
-import org.neo4j.packstream.io.value.PackstreamValueReader;
+import org.neo4j.packstream.io.value.AbstractPackstreamValueReader;
 import org.neo4j.packstream.struct.StructHeader;
 import org.neo4j.values.storable.Values;
 import org.neo4j.values.virtual.ListValueBuilder;
@@ -41,7 +42,7 @@ public class HelloMessageDecoderV53Test extends DefaultHelloMessageDecoderTest {
     @Override
     public void shouldReadMessage() throws PackstreamReaderException {
         var buf = PackstreamBuf.allocUnpooled();
-        var reader = Mockito.mock(PackstreamValueReader.class);
+        var reader = Mockito.mock(AbstractPackstreamValueReader.class);
 
         var builder = new MapValueBuilder();
         builder.add("address", Values.stringValue("localhost"));
@@ -76,7 +77,8 @@ public class HelloMessageDecoderV53Test extends DefaultHelloMessageDecoderTest {
             Assertions.assertThat(ctx.getParameters()).hasSize(1).containsEntry("address", "localhost");
         });
         Assertions.assertThat(msg.notificationsConfig())
-                .isEqualTo(new SelectiveNotificationsConfig("WARNING", List.of("HINT")));
+                .isEqualTo(new SelectiveNotificationsConfig(
+                        NotificationConfiguration.Severity.WARNING, Set.of(NotificationConfiguration.Category.HINT)));
 
         // ensure that readPrimitiveMap is the only interaction point on PackstreamValueReader as HELLO explicitly
         // forbids the use of complex structures (such as dates, points, etc) to reduce potential attack vectors that

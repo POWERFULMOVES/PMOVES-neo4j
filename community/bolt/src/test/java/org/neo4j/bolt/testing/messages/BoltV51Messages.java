@@ -22,12 +22,12 @@ package org.neo4j.bolt.testing.messages;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import org.neo4j.bolt.negotiation.ProtocolVersion;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 import org.neo4j.bolt.protocol.common.connector.connection.Feature;
-import org.neo4j.bolt.protocol.common.message.request.RequestMessage;
-import org.neo4j.bolt.protocol.common.message.request.connection.RoutingContext;
 import org.neo4j.bolt.protocol.v51.BoltProtocolV51;
 import org.neo4j.bolt.testing.error.UnsupportedProtocolFeatureException;
+import org.neo4j.boltmessages.request.RequestMessage;
+import org.neo4j.boltmessages.request.connection.RoutingContext;
 
 public class BoltV51Messages extends AbstractBoltMessages {
     private static final String USER_AGENT = "BoltV51Wire/0.0";

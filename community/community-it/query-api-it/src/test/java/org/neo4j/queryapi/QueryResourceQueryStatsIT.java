@@ -20,68 +20,36 @@
 package org.neo4j.queryapi;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.neo4j.queryapi.QueryApiTestUtil.setupLogging;
+import static org.neo4j.server.queryapi.response.format.Fieldnames.VALUES_KEY;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.neo4j.configuration.connectors.BoltConnector;
-import org.neo4j.configuration.connectors.BoltConnectorInternalSettings;
-import org.neo4j.configuration.connectors.ConnectorPortRegister;
-import org.neo4j.configuration.connectors.ConnectorType;
-import org.neo4j.configuration.connectors.HttpConnector;
-import org.neo4j.configuration.helpers.SocketAddress;
-import org.neo4j.dbms.api.DatabaseManagementService;
-import org.neo4j.test.TestDatabaseManagementServiceBuilder;
+import org.neo4j.kernel.api.exceptions.Status;
+import org.neo4j.queryapi.test.annotation.QueryAPITestExtension;
+import org.neo4j.queryapi.test.testclient.QueryAPITestClient;
+import org.neo4j.queryapi.test.testclient.QueryRequest;
 
+@QueryAPITestExtension
 class QueryResourceQueryStatsIT {
 
-    private static DatabaseManagementService dbms;
-    private static HttpClient client;
+    private final QueryAPITestClient testClient;
 
-    private static String queryEndpoint;
-
-    private final ObjectMapper MAPPER = new ObjectMapper();
-
-    @BeforeAll
-    static void beforeAll() {
-        setupLogging();
-        var builder = new TestDatabaseManagementServiceBuilder();
-        dbms = builder.setConfig(HttpConnector.enabled, true)
-                .setConfig(HttpConnector.listen_address, new SocketAddress("localhost", 0))
-                .setConfig(
-                        BoltConnectorInternalSettings.local_channel_address,
-                        QueryResourceQueryStatsIT.class.getSimpleName())
-                .setConfig(BoltConnector.enabled, true)
-                .impermanent()
-                .build();
-        var portRegister = QueryApiTestUtil.resolveDependency(dbms, ConnectorPortRegister.class);
-        queryEndpoint = "http://" + portRegister.getLocalAddress(ConnectorType.HTTP) + "/db/{databaseName}/query/v2";
-        client = HttpClient.newBuilder().build();
-    }
-
-    @AfterAll
-    static void teardown() {
-        dbms.shutdown();
+    QueryResourceQueryStatsIT(QueryAPITestClient testClient) {
+        this.testClient = testClient;
     }
 
     @Test
     void shouldIncludeQueryStats() throws IOException, InterruptedException {
-        var httpRequest = QueryApiTestUtil.baseRequestBuilder(queryEndpoint, "neo4j")
-                .POST(HttpRequest.BodyPublishers.ofString("{\"statement\": \"RETURN 1\", \"includeCounters\": true}"))
-                .build();
-        var response = client.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+        var response = testClient.autoCommit(QueryRequest.newBuilder()
+                .statement("RETURN 1")
+                .includeCounters()
+                .build());
 
-        assertThat(response.statusCode()).isEqualTo(202);
-        var parsedJson = MAPPER.readTree(response.body());
-        var queryStatsMap = parsedJson.get("counters");
+        QueryResponseAssertions.assertThat(response).wasSuccessful();
 
-        assertThat(parsedJson.get("data").get("fields").size()).isEqualTo(1);
+        var queryStatsMap = response.body().counters();
+
+        assertThat(response.body().data().get("fields").size()).isEqualTo(1);
         assertThat(queryStatsMap.size()).isEqualTo(14);
         assertThat(queryStatsMap.get("containsUpdates").asBoolean()).isEqualTo(false);
         assertThat(queryStatsMap.get("containsSystemUpdates").asBoolean()).isEqualTo(false);
@@ -101,43 +69,31 @@ class QueryResourceQueryStatsIT {
 
     @Test
     void shouldNotIncludeQueryStats() throws IOException, InterruptedException {
-        var httpRequest = QueryApiTestUtil.baseRequestBuilder(queryEndpoint, "neo4j")
-                .POST(HttpRequest.BodyPublishers.ofString("{\"statement\": \"RETURN 1\", \"includeCounters\": false}"))
-                .build();
-        var response = client.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+        var response = testClient.autoCommit(QueryRequest.newBuilder()
+                .statement("RETURN 1")
+                .withoutCounters()
+                .build());
 
-        assertThat(response.statusCode()).isEqualTo(202);
-        var parsedJson = MAPPER.readTree(response.body());
+        QueryResponseAssertions.assertThat(response).wasSuccessful();
 
-        assertThat(parsedJson.get("data").get("fields").size()).isEqualTo(1);
-        assertThat(parsedJson.get("counters")).isNull();
+        assertThat(response.body().data().get(VALUES_KEY).size()).isEqualTo(1);
+        assertThat(response.body().counters()).isNull();
     }
 
     @Test
     void shouldNotIncludeQueryStatsByDefault() throws IOException, InterruptedException {
-        var httpRequest = QueryApiTestUtil.baseRequestBuilder(queryEndpoint, "neo4j")
-                .POST(HttpRequest.BodyPublishers.ofString("{\"statement\": \"RETURN 1\"}"))
-                .build();
-        var response = client.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+        var response = testClient.autoCommit(QueryRequest.returnOne());
 
-        assertThat(response.statusCode()).isEqualTo(202);
-        var parsedJson = MAPPER.readTree(response.body());
+        QueryResponseAssertions.assertThat(response).wasSuccessful();
 
-        assertThat(parsedJson.get("data").get("fields").size()).isEqualTo(1);
-        assertThat(parsedJson.get("counters")).isNull();
+        assertThat(response.body().data().get(VALUES_KEY).size()).isEqualTo(1);
+        assertThat(response.body().counters()).isNull();
     }
 
     @Test
     void shouldErrorIfInvalidInput() throws IOException, InterruptedException {
-        var httpRequest = QueryApiTestUtil.baseRequestBuilder(queryEndpoint, "neo4j")
-                .POST(HttpRequest.BodyPublishers.ofString(
-                        "{\"statement\": \"RETURN 1\", " + "\"includeCounters\": \"banana\"}"))
-                .build();
-        var response = client.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+        var response = testClient.sendRaw("{\"statement\": \"RETURN 1\", " + "\"includeCounters\": \"banana\"}");
 
-        assertThat(response.statusCode()).isEqualTo(400);
-        assertThat(response.body())
-                .isEqualTo("{\"errors\":[{\"code\":\"Neo.ClientError.Request.Invalid\","
-                        + "\"message\":\"Bad Request\"}]}");
+        QueryResponseAssertions.assertThat(response).hasErrorStatus(400, Status.Request.Invalid);
     }
 }

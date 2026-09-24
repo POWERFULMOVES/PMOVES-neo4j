@@ -21,7 +21,6 @@ package org.neo4j.cypher.internal.compiler.planner
 
 import org.neo4j.cypher.internal.ast.Query
 import org.neo4j.cypher.internal.ast.Statement
-import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
 import org.neo4j.cypher.internal.ast.semantics.SemanticTable
 import org.neo4j.cypher.internal.compiler.phases.PlannerContext
 import org.neo4j.cypher.internal.expressions.LabelName
@@ -31,13 +30,17 @@ import org.neo4j.cypher.internal.frontend.phases.BaseContains
 import org.neo4j.cypher.internal.frontend.phases.BaseState
 import org.neo4j.cypher.internal.frontend.phases.CompilationPhaseTracer.CompilationPhase.AST_REWRITE
 import org.neo4j.cypher.internal.frontend.phases.Phase
+import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerConfig
 import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerFactory
+import org.neo4j.cypher.internal.planner.spi.PlanContext
 import org.neo4j.cypher.internal.planner.spi.ReadTokenContext
 import org.neo4j.cypher.internal.util.LabelId
 import org.neo4j.cypher.internal.util.PropertyKeyId
 import org.neo4j.cypher.internal.util.RelTypeId
 import org.neo4j.cypher.internal.util.StepSequencer
 import org.neo4j.cypher.internal.util.StepSequencer.DefaultPostCondition
+
+import scala.util.chaining.scalaUtilChainingOps
 
 /**
  * Resolve token ids for labels, property keys and relationship types.
@@ -47,22 +50,27 @@ case object ResolveTokens extends Phase[PlannerContext, BaseState, BaseState] wi
     with PlanPipelineTransformerFactory {
 
   private[planner] def resolve(ast: Query, semanticTable: SemanticTable)(
-    implicit tokenContext: ReadTokenContext
+    implicit planContext: PlanContext
   ): SemanticTable = {
     ast.folder.fold(semanticTable) {
       case token: PropertyKeyName =>
         acc => resolvePropertyKeyName(token.name, acc)
       case token: LabelName =>
-        acc => resolveLabelName(token.name, acc)
+        acc =>
+          acc
+            .pipe(resolveLabelName(token.name, _))
+            .pipe(resolveImpliedLabelNames(token.name, _))
       case token: RelTypeName =>
-        acc => resolveRelTypeName(token.name, acc)
+        acc =>
+          acc.pipe(resolveRelTypeName(token.name, _))
+            .pipe(resolveImpliedEndpointLabelNames(token.name, _))
     }
   }
 
   private def resolvePropertyKeyName(name: String, semanticTable: SemanticTable)(
     implicit tokenContext: ReadTokenContext
   ): SemanticTable = {
-    tokenContext.getOptPropertyKeyId(name).map(PropertyKeyId) match {
+    tokenContext.getOptPropertyKeyId(name).map(PropertyKeyId.apply) match {
       case Some(id) =>
         semanticTable.addResolvedPropertyKeyName(name, id)
       case None => semanticTable
@@ -72,20 +80,37 @@ case object ResolveTokens extends Phase[PlannerContext, BaseState, BaseState] wi
   private def resolveLabelName(name: String, semanticTable: SemanticTable)(
     implicit tokenContext: ReadTokenContext
   ): SemanticTable = {
-    tokenContext.getOptLabelId(name).map(LabelId) match {
+    tokenContext.getOptLabelId(name).map(LabelId.apply) match {
       case Some(id) =>
         semanticTable.addResolvedLabelName(name, id)
       case None => semanticTable
     }
   }
 
+  private def resolveImpliedLabelNames(constrainedLabel: String, semanticTable: SemanticTable)(
+    implicit planContext: PlanContext
+  ): SemanticTable = {
+    val impliedLabels = planContext.getNodeLabelConstraints(constrainedLabel)
+    impliedLabels.foldLeft(semanticTable)((acc, l) => resolveLabelName(l, acc))
+  }
+
   private def resolveRelTypeName(name: String, semanticTable: SemanticTable)(
     implicit tokenContext: ReadTokenContext
   ): SemanticTable = {
-    tokenContext.getOptRelTypeId(name).map(RelTypeId) match {
+    tokenContext.getOptRelTypeId(name).map(RelTypeId.apply) match {
       case Some(id) =>
         semanticTable.addResolvedRelTypeName(name, id)
       case None => semanticTable
+    }
+  }
+
+  private def resolveImpliedEndpointLabelNames(name: String, semanticTable: SemanticTable)(
+    implicit planContext: PlanContext
+  ): SemanticTable = {
+    val impliedLabels = planContext.getRelationshipEndpointLabelConstraints(name)
+    impliedLabels.values.foldLeft(semanticTable) { (acc, l) =>
+      val resolvedRelImpliedLabel = resolveLabelName(l, acc)
+      resolveImpliedLabelNames(l, resolvedRelImpliedLabel)
     }
   }
 
@@ -111,8 +136,5 @@ case object ResolveTokens extends Phase[PlannerContext, BaseState, BaseState] wi
 
   override def invalidatedConditions: Set[StepSequencer.Condition] = Set.empty
 
-  override def getTransformer(
-    pushdownPropertyReads: Boolean,
-    semanticFeatures: Seq[SemanticFeature]
-  ): ResolveTokens.type = this
+  override def getTransformer(planPipelineConfig: PlanPipelineTransformerConfig): ResolveTokens.type = this
 }

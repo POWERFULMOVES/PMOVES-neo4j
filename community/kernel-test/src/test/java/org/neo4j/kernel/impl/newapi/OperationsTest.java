@@ -21,6 +21,7 @@ package org.neo4j.kernel.impl.newapi;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -32,6 +33,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.neo4j.function.Suppliers.singleton;
 import static org.neo4j.internal.kernel.api.connectioninfo.ClientConnectionInfo.EMBEDDED_CONNECTION;
+import static org.neo4j.internal.schema.constraints.ConstraintDescriptorFactory.existsForLabel;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.lock.LockTracer.NONE;
 import static org.neo4j.logging.SecurityLogHelper.line;
@@ -52,7 +54,6 @@ import org.junit.jupiter.api.function.Executable;
 import org.mockito.InOrder;
 import org.mockito.Mockito;
 import org.neo4j.configuration.Config;
-import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.dbms.DbmsRuntimeVersionProvider;
 import org.neo4j.graphdb.security.AuthorizationViolationException;
 import org.neo4j.internal.helpers.collection.Iterators;
@@ -68,10 +69,10 @@ import org.neo4j.internal.kernel.api.helpers.StubRead;
 import org.neo4j.internal.kernel.api.helpers.StubRelationshipCursor;
 import org.neo4j.internal.kernel.api.helpers.TestRelationshipChain;
 import org.neo4j.internal.kernel.api.security.AccessMode;
-import org.neo4j.internal.kernel.api.security.AccessMode.Static;
 import org.neo4j.internal.kernel.api.security.CommunitySecurityLog;
 import org.neo4j.internal.kernel.api.security.SecurityAuthorizationHandler;
 import org.neo4j.internal.kernel.api.security.SecurityContext;
+import org.neo4j.internal.kernel.api.security.StaticAccessMode;
 import org.neo4j.internal.schema.AllIndexProviderDescriptors;
 import org.neo4j.internal.schema.ConstraintDescriptor;
 import org.neo4j.internal.schema.EndpointType;
@@ -80,16 +81,17 @@ import org.neo4j.internal.schema.IndexProviderDescriptor;
 import org.neo4j.internal.schema.LabelSchemaDescriptor;
 import org.neo4j.internal.schema.NodeLabelExistenceSchemaDescriptor;
 import org.neo4j.internal.schema.RelationshipEndpointLabelSchemaDescriptor;
-import org.neo4j.internal.schema.SchemaDescriptorImplementationNode;
+import org.neo4j.internal.schema.SchemaDescriptorImplementation;
 import org.neo4j.internal.schema.SchemaDescriptors;
 import org.neo4j.internal.schema.SchemaState;
 import org.neo4j.internal.schema.constraints.ConstraintDescriptorFactory;
+import org.neo4j.internal.schema.constraints.ExistenceConstraintDescriptor;
 import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.api.AssertOpen;
+import org.neo4j.kernel.api.exceptions.schema.DropConstraintFailureException;
 import org.neo4j.kernel.api.index.IndexProvider;
 import org.neo4j.kernel.api.txstate.TransactionState;
 import org.neo4j.kernel.impl.api.KernelTransactionImplementation;
-import org.neo4j.kernel.impl.api.index.IndexingProvidersService;
 import org.neo4j.kernel.impl.api.index.IndexingService;
 import org.neo4j.kernel.impl.api.index.stats.IndexStatisticsStore;
 import org.neo4j.kernel.impl.api.state.ConstraintIndexCreator;
@@ -100,6 +102,7 @@ import org.neo4j.lock.LockTracer;
 import org.neo4j.lock.ResourceType;
 import org.neo4j.logging.FormattedLogFormat;
 import org.neo4j.logging.Level;
+import org.neo4j.logging.NullLogProvider;
 import org.neo4j.logging.SecurityLogHelper;
 import org.neo4j.storageengine.api.CommandCreationContext;
 import org.neo4j.storageengine.api.PropertySelection;
@@ -157,7 +160,7 @@ abstract class OperationsTest {
         when(transaction.txState()).thenReturn(txState);
         when(transaction.storeCursors()).thenReturn(storeCursors);
         when(transaction.securityContext())
-                .thenReturn(SecurityContext.authDisabled(AccessMode.Static.FULL, EMBEDDED_CONNECTION, DB_NAME));
+                .thenReturn(SecurityContext.authDisabled(StaticAccessMode.FULL, EMBEDDED_CONNECTION, DB_NAME));
         logHelper = new SecurityLogHelper(getFormat());
         securityLog = new CommunitySecurityLog(logHelper.getLogProvider().getLog(this.getClass()));
         when(transaction.securityAuthorizationHandler()).thenReturn(new SecurityAuthorizationHandler(securityLog));
@@ -183,7 +186,8 @@ abstract class OperationsTest {
         indexingService = mock(IndexingService.class);
         storageLocks = mock(StorageLocks.class);
         tokenHolders = mockedTokenHolders();
-        var kernelToken = new KernelToken(storageReader, creationContext, transaction, tokenHolders);
+        var kernelToken = new KernelToken(
+                storageReader, creationContext, transaction, tokenHolders, NullLogProvider.getInstance());
         EntityLocks entityLocks = new EntityLocks(storageLocks, singleton(NONE), locks, () -> {});
         kernelSchemaRead = new KernelSchemaRead(
                 mock(SchemaState.class),
@@ -193,7 +197,7 @@ abstract class OperationsTest {
                 transaction,
                 indexingService,
                 mock(AssertOpen.class),
-                () -> Static.FULL);
+                () -> StaticAccessMode.FULL);
         kernelRead = new KernelRead(
                 storageReader,
                 kernelToken,
@@ -207,13 +211,14 @@ abstract class OperationsTest {
                 INSTANCE,
                 false,
                 mock(AssertOpen.class),
-                () -> Static.FULL,
-                false);
+                () -> StaticAccessMode.FULL,
+                false,
+                NullLogProvider.getInstance());
         constraintIndexCreator = mock(ConstraintIndexCreator.class);
         creationContext = mock(CommandCreationContext.class);
 
         IndexProvider fulltextProvider = mock(IndexProvider.class);
-        when(fulltextProvider.getProviderDescriptor()).thenReturn(AllIndexProviderDescriptors.FULLTEXT_DESCRIPTOR);
+        when(fulltextProvider.getProviderDescriptor()).thenReturn(AllIndexProviderDescriptors.FULLTEXT_V2_DESCRIPTOR);
         when(fulltextProvider.getMinimumRequiredVersion()).thenReturn(KernelVersion.EARLIEST);
         IndexProvider rangeProvider = mock(IndexProvider.class);
         when(rangeProvider.getProviderDescriptor()).thenReturn(AllIndexProviderDescriptors.RANGE_DESCRIPTOR);
@@ -224,19 +229,17 @@ abstract class OperationsTest {
         when(provider.getProviderDescriptor()).thenReturn(providerDescriptor);
         when(provider.getMinimumRequiredVersion()).thenReturn(KernelVersion.EARLIEST);
 
-        IndexingProvidersService indexingProvidersService = mock(IndexingProvidersService.class);
-        when(indexingProvidersService.getFulltextProvider())
-                .thenAnswer(inv -> fulltextProvider.getProviderDescriptor());
-        when(indexingProvidersService.getDefaultProvider()).thenAnswer(inv -> rangeProvider.getProviderDescriptor());
-        when(indexingProvidersService.validateIndexPrototype(any(IndexPrototype.class)))
-                .thenAnswer(i -> i.getArguments()[0]);
+        var indexingService = mock(IndexingService.class);
+        when(indexingService.getFulltextProvider()).thenAnswer(inv -> fulltextProvider.getProviderDescriptor());
+        when(indexingService.getDefaultProvider()).thenAnswer(inv -> rangeProvider.getProviderDescriptor());
+        when(indexingService.validateIndexPrototype(any(IndexPrototype.class))).thenAnswer(i -> i.getArguments()[0]);
         List.of(fulltextProvider, rangeProvider, provider).forEach(indexProvider -> {
             IndexProviderDescriptor descriptor = indexProvider.getProviderDescriptor();
             String name = descriptor.name();
-            when(indexingProvidersService.indexProviderByName(name)).thenReturn(descriptor);
-            when(indexingProvidersService.getIndexProvider(descriptor)).thenReturn(indexProvider);
+            when(indexingService.indexProviderByName(name)).thenReturn(descriptor);
+            when(indexingService.getIndexProvider(descriptor)).thenReturn(indexProvider);
         });
-        when(indexingProvidersService.completeConfiguration(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(indexingService.completeConfiguration(any())).thenAnswer(inv -> inv.getArgument(0));
 
         operations = new Operations(
                 kernelRead,
@@ -252,12 +255,10 @@ abstract class OperationsTest {
                 cursors,
                 constraintIndexCreator,
                 mock(ConstraintSemantics.class),
-                indexingProvidersService,
-                Config.defaults(Map.of(
-                        GraphDatabaseInternalSettings.relationship_endpoint_label_and_node_label_existence_constraints,
-                        true)),
+                indexingService,
+                Config.defaults(),
                 INSTANCE,
-                () -> Static.FULL,
+                () -> StaticAccessMode.FULL,
                 TransactionStateBehaviour.DEFAULT_BEHAVIOUR);
         operations.initialize(NULL_CONTEXT);
 
@@ -271,7 +272,7 @@ abstract class OperationsTest {
 
     @Test
     void nodeAddLabelShouldFailReadOnly() throws Exception {
-        String message = runForSecurityLevel(() -> operations.nodeAddLabel(1L, 2), AccessMode.Static.READ, false);
+        String message = runForSecurityLevel(() -> operations.nodeAddLabel(1L, 2), StaticAccessMode.READ, false);
         String expected = String.format(
                 "Set label for label 'Label' on database '%s' is not allowed for AUTH_DISABLED with READ.", DB_NAME);
         assertThat(message).contains(expected);
@@ -280,12 +281,13 @@ abstract class OperationsTest {
                 .containsOrdered(line().level(Level.ERROR)
                         .database(DB_NAME)
                         .source(ClientConnectionInfo.EMBEDDED_CONNECTION.asConnectionDetails())
-                        .message(expected));
+                        .message(expected)
+                        .errorInfo(Map.of("GQLSTATUS", "42NFF")));
     }
 
     @Test
     void nodeAddLabelShouldFailAccess() throws Exception {
-        String message = runForSecurityLevel(() -> operations.nodeAddLabel(1L, 2), AccessMode.Static.ACCESS, false);
+        String message = runForSecurityLevel(() -> operations.nodeAddLabel(1L, 2), StaticAccessMode.ACCESS, false);
         String expected = String.format(
                 "Set label for label 'Label' on database '%s' is not allowed for AUTH_DISABLED with ACCESS.", DB_NAME);
         assertThat(message).contains(expected);
@@ -294,12 +296,13 @@ abstract class OperationsTest {
                 .containsOrdered(line().level(Level.ERROR)
                         .database(DB_NAME)
                         .source(ClientConnectionInfo.EMBEDDED_CONNECTION.asConnectionDetails())
-                        .message(expected));
+                        .message(expected)
+                        .errorInfo(Map.of("GQLSTATUS", "42NFF")));
     }
 
     @Test
     void nodeRemoveLabelShouldFailReadOnly() throws Exception {
-        String message = runForSecurityLevel(() -> operations.nodeRemoveLabel(1L, 3), AccessMode.Static.READ, false);
+        String message = runForSecurityLevel(() -> operations.nodeRemoveLabel(1L, 3), StaticAccessMode.READ, false);
         String expected = String.format(
                 "Remove label for label 'Label' on database '%s' is not allowed for AUTH_DISABLED with READ.", DB_NAME);
         assertThat(message).contains(expected);
@@ -308,12 +311,13 @@ abstract class OperationsTest {
                 .containsOrdered(line().level(Level.ERROR)
                         .database(DB_NAME)
                         .source(ClientConnectionInfo.EMBEDDED_CONNECTION.asConnectionDetails())
-                        .message(expected));
+                        .message(expected)
+                        .errorInfo(Map.of("GQLSTATUS", "42NFF")));
     }
 
     @Test
     void nodeRemoveLabelShouldFailAccess() throws Exception {
-        String message = runForSecurityLevel(() -> operations.nodeRemoveLabel(1L, 3), AccessMode.Static.ACCESS, false);
+        String message = runForSecurityLevel(() -> operations.nodeRemoveLabel(1L, 3), StaticAccessMode.ACCESS, false);
         String expected = String.format(
                 "Remove label for label 'Label' on database '%s' is not allowed for AUTH_DISABLED with ACCESS.",
                 DB_NAME);
@@ -323,7 +327,8 @@ abstract class OperationsTest {
                 .containsOrdered(line().level(Level.ERROR)
                         .database(DB_NAME)
                         .source(ClientConnectionInfo.EMBEDDED_CONNECTION.asConnectionDetails())
-                        .message(expected));
+                        .message(expected)
+                        .errorInfo(Map.of("GQLSTATUS", "42NFF")));
     }
 
     @Test
@@ -346,7 +351,7 @@ abstract class OperationsTest {
         verify(locks).acquireShared(any(), eq(ResourceType.LABEL), eq(3L));
         verify(locks)
                 .acquireShared(
-                        any(), eq(ResourceType.LABEL), eq(SchemaDescriptorImplementationNode.TOKEN_INDEX_LOCKING_IDS));
+                        any(), eq(ResourceType.LABEL), eq(SchemaDescriptorImplementation.TOKEN_INDEX_LOCKING_IDS));
         verify(locks).acquireShared(any(), eq(ResourceType.LABEL), eq(1L), eq(2L));
         verify(storageLocks).acquireNodeLabelChangeLock(any(), eq(node), eq(1));
         verify(storageLocks).acquireNodeLabelChangeLock(any(), eq(node), eq(3));
@@ -413,7 +418,30 @@ abstract class OperationsTest {
         when(tokenHolders.propertyKeyTokens().getTokenById(anyInt()))
                 .thenReturn(new NamedToken("Property", propertyId));
         assertThatThrownBy(() -> operations.nodePropertyExistenceConstraintCreate(schemaDescriptor, "name2", false))
-                .hasMessageContainingAll("Graph Type", "dependent", "independent", "incompatible");
+                .hasMessageContainingAll("Graph type", "dependent", "independent", "incompatible");
+    }
+
+    @Test
+    void shouldFailToDropDependentConstraint() {
+        int labelId = 1;
+        int propertyId = 2;
+        ExistenceConstraintDescriptor constraint =
+                existsForLabel(true, labelId, propertyId).withName("constraint");
+
+        var e = catchThrowableOfType(
+                DropConstraintFailureException.class, () -> operations.constraintDrop(constraint, false));
+
+        assertThat(e.getMessage()).isEqualTo("Unable to drop constraint: Cannot drop dependent constraint");
+        assertThat(e.gqlStatus()).isEqualTo("50N12");
+        assertThat(e.statusDescription())
+                .isEqualTo(
+                        "error: general processing exception - constraint drop failed. Unable to drop 'constraint'.");
+        assertThat(e.cause()).isPresent();
+        var cause = e.cause().get();
+        assertThat(cause.gqlStatus()).isEqualTo("22N68");
+        assertThat(cause.statusDescription())
+                .isEqualTo(
+                        "error: data exception - dependent constraint managed individually. Dependent constraints cannot be managed individually and must be managed together with its graph type.");
     }
 
     protected String runForSecurityLevel(Executable executable, AccessMode mode, boolean shouldBeAuthorized)

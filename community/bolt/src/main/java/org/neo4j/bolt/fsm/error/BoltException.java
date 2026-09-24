@@ -30,12 +30,12 @@ import org.neo4j.kernel.api.exceptions.Status;
 public class BoltException extends GqlException implements Status.HasStatus {
     private final Status status;
 
-    public BoltException(ErrorGqlStatusObject gql, Status status, String message) {
+    private BoltException(ErrorGqlStatusObject gql, Status status, String message) {
         super(gql, message);
         this.status = status;
     }
 
-    public BoltException(ErrorGqlStatusObject gql, Status status, String message, Throwable cause) {
+    private BoltException(ErrorGqlStatusObject gql, Status status, String message, Throwable cause) {
         super(gql, message, cause);
         this.status = status;
     }
@@ -57,6 +57,7 @@ public class BoltException extends GqlException implements Status.HasStatus {
     public static BoltException failedToAcquireExecutionThread() {
         // DRI-055
         var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N59)
+                .withDiagnosticRecordProperty(BoltDiagnosticRecordProperty.IDEMPOTENT, true)
                 .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_51N38)
                         .build())
                 .build();

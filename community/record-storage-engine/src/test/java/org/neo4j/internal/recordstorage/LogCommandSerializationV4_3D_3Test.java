@@ -19,20 +19,20 @@
  */
 package org.neo4j.internal.recordstorage;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
 import java.io.IOException;
 import java.nio.ByteOrder;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.kernel.impl.store.record.MetaDataRecord;
 import org.neo4j.kernel.impl.store.record.RelationshipGroupRecord;
-import org.neo4j.kernel.impl.transaction.log.InMemoryClosableChannel;
+import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.CommandReader;
 import org.neo4j.storageengine.api.StorageCommand;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.wal.InMemoryClosableChannel;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class LogCommandSerializationV4_3D_3Test extends LogCommandSerializationV4_2Test {
     @Test
     void shouldReadAndWriteMetaDataCommand() throws IOException {
@@ -48,8 +48,8 @@ class LogCommandSerializationV4_3D_3Test extends LogCommandSerializationV4_2Test
 
         // When
         CommandReader reader = createReader();
-        StorageCommand command = reader.read(channel);
-        assertTrue(command instanceof Command.MetaDataCommand);
+        StorageCommand command = reader.read(channel, EmptyMemoryTracker.INSTANCE);
+        assertInstanceOf(Command.MetaDataCommand.class, command);
 
         Command.MetaDataCommand readCommand = (Command.MetaDataCommand) command;
 
@@ -78,8 +78,8 @@ class LogCommandSerializationV4_3D_3Test extends LogCommandSerializationV4_2Test
 
         // When
         CommandReader reader = createReader();
-        StorageCommand command = reader.read(channel);
-        assertTrue(command instanceof Command.RelationshipGroupCommand);
+        StorageCommand command = reader.read(channel, EmptyMemoryTracker.INSTANCE);
+        assertInstanceOf(Command.RelationshipGroupCommand.class, command);
 
         Command.RelationshipGroupCommand relationshipGroupCommand = (Command.RelationshipGroupCommand) command;
 
@@ -109,8 +109,8 @@ class LogCommandSerializationV4_3D_3Test extends LogCommandSerializationV4_2Test
 
         // When
         CommandReader reader = createReader();
-        StorageCommand command = reader.read(channel);
-        assertTrue(command instanceof Command.RelationshipGroupCommand);
+        StorageCommand command = reader.read(channel, EmptyMemoryTracker.INSTANCE);
+        assertInstanceOf(Command.RelationshipGroupCommand.class, command);
 
         Command.RelationshipGroupCommand relationshipGroupCommand = (Command.RelationshipGroupCommand) command;
 

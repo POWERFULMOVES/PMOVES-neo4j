@@ -19,13 +19,17 @@
  */
 package org.neo4j.server.rest.repr;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
 import static org.mockito.Mockito.mock;
 import static org.neo4j.server.rest.repr.Serializer.joinBaseWithRelativePath;
 
+import java.util.List;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.connectors.BoltConnector;
 import org.neo4j.configuration.connectors.ConnectorPortRegister;
@@ -33,6 +37,7 @@ import org.neo4j.server.rest.discovery.DiscoverableURIs;
 import org.neo4j.server.rest.discovery.ServerVersionAndEdition;
 
 class DiscoveryRepresentationTest {
+
     @Test
     void shouldCreateAMapContainingDataAndManagementURIs() {
         var baseUri = RepresentationTestBase.BASE_URI;
@@ -47,7 +52,8 @@ class DiscoveryRepresentationTest {
                         .build()
                         .update(baseUri),
                 mock(ServerVersionAndEdition.class),
-                new AuthConfigRepresentation());
+                new AuthConfigRepresentation(),
+                new QueryApiVersionRepresentation(ListRepresentation.strings()));
 
         var mapOfUris = RepresentationTestAccess.serialize(dr);
 
@@ -55,19 +61,23 @@ class DiscoveryRepresentationTest {
         var mappedDataUri = mapOfUris.get("data");
         var mappedBoltUri = mapOfUris.get("bolt_direct");
 
-        assertNotNull(mappedManagementUri);
-        assertNotNull(mappedDataUri);
-        assertNotNull(mappedBoltUri);
+        assertThat(mappedManagementUri).isNotNull();
+        assertThat(mappedDataUri).isNotNull();
+        assertThat(mappedBoltUri).isNotNull();
 
-        assertEquals(joinBaseWithRelativePath(baseUri, managementUri), mappedManagementUri.toString());
-        assertEquals(joinBaseWithRelativePath(baseUri, dataUri), mappedDataUri.toString());
-        assertEquals("bolt://neo4j.org:7687", mappedBoltUri.toString());
+        assertThat(mappedManagementUri).hasToString(joinBaseWithRelativePath(baseUri, managementUri));
+        assertThat(mappedDataUri).hasToString(joinBaseWithRelativePath(baseUri, dataUri));
+        assertThat(mappedBoltUri).hasToString("bolt://neo4j.org:7687");
     }
 
     @Test
     void shouldCreateAMapContainingServerVersionAndEditionInfo() {
         var serverInfo = new ServerVersionAndEdition("myVersion", "myEdition");
-        var dr = new DiscoveryRepresentation(mock(DiscoverableURIs.class), serverInfo, new AuthConfigRepresentation());
+        var dr = new DiscoveryRepresentation(
+                mock(DiscoverableURIs.class),
+                serverInfo,
+                new AuthConfigRepresentation(),
+                new QueryApiVersionRepresentation(ListRepresentation.strings()));
 
         var mapOfUris = RepresentationTestAccess.serialize(dr);
 
@@ -75,11 +85,34 @@ class DiscoveryRepresentationTest {
         var edition = mapOfUris.get("neo4j_edition");
         var authConfig = mapOfUris.get("auth_config");
 
-        assertNotNull(version);
-        assertNotNull(edition);
+        assertThat(version).isNotNull();
+        assertThat(edition).isNotNull();
 
-        assertEquals("myVersion", version.toString());
-        assertEquals("myEdition", edition.toString());
-        assertNull(authConfig); // No auth_config for community.
+        assertThat(version).hasToString("myVersion");
+        assertThat(edition).hasToString("myEdition");
+        assertThat(authConfig).isNull(); // No auth_config for community.
+    }
+
+    @ParameterizedTest
+    @MethodSource("queryApiVersions")
+    void shouldCreateAMapContainingQueryApiVersions(List<String> versions) {
+        var dr = new DiscoveryRepresentation(
+                mock(DiscoverableURIs.class),
+                mock(ServerVersionAndEdition.class),
+                new AuthConfigRepresentation(),
+                new QueryApiVersionRepresentation(ListRepresentation.string(versions)));
+
+        var mapOfUris = RepresentationTestAccess.serialize(dr);
+
+        var queryApiVersions = mapOfUris.get("query_api_versions");
+        assertThat(queryApiVersions).isEqualTo(versions);
+    }
+
+    static Stream<Arguments> queryApiVersions() {
+        return Stream.of(
+                arguments(List.of("2.0", "3.1")),
+                arguments(List.of("3.1")),
+                arguments(List.of("2.0")),
+                arguments(List.of()));
     }
 }

@@ -21,6 +21,7 @@ package org.neo4j.graphdb.factory.module.id;
 
 import org.neo4j.annotations.service.ServiceProvider;
 import org.neo4j.graphdb.factory.module.GlobalModule;
+import org.neo4j.kernel.database.IdContextFactory;
 
 @ServiceProvider
 public class DefaultIdContextFactoryProvider implements IdContextFactoryProvider {
@@ -29,7 +30,6 @@ public class DefaultIdContextFactoryProvider implements IdContextFactoryProvider
         return IdContextFactoryBuilder.of(
                         globalModule.getFileSystem(),
                         globalModule.getJobScheduler(),
-                        globalModule.getGlobalConfig(),
                         globalModule.getTracers().getPageCacheTracer())
                 .withLogService(globalModule.getLogService())
                 .build();

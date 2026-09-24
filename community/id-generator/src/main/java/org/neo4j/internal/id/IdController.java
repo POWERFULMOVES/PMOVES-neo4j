@@ -20,12 +20,13 @@
 package org.neo4j.internal.id;
 
 import java.io.IOException;
-import java.nio.file.Path;
 import java.util.function.Supplier;
 import org.neo4j.configuration.Config;
 import org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker;
 import org.neo4j.io.fs.FileSystemAbstraction;
+import org.neo4j.io.pagecache.context.OldestVisibilityHorizonFactory;
 import org.neo4j.io.pagecache.context.TransactionIdSnapshot;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.kernel.lifecycle.Lifecycle;
 import org.neo4j.memory.MemoryTracker;
 
@@ -34,6 +35,10 @@ import org.neo4j.memory.MemoryTracker;
  * maintenance, clearing, resetting, generation.
  */
 public interface IdController extends Lifecycle {
+    int MAINTENANCE_FREE_IDS = 0x1;
+    int MAINTENANCE_LOAD_IDS = 0x2;
+    int MAINTENANCE_ALL = MAINTENANCE_LOAD_IDS | MAINTENANCE_FREE_IDS;
+
     /**
      * Essentially a condition to check whether or not the {@link IdController} can free a batch of IDs, in maintenance.
      * For a concrete example it can be a snapshot of ongoing transactions. Then given that snapshot {@link #eligibleForFreeing(TransactionSnapshot)}
@@ -61,22 +66,30 @@ public interface IdController extends Lifecycle {
         }
     }
 
-    @FunctionalInterface
-    interface TransactionIdVisibilityBoundary {
-        long oldestObservableHorizon();
+    interface VisibilityHorizonVisibilityBoundary extends OldestVisibilityHorizonFactory {
+        long oldestCleanupHorizon();
     }
 
     /**
-     * Perform ids related maintenance.
+     * Perform ids related maintenance - all available tasks.
      */
-    void maintenance();
+    default void maintenance() {
+        maintenance(MAINTENANCE_ALL);
+    }
+
+    /**
+     * Perform ids related maintenance - only the tasks that are specified in {@code flags}.
+     * @param flags which tasks to perform,
+     * see {@link #MAINTENANCE_FREE_IDS}, {@link #MAINTENANCE_LOAD_IDS}, {@link #MAINTENANCE_ALL}.
+     */
+    void maintenance(int flags);
 
     void initialize(
             FileSystemAbstraction fs,
-            Path baseBufferPath,
+            StoreFile storeFile,
             Config config,
             Supplier<TransactionSnapshot> snapshotSupplier,
-            TransactionIdVisibilityBoundary visibilityBoundary,
+            VisibilityHorizonVisibilityBoundary visibilityBoundary,
             IdFreeCondition condition,
             MemoryTracker memoryTracker,
             DatabaseReadOnlyChecker databaseReadOnlyChecker)

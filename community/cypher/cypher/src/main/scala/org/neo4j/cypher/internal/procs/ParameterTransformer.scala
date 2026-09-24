@@ -21,8 +21,8 @@ package org.neo4j.cypher.internal.procs
 
 import ParameterTransformer.ParameterConversionFunction
 import ParameterTransformer.ParameterTransformerOutput
+import org.neo4j.cypher.internal.notification.InternalNotification
 import org.neo4j.cypher.internal.procs.ParameterTransformer.ParameterGenerationFunction
-import org.neo4j.cypher.internal.util.InternalNotification
 import org.neo4j.exceptions.InvalidArgumentException
 import org.neo4j.graphdb.Transaction
 import org.neo4j.internal.kernel.api.security.SecurityContext
@@ -43,7 +43,7 @@ trait ParameterTransformerFunction {
     updatedSystemParams.foreach {
       case (_, Values.NO_VALUE) => // placeholders should be replaced
       case (key, _) => if (userParams.containsKey(key))
-          throw new InvalidArgumentException(s"The query contains a parameter with an illegal name: '$key'")
+          throw InvalidArgumentException.queryContainsIllegalName(key)
     }
     updatedSystemParams.updatedWith(userParams)
   }
@@ -55,7 +55,13 @@ case class ParameterTransformer(
 ) extends ParameterTransformerFunction {
 
   def convert(convFunc: ParameterConversionFunction): ParameterTransformer = {
-    ParameterTransformer(genFunc, (tx, mv) => (convFunc(tx, transformFunc(tx, mv)._1), Set.empty))
+    ParameterTransformer(
+      genFunc,
+      (tx, mv) => {
+        val (params, notifications) = transformFunc(tx, mv)
+        (convFunc(tx, params), notifications)
+      }
+    )
   }
 
   def optionallyConvert(convFunc: Option[ParameterConversionFunction]): ParameterTransformer = {

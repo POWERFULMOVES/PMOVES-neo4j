@@ -19,198 +19,128 @@
  */
 package org.neo4j.queryapi;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.neo4j.queryapi.QueryApiTestUtil.setupLogging;
-import static org.neo4j.server.queryapi.response.format.Fieldnames.BOOKMARKS_KEY;
-import static org.neo4j.server.queryapi.response.format.Fieldnames.DATA_KEY;
-import static org.neo4j.server.queryapi.response.format.Fieldnames.ERRORS_KEY;
-import static org.neo4j.server.queryapi.response.format.Fieldnames.FIELDS_KEY;
+import static java.util.List.of;
+import static org.neo4j.queryapi.QueryResponseAssertions.assertThat;
+import static org.neo4j.queryapi.test.testclient.QueryRequest.returnOne;
 import static org.neo4j.server.queryapi.response.format.Fieldnames.VALUES_KEY;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.util.List;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
+import java.util.stream.Stream;
+import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.Test;
-import org.neo4j.configuration.connectors.BoltConnector;
-import org.neo4j.configuration.connectors.BoltConnectorInternalSettings;
-import org.neo4j.configuration.connectors.ConnectorPortRegister;
-import org.neo4j.configuration.connectors.ConnectorType;
-import org.neo4j.configuration.connectors.HttpConnector;
-import org.neo4j.configuration.helpers.SocketAddress;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.neo4j.dbms.api.DatabaseManagementService;
 import org.neo4j.fabric.bolt.QueryRouterBookmark;
 import org.neo4j.fabric.bookmark.BookmarkFormat;
+import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.database.Database;
-import org.neo4j.test.TestDatabaseManagementServiceBuilder;
+import org.neo4j.queryapi.test.QueryApiTestUtil;
+import org.neo4j.queryapi.test.annotation.QueryAPITestExtension;
+import org.neo4j.queryapi.test.testclient.QueryAPITestClient;
+import org.neo4j.queryapi.test.testclient.QueryRequest;
 
+@QueryAPITestExtension(bookmarkReadyTimeoutInSeconds = 1)
 class QueryResourceIT {
 
-    private static DatabaseManagementService dbms;
-    private static HttpClient client;
+    private final DatabaseManagementService dbms;
+    private final QueryAPITestClient testClient;
 
-    private static String queryEndpoint;
-
-    private final ObjectMapper MAPPER = new ObjectMapper();
-
-    @BeforeAll
-    static void beforeAll() {
-        setupLogging();
-        var builder = new TestDatabaseManagementServiceBuilder();
-        dbms = builder.setConfig(HttpConnector.enabled, true)
-                .setConfig(HttpConnector.listen_address, new SocketAddress("localhost", 0))
-                .setConfig(BoltConnectorInternalSettings.local_channel_address, QueryResourceIT.class.getSimpleName())
-                .setConfig(BoltConnector.enabled, true)
-                .impermanent()
-                .build();
-        var portRegister = QueryApiTestUtil.resolveDependency(dbms, ConnectorPortRegister.class);
-        queryEndpoint = "http://" + portRegister.getLocalAddress(ConnectorType.HTTP) + "/db/{databaseName}/query/v2";
-        client = HttpClient.newBuilder().build();
-    }
-
-    @AfterAll
-    static void teardown() {
-        dbms.shutdown();
+    public QueryResourceIT(DatabaseManagementService dbms, QueryAPITestClient testClient) {
+        this.dbms = dbms;
+        this.testClient = testClient;
     }
 
     @Test
     void shouldExecuteSimpleQuery() throws IOException, InterruptedException {
-        var httpRequest = QueryApiTestUtil.baseRequestBuilder(queryEndpoint, "neo4j")
-                .POST(HttpRequest.BodyPublishers.ofString("{\"statement\": \"RETURN 1\"}"))
-                .build();
-        var response = client.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+        var response = testClient.autoCommit(
+                QueryRequest.newBuilder().statement("RETURN 1").build());
 
-        assertThat(response.statusCode()).isEqualTo(202);
-        var parsedJson = MAPPER.readTree(response.body());
-
-        assertThat(parsedJson.get(DATA_KEY).get(FIELDS_KEY).size()).isEqualTo(1);
-        assertThat(parsedJson.get(DATA_KEY).get(VALUES_KEY).get(0).get(0).asInt())
-                .isEqualTo(1);
+        assertThat(response).wasSuccessful();
+        assertThat(response).hasRecord(1);
     }
 
     @Test
     void shouldReturnMultipleRecords() throws IOException, InterruptedException {
-        var httpRequest = QueryApiTestUtil.baseRequestBuilder(queryEndpoint, "neo4j")
-                .POST(HttpRequest.BodyPublishers.ofString("{\"statement\": \"UNWIND [1,2] as i RETURN i\"}"))
-                .build();
-        var response = client.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+        var response = testClient.autoCommit(QueryRequest.newBuilder()
+                .statement("UNWIND [1,2] as i RETURN i")
+                .build());
 
-        assertThat(response.statusCode()).isEqualTo(202);
-        var parsedJson = MAPPER.readTree(response.body());
-
-        assertThat(parsedJson.get(DATA_KEY).get(FIELDS_KEY).size()).isEqualTo(1);
-        assertThat(parsedJson.get(DATA_KEY).get(VALUES_KEY).get(0).get(0).asInt())
-                .isEqualTo(1);
-        assertThat(parsedJson.get(DATA_KEY).get(VALUES_KEY).get(1).get(0).asInt())
-                .isEqualTo(2);
+        assertThat(response).wasSuccessful().hasRecords(1, 2);
     }
 
     @Test
     void shouldReturnMultipleRecordMultiFields() throws IOException, InterruptedException {
-        var httpRequest = QueryApiTestUtil.baseRequestBuilder(queryEndpoint, "neo4j")
-                .POST(HttpRequest.BodyPublishers.ofString("{\"statement\": \"UNWIND [1,2] as i RETURN i, 'bob'\"}"))
-                .build();
-        var response = client.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+        var response = testClient.autoCommit(QueryRequest.newBuilder()
+                .statement("UNWIND [1,2] as i RETURN i, 'bob'")
+                .build());
 
-        assertThat(response.statusCode()).isEqualTo(202);
-        var parsedJson = MAPPER.readTree(response.body());
-
-        assertThat(parsedJson.get(DATA_KEY).get(FIELDS_KEY).size()).isEqualTo(2);
-        assertThat(parsedJson.get(DATA_KEY).get(VALUES_KEY).get(0).get(0).asInt())
-                .isEqualTo(1);
-        assertThat(parsedJson.get(DATA_KEY).get(VALUES_KEY).get(0).get(1).asText())
-                .isEqualTo("bob");
-        assertThat(parsedJson.get(DATA_KEY).get(VALUES_KEY).get(1).get(0).asInt())
-                .isEqualTo(2);
-        assertThat(parsedJson.get(DATA_KEY).get(VALUES_KEY).get(1).get(1).asText())
-                .isEqualTo("bob");
+        assertThat(response).wasSuccessful().hasRecords(of(of(1, "bob"), of(2, "bob")));
     }
 
     @Test
     void shouldReturnBookmarks() throws IOException, InterruptedException {
-        var response = QueryApiTestUtil.simpleRequest(client, queryEndpoint);
+        var response = testClient.autoCommit(
+                QueryRequest.newBuilder().statement("RETURN 1").build());
 
-        assertThat(response.statusCode()).isEqualTo(202);
-        var parsedJson = MAPPER.readTree(response.body());
-
-        assertThat(parsedJson.get(BOOKMARKS_KEY).size()).isEqualTo(1);
-        assertThat(parsedJson.get(BOOKMARKS_KEY).get(0).asText()).isNotBlank();
+        assertThat(response).wasSuccessful().hasRecord().hasBookmark();
     }
 
     @Test
     void shouldReturnUpdatedBookmark() throws IOException, InterruptedException {
-        var responseA = QueryApiTestUtil.simpleRequest(client, queryEndpoint);
+        var responseA = testClient.autoCommit(returnOne());
 
-        assertThat(responseA.statusCode()).isEqualTo(202);
-        var parsedJsonA = MAPPER.readTree(responseA.body());
+        assertThat(responseA).wasSuccessful();
 
-        var initialBookmark = parsedJsonA.get(BOOKMARKS_KEY).get(0).asText();
+        var initialBookmarks = responseA.body().bookmarks();
 
-        var responseB = QueryApiTestUtil.simpleRequest(
-                client,
-                queryEndpoint,
-                "{\"statement\": \"CREATE (n)\", \"bookmarks\" : [\"" + initialBookmark + "\"]}");
+        var responseB = testClient.autoCommit(QueryRequest.newBuilder()
+                .statement("CREATE (n)")
+                .bookmarks(initialBookmarks)
+                .build());
 
-        assertThat(responseB.statusCode()).isEqualTo(202);
-        var parsedJsonB = MAPPER.readTree(responseB.body());
+        assertThat(responseB).wasSuccessful().hasBookmark();
 
-        assertThat(parsedJsonB.get(BOOKMARKS_KEY).get(0).asText()).isNotBlank();
-        assertThat(parsedJsonB.get(BOOKMARKS_KEY).get(0).asText()).isNotEqualTo(initialBookmark);
+        Assertions.assertThat(responseB.body().bookmarks()).isNotEqualTo(initialBookmarks);
     }
 
     @Test
     void shouldAcceptBookmarksAsInput() throws IOException, InterruptedException {
-        var responseA = QueryApiTestUtil.simpleRequest(client, queryEndpoint);
+        var responseA = testClient.autoCommit(returnOne());
 
-        assertThat(responseA.statusCode()).isEqualTo(202);
-        var parsedJsonA = MAPPER.readTree(responseA.body());
+        assertThat(responseA).wasSuccessful().hasBookmark();
 
-        assertThat(parsedJsonA.get(BOOKMARKS_KEY).size()).isEqualTo(1);
-        assertThat(parsedJsonA.get(BOOKMARKS_KEY).get(0).asText()).isNotBlank();
+        var responseB = testClient.autoCommit(QueryRequest.newBuilder()
+                .statement("RETURN 1")
+                .bookmarks(responseA.body().bookmarks())
+                .build());
 
-        var responseB = QueryApiTestUtil.simpleRequest(
-                client,
-                queryEndpoint,
-                "{\"statement\": \"RETURN 1\", \"bookmarks\" : [\""
-                        + parsedJsonA.get(BOOKMARKS_KEY).get(0).asText() + "\"]}");
-
-        assertThat(responseB.statusCode()).isEqualTo(202);
-        var parsedJsonB = MAPPER.readTree(responseB.body());
-
-        assertThat(parsedJsonB.get(BOOKMARKS_KEY).size()).isEqualTo(1);
-        assertThat(parsedJsonB.get(BOOKMARKS_KEY).get(0).asText()).isNotBlank();
+        assertThat(responseB).wasSuccessful().hasBookmark();
     }
 
     @Test
     void shouldAcceptMultipleBookmarksAsInput() throws IOException, InterruptedException {
-        var responseA = QueryApiTestUtil.simpleRequest(client, queryEndpoint, "{\"statement\": \"CREATE (n)\"}");
-        assertThat(responseA.statusCode()).isEqualTo(202);
+        var responseA = testClient.autoCommit(
+                QueryRequest.newBuilder().statement("CREATE (n)").build());
+        var responseB = testClient.autoCommit(
+                QueryRequest.newBuilder().statement("CREATE (n)").build());
 
-        var responseB = QueryApiTestUtil.simpleRequest(client, queryEndpoint, "{\"statement\": \"CREATE (n)\"}");
-        assertThat(responseA.statusCode()).isEqualTo(202);
+        var bmA = responseA.body().bookmarks().getFirst();
+        var bmB = responseB.body().bookmarks().getFirst();
 
-        var bookmarkA =
-                MAPPER.readTree(responseA.body()).get(BOOKMARKS_KEY).get(0).asText();
-        var bookmarkB =
-                MAPPER.readTree(responseB.body()).get(BOOKMARKS_KEY).get(0).asText();
+        var combinedBmResponse = testClient.autoCommit(QueryRequest.newBuilder()
+                .statement("CREATE (n)")
+                .bookmarks(of(bmA, bmB))
+                .build());
 
-        var combinedBmResponse = QueryApiTestUtil.simpleRequest(
-                client,
-                queryEndpoint,
-                "{\"statement\": \"CREATE (n)\", \"bookmarks\" : [\"" + bookmarkA + "\",\"" + bookmarkB + "\"]}");
+        assertThat(combinedBmResponse).wasSuccessful().hasBookmark();
 
-        assertThat(combinedBmResponse.statusCode()).isEqualTo(202);
-        var combineBmJson = MAPPER.readTree(combinedBmResponse.body());
-        var combinedBookmark = combineBmJson.get(BOOKMARKS_KEY).get(0).asText();
+        var newBm = combinedBmResponse.body().bookmarks().getFirst();
 
-        assertThat(combineBmJson.get(BOOKMARKS_KEY).size()).isEqualTo(1);
-        assertThat(combinedBookmark).isNotBlank();
-        assertThat(combinedBookmark).isNotEqualTo(bookmarkA);
-        assertThat(combinedBookmark).isNotEqualTo(bookmarkB);
+        Assertions.assertThat(newBm).isNotEqualTo(bmA);
+        Assertions.assertThat(newBm).isNotEqualTo(bmB);
     }
 
     @Test
@@ -224,16 +154,12 @@ class QueryResourceIT {
                         QueryApiTestUtil.getLastClosedTransactionId(dbms) + 1)),
                 List.of()));
 
-        var response = QueryApiTestUtil.simpleRequest(
-                client,
-                queryEndpoint,
-                "{\"statement\": \"RETURN 1\",  \"bookmarks\" : [\"" + expectedBookmark + "\"]}");
-        var parsedJson = MAPPER.readTree(response.body());
+        var response = testClient.autoCommit(QueryRequest.newBuilder()
+                .statement("RETURN 1")
+                .bookmarks(of(expectedBookmark))
+                .build());
 
-        assertThat(response.statusCode()).isEqualTo(400);
-
-        assertThat(parsedJson.get(ERRORS_KEY).get(0).get("code").asText())
-                .isEqualTo("Neo.TransientError.Transaction.BookmarkTimeout");
+        assertThat(response).hasErrorStatus(400, Status.Transaction.BookmarkTimeout);
     }
 
     @Test
@@ -249,42 +175,101 @@ class QueryResourceIT {
                         nextTxId)),
                 List.of()));
 
-        var responseA = QueryApiTestUtil.simpleRequest(
-                client, queryEndpoint, "{\"statement\": \"RETURN 1\", \"bookmarks\" : [\"" + expectedBookmark + "\"]}");
+        var responseA = testClient.autoCommit(QueryRequest.newBuilder()
+                .statement("RETURN 1")
+                .bookmarks(of(expectedBookmark))
+                .build());
 
+        var dbName = dbms.database("neo4j").databaseName();
         // initial request times out
-        assertThat(responseA.statusCode()).isEqualTo(400);
-        assertThat(responseA.body())
-                .isEqualTo("{\"errors\":[{\"code\":\"Neo.TransientError.Transaction.BookmarkTimeout\","
-                        + "\"mes"
-                        + "sage\":\"Database 'neo4j' not up to the requested version: " + nextTxId
-                        + ". Latest database version is " + lastTxId + "\"}]}");
+        assertThat(responseA).hasErrorStatus(400, Status.Transaction.BookmarkTimeout);
 
-        var createNodeRequest =
-                QueryApiTestUtil.simpleRequest(client, queryEndpoint, "{\"statement\": \"CREATE (n)\"}");
-        assertThat(createNodeRequest.statusCode()).isEqualTo(202);
+        var createNodeRequest = testClient.autoCommit(
+                QueryRequest.newBuilder().statement("CREATE (n)").build());
 
-        var responseB = QueryApiTestUtil.simpleRequest(
-                client, queryEndpoint, "{\"statement\": \"RETURN 1\", \"bookmarks\" : [\"" + expectedBookmark + "\"]}");
-        var parsedJson = MAPPER.readTree(responseB.body());
+        assertThat(createNodeRequest).wasSuccessful();
 
-        assertThat(responseB.statusCode()).isEqualTo(202);
-        assertThat(parsedJson.get(BOOKMARKS_KEY).get(0).asText()).isEqualTo(expectedBookmark);
+        var responseB = testClient.autoCommit(QueryRequest.newBuilder()
+                .statement("RETURN 1")
+                .bookmarks(of(expectedBookmark))
+                .build());
+
+        assertThat(responseB).wasSuccessful().hasBookmark(expectedBookmark);
     }
 
     @Test
     void callInTransactions() throws Exception {
-        var httpRequest = QueryApiTestUtil.baseRequestBuilder(queryEndpoint, "neo4j")
-                .POST(HttpRequest.BodyPublishers.ofString("{\"statement\": \"UNWIND [4, 2, 1, 0] AS i"
-                        + " CALL { WITH i CREATE ()} IN TRANSACTIONS OF 2 ROWS RETURN i\"}"))
-                .build();
-        var response = client.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+        var response = testClient.autoCommit(QueryRequest.newBuilder()
+                .statement("UNWIND [4, 2, 1, 0] AS i CALL { WITH i CREATE ()} IN TRANSACTIONS OF 2 ROWS RETURN i")
+                .build());
 
-        assertThat(response.statusCode()).isEqualTo(202);
-        var parsedJson = MAPPER.readTree(response.body());
+        assertThat(response).wasSuccessful().hasRecords(4, 2, 1, 0);
+    }
 
-        assertThat(parsedJson.get(DATA_KEY).get(FIELDS_KEY).size()).isEqualTo(1);
-        assertThat(parsedJson.get(DATA_KEY).get(VALUES_KEY).get(0).get(0).asInt())
-                .isEqualTo(4);
+    @Test
+    void shouldHandleErrorAfterStreamingStarts() throws IOException, InterruptedException {
+        var response = testClient.autoCommit(QueryRequest.newBuilder()
+                .statement("UNWIND range(10_000, 0, -1) AS n RETURN 10_000/n AS n")
+                .build());
+
+        QueryResponseAssertions.assertThat(response)
+                .hasErrorStatus(202, Status.Statement.ArithmeticError)
+                .hasFieldNames("n");
+
+        var parsedJson = response.body().data();
+
+        // All valid values goes through
+        Assertions.assertThat(parsedJson.get(VALUES_KEY).size()).isEqualTo(10000);
+    }
+
+    @ParameterizedTest
+    @MethodSource("queryTypes")
+    void shouldReturnQueryType(TransactionType transactionType, String statement, String expectedQueryType)
+            throws IOException, InterruptedException {
+        var response = testClient.executeQuery(
+                transactionType, QueryRequest.newBuilder().statement(statement).build());
+
+        QueryResponseAssertions.assertThat(response).wasSuccessful().hasQueryType(expectedQueryType);
+    }
+
+    @ParameterizedTest
+    @MethodSource("queryRequestElements")
+    void shouldHandleRequestFieldsInAnyOrder(List<String> elements) throws IOException, InterruptedException {
+        var response = testClient.sendRaw("{ %s }".formatted(String.join(",", elements)));
+
+        QueryResponseAssertions.assertThat(response).wasSuccessful();
+    }
+
+    static Stream<Arguments> queryTypes() {
+        return Stream.of(TransactionType.values())
+                .flatMap(type -> Stream.of(
+                        Arguments.of(type, "RETURN 1", "r"),
+                        Arguments.of(type, "CREATE ()", "w"),
+                        Arguments.of(type, "CREATE (p:Person{name: 'Vozinha'}) RETURN p", "rw"),
+                        Arguments.of(
+                                type,
+                                "CREATE CONSTRAINT constraint_name_%d FOR (n:Label) REQUIRE n.property_%d IS UNIQUE"
+                                        .formatted(type.ordinal(), type.ordinal()),
+                                "s")));
+    }
+
+    static Stream<Arguments> queryRequestElements() {
+        var includeCounters = """
+                "includeCounters": true""";
+        var parameters = """
+                    "parameters": {
+                      "value": 1
+                    }\
+                """;
+        var statement = """
+                "statement": "RETURN $value AS one\"""";
+        return Stream.of(
+                        List.of(includeCounters, parameters, statement),
+                        List.of(includeCounters, statement, parameters),
+                        List.of(statement, includeCounters, parameters),
+                        List.of(statement, parameters, includeCounters),
+                        List.of(parameters, statement, includeCounters),
+                        List.of(parameters, includeCounters, statement))
+                .map(Arguments::of);
     }
 }

@@ -25,15 +25,15 @@ import static java.time.Duration.ofMinutes;
 import static java.time.Duration.ofSeconds;
 import static java.util.concurrent.TimeUnit.DAYS;
 import static java.util.concurrent.TimeUnit.MINUTES;
+import static org.neo4j.configuration.SettingConstraints.any;
+import static org.neo4j.configuration.SettingConstraints.is;
 import static org.neo4j.configuration.SettingConstraints.lessThanOrEqualLong;
 import static org.neo4j.configuration.SettingConstraints.max;
 import static org.neo4j.configuration.SettingConstraints.min;
-import static org.neo4j.configuration.SettingConstraints.minSize;
 import static org.neo4j.configuration.SettingConstraints.range;
 import static org.neo4j.configuration.SettingConstraints.resolution;
 import static org.neo4j.configuration.SettingImpl.newBuilder;
 import static org.neo4j.configuration.SettingValueParsers.BOOL;
-import static org.neo4j.configuration.SettingValueParsers.BYTE;
 import static org.neo4j.configuration.SettingValueParsers.BYTES;
 import static org.neo4j.configuration.SettingValueParsers.CIDR_IP;
 import static org.neo4j.configuration.SettingValueParsers.DOUBLE;
@@ -42,9 +42,11 @@ import static org.neo4j.configuration.SettingValueParsers.INT;
 import static org.neo4j.configuration.SettingValueParsers.LONG;
 import static org.neo4j.configuration.SettingValueParsers.PATH;
 import static org.neo4j.configuration.SettingValueParsers.STRING;
+import static org.neo4j.configuration.SettingValueParsers.UNSIGNED_BYTE;
 import static org.neo4j.configuration.SettingValueParsers.listOf;
 import static org.neo4j.configuration.SettingValueParsers.ofEnum;
 import static org.neo4j.configuration.SettingValueParsers.setOf;
+import static org.neo4j.io.ByteUnit.gibiBytes;
 import static org.neo4j.io.ByteUnit.kibiBytes;
 import static org.neo4j.io.ByteUnit.mebiBytes;
 
@@ -52,14 +54,19 @@ import inet.ipaddr.IPAddressString;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.temporal.ChronoUnit;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import org.neo4j.annotations.service.ServiceProvider;
 import org.neo4j.graphdb.config.Setting;
+import org.neo4j.logging.log4j.LogConfig;
+import org.neo4j.memory.HeapEstimatorCacheConfig;
 
 @ServiceProvider
 public class GraphDatabaseInternalSettings implements SettingsDeclaration {
 
+    // Has no effect at time of writing, but kept to save some work when the next experimental version is introduced.
     @Internal
     @Description("Enable use of experimental Cypher versions.")
     public static final Setting<Boolean> enable_experimental_cypher_versions = newBuilder(
@@ -94,16 +101,16 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             .build();
 
     @Internal
-    @Description(
-            "Configure lucene partition size. This is mainly used to test partitioning behaviour without having to create "
-                    + "Integer.MAX_VALUE indexed entities.")
-    public static final Setting<Integer> lucene_max_partition_size =
-            newBuilder("internal.dbms.lucene.max_partition_size", INT, null).build();
+    @Description("Enable markers in debug log.")
+    public static final Setting<Boolean> log_markers_enabled = newBuilder(
+                    LogConfig.MARKERS_ENABLED_SETTING, BOOL, false)
+            .immutable()
+            .build();
 
     @Internal
     @Description("Include additional information in deadlock descriptions.")
     public static final Setting<Boolean> lock_manager_verbose_deadlocks = newBuilder(
-                    "internal.dbms.lock_manager.verbose_deadlocks", BOOL, false)
+                    "internal.dbms.lock_manager.verbose_deadlocks", BOOL, true)
             .dynamic()
             .build();
 
@@ -124,6 +131,20 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
     public static final Setting<Integer> consistency_checker_fail_fast_threshold = newBuilder(
                     "internal.consistency_checker.fail_fast_threshold", INT, 0)
             .addConstraint(min(0))
+            .build();
+
+    @Internal
+    @Description("Trigger the upgrade at the clustering layer. Default is false")
+    public static final Setting<Boolean> use_clustering_upgrade_mechanism = newBuilder(
+                    "internal.dbms.use_clustering_upgrade_mechanism", BOOL, false)
+            .build();
+
+    @Internal
+    @Description("A way for tests to turn off the cluster upgrade mechanism triggered on start to be able "
+            + "to verify version before upgrade. RaftUpgraderTaskScheduler.setDebugTimerMode() can be used to "
+            + "enable it again when suitable.")
+    public static final Setting<Boolean> clustering_upgrade_mechanism_dont_schedule = newBuilder(
+                    "internal.dbms.clustering_upgrade_mechanism_dont_schedule", BOOL, false)
             .build();
 
     public enum CypherRuntime {
@@ -237,6 +258,43 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
                     StatefulShortestPlanningMode.CARDINALITY_HEURISTIC)
             .build();
 
+    @Internal
+    @Description("Display the planner version in query logs and plan descriptions.")
+    public static final Setting<Boolean> display_planner_version =
+            newBuilder("internal.cypher.display_planner_version", BOOL, false).build();
+
+    public enum CypherPlannerVersion {
+        LATEST, // Alias to the latest version (immediately following this entry)
+        // Planner version update: add the latest version here just after LATEST
+        V2026_05("2026.05"),
+        V2026_04("2026.04"),
+        V2026_03("2026.03");
+
+        private final String value;
+
+        // For named versions (e.g. LATEST), whose string value is just the constant's own name.
+        CypherPlannerVersion() {
+            this.value = name();
+        }
+
+        CypherPlannerVersion(String value) {
+            this.value = value;
+        }
+
+        @Override
+        public String toString() {
+            return value;
+        }
+    }
+
+    @Internal
+    @Description("Sets the default Cypher planner version. This can be overridden per-query using the `plannerVersion` "
+            + "pre-parser option, which takes precedence over this setting.")
+    public static final Setting<CypherPlannerVersion> cypher_planner_version = newBuilder(
+                    "internal.cypher.planner_version", ofEnum(CypherPlannerVersion.class), CypherPlannerVersion.LATEST)
+            .dynamic()
+            .build();
+
     public enum PlanVarExpandInto {
         /**
          * Plan expandInto using regular cost estimation
@@ -262,6 +320,19 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             "Feature flag to enable/disable the rewriting of GPM Shortest patterns into legacy findShortest where conversions are possible")
     public static final Setting<Boolean> gpm_shortest_to_legacy_shortest_enabled = newBuilder(
                     "internal.cypher.enable_shortest_to_legacy_shortest", BOOL, true)
+            .build();
+
+    public enum ParallelRuntimeConfig {
+        NONE,
+        LEVERAGEORDER
+    }
+
+    @Internal
+    @Description("Set this to specify parallel runtime features to enable.")
+    public static final Setting<ParallelRuntimeConfig> parallel_runtime_config = newBuilder(
+                    "internal.cypher.parallel_runtime_config",
+                    ofEnum(ParallelRuntimeConfig.class),
+                    ParallelRuntimeConfig.NONE)
             .build();
 
     @Internal
@@ -331,6 +402,44 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             .build();
 
     @Internal
+    @Description("Set this to enable using label/relationship type scans to solve queries that use dynamic labels.")
+    public static final Setting<Boolean> cypher_enable_dynamic_label_scan =
+            newBuilder("internal.cypher.enable_dynamic_label_scan", BOOL, true).build();
+
+    @Internal
+    @Description("Set this to enable using indexes to solve queries that use dynamic labels.")
+    public static final Setting<Boolean> cypher_enable_dynamic_label_index_use = newBuilder(
+                    "internal.cypher.enable_dynamic_label_index_use", BOOL, true)
+            .build();
+
+    @Internal
+    @Description("Set this to enable using non-fused pipelined MERGE.")
+    public static final Setting<Boolean> cypher_enable_non_fused_merge =
+            newBuilder("internal.cypher.enable_non_fused_merge", BOOL, true).build();
+
+    @Internal
+    @Description("Set this to enable the use of local callables.")
+    public static final Setting<Boolean> cypher_enable_local_callables =
+            newBuilder("internal.cypher.enable_local_callables", BOOL, false).build();
+
+    @Internal
+    @Description("Set this to enable the use of the SCOPE queries.")
+    public static final Setting<Boolean> cypher_enable_scope_queries =
+            newBuilder("internal.cypher.enable_scope_queries", BOOL, false).build();
+
+    @Internal
+    @Description("Enable parsing of obfuscated literals")
+    public static final Setting<Boolean> cypher_enable_parsing_of_obfuscated_literals = newBuilder(
+                    "internal.cypher.enable_parsing_of_obfuscated_literals", BOOL, false)
+            .build();
+
+    @Internal
+    @Description("Disable type checking in semantic analysis")
+    public static final Setting<Boolean> cypher_disable_type_checking = newBuilder(
+                    "internal.cypher.disable_type_checking_in_semantic_analysis", BOOL, false)
+            .build();
+
+    @Internal
     @Description("Set this to enable monitors in the Cypher runtime.")
     public static final Setting<Boolean> cypher_enable_runtime_monitors =
             newBuilder("internal.cypher.enable_runtime_monitors", BOOL, false).build();
@@ -339,6 +448,14 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
     @Description("Set this to enable tracer monitors in the Cypher query caches.")
     public static final Setting<Boolean> cypher_enable_query_cache_monitors = newBuilder(
                     "internal.cypher.enable_query_cache_monitors", BOOL, false)
+            .build();
+
+    @Internal
+    @Description(
+            "By default, the query log is disabled for property shards. This means that no internal queries will be logged in the query log. "
+                    + "If this setting is set to true, the query log will be enabled for internal shard queries.")
+    public static final Setting<Boolean> shard_query_log_enabled = newBuilder(
+                    "internal.dbms.sharded_property_database.shard_query_log_enabled", BOOL, false)
             .build();
 
     @Internal
@@ -356,10 +473,32 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             .build();
 
     @Internal
+    @Description("The preset for deciding the size of batches in the pipelined runtime."
+            + "The default value uses the two settings `internal.cypher.pipelined.batch_size_small` "
+            + "and `internal.cypher.pipelined.batch_size_big` to decide the batch size based on "
+            + "the maximum number of intermediate rows estimated at query planning time.")
+    public static final Setting<CypherPipelinedBatchSizePreset> cypher_pipelined_batch_size_preset = newBuilder(
+                    "internal.cypher.pipelined.batch_size_preset",
+                    ofEnum(CypherPipelinedBatchSizePreset.class),
+                    CypherPipelinedBatchSizePreset.DEFAULT)
+            .dynamic()
+            .build();
+
+    public enum CypherPipelinedBatchSizePreset {
+        DEFAULT,
+        DISABLED,
+        SMALL,
+        MEDIUM,
+        LARGE,
+        CUSTOM
+    }
+
+    @Internal
     @Description("The size of batches in the pipelined runtime for queries which work with few rows.")
     public static final Setting<Integer> cypher_pipelined_batch_size_small = newBuilder(
                     "internal.cypher.pipelined.batch_size_small", INT, 128)
             .addConstraint(min(1))
+            .dynamic()
             .build();
 
     @Internal
@@ -367,7 +506,37 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
     public static final Setting<Integer> cypher_pipelined_batch_size_big = newBuilder(
                     "internal.cypher.pipelined.batch_size_big", INT, 1024)
             .addConstraint(min(1))
+            .dynamic()
             .build();
+
+    @Internal
+    @Description("Decides how batches are allowed to be reused in pipelined and parallel runtime.")
+    public static final Setting<CypherPipelinedBatchReuse> cypher_pipelined_batch_reuse = newBuilder(
+                    "internal.cypher.pipelined.batch_reuse",
+                    ofEnum(CypherPipelinedBatchReuse.class),
+                    CypherPipelinedBatchReuse.DEFAULT)
+            .dynamic()
+            .build();
+
+    public enum CypherPipelinedBatchReuse {
+        DEFAULT,
+        DISABLED,
+        PACK,
+        FULL
+    }
+
+    @Internal
+    @Description(
+            "The threshold of the LIMIT of a Top operator (planned with ORDER BY + LIMIT) to change the memory tracking "
+                    + "strategy. If the LIMIT is less than or equal to the threshold, a more precise memory tracking strategy is used."
+                    + "If it is above the threshold, a more approximate estimation strategy is used. "
+                    + "NOTE: This setting is dynamic, but changing it will not affect already running queries. "
+                    + "Setting this to zero will disable precise memory tracking, and apply the same approximate strategy as prior to "
+                    + "the introduction of this setting.")
+    public static final Setting<Long> cypher_pipelined_memory_top_operator_memory_tracking_strategy_threshold =
+            newBuilder("internal.cypher.pipelined.memory.top_operator_memory_tracking_strategy_threshold", LONG, 10000L)
+                    .dynamic()
+                    .build();
 
     @Internal
     @Description(
@@ -449,6 +618,13 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             .build();
 
     @Internal
+    @Description("If set to true we support CALL {...} IN TRANSACTIONS ON ERROR RETRY with pipelined runtime. "
+            + "If set to false we will fall back to using slotted runtime instead.")
+    public static final Setting<Boolean> cypher_pipelined_subquery_transaction_retry_enabled = newBuilder(
+                    "internal.cypher.pipelined.subquery_transaction_retry_enabled", BOOL, true)
+            .build();
+
+    @Internal
     @Description(
             "For compiled execution, specialized code is generated and then executed. "
                     + "More optimizations such as operator fusion may apply. "
@@ -512,19 +688,6 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
                     "internal.cypher.pipelined.operator_fusion_lower_limit", INT, 2)
             .build();
 
-    public enum EagerAnalysisImplementation {
-        IR,
-        LP
-    }
-
-    @Internal
-    @Description("Choose the Eager Analysis implementation")
-    public static final Setting<EagerAnalysisImplementation> cypher_eager_analysis_implementation = newBuilder(
-                    "internal.cypher.eager_analysis_implementation",
-                    ofEnum(EagerAnalysisImplementation.class),
-                    EagerAnalysisImplementation.LP)
-            .build();
-
     @Internal
     @Description("Enable fallback to updateStrategy=alwaysEager for LP eager analyzer")
     public static final Setting<Boolean> cypher_lp_eager_analysis_fallback_enabled = newBuilder(
@@ -541,6 +704,12 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
     @Description("Enable freeing memory of unused columns during Cypher query execution")
     public static final Setting<Boolean> cypher_free_memory_of_unused_columns = newBuilder(
                     "internal.cypher.free_memory_of_unused_columns", BOOL, true)
+            .build();
+
+    @Internal
+    @Description("Warn if aggregation encounters and skips a NULL value. Part of GQL but annoying and not very useful.")
+    public static final Setting<Boolean> cypher_warn_on_aggregation_skip_null = newBuilder(
+                    "internal.cypher.warn_on_aggregation_skip_null", BOOL, false)
             .build();
 
     @Internal
@@ -579,7 +748,8 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             newBuilder("internal.dbms.block_start_stop_database", BOOL, false).build();
 
     @Internal
-    @Description("Enable or disable the ability to alter databases.")
+    @Description(
+            "Enable or disable the ability to alter databases. This excludes SET DEFAULT LANGUAGE, which is always allowed (RBAC permitting).")
     public static final Setting<Boolean> block_alter_database =
             newBuilder("internal.dbms.block_alter_database", BOOL, false).build();
 
@@ -621,7 +791,8 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
 
     @Internal
     @Description("Name of file containing commands to be run during initialization of the system database. "
-            + "The file should exists in the scripts directory in neo4j home directory.")
+            + "The file should exists in the scripts directory in neo4j home directory."
+            + "Initialization queries are run in the query language version defined in `db.query.default_language`.")
     public static final Setting<Path> system_init_file = newBuilder("internal.dbms.init_file", PATH, null)
             .immutable()
             .setDependency(scripts_dir)
@@ -679,12 +850,6 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             .build();
 
     @Internal
-    @Description("If 'true', new database will be created without token indexes for labels and relationships.")
-    public static final Setting<Boolean> skip_default_indexes_on_creation = newBuilder(
-                    "internal.dbms.index.skip_default_indexes_on_creation", BOOL, false)
-            .build();
-
-    @Internal
     @Description(
             "If sent in index-provider in index create should be respected. Only for tests, latest should always be used")
     public static final Setting<Boolean> always_use_latest_index_provider = newBuilder(
@@ -700,8 +865,14 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             .build();
 
     @Internal
+    @Description("If `true`, Neo4j will ignore any corrupt schema or tokens during recovery and startup")
+    public static final Setting<Boolean> ignore_corrupt_schema =
+            newBuilder("internal.dbms.ignore_corrupt_schema", BOOL, false).build();
+
+    @Internal
     @Description("Specifies if engine should run cypher query based on a snapshot of accessed data. "
-            + "Query will be restarted in case if concurrent modification of data will be detected.")
+            + "Query will be restarted in case if concurrent modification of data will be detected. "
+            + "This is not supported on a SPD database.")
     public static final Setting<Boolean> snapshot_query =
             newBuilder("internal.dbms.query.snapshot", BOOL, false).build();
 
@@ -710,6 +881,14 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             "Specifies number or retries that query engine will do to execute query based on stable accessed data snapshot before giving up.")
     public static final Setting<Integer> snapshot_query_retries = newBuilder(
                     "internal.dbms.query.snapshot.retries", INT, 5)
+            .addConstraint(range(1, Integer.MAX_VALUE))
+            .build();
+
+    @Internal
+    @Description(
+            "Specifies number or retries that system database will try to execute system db query based on stable accessed snapshot before giving up.")
+    public static final Setting<Integer> system_snapshot_query_retries = newBuilder(
+                    "internal.dbms.system.query.snapshot.retries", INT, 100)
             .addConstraint(range(1, Integer.MAX_VALUE))
             .build();
 
@@ -795,6 +974,36 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             .build();
 
     @Internal
+    @Description("Default for whether the literals of the queries in the (JSON) query log are obfuscated when the "
+            + "log is collected by 'neo4j-admin server report'. The report command's '--obfuscate-query-log' "
+            + "option overrides this default for a single run.")
+    public static final Setting<Boolean> log_queries_obfuscation_in_report_enabled = newBuilder(
+                    "internal.dbms.logs.query.obfuscation_in_report_enabled", BOOL, false)
+            .build();
+
+    @Internal
+    @Description("Error codes that are considered unexpected during query execution.")
+    public static final Setting<Set<String>> log_queries_unexpected_codes = newBuilder(
+                    "internal.dbms.logs.query.unexpected.codes", setOf(STRING), Set.of("50N00"))
+            .dynamic()
+            .build();
+
+    @Internal
+    @Description("A set of classes that are excluded from unexpected errors.")
+    public static final Setting<Set<String>> log_queries_unexpected_ignored_classes = newBuilder(
+                    "internal.dbms.logs.query.unexpected.ignored_classes",
+                    setOf(STRING),
+                    Set.of(
+                            // These exceptions have code 50N00, but are not unexpected (in this context at least).
+                            "org.neo4j.exceptions.EntityNotFoundException",
+                            "org.neo4j.internal.kernel.api.exceptions.EntityNotFoundException",
+                            "org.neo4j.graphdb.TransactionFailureException",
+                            "org.neo4j.internal.kernel.api.exceptions.TransactionFailureException",
+                            "com.neo4j.aura.AuraTransactionListener$ExceedLimitException"))
+            .dynamic()
+            .build();
+
+    @Internal
     @Description("Specifies number of operations that batch inserter will try to group into one batch before "
             + "flushing data into underlying storage.")
     public static final Setting<Integer> batch_inserter_batch_size =
@@ -809,9 +1018,9 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             .build();
 
     @Internal
-    @Description("Quiet period for netty shutdown")
-    public static final Setting<Integer> netty_server_shutdown_quiet_period = newBuilder(
-                    "internal.dbms.bolt.netty_server_shutdown_quiet_period", INT, 5)
+    @Description("Quiet period for netty shutdown as a duration.")
+    public static final Setting<Duration> netty_server_shutdown_quiet_period = newBuilder(
+                    "internal.dbms.bolt.netty_server_shutdown_quiet_period_duration", DURATION, Duration.ofSeconds(5))
             .build();
 
     @Internal
@@ -835,6 +1044,14 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
     @Description("Perform some data consistency checks on transaction apply")
     public static final Setting<Boolean> consistency_check_on_apply = newBuilder(
                     "internal.dbms.storage.consistency_check_on_apply", BOOL, Boolean.FALSE)
+            .build();
+
+    @Internal
+    @Description(
+            "Enables trace logging for the internal driver, it will appear as debug level\n"
+                    + "This will only log if the log level of the server and routing_driver_logging_level is set to debug as well.")
+    public static final Setting<Boolean> routing_driver_trace_logging_enabled = newBuilder(
+                    "internal.dbms.routing.driver.trace_logging_enabled", BOOL, false)
             .build();
 
     @Internal
@@ -936,17 +1153,9 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             .build();
 
     @Internal
-    @Description("Enable asynchronous index sample recovery")
-    public static final Setting<Boolean> async_recover_index_samples = newBuilder(
-                    "internal.dbms.index.sampling.async_recovery", BOOL, true)
-            .immutable()
-            .build();
-
-    @Internal
     @Description("Wait for asynchronous index sample recovery to finish")
     public static final Setting<Boolean> async_recover_index_samples_wait = newBuilder(
-                    "internal.dbms.index.sampling.async_recovery_wait", BOOL, null)
-            .setDependency(async_recover_index_samples)
+                    "internal.dbms.index.sampling.async_recovery_wait", BOOL, true)
             .build();
 
     @Internal
@@ -993,7 +1202,7 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
     @Description("Block/buffer size for index population")
     public static final Setting<Long> index_populator_block_size = newBuilder(
                     "internal.dbms.index.populator_block_size", BYTES, mebiBytes(1))
-            .addConstraint(min(20L))
+            .addConstraint(min(kibiBytes(16)))
             .addConstraint(max((long) Integer.MAX_VALUE))
             .build();
 
@@ -1029,12 +1238,6 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
     @Description("Print stack trace on failed native io buffer allocation")
     public static final Setting<Boolean> print_page_buffer_allocation_trace = newBuilder(
                     "internal.dbms.debug.print_page_buffer_allocation_trace", BOOL, false)
-            .build();
-
-    @Internal
-    @Description("Printing debug information on index population")
-    public static final Setting<Boolean> index_population_print_debug = newBuilder(
-                    "internal.dbms.index.population_print_debug", BOOL, false)
             .build();
 
     @Internal
@@ -1082,6 +1285,14 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             newBuilder("internal.dbms.recovery.enable_parallelism", BOOL, false).build();
 
     @Internal
+    @Description(
+            "Whether to update indexes in parallel during parallel recovery (disabled if parallel recover is disabled)")
+    public static final Setting<Boolean> do_parallel_index_updates_in_recovery = newBuilder(
+                    "internal.dbms.recovery.enable_index_updates_parallelism", BOOL, true)
+            .internal()
+            .build();
+
+    @Internal
     @Description("Whether or not to log contents of data that is inconsistent when deleting it.")
     public static final Setting<Boolean> log_inconsistent_data_deletion = newBuilder(
                     "internal.dbms.log_inconsistent_data_deletion", BOOL, Boolean.FALSE)
@@ -1116,6 +1327,90 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             .build();
 
     @Internal
+    @Description("Feature flag to enable/disable use of graph schema optimizations during planning.")
+    public static final Setting<Boolean> planning_graph_schema_optimizations_enabled = newBuilder(
+                    "internal.cypher.planning_graph_schema_optimizations_enabled", BOOL, true)
+            .build();
+
+    @Internal
+    @Description("Feature flag to enable/disable use of optional match remover during planning.")
+    public static final Setting<Boolean> optional_match_remover_enabled = newBuilder(
+                    "internal.cypher.planning_optional_match_remover_enabled", BOOL, true)
+            .build();
+
+    @Internal
+    @Description("Feature flag to enable/disable limit-before-count rewriter during planning.")
+    public static final Setting<Boolean> planning_limit_before_count_rewriter_enabled = newBuilder(
+                    "internal.cypher.planning_limit_before_count_rewriter_enabled", BOOL, true)
+            .build();
+
+    @Internal
+    @Description("Feature flag to enable/disable planning of EXISTS subqueries with implicit LIMIT 1.")
+    public static final Setting<Boolean> planning_exists_with_implicit_limit_enabled = newBuilder(
+                    "internal.cypher.planning_exists_with_implicit_limit_enabled", BOOL, true)
+            .build();
+
+    @Internal
+    @Description("Maximum number of candidates for which we consider all possibilities")
+    public static final Setting<Integer> planning_selector_candidates_maximum = newBuilder(
+                    "internal.cypher.planning_selector_candidates_maximum", INT, 3)
+            .addConstraint(min(1))
+            .build();
+
+    @Internal
+    @Description(
+            "Feature flag to allow/disallow duplicating of subquery expressions (e.g. EXISTS {}) in CNFNormalizer.")
+    public static final Setting<Boolean> allow_duplicating_subquery_expressions_in_cnf_normalizer = newBuilder(
+                    "internal.cypher.allow_duplicating_subquery_expressions_in_cnf_normalizer", BOOL, true)
+            .build();
+
+    @Internal
+    @Description("Feature flag to allow/disallow planning of merge join.")
+    public static final Setting<Boolean> planning_merge_join_enabled = newBuilder(
+                    "internal.cypher.planning_merge_join_enabled", BOOL, false)
+            .build();
+
+    @Internal
+    @Description("Feature flag to allow/disallow the optimizing merge rewriter creating MergeUniqueNode and MergeInto.")
+    public static final Setting<Boolean> merge_optimization_enabled =
+            newBuilder("internal.cypher.merge_optimization_enabled", BOOL, true).build();
+
+    @Internal
+    @Description(
+            "Feature flag to enable planning of the remote node index seek operators (RemoteNodeIndexSeek, RemoteNodeUniqueIndexSeek) in sharded databases (currently only read-only queries).")
+    public static final Setting<Boolean> remote_node_index_seek =
+            newBuilder("internal.cypher.remote_node_index_seek", BOOL, true).build();
+
+    @Internal
+    @Description(
+            "Feature flag to enable planning of the remote relationship index seek operators (RemoteDirectedRelationshipIndexSeek and variants) in sharded databases (currently only read-only queries).")
+    public static final Setting<Boolean> remote_relationship_index_seek = newBuilder(
+                    "internal.cypher.remote_relationship_index_seek", BOOL, false)
+            .build();
+
+    public enum RemoteNodeIndexWriteOperators {
+        NON_LOCKING,
+        UNIQUE_INDEX_LOCKING,
+        CALL_IN_TRANSACTIONS
+    }
+
+    @Internal
+    @Description(
+            "Control flags to decide whether to plan remote (unique) node index seeks on the RHS of write queries in sharded databases.")
+    public static final Setting<Set<RemoteNodeIndexWriteOperators>> remote_node_index_write_operators = newBuilder(
+                    "internal.cypher.remote_node_index_write_operators",
+                    setOf(ofEnum(RemoteNodeIndexWriteOperators.class)),
+                    Set.of())
+            .build();
+
+    @Internal
+    @Description("A legacy feature flag enabling Sharded Property Databases feature. This flag has no longer any use"
+            + "and is part of the settings only for backward compatibility reasons.")
+    public static final Setting<Boolean> spd_enabled = newBuilder(
+                    "internal.dbms.sharded_property_database.enabled", BOOL, true)
+            .build();
+
+    @Internal
     @Description(
             "Limits the maximum amount of off-heap memory the consistency checker will allocate. The value is given as a factor between 0.1 .. 1 "
                     + "and will be multiplied with actual available memory to get the effectively available amount of memory taken into consideration")
@@ -1140,13 +1435,6 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
     @Description("Enables sketching of next transaction log file in the background during reverse recovery.")
     public static final Setting<Boolean> pre_sketch_transaction_logs =
             newBuilder("internal.dbms.tx_log.presketch", BOOL, false).build();
-
-    @Internal
-    @Description(
-            "Enables using format versions that are still under development, which will trigger migration to them on start up. "
-                    + "This setting is only useful for tests of incomplete format versions during their development for for testing upgrade itself.")
-    public static final Setting<Boolean> include_versions_under_development =
-            newBuilder("internal.dbms.include_dev_format_versions", BOOL, false).build();
 
     @Internal
     @Description("If set, the database will locate token index files in the old location and under the old name."
@@ -1187,15 +1475,10 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             .build();
 
     @Internal
-    @Description("Enables creation of graph type dependent constraints")
-    public static final Setting<Boolean> dependent_constraints_enabled = newBuilder(
-                    "internal.dbms.dependent_constraints_enabled", BOOL, false)
-            .build();
-
-    @Internal
-    @Description("Enables usage of relationship endpoint label and node label existence constraints")
-    public static final Setting<Boolean> relationship_endpoint_label_and_node_label_existence_constraints = newBuilder(
-                    "internal.dbms.relationship_endpoint_label_and_node_label_existence_constraints", BOOL, false)
+    @Description("Set this to enable the use of the GROUP BY clause in Cypher.")
+    public static final Setting<Boolean> cypher_group_by_clause_enabled = newBuilder(
+                    "internal.cypher.group_by_clause_enabled", BOOL, true)
+            .immutable()
             .build();
 
     public enum ExtractLiteral {
@@ -1211,9 +1494,67 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             .build();
 
     @Internal
+    @Description("Set this to expose the fully obfuscated (all-literals) view of executing queries, "
+            + "independent of db.logs.query.obfuscate_literals. Disabling this is a fail-safe that "
+            + "restores the previous behavior, where the all-literals view is only available when "
+            + "db.logs.query.obfuscate_literals is enabled.")
+    public static final Setting<Boolean> expose_fully_obfuscated_query_view = newBuilder(
+                    "internal.dbms.expose_fully_obfuscated_query_view", BOOL, true)
+            .build();
+
+    @Internal
+    @Description("Set this to render each obfuscated literal in the query log as a parameter-style token "
+            + "carrying its type, e.g. $`OBFUSCATED STRING 1`, instead of a bare \\*\\*\\*\\*\\*\\*. Tokens are "
+            + "numbered per type in query-text order. This is a breaking change to the query-log format and is "
+            + "gated off by default.")
+    public static final Setting<Boolean> obfuscated_query_log_literal_type_hints = newBuilder(
+                    "internal.dbms.cypher.obfuscated_query_log_literal_type_hints", BOOL, false)
+            .dynamic()
+            .build();
+
+    public static SettingValueParser<Set<Map<String, String>>> HistogramsOfStandardBucketTypeParser =
+            setOf(new SettingValueParsers.MapPattern(
+                    Set.of("entityType", "labelOrType", "property", "min", "max", "selectivity"),
+                    Set.of("entityType", "labelOrType", "property", "min", "max", "selectivity")));
+
+    /**
+     * This option allows histograms to be loaded through the configuration file, serialized per bucket.
+     * Specify a bucket using key-value pairs separated by semicolons: key1=value1;key2=value2;key3=value3
+     * Each bucket should have the following keys: entityType, labelOrType, property, min, max, selectivity
+     * Combine the buckets using commas: bucket1,bucket2,bucket3
+     *
+     * All buckets with the same values for entityType, labelOrType and property will become a single histogram.
+     * Different values for EntityType, labelOrType and property will lead to the construction of multiple histograms.
+     * If you want the histograms to be used during planning, you will have to disable literal extraction completely for
+     * now.
+     *
+     * Example:
+     *  internal.cypher.extract_literals=NEVER
+     *  internal.cypher.histograms_standard_type_buckets= \
+     *    labelOrType=Person;property=prop;min=10;max=20;selectivity=0.28;entityType=node, \
+     *    labelOrType=Person;property=prop;min=20;max=30;selectivity=0.48;entityType=node, \
+     *    labelOrType=Person;property=prop;min=30;max=40;selectivity=0.05;entityType=node, \
+     *    labelOrType=Person;property=prop;min=40;max=50;selectivity=0.19;entityType=node
+     *
+     */
+    @Internal
+    @Description("Add histogram using configuration.")
+    public static final Setting<Set<Map<String, String>>> histogram_data = newBuilder(
+                    "internal.cypher.histograms_standard_type_buckets",
+                    HistogramsOfStandardBucketTypeParser,
+                    new HashSet<>())
+            .build();
+
+    @Internal
     @Description("Use size of lists and strings of provided parameter values in planning")
     public static final Setting<Boolean> cypher_size_hint_parameters =
             newBuilder("internal.cypher.use_parameter_size", BOOL, true).build();
+
+    @Internal
+    @Description("Resolve simple dynamic expressions during AST rewriting")
+    public static final Setting<Boolean> resolve_simple_dynamic_expressions = newBuilder(
+                    "internal.cypher.resolve_simple_dynamic_expressions", BOOL, false)
+            .build();
 
     @Internal
     @Description("Multi versioned store transaction chunk size.")
@@ -1235,9 +1576,24 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             .build();
 
     @Internal
-    @Description("Dump transaction visibility boundaries in multi versioned database.")
-    public static final Setting<Boolean> multi_version_dump_transaction_visibility_boundaries = newBuilder(
-                    "internal.db.multiversion.transaction.visibility.boundaries.dump", BOOL, false)
+    @Description("Allow transaction visibility refresh on all types of transactions regardless of origin.")
+    public static final Setting<Boolean> multi_version_transaction_visibility_refresh_all = newBuilder(
+                    "internal.db.multiversion.transaction.visibility.refresh_all.enabled", BOOL, false)
+            .dynamic()
+            .build();
+
+    @Internal
+    @Description("Enable ability of transaction visibility refresh.")
+    public static final Setting<Boolean> multi_version_transaction_visibility_refresh = newBuilder(
+                    "internal.db.multiversion.transaction.visibility.refresh_enabled", BOOL, true)
+            .dynamic()
+            .build();
+
+    @Internal
+    @Description("Enable ability of transaction visibility refresh.")
+    public static final Setting<Long> multi_version_deletion_additional_reservation_size = newBuilder(
+                    "internal.db.multiversion.transaction.deletion.reservation.size", BYTES, 256L)
+            .dynamic()
             .build();
 
     @Internal
@@ -1252,25 +1608,57 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             newBuilder("internal.dbms.change_data_capture", BOOL, true).build();
 
     @Internal
+    @Description("A feature toggle behind which the relationship property value access rule feature is developed")
+    public static final Setting<Boolean> relationship_property_value_access_rules = newBuilder(
+                    "internal.dbms.feature_flag.relationship_property_value_access_rules", BOOL, true)
+            .build();
+
+    @Internal
+    @Description("A feature toggle behind which the attribute based access control feature is developed")
+    public static final Setting<Boolean> attribute_based_access_control = newBuilder(
+                    "internal.dbms.feature_flag.attribute_based_access_control", BOOL, true)
+            .build();
+
+    @Internal
+    @Description("A feature toggle behind which native user tags are developed")
+    public static final Setting<Boolean> user_tags =
+            newBuilder("internal.dbms.feature_flag.user_tags", BOOL, true).build();
+
+    @Internal
+    @Description("A feature toggle behind which property-based access control rules matching a value "
+            + "against a list-valued property (`<value> IN n.property`) are developed")
+    public static final Setting<Boolean> value_in_list_property = newBuilder(
+                    "internal.dbms.feature_flag.value_in_list_property", BOOL, true)
+            .build();
+
+    @Internal
+    @Description("A feature toggle behind which property-based access control rules using the "
+            + "abac.native.user_tags() function (`n.property IN abac.native.user_tags()`) are developed")
+    public static final Setting<Boolean> user_tags_in_property_rules = newBuilder(
+                    "internal.dbms.feature_flag.user_tags_in_property_rules", BOOL, false)
+            .build();
+
+    @Internal
     @Description("A feature toggle behind which show setting feature is developed")
     public static final Setting<Boolean> show_setting =
             newBuilder("internal.dbms.show_setting", BOOL, true).build();
 
     @Internal
-    @Description("A feature toggle behind which composable commands are developed")
-    public static final Setting<Boolean> composable_commands =
-            newBuilder("internal.dbms.composable_commands", BOOL, false).build();
-
-    @Internal
-    @Description("A feature toggle behind which graph types are developed")
-    public static final Setting<Boolean> graph_type_enabled =
-            newBuilder("internal.dbms.graph_type", BOOL, false).build();
+    @Description("A feature toggle behind which oidc credential forwarding is developed")
+    public static final Setting<Boolean> oidc_credential_forwarding_enabled = newBuilder(
+                    "internal.cypher.enable_oidc_credential_forwarding", BOOL, true)
+            .build();
 
     @Internal
     @Description("A feature toggle behind which out of disk space protection feature is developed")
     public static final Setting<Boolean> out_of_disk_space_protection = newBuilder(
                     "internal.dbms.out_of_disk_space_protection", BOOL, false)
             .build();
+
+    @Internal
+    @Description("A feature toggle behind which the secrets manager feature is developed")
+    public static final Setting<Boolean> secrets_manager_enabled =
+            newBuilder("internal.dbms.secrets_manager_enabled", BOOL, false).build();
 
     @Internal
     @Description("Just to be used in tests: A way to indicate to fallback to latest dbms runtime component version. "
@@ -1288,12 +1676,36 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
     @Internal
     @Description("Just to be used in tests: A way to set the latest kernel version. "
             + "Can be useful for writing upgrade tests for coming versions")
-    public static final Setting<Byte> latest_kernel_version =
-            newBuilder("internal.dbms.latest_kernel_version", BYTE, null).build();
+    public static final Setting<Byte> latest_kernel_version = newBuilder(
+                    "internal.dbms.latest_kernel_version", UNSIGNED_BYTE, null)
+            .build();
 
     @Internal
-    @Description(
-            """
+    @Description("Just to be used in tests: A way to make envelope log format the format on GLORIOUS_FUTURE.")
+    public static final Setting<Boolean> envelope_log_format_on_future = newBuilder(
+                    "internal.dbms.envelope_log_format_on_future", BOOL, false)
+            .build();
+
+    @Internal
+    @Description("A way to turn on the next log format. Any new databases will get the format and any existing "
+            + "ones will upgrade to it on the next kernel version upgrade.")
+    public static final Setting<Boolean> allow_new_log_format_on_upgrade_or_create = newBuilder(
+                    "internal.dbms.allow_new_log_format_on_upgrade_or_create", BOOL, false)
+            .build();
+
+    @Internal
+    @Description("System database store format.")
+    public static final Setting<String> system_database_format = newBuilder(
+                    "internal.dbms.system_database_format", STRING, "aligned")
+            .build();
+
+    @Internal
+    @Description("Whether the transaction log is merged with replication log.")
+    public static final Setting<Boolean> merged_log =
+            newBuilder("internal.dbms.merged_log", BOOL, false).build();
+
+    @Internal
+    @Description("""
                     Ask page cache to close memory allocator on shutdown to clear native memory allocated for page cache pages.
                     WARNING: This setting is dangerous and must only be enabled if you completely confident that there are no leaked page cursors.
                     Otherwise it can result in VM crashes
@@ -1303,11 +1715,9 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             .build();
 
     @Internal
-    @Description(
-            "Size of the memory block used to allocate page cache memory. Default value calculated based on page cache size.")
-    public static final Setting<Long> page_cache_allocation_grab_size = newBuilder(
-                    "internal.dbms.page_cache_allocator_block_size", BYTES, null)
-            .addConstraint(min(1L))
+    @Description("Pre-touch every memory page of page cache on startup. Linux only.")
+    public static final Setting<Boolean> page_cache_allocator_pre_touch = newBuilder(
+                    "internal.dbms.page_cache_allocator_pre_touch", BOOL, false)
             .build();
 
     @Internal
@@ -1345,6 +1755,39 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             .build();
 
     @Internal
+    @Description(
+            "Log query plans to a separate plan log file whenever a new plan is computed and inserted into the execution plan cache.")
+    public static final Setting<Boolean> log_query_plan_enabled = newBuilder(
+                    "internal.dbms.logs.query.plan_log_enabled", BOOL, false)
+            .dynamic()
+            .build();
+
+    @Internal
+    @Description("Periodically collect graph counts (node/relationship/index/constraint statistics) "
+            + "and log them to a separate graph stats log file.")
+    public static final Setting<Boolean> graph_stats_collection_enabled = newBuilder(
+                    "internal.dbms.logs.graph_stats.collection_enabled", BOOL, false)
+            .dynamic()
+            .build();
+
+    @Internal
+    @Description("The interval between periodic graph stats collections.")
+    public static final Setting<Duration> graph_stats_collection_interval = newBuilder(
+                    "internal.dbms.logs.graph_stats.collection_interval", DURATION, Duration.ofHours(24))
+            .dynamic()
+            .build();
+
+    @Internal
+    @Description("How much a graph stats snapshot needs to have diverged from the previously logged one "
+            + "before it is logged again, expressed as the maximum relative difference across all "
+            + "compared entries. Independent of `dbms.cypher.statistics_divergence_threshold`.")
+    public static final Setting<Double> graph_stats_collection_divergence_threshold = newBuilder(
+                    "internal.dbms.logs.graph_stats.divergence_threshold", DOUBLE, 0.75)
+            .addConstraint(range(0.0, 1.0))
+            .dynamic()
+            .build();
+
+    @Internal
     @Description("Log whether the query plan served from one of the query caches.")
     public static final Setting<Boolean> log_query_cache_usage = newBuilder(
                     "internal.dbms.logs.query.query_cache_usage", BOOL, false)
@@ -1374,6 +1817,13 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             .build();
 
     @Internal
+    @Description("Log query statistics. ")
+    public static final Setting<Boolean> log_query_statistics = newBuilder(
+                    "internal.dbms.logs.query.log_query_statistics", BOOL, false)
+            .dynamic()
+            .build();
+
+    @Internal
     @Description("The maximum period of time to wait for changes to the transaction log (specifically to get the "
             + "position after the last committed transaction). This is an upper bound as further subscriber requests "
             + "will always lead to fetching the latest transaction details.")
@@ -1385,36 +1835,6 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
     @Description("Multiversion degree store root mapping cache size.")
     public static final Setting<Long> multi_version_degreestore_mapping_cache_size = newBuilder(
                     "internal.dbms.multiversion_degreestore_mapping_cache_size", BYTES, mebiBytes(10))
-            .build();
-
-    @Internal
-    @Description(
-            "The reserved namespaces that are used for internal functionality of the DBMS. Procedures and UDFs in these namespaces will never be loaded, or compiled from disk.")
-    public static final Setting<List<String>> reserved_procedure_namespaces = newBuilder(
-                    "internal.dbms.reserved_procedure_namespaces",
-                    listOf(STRING),
-                    List.of(
-                            // Reserved functions
-                            "date",
-                            "datetime",
-                            "duration",
-                            "localdatetime",
-                            "localtime",
-                            "time",
-                            // Reserved namespaces
-                            "cdc.*",
-                            "date.*",
-                            "datetime.*",
-                            "db.*",
-                            "dbms.*",
-                            "duration.*",
-                            "graph.*",
-                            "internal.*",
-                            "localdatetime.*",
-                            "localtime.*",
-                            "time.*",
-                            "tx.*",
-                            "unsupported.*"))
             .build();
 
     @Internal
@@ -1456,10 +1876,40 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             .build();
 
     @Internal
+    @Description("The maximum size of a raw text query to be cached in the outer executable query cache, "
+            + "the preparser cache, and the AST cache, where the "
+            + "query text is used as the cache key. This limit is used to prevent huge query strings from occupying too "
+            + "much memory in the query cache, as such queries are often the result of programmatic generation and are unlikely "
+            + "to be reused before auto-parameterization is applied.")
+    public static final Setting<Long> query_cache_max_query_text_size = newBuilder(
+                    "internal.server.memory.query_cache.max_query_text_size", BYTES, kibiBytes(128))
+            .addConstraint(min(0L))
+            .dynamic()
+            .build();
+
+    @Internal
     @Description(
-            "Feature flag to enable/disable the ANTLR parser as opposed to Javacc. If changed dynamically, query caches need to be cleared for it to take effect.")
-    public static final Setting<Boolean> cypher_parser_antlr_enabled = newBuilder(
-                    "internal.cypher.parser.antlr_enabled", BOOL, true)
+            "The maximum size of the AST (Abstract Syntax Tree) of the query for it to be cached in the logical plan cache "
+                    + "where the AST is used as the cache key. This limit is used to prevent huge queries from occupying too "
+                    + "much memory in the query cache, as such queries are often the result of programmatic generation and are unlikely "
+                    + "to be reused."
+                    + "WARNING: This value should not be expected to have a definitive and stable unit, and is subject to refinement over time.")
+    public static final Setting<Long> query_cache_max_ast_size = newBuilder(
+                    "internal.server.memory.query_cache.max_ast_size", LONG, -1L)
+            .addConstraint(min(-1L))
+            .dynamic()
+            .build();
+
+    @Internal
+    @Description(
+            "The maximum size of the Logical Plan of the query for it to be cached in the execution plan cache "
+                    + "where the logical plan is used as the cache key. This limit is used to prevent huge queries from occupying too "
+                    + "much memory in the query cache, as such queries are often the result of programmatic generation and are unlikely "
+                    + "to be reused."
+                    + "WARNING: This value should not be expected to have a definitive and stable unit, and is subject to refinement over time.")
+    public static final Setting<Long> query_cache_max_logical_plan_size = newBuilder(
+                    "internal.server.memory.query_cache.max_logical_plan_size", LONG, -1L)
+            .addConstraint(min(-1L))
             .dynamic()
             .build();
 
@@ -1484,19 +1934,11 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
     @Internal
     @Description("Id controller maintenance interval")
     public static final Setting<Duration> id_controller_maintenance_interval = newBuilder(
-                    "internal.db.idcontroller.maintenance_interval", DURATION, ofSeconds(1))
-            .build();
-
-    @Internal
-    @Description("Maximum time to download metadata when seeding metadata during CREATE DATABASE. "
-            + "It is recommended to keep this low, since a system transaction is kept open during this time.")
-    public static final Setting<Duration> seed_with_metadata_timeout = newBuilder(
-                    "internal.dbms.seed_with_metadata_timeout", DURATION, Duration.ofSeconds(60))
+                    "internal.db.idcontroller.maintenance_interval", DURATION, ofMillis(400))
             .build();
 
     public enum RemoteBatchPropertiesImplementation {
         PLANNER,
-        REWRITER,
         SKIP_REMOTE_BATCHING
     }
 
@@ -1506,54 +1948,19 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             newBuilder(
                             "internal.cypher.remote_batch_properties_implementation",
                             ofEnum(RemoteBatchPropertiesImplementation.class),
-                            RemoteBatchPropertiesImplementation.REWRITER)
+                            RemoteBatchPropertiesImplementation.PLANNER)
                     .build();
+
+    @Internal
+    @Description("Push valid operators into Remote Batch Properties")
+    public static final Setting<Boolean> push_operators_into_remote_batch_properties = newBuilder(
+                    "internal.cypher.push_operators_into_remote_batch_properties", BOOL, false)
+            .build();
 
     @Internal
     @Description("Allow duplicated setting declarations when strict validation is enabled.")
     public static final Setting<Boolean> strict_config_validation_allow_duplicates = newBuilder(
                     "internal.server.config.strict_validation.allow_duplicates.enabled", BOOL, false)
-            .build();
-
-    @Internal
-    @Description("Push valid predicates into Remote Batch Properties")
-    public static final Setting<Boolean> push_predicates_into_remote_batch_properties = newBuilder(
-                    "internal.cypher.push_predicates_into_remote_batch_properties", BOOL, false)
-            .build();
-
-    @Internal
-    @Description(
-            "Enables returning the client address provided by a driver as the sole router in routing tables. This makes it easier for networking "
-                    + "middleware to migrate workload to new Neo4j servers, or even a new DBMS.")
-    public static final Setting<Boolean> client_provided_router_enabled = newBuilder(
-                    "internal.dbms.routing.client_provided_router_enabled", BOOL, false)
-            .build();
-
-    @Internal
-    @Description(
-            "A list of prefixes to append to the client provided router address when the server cycles through addresses to force a routing table "
-                    + "update.")
-    public static final Setting<List<String>> client_provided_router_prefixes = newBuilder(
-                    "internal.dbms.routing.client_provided_router_prefixes",
-                    listOf(STRING),
-                    List.of("a", "b", "c", "d"))
-            .addConstraint(minSize(2))
-            .build();
-
-    @Internal
-    @Description(
-            "The period of time for the server to wait between cycling client provided router address prefixes to force a routing table update.")
-    public static final Setting<Duration> client_provided_router_prefix_rotation_period = newBuilder(
-                    "internal.dbms.routing.client_provided_router_rotation_period", DURATION, Duration.ofMinutes(1))
-            .addConstraint(range(Duration.ofSeconds(10), Duration.ofDays(1)))
-            .build();
-
-    @Internal
-    @Description(
-            "The suffix we expect on the client provided address in order to trigger the behaviour of client_provided_router_enabled and return said "
-                    + "address as the sole router in routing tables.")
-    public static final Setting<String> client_provided_router_suffix = newBuilder(
-                    "internal.dbms.routing.client_provided_address_suffix", STRING, "endpoints.neo4j.io")
             .build();
 
     @Internal
@@ -1568,9 +1975,350 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             newBuilder("internal.dbms.prefetch_on_commit", BOOL, false).build();
 
     @Internal
+    @Description("Indicates that the application is running within an Aura environment.")
+    public static final Setting<Boolean> enable_aura_profile =
+            newBuilder("internal.dbms.enable_aura_profile", BOOL, false).build();
+
+    @Internal
     @Description("The maximum amount of time to wait for terminated transactions to start closing before allowing "
             + "initiated database shutdown to continue")
     public static final Setting<Duration> shutdown_terminated_transaction_wait_timeout = newBuilder(
-                    "internal.db.transaction.shutdown_terminated_transaction_wait_timeout", DURATION, ofSeconds(1))
+                    "internal.db.transaction.shutdown_terminated_transaction_wait_timeout", DURATION, ofMinutes(1))
             .build();
+
+    public enum ProcedureClassPreloading {
+        // All classes are preloaded from the plugins before filtering
+        ALL,
+        // Only plugin classes with procedure, or function api annotations are directly loaded,
+        // with dependencies loaded indirectly only
+        ANNOTATED
+    }
+
+    @Internal
+    @Description("")
+    public static final Setting<Double> spd_segment_memory_reclaim = newBuilder(
+                    "internal.db.spd_import.segment_memory_reclaim", DOUBLE, 0.1)
+            .build();
+
+    @Internal
+    @Description("")
+    public static final Setting<Double> spd_segment_memory_reclaim_trigger = newBuilder(
+                    "internal.db.spd_import.segment_memory_reclaim_trigger", DOUBLE, 0.5)
+            .build();
+
+    @Internal
+    @Description("")
+    public static final Setting<Long> spd_import_segment_buffer_size = newBuilder(
+                    "internal.db.spd_import.segment_buffer_size", BYTES, mebiBytes(8))
+            .addConstraint(max(gibiBytes(2)))
+            .build();
+
+    @Internal
+    @Description("")
+    public static final Setting<Double> spd_import_buffer_max_direct_memory_fraction = newBuilder(
+                    "internal.db.spd_import.buffer_max_direct_memory_fraction", DOUBLE, 0.001)
+            .build();
+
+    @Internal
+    @Description("")
+    public static final Setting<Long> spd_import_segment_increment_size = newBuilder(
+                    "internal.db.spd_import.segment_increment_size", BYTES, mebiBytes(1))
+            .build();
+
+    @Internal
+    @Description("")
+    public static final Setting<Double> spd_import_segment_records_heap_limit = newBuilder(
+                    "internal.db.spd_import.segment_records_heap_limit", DOUBLE, 0.1)
+            .build();
+
+    @Internal
+    @Description("")
+    public static final Setting<Integer> spd_import_max_segment_records = newBuilder(
+                    "internal.db.spd_import.max_segment_records", INT, 100_000)
+            .build();
+
+    @Internal
+    @Description("")
+    public static final Setting<Long> spd_import_io_buffer_size = newBuilder(
+                    "internal.db.spd_import.io_buffer_size", BYTES, mebiBytes(2))
+            .addConstraint(max(gibiBytes(2)))
+            .build();
+
+    @Internal
+    @Description("")
+    public static final Setting<Integer> spd_import_merge_step =
+            newBuilder("internal.db.spd_import.merge_step", INT, 50).build();
+
+    @Internal
+    @Description("")
+    public static final Setting<Double> spd_import_heap_for_entity_tasks = newBuilder(
+                    "internal.db.spd_import.heap_for_entity_tasks", DOUBLE, 0.05)
+            .build();
+
+    @Internal
+    @Description("")
+    public static final Setting<Double> spd_import_prefetcher_heap_fraction = newBuilder(
+                    "internal.db.spd_import.prefetcher_heap_fraction", DOUBLE, 0.01)
+            .build();
+
+    @Internal
+    @Description("")
+    public static final Setting<Long> spd_import_prefetcher_batch_size = newBuilder(
+                    "internal.db.spd_import.prefetcher_batch_size", BYTES, mebiBytes(2))
+            .addConstraint(max(gibiBytes(1)))
+            .build();
+
+    @Internal
+    @Description("")
+    public static final Setting<Integer> spd_import_entity_executor_preallocation_size = newBuilder(
+                    "internal.db.spd_import.entity_executor_preallocation_size", INT, 10_000)
+            .build();
+
+    @Internal
+    @Description("")
+    public static final Setting<Long> spd_import_entity_encoding_buffer_initial_capacity = newBuilder(
+                    "internal.db.spd_import.entity_encoding_buffer_initial_capacity", BYTES, 10 * 1024L)
+            .build();
+
+    @Internal
+    @Description("A setting used only in tests to override the memery limit for batches used during store creation. "
+            + "Its purpose is being able to test the code path dealing with oversized nodes "
+            + "without creating an IT with huge number of relationships and consuming too much memory.")
+    public static final Setting<Integer> spd_import_batch_memory_limit_override = newBuilder(
+                    "internal.db.spd_import.batch_memory_limit_override", INT, null)
+            .build();
+
+    @Internal
+    @Description("")
+    public static final Setting<Duration> spd_import_rpc_poll_interval = newBuilder(
+                    "internal.db.spd_import.rpc.poll_interval", DURATION, ofSeconds(1))
+            .build();
+
+    @Internal
+    @Description("")
+    public static final Setting<Duration> spd_import_termination_check_interval = newBuilder(
+                    "internal.db.spd_import.termination_check_interval", DURATION, ofSeconds(1))
+            .build();
+
+    @Internal
+    @Description("")
+    public static final Setting<Duration> spd_import_progress_collect_interval = newBuilder(
+                    "internal.db.spd_import.progress_collect_interval", DURATION, ofSeconds(1))
+            .build();
+
+    @Internal
+    @Description("")
+    public static final Setting<Duration> spd_import_rpc_report_interval = newBuilder(
+                    "internal.db.spd_import.rpc.report_interval", DURATION, ofMinutes(10))
+            .build();
+
+    @Internal
+    @Description("")
+    public static final Setting<Boolean> spd_import_rpc_retry =
+            newBuilder("internal.db.spd_import.rpc.retry", BOOL, true).build();
+
+    @Internal
+    @Description("")
+    public static final Setting<Duration> spd_import_rpc_retry_interval = newBuilder(
+                    "internal.db.spd_import.rpc.retry_interval", DURATION, ofSeconds(1))
+            .build();
+
+    @Internal
+    @Description("")
+    public static final Setting<Duration> spd_import_rpc_connect_timeout = newBuilder(
+                    "internal.db.spd_import.rpc.connect_timeout", DURATION, ofSeconds(30))
+            .build();
+
+    @Internal
+    @Description("")
+    public static final Setting<Duration> spd_import_rpc_request_timeout = newBuilder(
+                    "internal.db.spd_import.rpc.request_timeout", DURATION, ofMinutes(5))
+            .build();
+
+    @Internal
+    @Description("Select how eagerly procedure loader will class load procedures")
+    public static final Setting<ProcedureClassPreloading> preload = newBuilder(
+                    "internal.dbms.procedures.preload",
+                    ofEnum(ProcedureClassPreloading.class),
+                    ProcedureClassPreloading.ANNOTATED)
+            .build();
+
+    // Heap estimator cache settings
+
+    @Internal
+    @Description("Enable the use of a heap estimator cache that can reduce heap usage overestimation of large objects "
+            + " in some queries.")
+    public static final Setting<HeapEstimatorCachePreset> heap_estimator_cache_preset = newBuilder(
+                    "internal.server.heap_estimator_cache.preset",
+                    ofEnum(HeapEstimatorCachePreset.class),
+                    HeapEstimatorCachePreset.DEFAULT)
+            .dynamic()
+            .build();
+
+    public enum HeapEstimatorCachePreset {
+        DEFAULT,
+        DISABLED,
+        SMALL,
+        LARGE,
+        CUSTOM
+    }
+
+    @Internal
+    @Description(
+            "The maximum size of a heap estimator cache instance. "
+                    + "This setting only takes effect in combination with 'internal.server.heap_estimator_cache.preset' set to 'custom'.")
+    public static final Setting<Integer> heap_estimator_cache_size_limit = newBuilder(
+                    "internal.server.heap_estimator_cache.size_limit", INT, HeapEstimatorCacheConfig.DEFAULT_SIZE_LIMIT)
+            .addConstraint(min(0))
+            .dynamic()
+            .build();
+
+    @Internal
+    @Description(
+            "The estimated heap usage threshold in bytes for an object to be considered a large object by "
+                    + " the heap estimator cache. Only objects larger than this threshold will be considered for caching. "
+                    + "This setting only takes effect in combination with 'internal.server.heap_estimator_cache.preset' set to 'custom'.")
+    public static final Setting<Long> heap_estimator_cache_large_object_threshold = newBuilder(
+                    "internal.server.heap_estimator_cache.large_object_threshold",
+                    BYTES,
+                    HeapEstimatorCacheConfig.DEFAULT_LARGE_OBJECT_THRESHOLD)
+            .addConstraint(min(0L))
+            .dynamic()
+            .build();
+
+    @Internal
+    @Description(
+            "A custom value to return in the 'versions' column of the `dbms.components()` procedure, for the 'Neo4j Kernel' component."
+                    + "Note: is overridden by the `internal.neo4j.custom_version` system property.")
+    public static final Setting<String> custom_kernel_version =
+            newBuilder("internal.dbms.custom_kernel_version", STRING, null).build();
+
+    @Internal
+    @Description(
+            "Enables asynchronous commit and rollback of shard transactions. "
+                    + "When enabled a graph shard will not wait for the result when committing or rolling back a property shard transaction. "
+                    + "This means a performance improvement for short transactions that fetch only very little data from property shards.")
+    public static final Setting<Boolean> spd_asynchronous_shard_transaction_close = newBuilder(
+                    "internal.dbms.sharded_property_database.asynchronous_shard_transaction_close", BOOL, true)
+            .build();
+
+    @Internal
+    @Description("Set the frequency and offset for reporting index usage statistics.")
+    public static final Setting<Duration> async_index_drop_maintenance_interval = newBuilder(
+                    "internal.dbms.index.async_index_drop_maintenance_interval", DURATION, ofMinutes(1))
+            .addConstraint(resolution(ChronoUnit.SECONDS))
+            .build();
+
+    @Internal
+    @Description("Allowlist of logging prefixes for libraries that bind to SLF4J")
+    public static final Setting<List<String>> slf4j_class_prefixes = newBuilder(
+                    "internal.server.logs.filter.slf4j_class_prefixes",
+                    SettingValueParsers.listOf(STRING),
+                    List.of("org.eclipse.jetty"))
+            .immutable()
+            .build();
+
+    @Internal
+    @Description("Do not create updates when the new property value is identical to the existing value. "
+            + "No recording of these updates are preserved, prioritizing performance over correctness.")
+    public static final Setting<Boolean> no_property_update_on_identical_value = newBuilder(
+                    "internal.db.transaction.no_property_update_on_identical_value", BOOL, false)
+            .build();
+
+    @Internal
+    @Description("Enables profiling of composite queries. Profiling of composite queries behaves differently "
+            + "than in the case of the non-composite ones. The result of profiling is not returned in the form of "
+            + "a profiled execution plan at the end of the query, but the profiling data are written to a file. "
+            + "A file is created for each profiled query execution and the files are located, by default, in logs/profiles "
+            + "directory. The location can be changed with 'internal.db.composite.query_profiles_output' setting.")
+    public static final Setting<Boolean> composite_query_profiling_enabled = newBuilder(
+                    "internal.db.composite.query_profiling_enabled", BOOL, false)
+            .dynamic()
+            .build();
+
+    @Internal
+    @Description("Output directory of composite query profiling output.")
+    public static final Setting<Path> composite_query_profiles_output = newBuilder(
+                    "internal.db.composite.query_profiles_output", PATH, Path.of("logs", "profiles"))
+            .setDependency(GraphDatabaseSettings.neo4j_home)
+            .dynamic()
+            .build();
+
+    @Internal
+    @Description("The duration between detailed reporting events during an import process.")
+    public static final Setting<Duration> import_detailed_reporting_interval = newBuilder(
+                    "internal.db.import.detailed_reporting_interval", DURATION, Duration.ofMinutes(1))
+            .addConstraint(resolution(ChronoUnit.SECONDS))
+            .build();
+
+    @Internal
+    @Description("Allows the size of individual files when creating a split archive to be smaller than 1 GiB. "
+            + "This is only for testing purposes and should not be used in production.")
+    public static final Setting<Boolean> allow_small_split_archive_size = newBuilder(
+                    "internal.db.backup.allow_small_split_file_size", BOOL, false)
+            .build();
+
+    @Internal
+    @Description("Defines the level of parallelism employed when reading backup descriptions")
+    public static final Setting<Integer> backup_description_reader_threads = newBuilder(
+                    "internal.dbms.backup.description_reader_thread_count", INT, 8)
+            .addConstraint(min(1))
+            .build();
+
+    @Internal
+    @Description("Total in-memory byte budget for the cache in versioned relationship degree store.")
+    public static final Setting<Long> versioned_degrees_cache_max_size = newBuilder(
+                    "internal.db.block.versioned_degrees_cache_max_size", BYTES, mebiBytes(10))
+            .addConstraint(min(kibiBytes(8)))
+            .build();
+
+    @Internal
+    @Description(
+            "Target size of one segment for the segmented store files. When set to 0, every "
+                    + "store is a single file (classical behaviour). When set the store file is split into segment files of configured size. "
+                    + " Segment 0 keeps the original file name (block.x1.db), additional segments use numeric suffixes (e.g. block.x1.db.1).")
+    public static final Setting<Long> store_segment_size = newBuilder("internal.db.store.segment_size", BYTES, 0L)
+            .addConstraint(any(is(0L), min(mebiBytes(16))))
+            .build();
+
+    @Internal
+    @Description("Track store segments state changes. Only affects segmented stores.")
+    public static final Setting<Boolean> store_segment_tracking =
+            newBuilder("internal.db.store.segment_tracking", BOOL, true).build();
+
+    @Internal
+    @Description(
+            "When inspecting or consuming backup chains, performs an incremental search over an increasing number of artifacts. "
+                    + "Provides a performance improvement for directories containing many short backup chains, or a long continuous backup chain."
+                    + "Only has an effect for object-storage-based filesystems, not on true local filesystems.")
+    public static final Setting<Boolean> backup_chain_search_incremental_query_enabled = newBuilder(
+                    "internal.dbms.backup.incremental_chain_search_enabled", BOOL, false)
+            .build();
+
+    @Internal
+    @Description("Controls the increase to the number of artifacts searched upon each iteration. "
+            + "A reasonable batch size is twice the expected number of artifacts per backup chain.")
+    public static final Setting<Integer> backup_chain_search_incremental_query_batch_size = newBuilder(
+                    "internal.dbms.backup.incremental_chain_search_query_batch_size", INT, 50)
+            .addConstraint(min(1))
+            .build();
+
+    @Internal
+    @Description("The size of the cache for holding recently accessed roots in the dense relationships store."
+            + " Accepted values are: plain numbers, byte values e.g 10M, percentage of heap e.g. 1% or 'auto'"
+            + " for an automatically chosen value, attempting to set the cache to an optimal size. "
+            + "This cache is shared between all block format databases in the dbms.")
+    public static final Setting<Long> dense_relationships_store_root_cache_size = newBuilder(
+                    "internal.db.block.dense_relationships_store_root_cache_size",
+                    new DenseRootCacheSizeSettingValueParser(),
+                    DenseRootCacheSizeSettingValueParser.clampedPercentageOfHeap(1))
+            .addConstraint(min(DenseRootCacheSizeSettingValueParser.MIN))
+            .addConstraint(max(DenseRootCacheSizeSettingValueParser.MAX))
+            .build();
+
+    public static HeapEstimatorCacheConfig extractCustomHeapEstimatorCacheConfig(Config config) {
+        return new HeapEstimatorCacheConfig(
+                config.get(GraphDatabaseInternalSettings.heap_estimator_cache_size_limit),
+                config.get(GraphDatabaseInternalSettings.heap_estimator_cache_large_object_threshold));
+    }
 }

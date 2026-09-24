@@ -29,9 +29,20 @@ public class DefaultScopedMemoryTracker implements ScopedMemoryTracker {
     private long trackedNative;
     private long trackedHeap;
     private boolean isClosed;
+    private final HeapEstimatorCache heapEstimatorCache;
 
     public DefaultScopedMemoryTracker(MemoryTracker delegate) {
         this.delegate = delegate;
+        this.heapEstimatorCache = HeapEstimatorCache.NoHeapEstimatorCache.INSTANCE;
+        // TBD: Alternatively we could get it from the delegate,
+        // but for now we require the caller to do this explicitly using
+        // the other constructor
+        // this.heapEstimatorCache = delegate.getHeapEstimatorCache();
+    }
+
+    public DefaultScopedMemoryTracker(MemoryTracker delegate, HeapEstimatorCache heapEstimatorCache) {
+        this.delegate = delegate;
+        this.heapEstimatorCache = heapEstimatorCache;
     }
 
     @Override
@@ -85,6 +96,7 @@ public class DefaultScopedMemoryTracker implements ScopedMemoryTracker {
 
     @Override
     public void reset() {
+        heapEstimatorCache.fullReset();
         delegate.releaseNative(trackedNative);
         delegate.releaseHeap(trackedHeap);
         trackedNative = 0;
@@ -93,10 +105,15 @@ public class DefaultScopedMemoryTracker implements ScopedMemoryTracker {
 
     @Override
     public void close() {
+        heapEstimatorCache.fullReset();
         // On a parent ScopedMemoryTracker, only release memory if that parent was not already closed.
-        if (!(delegate instanceof ScopedMemoryTracker) || !((ScopedMemoryTracker) delegate).isClosed()) {
-            delegate.releaseNative(trackedNative);
-            delegate.releaseHeap(trackedHeap);
+        if (!(delegate instanceof final ScopedMemoryTracker scoped && scoped.isClosed())) {
+            if (trackedNative != 0) {
+                delegate.releaseNative(trackedNative);
+            }
+            if (trackedHeap != 0) {
+                delegate.releaseHeap(trackedHeap);
+            }
         }
         trackedNative = 0;
         trackedHeap = 0;
@@ -105,11 +122,16 @@ public class DefaultScopedMemoryTracker implements ScopedMemoryTracker {
 
     @Override
     public MemoryTracker getScopedMemoryTracker() {
-        return new DefaultScopedMemoryTracker(this);
+        return new DefaultScopedMemoryTracker(this, getHeapEstimatorCache());
     }
 
     @Override
     public boolean isClosed() {
         return isClosed;
+    }
+
+    @Override
+    public HeapEstimatorCache getHeapEstimatorCache() {
+        return heapEstimatorCache;
     }
 }

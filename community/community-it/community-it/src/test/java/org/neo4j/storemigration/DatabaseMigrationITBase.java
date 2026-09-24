@@ -23,7 +23,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.neo4j.configuration.GraphDatabaseInternalSettings.automatic_upgrade_enabled;
-import static org.neo4j.configuration.GraphDatabaseInternalSettings.include_versions_under_development;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
 import static org.neo4j.configuration.GraphDatabaseSettings.SYSTEM_DATABASE_NAME;
 import static org.neo4j.driver.internal.util.Iterables.count;
@@ -33,7 +32,6 @@ import static org.neo4j.internal.kernel.api.InternalIndexState.ONLINE;
 import static org.neo4j.internal.schema.IndexType.RANGE;
 
 import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
@@ -41,7 +39,6 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.stream.StreamSupport;
-import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.mutable.MutableInt;
 import org.neo4j.common.DependencyResolver;
 import org.neo4j.common.EntityType;
@@ -111,18 +108,13 @@ public abstract class DatabaseMigrationITBase {
         return StoreMigrationTestUtils.runStoreMigrationCommandFromSameJvm(neo4jLayout, args);
     }
 
-    protected void doShouldMigrateDatabase(ZippedStore zippedStore, String toRecordFormat, boolean includeExperimental)
+    protected void doShouldMigrateDatabase(ZippedStore zippedStore, String toRecordFormat)
             throws IOException, ConsistencyCheckIncompleteException {
         // given
         Path homeDir = layout.homeDirectory();
         zippedStore.unzip(homeDir);
 
         String[] args = {"--to-format", toRecordFormat, "--verbose", DEFAULT_DATABASE_NAME};
-        if (includeExperimental) {
-            Path additionalConfig = directory.file("add-config.conf");
-            Files.writeString(additionalConfig, include_versions_under_development.name() + "=true");
-            args = ArrayUtils.addAll(args, "--additional-config", additionalConfig.toString());
-        }
 
         // when
         StoreMigrationTestUtils.Result result = migrate(layout, args);
@@ -131,14 +123,9 @@ public abstract class DatabaseMigrationITBase {
         migrateOrRemoveSystemDatabase(zippedStore, layout);
 
         // then
-        TestDatabaseManagementServiceBuilder builder = newDbmsBuilder(homeDir);
-        if (includeExperimental) {
-            builder.setConfig(include_versions_under_development, true);
-            builder.setConfig(GraphDatabaseSettings.db_format, toRecordFormat);
-        }
-        DatabaseManagementService dbms = builder.build();
-
-        try {
+        try (DatabaseManagementService dbms = newDbmsBuilder(homeDir)
+                .setConfig(GraphDatabaseSettings.db_format, toRecordFormat)
+                .build()) {
             GraphDatabaseService db = dbms.database(DEFAULT_DATABASE_NAME);
             verifyContents(db, zippedStore.statistics(), toRecordFormat);
             verifyStoreFormat(db, expectedFormat(db, toRecordFormat));
@@ -146,11 +133,8 @@ public abstract class DatabaseMigrationITBase {
             verifyKernelVersion(db);
             verifyRemovedIndexProviders(db);
             verifyFulltextIndexes(db, zippedStore.statistics().kernelVersion());
-        } finally {
-            dbms.shutdown();
         }
-        // for now we skip index check for experimental formats (multiversion only atm)
-        consistencyCheck(homeDir, DEFAULT_DATABASE_NAME, includeExperimental);
+        consistencyCheck(homeDir, DEFAULT_DATABASE_NAME);
     }
 
     protected StoreVersionIdentifier expectedFormat(GraphDatabaseService db, String toRecordFormat) {
@@ -197,13 +181,11 @@ public abstract class DatabaseMigrationITBase {
         migrate.accept(neo4jLayout);
 
         var initialIndexStateMonitor = new InitialIndexStateMonitor(SYSTEM_DATABASE_NAME);
-        DatabaseManagementService dbms = newDbmsBuilder(targetDirectory)
+        // then
+        try (DatabaseManagementService dbms = newDbmsBuilder(targetDirectory)
                 .setConfig(automatic_upgrade_enabled, false)
                 .setMonitors(initialIndexStateMonitor.monitors())
-                .build();
-
-        // then
-        try {
+                .build()) {
             var system = dbms.database(SYSTEM_DATABASE_NAME);
             verifyInitialIndexState(initialIndexStateMonitor);
             verifyGraphComponents(system);
@@ -224,8 +206,6 @@ public abstract class DatabaseMigrationITBase {
                 tx.createNode();
                 tx.commit();
             }
-        } finally {
-            dbms.shutdown();
         }
         consistencyCheck(targetDirectory, SYSTEM_DATABASE_NAME, true);
     }
@@ -359,8 +339,8 @@ public abstract class DatabaseMigrationITBase {
                 .isFalse();
 
         // The legacy location for scanstores should have been cleared
-        assertFalse(fs.fileExists(databaseLayout.file("neostore.labelscanstore.db")));
-        assertFalse(fs.fileExists(databaseLayout.file("neostore.relationshiptypescanstore.db")));
+        assertFalse(databaseLayout.file("neostore.labelscanstore.db").exists(fs));
+        assertFalse(databaseLayout.file("neostore.relationshiptypescanstore.db").exists(fs));
     }
 
     private static IndexDirectoryStructure getIndexProviderDirectoryStructure(

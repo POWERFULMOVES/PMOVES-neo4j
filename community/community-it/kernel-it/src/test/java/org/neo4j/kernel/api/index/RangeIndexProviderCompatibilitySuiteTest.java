@@ -32,15 +32,18 @@ import org.neo4j.annotations.documented.ReporterFactories;
 import org.neo4j.common.EmptyDependencyResolver;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.database.readonly.ConfigBasedLookupFactory;
+import org.neo4j.configuration.database.readonly.ConfigBasedLookupFactory.DatabaseIdResolver;
+import org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker;
 import org.neo4j.dbms.database.readonly.DefaultReadOnlyDatabases;
 import org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector;
 import org.neo4j.internal.schema.IndexType;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.kernel.database.DatabaseIdFactory;
-import org.neo4j.kernel.database.DatabaseIdRepository;
+import org.neo4j.kernel.database.NamedDatabaseId;
 import org.neo4j.kernel.impl.index.schema.ConsistencyCheckable;
 import org.neo4j.kernel.impl.index.schema.RangeIndexProviderFactory;
+import org.neo4j.logging.NullLogProvider;
 import org.neo4j.monitoring.Monitors;
 
 class RangeIndexProviderCompatibilitySuiteTest extends PropertyIndexProviderCompatibilityTestSuite {
@@ -49,13 +52,15 @@ class RangeIndexProviderCompatibilitySuiteTest extends PropertyIndexProviderComp
         Monitors monitors = new Monitors();
         String monitorTag = "";
         RecoveryCleanupWorkCollector recoveryCleanupWorkCollector = RecoveryCleanupWorkCollector.immediate();
-        var defaultDatabaseId = DatabaseIdFactory.from(
+        NamedDatabaseId defaultDatabaseId = DatabaseIdFactory.from(
                 DEFAULT_DATABASE_NAME, UUID.randomUUID()); // UUID required, but ignored by config lookup
-        DatabaseIdRepository databaseIdRepository = mock(DatabaseIdRepository.class);
-        Mockito.when(databaseIdRepository.getByName(DEFAULT_DATABASE_NAME)).thenReturn(Optional.of(defaultDatabaseId));
-        var readOnlyDatabases =
-                new DefaultReadOnlyDatabases(new ConfigBasedLookupFactory(config, databaseIdRepository));
-        var readOnlyChecker = readOnlyDatabases.forDatabase(defaultDatabaseId);
+
+        DatabaseIdResolver databaseIdResolver = mock(ConfigBasedLookupFactory.DatabaseIdResolver.class);
+        Mockito.when(databaseIdResolver.resolve(DEFAULT_DATABASE_NAME))
+                .thenReturn(Optional.of(defaultDatabaseId.databaseId()));
+        ConfigBasedLookupFactory configBasedLookup = new ConfigBasedLookupFactory(config, databaseIdResolver);
+        DefaultReadOnlyDatabases readOnlyDatabases = new DefaultReadOnlyDatabases(configBasedLookup);
+        DatabaseReadOnlyChecker readOnlyChecker = readOnlyDatabases.forDatabase(defaultDatabaseId);
         return RangeIndexProviderFactory.create(
                 pageCache,
                 graphDbDir,
@@ -65,6 +70,7 @@ class RangeIndexProviderCompatibilitySuiteTest extends PropertyIndexProviderComp
                 config,
                 readOnlyChecker,
                 recoveryCleanupWorkCollector,
+                NullLogProvider.getInstance(),
                 NULL_CONTEXT_FACTORY,
                 NULL,
                 DEFAULT_DATABASE_NAME,

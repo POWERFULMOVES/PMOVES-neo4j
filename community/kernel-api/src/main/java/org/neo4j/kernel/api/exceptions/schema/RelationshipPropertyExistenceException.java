@@ -34,18 +34,6 @@ public class RelationshipPropertyExistenceException extends ConstraintValidation
     private final RelationTypeSchemaDescriptor schema;
     private final long relationshipId;
 
-    @Deprecated
-    private RelationshipPropertyExistenceException(
-            RelationTypeSchemaDescriptor schema,
-            Function<RelationTypeSchemaDescriptor, ConstraintDescriptor> constraintFunc,
-            ConstraintValidationException.Phase phase,
-            long relationshipId,
-            TokenNameLookup tokenNameLookup) {
-        super(constraintFunc.apply(schema), phase, format("Relationship(%s)", relationshipId), tokenNameLookup);
-        this.schema = schema;
-        this.relationshipId = relationshipId;
-    }
-
     private RelationshipPropertyExistenceException(
             ErrorGqlStatusObject gqlStatusObject,
             RelationTypeSchemaDescriptor schema,
@@ -72,7 +60,7 @@ public class RelationshipPropertyExistenceException extends ConstraintValidation
             long relationshipId) {
         // This might be a way to expose hidden properties to the user with roles with no access to those properties
         // TODO: check for user rights
-        var propIds = schema.getPropertyIds();
+        int[] propIds = schema.getPropertyIds();
         String[] propKeyNames = new String[propIds.length];
         for (int i = 0; i < propIds.length; i++) {
             propKeyNames[i] = tokenHolders.propertyKeyGetName(propIds[i]);

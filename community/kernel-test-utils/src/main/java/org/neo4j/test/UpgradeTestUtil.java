@@ -24,24 +24,31 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
-import org.awaitility.Awaitility;
-import org.awaitility.Durations;
+import java.util.function.Consumer;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.dbms.api.DatabaseManagementService;
-import org.neo4j.dbms.database.SystemGraphComponent.Status;
+import org.neo4j.dbms.database.SystemGraphComponents;
 import org.neo4j.function.ThrowingSupplier;
 import org.neo4j.graphdb.GraphDatabaseService;
 import org.neo4j.graphdb.Transaction;
 import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.KernelVersionProvider;
+import org.neo4j.kernel.impl.transaction.ChunkedBatchRepresentation;
+import org.neo4j.kernel.impl.transaction.ChunkedRollbackBatchRepresentation;
 import org.neo4j.kernel.impl.transaction.CommittedCommandBatchRepresentation;
 import org.neo4j.kernel.impl.transaction.CompleteBatchRepresentation;
-import org.neo4j.kernel.impl.transaction.log.CommandBatchCursor;
-import org.neo4j.kernel.impl.transaction.log.LogicalTransactionStore;
+import org.neo4j.kernel.impl.transaction.EmptyBatchRepresentation;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
+import org.neo4j.storageengine.api.CommandBatch;
 import org.neo4j.storageengine.api.StorageCommand;
+import org.neo4j.wal.CommandBatchCursor;
+import org.neo4j.wal.LogicalTransactionStore;
 
 public class UpgradeTestUtil {
+
+    private static final Consumer<Iterable<? extends StorageCommand>> ASSERT_DEFAULT_UPGRADE_TRANSACTION =
+            c -> assertThat(c).hasSize(1).first().isInstanceOf(StorageCommand.VersionUpgradeCommand.class);
+
     public static void upgradeDatabase(
             DatabaseManagementService dbms,
             GraphDatabaseAPI db,
@@ -74,18 +81,28 @@ public class UpgradeTestUtil {
 
     public static void upgradeDbms(DatabaseManagementService dbms) {
         final var system = dbms.database(GraphDatabaseSettings.SYSTEM_DATABASE_NAME);
-        Awaitility.await()
-                .atMost(Durations.FIVE_MINUTES)
-                .pollDelay(Durations.FIVE_SECONDS)
-                .untilAsserted(() -> assertThat(callUpgrade(system))
-                        .as("Unable to upgrade the system graph to the current version")
-                        .isEqualTo(Status.CURRENT.name()));
+        try {
+            manuallyUpgrade(system);
+        } catch (Exception e) {
+            throw new RuntimeException("this was unexpected...", e);
+        }
     }
 
     public static void assertUpgradeTransactionInOrder(
             KernelVersion from, KernelVersion to, long fromTxId, GraphDatabaseAPI db) throws Exception {
+        assertUpgradeTransactionInOrder(from, to, fromTxId, db, ASSERT_DEFAULT_UPGRADE_TRANSACTION);
+    }
+
+    public static void assertUpgradeTransactionInOrder(
+            KernelVersion from,
+            KernelVersion to,
+            long fromTxId,
+            GraphDatabaseAPI db,
+            Consumer<Iterable<? extends StorageCommand>> upgradeTransactionRequirement)
+            throws Exception {
         LogicalTransactionStore lts = db.getDependencyResolver().resolveDependency(LogicalTransactionStore.class);
-        assertUpgradeTransactionInOrder(from, to, fromTxId, () -> lts.getCommandBatches(fromTxId + 1));
+        assertUpgradeTransactionInOrder(
+                from, to, fromTxId, () -> lts.getCommandBatches(fromTxId + 1), upgradeTransactionRequirement);
     }
 
     public static void assertUpgradeTransactionInOrder(
@@ -94,14 +111,38 @@ public class UpgradeTestUtil {
             long fromTxId,
             ThrowingSupplier<CommandBatchCursor, IOException> commandBatchCursorSupplier)
             throws Exception {
+        assertUpgradeTransactionInOrder(
+                from, to, fromTxId, commandBatchCursorSupplier, ASSERT_DEFAULT_UPGRADE_TRANSACTION);
+    }
+
+    public static void assertUpgradeTransactionInOrder(
+            KernelVersion from,
+            KernelVersion to,
+            long fromTxId,
+            ThrowingSupplier<CommandBatchCursor, IOException> commandBatchCursorSupplier,
+            Consumer<Iterable<? extends StorageCommand>> upgradeTransactionRequirement)
+            throws Exception {
         ArrayList<KernelVersion> transactionVersions = new ArrayList<>();
         ArrayList<CommittedCommandBatchRepresentation> transactions = new ArrayList<>();
         try (CommandBatchCursor commandBatchCursor = commandBatchCursorSupplier.get()) {
             while (commandBatchCursor.next()) {
-                CompleteBatchRepresentation representation = (CompleteBatchRepresentation) commandBatchCursor.get();
-                if (representation.txId() > fromTxId) {
-                    transactions.add(representation);
-                    transactionVersions.add(representation.startEntry().kernelVersion());
+                CommittedCommandBatchRepresentation committedCommandBatchRepresentation = commandBatchCursor.get();
+                if (committedCommandBatchRepresentation.txId() > fromTxId) {
+                    transactions.add(committedCommandBatchRepresentation);
+                    KernelVersion kernelVersion;
+                    switch (committedCommandBatchRepresentation) {
+                        case EmptyBatchRepresentation empty -> kernelVersion = empty.kernelVersion();
+                        case CompleteBatchRepresentation complete ->
+                            kernelVersion = complete.startEntry().kernelVersion();
+                        case ChunkedBatchRepresentation chunked ->
+                            kernelVersion = chunked.chunkStart().kernelVersion();
+                        case ChunkedRollbackBatchRepresentation chunkedRollback ->
+                            kernelVersion = chunkedRollback.kernelVersion();
+                        default ->
+                            throw new IllegalStateException(
+                                    "unknown batch type " + committedCommandBatchRepresentation);
+                    }
+                    transactionVersions.add(kernelVersion);
                 }
             }
         }
@@ -109,29 +150,21 @@ public class UpgradeTestUtil {
                 .hasSizeGreaterThanOrEqualTo(2); // at least upgrade transaction and the triggering transaction
         assertThat(transactionVersions)
                 .isSortedAccordingTo(
-                        Comparator.comparingInt(KernelVersion::version)); // Sorted means everything is in order
-        assertThat(transactionVersions.get(0)).isEqualTo(from); // First should be "from" version
-        assertThat(transactionVersions.get(transactionVersions.size() - 1)).isEqualTo(to); // And last the "to" version
+                        Comparator.comparingInt(KernelVersion::versionAsInt)); // Sorted means everything is in order
+        assertThat(transactionVersions.getFirst()).isEqualTo(from); // First should be "from" version
+        assertThat(transactionVersions.getLast()).isEqualTo(to); // And last the "to" version
 
         int indexFirstOnNew = transactionVersions.indexOf(to);
         // Upgrade should be last on old version
         CommittedCommandBatchRepresentation upgradeTransaction = transactions.get(indexFirstOnNew - 1);
-        var commands = upgradeTransaction.commandBatch();
-        for (StorageCommand command : commands) {
-            assertThat(command).isInstanceOf(StorageCommand.VersionUpgradeCommand.class);
-        }
+        CommandBatch commands = upgradeTransaction.commandBatch();
+        assertThat(commands).satisfies(upgradeTransactionRequirement);
     }
 
-    private static String callUpgrade(GraphDatabaseService db) {
-        String status;
-        try (var tx = db.beginTx()) {
-            // whilst 'dbms.upgrade' returns a stream from BuiltInDbmsProcedures - it only ever contains one item
-            status = tx.execute("CALL dbms.upgrade()").stream()
-                    .map(row -> row.get("status").toString())
-                    .findFirst()
-                    .orElse(Status.UNINITIALIZED.name());
-            tx.commit();
-        }
-        return status;
+    public static void manuallyUpgrade(GraphDatabaseService systemDb) throws Exception {
+        ((GraphDatabaseAPI) systemDb)
+                .getDependencyResolver()
+                .resolveDependency(SystemGraphComponents.class)
+                .upgradeToCurrent(systemDb);
     }
 }

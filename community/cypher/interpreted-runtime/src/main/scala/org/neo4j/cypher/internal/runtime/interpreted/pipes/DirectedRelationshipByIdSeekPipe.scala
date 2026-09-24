@@ -25,28 +25,36 @@ import org.neo4j.cypher.internal.runtime.PrimitiveLongHelper
 import org.neo4j.cypher.internal.util.attribution.Id
 import org.neo4j.values.virtual.VirtualValues
 
-case class DirectedRelationshipByIdSeekPipe(ident: String, relIdExpr: SeekArgs, toNode: String, fromNode: String)(
+case class DirectedRelationshipByIdSeekPipe(
+  ident: Option[String],
+  relIdExpr: SeekArgs,
+  toNode: Option[String],
+  fromNode: Option[String]
+)(
   val id: Id = Id.INVALID_ID
 ) extends Pipe {
+
+  private val relationshipWriter =
+    Relationships.compileRelationshipWriter(ident, fromNode, toNode)
 
   protected def internalCreateResults(state: QueryState): ClosingIterator[CypherRow] = {
     val ctx = state.newRowWithArgument(rowFactory)
     val relIds = relIdExpr.expressions(ctx, state)
+    val cursor = state.query.scanCursor()
+    state.query.resources.trace(cursor)
     val relationships = new DirectedRelationshipIdSeekIterator(
       relIds.iterator(),
       state.query.transactionalContext.dataRead,
-      state.query.scanCursor()
+      cursor
     )
     PrimitiveLongHelper.map(
       relationships,
-      r => {
-        rowFactory.copyWith(
+      _ => {
+        relationshipWriter.writeRow(
+          rowFactory,
           ctx,
-          ident,
-          VirtualValues.relationship(r, relationships.startNodeId(), relationships.endNodeId(), relationships.typeId()),
-          fromNode,
+          relationships.relationship(),
           VirtualValues.node(relationships.startNodeId()),
-          toNode,
           VirtualValues.node(relationships.endNodeId())
         )
       }

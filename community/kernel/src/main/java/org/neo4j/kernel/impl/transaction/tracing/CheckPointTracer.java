@@ -20,6 +20,7 @@
 package org.neo4j.kernel.impl.transaction.tracing;
 
 import org.neo4j.kernel.impl.transaction.stats.CheckpointCounters;
+import org.neo4j.wal.checkpoint.LogCheckPointEvent;
 
 public interface CheckPointTracer extends CheckpointCounters {
     CheckPointTracer NULL = new CheckPointTracer() {

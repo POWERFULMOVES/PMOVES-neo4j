@@ -34,11 +34,12 @@ import org.neo4j.graphdb.Direction;
 import org.neo4j.internal.kernel.api.Locks;
 import org.neo4j.internal.kernel.api.QueryContext;
 import org.neo4j.internal.kernel.api.SchemaRead;
-import org.neo4j.internal.kernel.api.security.AccessMode.Static;
 import org.neo4j.internal.kernel.api.security.SecurityContext;
+import org.neo4j.internal.kernel.api.security.StaticAccessMode;
 import org.neo4j.kernel.impl.api.KernelTransactionImplementation;
 import org.neo4j.kernel.impl.api.index.IndexingService;
 import org.neo4j.kernel.impl.api.state.TxState;
+import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.PropertySelection;
 import org.neo4j.storageengine.api.Reference;
@@ -53,7 +54,6 @@ class DefaultRelationshipTraversalCursorTest {
     private static final int type = 9999;
     private static final int type2 = 9998;
     private static final long relationship = 100;
-    private final DefaultPooledCursors pool = mock(DefaultPooledCursors.class);
     private final InternalCursorFactory internalCursors = MockedInternalCursors.mockedInternalCursors();
 
     // Regular traversal of a sparse chain
@@ -63,12 +63,12 @@ class DefaultRelationshipTraversalCursorTest {
         // given
         StorageRelationshipTraversalCursor storeCursor = storeCursor(100, 102, 104);
         DefaultRelationshipTraversalCursor cursor =
-                new DefaultRelationshipTraversalCursor(pool::accept, storeCursor, internalCursors, false);
+                new DefaultRelationshipTraversalCursor(c -> {}, storeCursor, internalCursors, false);
         var ktx = emptyTxState();
         var read = mockedRead(ktx);
 
         // when
-        cursor.init(node, relationship, ALL_RELATIONSHIPS, read, ktx, () -> Static.FULL);
+        cursor.init(node, relationship, ALL_RELATIONSHIPS, read, ktx, () -> StaticAccessMode.FULL);
 
         // then
         assertRelationships(cursor, 100, 102, 104);
@@ -79,12 +79,12 @@ class DefaultRelationshipTraversalCursorTest {
         // given
         StorageRelationshipTraversalCursor storeCursor = storeCursor(100, 102, 104);
         DefaultRelationshipTraversalCursor cursor =
-                new DefaultRelationshipTraversalCursor(pool::accept, storeCursor, internalCursors, false);
+                new DefaultRelationshipTraversalCursor(c -> {}, storeCursor, internalCursors, false);
         var ktx = txState(3, 4);
         var read = mockedRead(ktx);
 
         // when
-        cursor.init(node, relationship, ALL_RELATIONSHIPS, read, ktx, () -> Static.FULL);
+        cursor.init(node, relationship, ALL_RELATIONSHIPS, read, ktx, () -> StaticAccessMode.FULL);
 
         // then
         assertRelationships(cursor, 3, 4, 100, 102, 104);
@@ -101,7 +101,7 @@ class DefaultRelationshipTraversalCursorTest {
                 rel(104, node, 52, type));
 
         DefaultRelationshipTraversalCursor cursor =
-                new DefaultRelationshipTraversalCursor(pool::accept, storeCursor, internalCursors, false);
+                new DefaultRelationshipTraversalCursor(c -> {}, storeCursor, internalCursors, false);
         var ktx = txState(
                 rel(3, node, 50, type),
                 rel(4, 50, node, type),
@@ -118,7 +118,7 @@ class DefaultRelationshipTraversalCursorTest {
                 selection(type, Direction.OUTGOING),
                 read,
                 ktx,
-                () -> Static.FULL);
+                () -> StaticAccessMode.FULL);
 
         // then
         assertRelationships(cursor, 3, 7, 6, 100, 102, 104);
@@ -132,7 +132,7 @@ class DefaultRelationshipTraversalCursorTest {
         StorageRelationshipTraversalCursor storeCursor = emptyStoreCursor();
 
         DefaultRelationshipTraversalCursor cursor =
-                new DefaultRelationshipTraversalCursor(pool::accept, storeCursor, internalCursors, false);
+                new DefaultRelationshipTraversalCursor(c -> {}, storeCursor, internalCursors, false);
         var ktx = txState(
                 rel(3, node, 50, type),
                 rel(4, 50, node, type),
@@ -142,7 +142,7 @@ class DefaultRelationshipTraversalCursorTest {
         var read = mockedRead(ktx);
 
         // when
-        cursor.init(node, relationship, selection(type, Direction.OUTGOING), read, ktx, () -> Static.FULL);
+        cursor.init(node, relationship, selection(type, Direction.OUTGOING), read, ktx, () -> StaticAccessMode.FULL);
 
         // then
         assertRelationships(cursor, 3, 7, 6);
@@ -154,7 +154,7 @@ class DefaultRelationshipTraversalCursorTest {
         StorageRelationshipTraversalCursor storeCursor = emptyStoreCursor();
 
         DefaultRelationshipTraversalCursor cursor =
-                new DefaultRelationshipTraversalCursor(pool::accept, storeCursor, internalCursors, false);
+                new DefaultRelationshipTraversalCursor(c -> {}, storeCursor, internalCursors, false);
         var ktx = txState(
                 rel(3, node, 50, type),
                 rel(4, 50, node, type),
@@ -165,7 +165,7 @@ class DefaultRelationshipTraversalCursorTest {
         var read = mockedRead(ktx);
 
         // when
-        cursor.init(node, relationship, selection(type, Direction.INCOMING), read, ktx, () -> Static.FULL);
+        cursor.init(node, relationship, selection(type, Direction.INCOMING), read, ktx, () -> StaticAccessMode.FULL);
 
         // then
         assertRelationships(cursor, 4, 7, 6);
@@ -177,7 +177,7 @@ class DefaultRelationshipTraversalCursorTest {
         StorageRelationshipTraversalCursor storeCursor = emptyStoreCursor();
 
         DefaultRelationshipTraversalCursor cursor =
-                new DefaultRelationshipTraversalCursor(pool::accept, storeCursor, internalCursors, false);
+                new DefaultRelationshipTraversalCursor(c -> {}, storeCursor, internalCursors, false);
         var ktx = txState(
                 rel(3, node, 50, type),
                 rel(2, node, node, type),
@@ -188,7 +188,7 @@ class DefaultRelationshipTraversalCursorTest {
         var read = mockedRead(ktx);
 
         // when
-        cursor.init(node, relationship, selection(type, Direction.BOTH), read, ktx, () -> Static.FULL);
+        cursor.init(node, relationship, selection(type, Direction.BOTH), read, ktx, () -> StaticAccessMode.FULL);
 
         // then
         assertRelationships(cursor, 3, 8, 7, 2, 6);
@@ -202,7 +202,7 @@ class DefaultRelationshipTraversalCursorTest {
         final var endId = 42;
 
         final var storeCursor = emptyStoreCursor();
-        final var cursor = new DefaultRelationshipTraversalCursor(pool::accept, storeCursor, internalCursors, false);
+        final var cursor = new DefaultRelationshipTraversalCursor(c -> {}, storeCursor, internalCursors, false);
         final var ktx = txState(
                 rel(3, node, 50, type),
                 rel(2, node, node, type),
@@ -213,7 +213,7 @@ class DefaultRelationshipTraversalCursorTest {
         var read = mockedRead(ktx);
 
         // when
-        cursor.init(relId, read, ktx, () -> Static.FULL);
+        cursor.init(relId, read, ktx, () -> StaticAccessMode.FULL);
 
         // then
         assertThat(cursor.next()).isTrue();
@@ -304,7 +304,11 @@ class DefaultRelationshipTraversalCursorTest {
             }
 
             @Override
-            public void init(long nodeReference, long reference, RelationshipSelection selection) {
+            public void init(
+                    long nodeReference,
+                    long reference,
+                    RelationshipSelection selection,
+                    boolean includeChangesFromThisTransaction) {
                 this.nodeReference = nodeReference;
                 this.selection = selection;
             }
@@ -365,9 +369,6 @@ class DefaultRelationshipTraversalCursorTest {
             public void reset() {}
 
             @Override
-            public void setForceLoad() {}
-
-            @Override
             public void close() {}
         };
     }
@@ -387,6 +388,7 @@ class DefaultRelationshipTraversalCursorTest {
                 false,
                 ktx,
                 () -> ktx.securityContext().mode(),
-                false);
+                false,
+                NullLogProvider.getInstance());
     }
 }

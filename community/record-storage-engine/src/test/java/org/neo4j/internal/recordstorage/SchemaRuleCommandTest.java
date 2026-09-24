@@ -46,17 +46,19 @@ import org.neo4j.internal.schema.SchemaDescriptors;
 import org.neo4j.internal.schema.SchemaRule;
 import org.neo4j.internal.schema.constraints.ConstraintDescriptorFactory;
 import org.neo4j.io.ByteUnit;
+import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.kernel.impl.store.MetaDataStore;
 import org.neo4j.kernel.impl.store.NeoStores;
 import org.neo4j.kernel.impl.store.SchemaStore;
 import org.neo4j.kernel.impl.store.record.SchemaRecord;
-import org.neo4j.kernel.impl.transaction.log.InMemoryClosableChannel;
 import org.neo4j.lock.LockService;
+import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.IndexUpdateListener;
 import org.neo4j.storageengine.api.StorageCommand;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.storageengine.util.IdGeneratorUpdatesWorkSync;
 import org.neo4j.test.LatestVersions;
+import org.neo4j.wal.InMemoryClosableChannel;
 
 class SchemaRuleCommandTest {
     private final int labelId = 2;
@@ -112,7 +114,7 @@ class SchemaRuleCommandTest {
         visitSchemaRuleCommand(indexApplier, new SchemaRuleCommand(serialization, before, after, rule));
 
         // THEN
-        verify(indexUpdateListener).createIndexes(SYSTEM, rule);
+        verify(indexUpdateListener).createIndexes(SYSTEM, CursorContext.NULL_CONTEXT, rule);
     }
 
     @Test
@@ -182,7 +184,7 @@ class SchemaRuleCommandTest {
 
         // WHEN
         command.serialize(buffer);
-        StorageCommand readCommand = serialization.read(buffer);
+        StorageCommand readCommand = serialization.read(buffer, EmptyMemoryTracker.INSTANCE);
 
         // THEN
         assertThat(readCommand).isInstanceOf(SchemaRuleCommand.class);
@@ -203,7 +205,7 @@ class SchemaRuleCommandTest {
 
         // WHEN
         command.serialize(buffer);
-        StorageCommand readCommand = serialization.read(buffer);
+        StorageCommand readCommand = serialization.read(buffer, EmptyMemoryTracker.INSTANCE);
 
         // THEN
         assertThat(readCommand).isInstanceOf(SchemaRuleCommand.class);
@@ -227,12 +229,12 @@ class SchemaRuleCommandTest {
         after.setCreated();
 
         SchemaRuleCommand command = new SchemaRuleCommand(serialization, before, after, rule);
-        InMemoryClosableChannel buffer = new InMemoryClosableChannel((int) ByteUnit.kibiBytes(5));
+        InMemoryClosableChannel buffer = new InMemoryClosableChannel((int) ByteUnit.kibiBytes(12));
         when(neoStores.getSchemaStore()).thenReturn(schemaStore);
 
         // WHEN
         command.serialize(buffer);
-        SchemaRuleCommand readCommand = (SchemaRuleCommand) serialization.read(buffer);
+        SchemaRuleCommand readCommand = (SchemaRuleCommand) serialization.read(buffer, EmptyMemoryTracker.INSTANCE);
 
         // THEN
         assertEquals(ruleId, readCommand.getKey());

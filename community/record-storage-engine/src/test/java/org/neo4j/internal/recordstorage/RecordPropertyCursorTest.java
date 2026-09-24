@@ -21,6 +21,7 @@ package org.neo4j.internal.recordstorage;
 
 import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -39,14 +40,12 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import org.eclipse.collections.api.factory.Sets;
 import org.eclipse.collections.api.map.primitive.MutableIntObjectMap;
 import org.eclipse.collections.impl.factory.primitive.IntObjectMaps;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.configuration.Config;
 import org.neo4j.internal.helpers.collection.Iterables;
 import org.neo4j.internal.id.DefaultIdGeneratorFactory;
@@ -56,6 +55,7 @@ import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.PageCursor;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.store.DynamicAllocatorProvider;
 import org.neo4j.kernel.impl.store.DynamicAllocatorProviders;
 import org.neo4j.kernel.impl.store.NeoStores;
@@ -70,20 +70,20 @@ import org.neo4j.kernel.impl.store.record.PrimitiveRecord;
 import org.neo4j.kernel.impl.store.record.PropertyBlock;
 import org.neo4j.kernel.impl.store.record.PropertyRecord;
 import org.neo4j.kernel.impl.store.record.RecordLoad;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.PropertySelection;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.EphemeralNeo4jLayoutExtension;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.extension.pagecache.EphemeralPageCacheExtension;
+import org.neo4j.values.storable.RandomValuesUtils;
 import org.neo4j.values.storable.Value;
 
 @EphemeralPageCacheExtension
 @EphemeralNeo4jLayoutExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 public class RecordPropertyCursorTest {
     @Inject
     protected RandomSupport random;
@@ -105,6 +105,9 @@ public class RecordPropertyCursorTest {
 
     @BeforeEach
     void setup() {
+        random.withConfiguration(
+                        RandomValuesUtils.selectStorageEngineDependentConfiguration(RecordStorageEngineFactory.NAME))
+                .reset();
         var pageCacheTracer = PageCacheTracer.NULL;
         idGeneratorFactory =
                 new DefaultIdGeneratorFactory(fs, immediate(), pageCacheTracer, databaseLayout.getDatabaseName());
@@ -119,8 +122,7 @@ public class RecordPropertyCursorTest {
                         NullLogProvider.getInstance(),
                         new CursorContextFactory(pageCacheTracer, EMPTY_CONTEXT_SUPPLIER),
                         false,
-                        LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
-                        Sets.immutable.empty())
+                        DatabaseCreationOptions.EMPTY_CREATION_OPTIONS)
                 .openAllNeoStores();
         allocatorProvider = DynamicAllocatorProviders.nonTransactionalAllocator(neoStores);
 
@@ -244,15 +246,16 @@ public class RecordPropertyCursorTest {
         // when
         RecordPropertyCursor cursor = createCursor();
         cursor.initNodeProperties(longReference(firstProp), ALL_PROPERTIES, owner.getId());
-        InconsistentDataReadException e = assertThrows(InconsistentDataReadException.class, () -> {
-            while (cursor.next()) {
-                // just keep going, it should eventually hit the cycle detection threshold
-                cursor.propertyValue();
-            }
-        });
 
         // then
-        assertThat(e).hasMessageContainingAll("Unable to read property value in record", "owner NODE:" + owner.getId());
+        assertThatThrownBy(() -> {
+                    while (cursor.next()) {
+                        // just keep going, it should eventually hit the cycle detection threshold
+                        cursor.propertyValue();
+                    }
+                })
+                .isInstanceOf(InconsistentDataReadException.class)
+                .hasMessageContainingAll("Unable to read property value in record", "owner NODE:" + owner.getId());
     }
 
     @Test
@@ -348,7 +351,8 @@ public class RecordPropertyCursorTest {
                     allocatorProvider.allocator(StoreType.PROPERTY_STRING),
                     allocatorProvider.allocator(StoreType.PROPERTY_ARRAY),
                     NULL_CONTEXT,
-                    INSTANCE);
+                    INSTANCE,
+                    "db-format-2000");
             list.add(block);
         }
         return list;

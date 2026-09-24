@@ -19,24 +19,29 @@
  */
 package org.neo4j.kernel.impl.coreapi;
 
+import static org.neo4j.graphdb.TransactionFailureHelper.UNABLE_TO_COMPLETE_TRANSACTION;
+
+import org.neo4j.gqlstatus.ErrorGqlStatusObject;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.graphdb.ConstraintViolationException;
 import org.neo4j.graphdb.TransactionFailureException;
-import org.neo4j.graphdb.TransactionStatusFailureException;
+import org.neo4j.graphdb.TransactionFailureHelper;
 import org.neo4j.graphdb.TransientFailureException;
 import org.neo4j.graphdb.TransientTransactionFailureException;
 import org.neo4j.internal.kernel.api.exceptions.ConstraintViolationTransactionFailureException;
 import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.api.exceptions.Status.Classification;
+import org.neo4j.logging.Log;
+import org.neo4j.monitoring.ExceptionHandlerService;
 
 public class DefaultTransactionExceptionMapper implements TransactionExceptionMapper {
-    private static final String UNABLE_TO_COMPLETE_TRANSACTION = "Unable to complete transaction.";
-
     public static final DefaultTransactionExceptionMapper INSTANCE = new DefaultTransactionExceptionMapper();
 
     private DefaultTransactionExceptionMapper() {}
 
     @Override
-    public RuntimeException mapException(Exception e) {
+    public RuntimeException mapException(Exception e, Log log, ExceptionHandlerService exceptionHandlerService) {
         if (e instanceof TransientFailureException tfe) {
             // We let transient exceptions pass through unchanged since they aren't really transaction failures
             // in the same sense as unexpected failures are. Such exception signals that the transaction
@@ -47,16 +52,33 @@ public class DefaultTransactionExceptionMapper implements TransactionExceptionMa
         } else if (e instanceof Status.HasStatus) {
             Status status = ((Status.HasStatus) e).status();
             return mapStatusException(
-                    UNABLE_TO_COMPLETE_TRANSACTION + ": " + status.code().description(), status, e);
+                    UNABLE_TO_COMPLETE_TRANSACTION + ": " + status.code().description(),
+                    status,
+                    e,
+                    exceptionHandlerService);
         } else {
-            return new TransactionFailureException(UNABLE_TO_COMPLETE_TRANSACTION, e, Status.Database.Unknown);
+            // GQL status code 25N02 points to the debug log for more information, so let's make sure people will
+            // actually find more info there.
+            log.error(e.getMessage(), e);
+            exceptionHandlerService.raiseException(e.getMessage(), e);
+            if (e instanceof ErrorGqlStatusObject statusObject) {
+                return TransactionFailureHelper.genericFailure(statusObject, e);
+            }
+            return TransactionFailureHelper.genericFailure(e);
         }
     }
 
-    public static RuntimeException mapStatusException(String message, Status status, Exception cause) {
+    public static RuntimeException mapStatusException(
+            String message, Status status, Exception cause, ExceptionHandlerService exceptionHandlerService) {
+        ErrorGqlStatusObject gql = cause instanceof ErrorGqlStatusObject statusObject
+                ? statusObject.gqlStatusObject()
+                : ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_25N02)
+                        .build();
+
         if (status.code().classification() == Classification.TransientError) {
-            throw new TransientTransactionFailureException(status, message, cause);
+            return new TransientTransactionFailureException(gql, status, message, cause);
         }
-        throw new TransactionStatusFailureException(status, message, cause);
+        exceptionHandlerService.raiseException(cause.getMessage(), cause);
+        return new TransactionFailureException(gql, message, cause, status);
     }
 }

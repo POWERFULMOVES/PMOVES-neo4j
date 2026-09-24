@@ -19,6 +19,7 @@
  */
 package org.neo4j.kernel.impl.api;
 
+import java.util.function.Supplier;
 import org.neo4j.storageengine.api.StorageEngineTransaction;
 
 /**
@@ -27,13 +28,14 @@ import org.neo4j.storageengine.api.StorageEngineTransaction;
  * to append to the end and then at regular intervals batch through the whole queue.
  */
 public class TransactionQueue {
+
     @FunctionalInterface
     public interface Applier {
         void apply(StorageEngineTransaction tx) throws Exception;
     }
 
     private final int maxSize;
-    private final Applier applier;
+    private volatile Applier applier;
     private StorageEngineTransaction tail;
     private StorageEngineTransaction head;
     private int size;
@@ -43,8 +45,33 @@ public class TransactionQueue {
         this.applier = applier;
     }
 
+    public TransactionQueue(int maxSize) {
+        this.maxSize = maxSize;
+    }
+
+    public void installApplier(Applier applier) {
+        this.applier = applier;
+    }
+
+    public boolean willQueueWithCurrentBatch(StorageEngineTransaction transaction) {
+        // will we add this transaction to the current batch in the queue (if any)
+        return isEmpty()
+                || (transaction.commandBatch().kernelVersion()
+                                == tail.commandBatch().kernelVersion()
+                        && !transaction.commandBatch().isRollback());
+    }
+
     public void queue(StorageEngineTransaction transaction) throws Exception {
+        assert applier != null;
+
         if (isNotEmpty()) {
+            if (transaction.commandBatch().kernelVersion()
+                    != tail.commandBatch().kernelVersion()) {
+                // Different kernel versions.. Let's split the batch to make upgrade easier
+                applyTransactions();
+                queue(transaction);
+                return;
+            }
             tail.next(transaction);
         } else {
             head = transaction;
@@ -53,6 +80,23 @@ public class TransactionQueue {
         if (++size == maxSize) {
             applyTransactions();
         }
+    }
+
+    /**
+     * @param transactionSupplier supplier for a {@link StorageEngineTransaction}. We create it lazily to avoid trying
+     *                            to call the Kernel components needed to do so before they are guaranteed to exist.
+     * @return true if not ignored
+     */
+    public boolean queueNonTx(Supplier<StorageEngineTransaction> transactionSupplier) throws Exception {
+        // Only interested in non-tx things that happen after kernel store has been created.
+        // For first start up SeedStoreEntry block until kernel is up to guarantee we don't miss non tx of interest
+        // For subsequent starts kernel should be up before processing begins
+        if (applier == null) {
+            return false;
+        }
+
+        queue(transactionSupplier.get());
+        return true;
     }
 
     public void applyTransactions() throws Exception {
@@ -64,7 +108,11 @@ public class TransactionQueue {
         }
     }
 
+    private boolean isEmpty() {
+        return size == 0;
+    }
+
     private boolean isNotEmpty() {
-        return size != 0;
+        return !isEmpty();
     }
 }

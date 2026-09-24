@@ -63,12 +63,7 @@ public class DefaultComparatorTopTable<T> extends MemoryTrackingHeap<T>
     }
 
     public DefaultComparatorTopTable(Comparator<? super T> comparator, long totalCount, MemoryTracker memoryTracker) {
-        this(comparator, totalCount, memoryTracker, 0L);
-    }
-
-    public DefaultComparatorTopTable(
-            Comparator<? super T> comparator, long totalCount, MemoryTracker memoryTracker, long extraShallowSize) {
-        super(comparator, (int) Math.min(totalCount, 1024), memoryTracker, SHALLOW_INSTANCE_SIZE + extraShallowSize);
+        super(comparator, (int) Math.min(totalCount, 1024), memoryTracker, SHALLOW_INSTANCE_SIZE);
         this.totalCount = totalCount;
     }
 
@@ -159,6 +154,7 @@ public class DefaultComparatorTopTable<T> extends MemoryTrackingHeap<T>
 
     @Override
     protected void overflow(long maxSize) {
-        throw new CypherExecutionException("Top table cannot hold more than " + maxSize + " elements.");
+        throw CypherExecutionException.internalError(
+                this.getClass().getSimpleName(), "Top table cannot hold more than " + maxSize + " elements.");
     }
 }

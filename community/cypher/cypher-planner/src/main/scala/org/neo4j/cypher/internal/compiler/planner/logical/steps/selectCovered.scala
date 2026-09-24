@@ -20,12 +20,13 @@
 package org.neo4j.cypher.internal.compiler.planner.logical.steps
 
 import org.neo4j.cypher.internal.compiler.planner.logical.LogicalPlanningContext
-import org.neo4j.cypher.internal.compiler.planner.logical.RemoteBatchingResult
+import org.neo4j.cypher.internal.compiler.planner.logical.RemoteBatchingSubQueryResult
 import org.neo4j.cypher.internal.compiler.planner.logical.ordering.InterestingOrderConfig
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.ir.QueryGraph
 import org.neo4j.cypher.internal.ir.ast.IRExpression
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
+import org.neo4j.cypher.internal.logical.plans.RewrittenSubQueryPredicates
 
 case object selectCovered extends SelectionCandidateGenerator {
 
@@ -43,27 +44,27 @@ case object selectCovered extends SelectionCandidateGenerator {
     if (unsolvedScalarPredicates.isEmpty) {
       Iterator.empty
     } else {
-      val RemoteBatchingResult(
+      val (impliedUnsolvedHasLabelPredicates, nonImpliedUnsolvedScalarPredicates) =
+        context.staticComponents.graphSchemaOptimizations.partitionImpliedHasLabelsPredicates(unsolvedScalarPredicates)
+      val inputWithImpliedHasLabelPredicates =
+        context.staticComponents.logicalPlanProducer.solvePredicates(input, impliedUnsolvedHasLabelPredicates)
+
+      val RemoteBatchingSubQueryResult(
         rewrittenExpressionsWithCachedProperties,
         planWithProperties
       ) =
         context.settings.remoteBatchPropertiesStrategy.planBatchPropertiesForSelections(
           queryGraph,
-          input,
+          inputWithImpliedHasLabelPredicates,
           context,
-          unsolvedScalarPredicates
+          RewrittenSubQueryPredicates.withNoRewrittenExprs(nonImpliedUnsolvedScalarPredicates)
         )
 
-      val plan = rewrittenExpressionsWithCachedProperties.selections match {
-        case rewrittenSelections: Set[Expression] if rewrittenSelections.nonEmpty =>
-          context.staticComponents.logicalPlanProducer.planSelectionWithSolvedPredicates(
-            planWithProperties,
-            rewrittenExpressionsWithCachedProperties.selections.toVector,
-            unsolvedScalarPredicates.toVector,
-            context
-          )
-        case _ => planWithProperties
-      }
+      val plan = context.staticComponents.logicalPlanProducer.planSelectionWithSolvedPredicates(
+        planWithProperties,
+        rewrittenExpressionsWithCachedProperties,
+        context
+      )
 
       Iterator(SelectionCandidate(plan, unsolvedScalarPredicates))
     }

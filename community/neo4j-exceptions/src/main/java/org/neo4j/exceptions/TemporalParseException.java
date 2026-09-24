@@ -20,7 +20,6 @@
 package org.neo4j.exceptions;
 
 import java.time.format.DateTimeParseException;
-import org.neo4j.gqlstatus.ErrorClassification;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
 import org.neo4j.gqlstatus.GqlHelper;
@@ -33,37 +32,24 @@ import org.neo4j.gqlstatus.GqlStatusInfoCodes;
  * in order to conform with Java's {@code DateTimeParseException} and {@code SyntaxException}.
  */
 public class TemporalParseException extends SyntaxException {
-    public TemporalParseException(String errorMsg, Throwable cause) {
-        super(errorMsg, cause);
-    }
 
-    public TemporalParseException(ErrorGqlStatusObject gqlStatusObject, String errorMsg, Throwable cause) {
+    private TemporalParseException(ErrorGqlStatusObject gqlStatusObject, String errorMsg, Throwable cause) {
         super(gqlStatusObject, errorMsg, cause);
     }
 
-    public TemporalParseException(String errorMsg, String parsedData, int errorIndex) {
-        super(errorMsg, parsedData, errorIndex);
-    }
-
-    public TemporalParseException(
+    private TemporalParseException(
             ErrorGqlStatusObject gqlStatusObject, String errorMsg, String parsedData, int errorIndex) {
         super(gqlStatusObject, errorMsg, parsedData, errorIndex);
     }
 
-    public TemporalParseException(String errorMsg, String parsedData, int errorIndex, Throwable cause) {
-        super(errorMsg, parsedData, errorIndex, cause);
-    }
-
-    public TemporalParseException(
+    private TemporalParseException(
             ErrorGqlStatusObject gqlStatusObject, String errorMsg, String parsedData, int errorIndex, Throwable cause) {
         super(gqlStatusObject, errorMsg, parsedData, errorIndex, cause);
     }
 
     public static TemporalParseException cannotProcessDateTime(String input, Throwable e) {
         var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22000)
-                .withClassification(ErrorClassification.CLIENT_ERROR)
                 .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N11)
-                        .withClassification(ErrorClassification.CLIENT_ERROR)
                         .withParam(GqlParams.StringParam.input, input)
                         .build())
                 .build();
@@ -71,15 +57,13 @@ public class TemporalParseException extends SyntaxException {
     }
 
     public static TemporalParseException cannotParseText(String type, String text) {
-        var gql = GqlHelper.getGql22007_22N36(text.toString(), type);
-        return new TemporalParseException(gql, "Text cannot be parsed to a " + type, text.toString(), 0);
+        var gql = GqlHelper.getGql22007_22N36(text, type);
+        return new TemporalParseException(gql, "Text cannot be parsed to a " + type, text, 0);
     }
 
     public static TemporalParseException cannotParseToDateHint(String input) {
         var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22007)
-                .withClassification(ErrorClassification.CLIENT_ERROR)
                 .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N35)
-                        .withClassification(ErrorClassification.CLIENT_ERROR)
                         .withParam(GqlParams.StringParam.input, input)
                         .build())
                 .build();
@@ -87,6 +71,22 @@ public class TemporalParseException extends SyntaxException {
                 gql,
                 "Text cannot be parsed to a Date. Hint, year+month needs to have two digits for "
                         + "month (e.g. 2015-02) and " + "ordinal dates three digits (e.g. 2015-032).",
+                null);
+    }
+
+    public static TemporalParseException mismatchedPattern(String pattern, String input, String valueType) {
+        var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22007)
+                .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42I68)
+                        .withParam(GqlParams.StringParam.input1, pattern)
+                        .withParam(GqlParams.StringParam.input2, input)
+                        .withParam(GqlParams.StringParam.valueType, valueType)
+                        .build())
+                .build();
+        return new TemporalParseException(
+                gql,
+                String.format(
+                        "Pattern, `%s`, does not match input, `%s`. Verify that the pattern is valid for constructing `%s`.",
+                        pattern, input, valueType),
                 null);
     }
 

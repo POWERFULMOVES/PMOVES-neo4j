@@ -43,6 +43,8 @@ import java.io.IOException
 
 import scala.collection.mutable
 
+object ReactiveResultTestBase
+
 abstract class ReactiveResultTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT]
@@ -278,11 +280,11 @@ abstract class ReactiveResultTestBase[CONTEXT <: RuntimeContext](
     val stream = batchedInputValues(1, nodes.map(Array[Any](_)): _*).stream()
 
     // When
-    val result = execute(
+    val result = executeWithSubscriber(
       logicalQuery,
       runtime,
-      stream,
       TestSubscriber.concurrent,
+      stream,
       testPlanCombinationRewriterHints = Set(TestPlanCombinationRewriter.NoEager)
     )
 

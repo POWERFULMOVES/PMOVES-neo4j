@@ -19,7 +19,10 @@
  */
 package org.neo4j.cypher.testing.impl.embedded
 
+import org.neo4j.cypher.testing.api.ConsumedResult
+import org.neo4j.cypher.testing.api.GqlNotification
 import org.neo4j.cypher.testing.api.StatementResult
+import org.neo4j.cypher.testing.api.ValueMapper
 import org.neo4j.graphdb.GqlStatusObject
 import org.neo4j.graphdb.Notification
 import org.neo4j.graphdb.Result
@@ -34,6 +37,16 @@ case class EmbeddedStatementResult(private val embeddedResult: Result) extends S
   override def records(): Seq[Record] =
     embeddedResult.asScala.map(EmbeddedRecordConverter.convertMap).toList
 
+  override def consume(valueMapper: ValueMapper): ConsumedResult = {
+    val headers = embeddedResult.columns()
+    val collector = new EmbeddedStatementResult.ResultCollector(headers, valueMapper)
+    embeddedResult.accept(collector)
+    val qqlStatusObjects = embeddedResult.getGqlStatusObjects.asScala
+      .map(s => GqlNotification(s.gqlStatus(), s.statusDescription()))
+      .toSeq
+    ConsumedResult(headers, collector.result(), qqlStatusObjects)
+  }
+
   override def getNotifications(): List[Notification] =
     Iterables.asList(embeddedResult.getNotifications).asScala.toList
 
@@ -44,4 +57,28 @@ case class EmbeddedStatementResult(private val embeddedResult: Result) extends S
     embeddedResult.asScala.map(EmbeddedRecordConverter.convertMap)
 
   override def close(): Unit = embeddedResult.close()
+}
+
+object EmbeddedStatementResult {
+
+  final private class ResultCollector(
+    headers: java.util.List[String],
+    mapper: ValueMapper
+  ) extends Result.ResultVisitor[RuntimeException] {
+    private val rows = new java.util.ArrayList[java.util.List[AnyRef]]
+    private val rowSize = headers.size()
+
+    override def visit(row: Result.ResultRow): Boolean = {
+      val resultRow = new java.util.ArrayList[AnyRef](rowSize)
+      var i = 0
+      while (i < rowSize) {
+        resultRow.add(mapper.mapJavaValue(row.get(headers.get(i))))
+        i += 1
+      }
+      rows.add(resultRow)
+      true
+    }
+
+    def result(): java.util.List[java.util.List[AnyRef]] = rows
+  }
 }

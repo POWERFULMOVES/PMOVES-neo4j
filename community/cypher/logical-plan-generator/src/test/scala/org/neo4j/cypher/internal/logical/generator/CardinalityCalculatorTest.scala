@@ -21,9 +21,7 @@ package org.neo4j.cypher.internal.logical.generator
 
 import org.neo4j.cypher.internal.ast.AstConstructionTestSupport
 import org.neo4j.cypher.internal.ast.AstConstructionTestSupport.VariableStringInterpolator
-import org.neo4j.cypher.internal.compiler.NotImplementedPlanContext
 import org.neo4j.cypher.internal.compiler.planner.logical.PlannerDefaults
-import org.neo4j.cypher.internal.compiler.test_helpers.TestGraphStatistics
 import org.neo4j.cypher.internal.expressions.CountStar
 import org.neo4j.cypher.internal.expressions.LabelName
 import org.neo4j.cypher.internal.expressions.ListLiteral
@@ -39,6 +37,7 @@ import org.neo4j.cypher.internal.logical.plans.CartesianProduct
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipByIdSeek
 import org.neo4j.cypher.internal.logical.plans.Distinct
 import org.neo4j.cypher.internal.logical.plans.Expand
+import org.neo4j.cypher.internal.logical.plans.Expand.ExpandAll
 import org.neo4j.cypher.internal.logical.plans.IndexOrderNone
 import org.neo4j.cypher.internal.logical.plans.Limit
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
@@ -62,13 +61,16 @@ import org.neo4j.cypher.internal.planner.spi.GraphStatistics
 import org.neo4j.cypher.internal.planner.spi.IndexDescriptor
 import org.neo4j.cypher.internal.planner.spi.InstrumentedGraphStatistics
 import org.neo4j.cypher.internal.planner.spi.MutableGraphStatisticsSnapshot
+import org.neo4j.cypher.internal.planner.spi.NotImplementedPlanContext
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.Cardinalities
+import org.neo4j.cypher.internal.planner.spi.TestGraphStatistics
 import org.neo4j.cypher.internal.util.Cardinality
 import org.neo4j.cypher.internal.util.LabelId
 import org.neo4j.cypher.internal.util.RelTypeId
 import org.neo4j.cypher.internal.util.attribution.Default
 import org.neo4j.cypher.internal.util.attribution.IdGen
 import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
+import org.neo4j.internal.schema.EndpointType
 import org.neo4j.internal.schema.constraints.SchemaValueType
 
 class CardinalityCalculatorTest extends CypherFunSuite with AstConstructionTestSupport {
@@ -102,6 +104,8 @@ class CardinalityCalculatorTest extends CypherFunSuite with AstConstructionTestS
         Map.empty
 
       override def databaseMode: DatabaseMode = DatabaseMode.SINGLE
+
+      override def getRelationshipEndpointLabelConstraints(relTypeName: String): Map[EndpointType, String] = Map.empty
     }
   }
 
@@ -263,7 +267,15 @@ class CardinalityCalculatorTest extends CypherFunSuite with AstConstructionTestS
         val relCount = if (relTypes.isEmpty) rels.size else relTypes.size
         val avgRelsPerNode = (relCount * individualRelCount) / allNodesCount.toDouble
 
-        val plan = Expand(Argument(), varFor("from"), SemanticDirection.OUTGOING, relTypes, varFor("to"), varFor("rel"))
+        val plan = Expand(
+          Argument(),
+          varFor("from"),
+          SemanticDirection.OUTGOING,
+          relTypes,
+          varFor("to"),
+          varFor("rel"),
+          ExpandAll
+        )
 
         val expectedAmountApprox = avgRelsPerNode * defaultSourceCardinality.amount
         val Cardinality(actualAmount) =
@@ -323,7 +335,15 @@ class CardinalityCalculatorTest extends CypherFunSuite with AstConstructionTestS
         val relCount = if (relTypes.isEmpty) rels.size else relTypes.size
         val avgRelsPerLabeledNode = (relCount * individualRelCount) / labeledNodesCount.toDouble
 
-        val plan = Expand(Argument(), varFor("from"), SemanticDirection.OUTGOING, relTypes, varFor("to"), varFor("rel"))
+        val plan = Expand(
+          Argument(),
+          varFor("from"),
+          SemanticDirection.OUTGOING,
+          relTypes,
+          varFor("to"),
+          varFor("rel"),
+          ExpandAll
+        )
 
         val expectedAmountApprox = avgRelsPerLabeledNode * defaultSourceCardinality.amount
         val Cardinality(actualAmount) =

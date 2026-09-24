@@ -25,7 +25,7 @@ import org.neo4j.cypher.internal.expressions.ExplicitParameter
 import org.neo4j.cypher.internal.expressions.SensitiveStringLiteral
 import org.neo4j.cypher.internal.rewriting.rewriters.sensitiveLiteralReplacement
 import org.neo4j.cypher.internal.util.InputPosition
-import org.neo4j.cypher.internal.util.OpenCypherExceptionFactory
+import org.neo4j.cypher.internal.util.Neo4jCypherExceptionFactory
 import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 import org.scalatest.matchers.Matcher
 
@@ -33,7 +33,7 @@ import java.nio.charset.StandardCharsets
 
 class SensitiveLiteralReplacementTest extends CypherFunSuite with AstRewritingTestSupport {
 
-  private val exceptionFactory = OpenCypherExceptionFactory(None)
+  private val exceptionFactory = Neo4jCypherExceptionFactory(null, None)
 
   private val passwordBytes = "password".getBytes(StandardCharsets.UTF_8)
   private val currentBytes = "current".getBytes(StandardCharsets.UTF_8)
@@ -41,7 +41,7 @@ class SensitiveLiteralReplacementTest extends CypherFunSuite with AstRewritingTe
   test("should extract password") {
     val expectedPattern: Matcher[Any] =
       matchPattern {
-        case CreateUser(_, _, _, _, Some(NativeAuth(List(Password(AutoExtractedParameter(_, _, _), _))))) =>
+        case CreateUser(_, _, _, _, Some(NativeAuth(List(Password(AutoExtractedParameter(_, _, _), _)))), _) =>
       }
 
     assertRewrite("CREATE USER foo SET PASSWORD 'password'", expectedPattern, Map("  AUTOSTRING0" -> passwordBytes))
@@ -50,7 +50,7 @@ class SensitiveLiteralReplacementTest extends CypherFunSuite with AstRewritingTe
   test("should extract password in the presence of other vars") {
     val expectedPattern: Matcher[Any] =
       matchPattern {
-        case CreateUser(_, _, _, _, Some(NativeAuth(List(Password(AutoExtractedParameter(_, _, _), _))))) =>
+        case CreateUser(_, _, _, _, Some(NativeAuth(List(Password(AutoExtractedParameter(_, _, _), _)))), _) =>
       }
 
     assertRewrite("CREATE USER $foo SET PASSWORD 'password'", expectedPattern, Map("  AUTOSTRING0" -> passwordBytes))
@@ -58,7 +58,8 @@ class SensitiveLiteralReplacementTest extends CypherFunSuite with AstRewritingTe
 
   test("should extract nothing if password is already parameterised") {
     val expectedPattern: Matcher[Any] =
-      matchPattern { case CreateUser(_, _, _, _, Some(NativeAuth(List(Password(ExplicitParameter(_, _, _), _))))) => }
+      matchPattern { case CreateUser(_, _, _, _, Some(NativeAuth(List(Password(ExplicitParameter(_, _, _), _)))), _) =>
+      }
 
     assertRewrite("CREATE USER $foo SET PASSWORD $password", expectedPattern, Map())
   }

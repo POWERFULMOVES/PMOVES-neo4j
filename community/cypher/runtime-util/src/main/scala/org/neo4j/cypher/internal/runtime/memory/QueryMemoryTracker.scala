@@ -25,12 +25,17 @@ import org.neo4j.cypher.internal.config.CUSTOM_MEMORY_TRACKING
 import org.neo4j.cypher.internal.config.MEMORY_TRACKING
 import org.neo4j.cypher.internal.config.MemoryTracking
 import org.neo4j.cypher.internal.config.NO_TRACKING
+import org.neo4j.cypher.internal.macros.ControlFlowMacros3.doWhile
 import org.neo4j.cypher.internal.runtime.GrowingArray
-import org.neo4j.cypher.internal.runtime.debug.DebugSupport.DEBUG_MEMORY_TRACKING
+import org.neo4j.cypher.internal.runtime.debug.events.Debug
+import org.neo4j.cypher.internal.runtime.debug.events.DebugCategory
 import org.neo4j.cypher.internal.runtime.memory.TrackingQueryMemoryTracker.MemoryTrackerPerOperator
 import org.neo4j.cypher.internal.runtime.memory.TrackingQueryMemoryTracker.OperatorMemoryTracker
 import org.neo4j.cypher.internal.runtime.memory.TransactionWorkerThreadDelegatingMemoryTracker.threadLocalExecutionContextMemoryTracker
+import org.neo4j.cypher.internal.util.attribution.Id
 import org.neo4j.memory.EmptyMemoryTracker
+import org.neo4j.memory.HeapEstimatorCache
+import org.neo4j.memory.HeapEstimatorCacheConfig
 import org.neo4j.memory.HeapHighWaterMarkTracker
 import org.neo4j.memory.HeapMemoryTracker
 import org.neo4j.memory.LocalMemoryTracker
@@ -59,7 +64,9 @@ trait QueryMemoryTracker
    * execute in a specific transaction (possibly one of multiple transactions in a query) as part of the query
    * tracked by this [[QueryMemoryTracker]].
    */
-  def newMemoryTrackerForOperatorProvider(transactionMemoryTracker: MemoryTracker): MemoryTrackerForOperatorProvider
+  def newMemoryTrackerForOperatorProvider(
+    transactionMemoryTracker: MemoryTracker
+  ): MemoryTrackerForOperatorProvider
 
   def debugPrintSummary(): Unit = {}
 }
@@ -68,9 +75,10 @@ object QueryMemoryTracker {
 
   def apply(memoryTracking: MemoryTracking): QueryMemoryTracker = {
     memoryTracking match {
-      case NO_TRACKING                       => NoOpQueryMemoryTracker
-      case MEMORY_TRACKING                   => new TrackingQueryMemoryTracker
-      case CUSTOM_MEMORY_TRACKING(decorator) => new CustomTrackingQueryMemoryTracker(decorator)
+      case NO_TRACKING     => NoOpQueryMemoryTracker
+      case MEMORY_TRACKING => new TrackingQueryMemoryTracker(HeapEstimatorCacheConfig.DEFAULT)
+      case CUSTOM_MEMORY_TRACKING(decorator) =>
+        new CustomTrackingQueryMemoryTracker(decorator, HeapEstimatorCacheConfig.DEFAULT)
     }
   }
 }
@@ -98,7 +106,9 @@ object TrackingQueryMemoryTracker {
  * Tracks the heap high water mark for one Cypher query using a [[LocalMemoryTracker]].
  * Provides operator memory trackers that are not bound to any transaction.
  */
-class TrackingQueryMemoryTracker extends QueryMemoryTracker with HeapMemoryTracker {
+class TrackingQueryMemoryTracker(heapEstimatorCacheConfig: HeapEstimatorCacheConfig = HeapEstimatorCacheConfig.DEFAULT)
+    extends QueryMemoryTracker
+    with HeapMemoryTracker {
 
   /**
    * The memory is also tracked by the transactions executing the query, so using a LocalMemoryTracker
@@ -114,9 +124,10 @@ class TrackingQueryMemoryTracker extends QueryMemoryTracker with HeapMemoryTrack
 
   override def releaseHeap(bytes: Long): Unit = memoryTracker.releaseHeap(bytes)
 
-  override def newMemoryTrackerForOperatorProvider(transactionMemoryTracker: MemoryTracker)
-    : MemoryTrackerForOperatorProvider =
-    new TransactionBoundMemoryTrackerForOperatorProvider(transactionMemoryTracker, this)
+  override def newMemoryTrackerForOperatorProvider(
+    transactionMemoryTracker: MemoryTracker
+  ): MemoryTrackerForOperatorProvider =
+    new TransactionBoundMemoryTrackerForOperatorProvider(transactionMemoryTracker, this, heapEstimatorCacheConfig)
 
   override def heapHighWaterMarkOfOperator(operatorId: Int): Long = {
     if (memoryTrackerPerOperator.isDefinedAt(operatorId)) {
@@ -140,14 +151,18 @@ class TrackingQueryMemoryTracker extends QueryMemoryTracker with HeapMemoryTrack
 /**
  * Applies a decorator on each transaction memory tracker that gets passed to [[newMemoryTrackerForOperatorProvider]].
  */
-class CustomTrackingQueryMemoryTracker(transactionMemoryTrackerDecorator: MemoryTracker => MemoryTracker)
-    extends TrackingQueryMemoryTracker {
+class CustomTrackingQueryMemoryTracker(
+  transactionMemoryTrackerDecorator: MemoryTracker => MemoryTracker,
+  heapEstimatorCacheConfig: HeapEstimatorCacheConfig
+) extends TrackingQueryMemoryTracker(heapEstimatorCacheConfig) {
 
-  override def newMemoryTrackerForOperatorProvider(transactionMemoryTracker: MemoryTracker)
-    : MemoryTrackerForOperatorProvider =
+  override def newMemoryTrackerForOperatorProvider(
+    transactionMemoryTracker: MemoryTracker
+  ): MemoryTrackerForOperatorProvider =
     new TransactionBoundMemoryTrackerForOperatorProvider(
       transactionMemoryTrackerDecorator(transactionMemoryTracker),
-      this
+      this,
+      heapEstimatorCacheConfig
     )
 }
 
@@ -169,38 +184,45 @@ case object NoOpQueryMemoryTracker extends QueryMemoryTracker {
  * Tracks the heap high water mark for one Cypher query running with the parallel runtime.
  */
 class ParallelTrackingQueryMemoryTracker(
-  delegatingMemoryTrackerFactory: () => MemoryTracker with MemoryTrackerForOperatorProvider
+  delegatingMemoryTrackerFactory: () => MemoryTracker with MemoryTrackerForOperatorProvider,
+  heapEstimatorCacheConfig: HeapEstimatorCacheConfig
 ) extends QueryMemoryTracker with MemoryTrackerForOperatorProvider {
 
   private[this] val delegate = delegatingMemoryTrackerFactory()
 
-  private[this] val debugMemoryTracker = if (DEBUG_MEMORY_TRACKING) {
+  private[this] val debugMemoryTracker: ParallelDebugMemoryTracker = Debug.ifElse[DebugCategory.MemoryTracking] {
     new ParallelDebugMemoryTracker(delegate)
-  } else {
-    null
+  } {
+    null.asInstanceOf[ParallelDebugMemoryTracker]
   }
 
   override def heapHighWaterMark(): Long = HeapHighWaterMarkTracker.ALLOCATIONS_NOT_TRACKED
 
   override def newMemoryTrackerForOperatorProvider(transactionMemoryTracker: MemoryTracker)
     : MemoryTrackerForOperatorProvider = {
-    if (DEBUG_MEMORY_TRACKING) {
+    Debug.ifElse[DebugCategory.MemoryTracking] {
       debugMemoryTracker
-    } else {
+    } {
       delegate
     }
   }
 
   override def heapHighWaterMarkOfOperator(operatorId: Int): Long = HeapHighWaterMarkTracker.ALLOCATIONS_NOT_TRACKED
 
-  override def memoryTrackerForOperator(operatorId: Int): MemoryTracker = delegate
+  override def memoryTrackerForOperator(operatorId: Int, enableScopedHeapEstimatorCache: Boolean): MemoryTracker = {
+    Debug.ifElse[DebugCategory.MemoryTracking] {
+      debugMemoryTracker.memoryTrackerForOperator(operatorId, enableScopedHeapEstimatorCache)
+    } {
+      delegate.memoryTrackerForOperator(operatorId, enableScopedHeapEstimatorCache)
+    }
+  }
 
   override def setInitializationMemoryTracker(memoryTracker: MemoryTracker): Unit = {
     delegate.setInitializationMemoryTracker(memoryTracker)
   }
 
   override def debugPrintSummary(): Unit = {
-    if (DEBUG_MEMORY_TRACKING) {
+    Debug.ifEnabled[DebugCategory.MemoryTracking] {
       debugMemoryTracker.debugPrintSummary()
     }
   }
@@ -212,7 +234,8 @@ class ParallelTrackingQueryMemoryTracker(
  * Keeps track of per-operator heap-usage which adds a performance overhead so this class should only be used for PROFILE queries.
  */
 class ProfilingParallelTrackingQueryMemoryTracker(
-  delegatingMemoryTrackerFactory: () => MemoryTracker with MemoryTrackerForOperatorProvider
+  delegatingMemoryTrackerFactory: () => MemoryTracker with MemoryTrackerForOperatorProvider,
+  heapEstimatorCacheConfig: HeapEstimatorCacheConfig
 ) extends QueryMemoryTracker
     with MemoryTrackerForOperatorProvider {
 
@@ -235,11 +258,12 @@ class ProfilingParallelTrackingQueryMemoryTracker(
 
   override def heapHighWaterMark(): Long = delegate.heapHighWaterMark()
 
-  override def memoryTrackerForOperator(operatorId: Int): MemoryTracker = memoryPerOperator.computeIfAbsent(
-    operatorId,
-    _ =>
-      new ProfilingParallelHighWaterMarkTrackingWorkerMemoryTracker(delegate)
-  )
+  override def memoryTrackerForOperator(operatorId: Int, enableScopedHeapEstimatorCache: Boolean): MemoryTracker =
+    memoryPerOperator.computeIfAbsent(
+      operatorId,
+      _ =>
+        new ProfilingParallelHighWaterMarkTrackingWorkerMemoryTracker(delegate)
+    )
 
   override def setInitializationMemoryTracker(memoryTracker: MemoryTracker): Unit =
     delegate.setInitializationMemoryTracker(memoryTracker)
@@ -309,18 +333,56 @@ class WorkerThreadDelegatingMemoryTracker extends MemoryTracker with MemoryTrack
     }
   }
 
-  override def memoryTrackerForOperator(operatorId: Int): MemoryTracker = {
-    // NOTE: We currently do not support tracking query heap usage high water mark per operator
-    this
+  override def memoryTrackerForOperator(operatorId: Int, enableScopedHeapEstimatorCache: Boolean): MemoryTracker = {
+    if (enableScopedHeapEstimatorCache) {
+      require(_initializationMemoryTracker != null, "Initialization memory tracker must be set")
+      newWithScopedHeapEstimatorCache(operatorId)
+    } else {
+      // NOTE: We only support tracking query heap usage high water mark per operator when profiling is enabled
+      this
+    }
   }
 
   override def setInitializationMemoryTracker(memoryTracker: MemoryTracker): Unit = {
     _initializationMemoryTracker = memoryTracker
   }
 
+  override def getHeapEstimatorCache: HeapEstimatorCache = {
+    delegateMemoryTracker.getHeapEstimatorCache
+  }
+
+  private def newWithScopedHeapEstimatorCache(operatorId: Int): WorkerThreadDelegatingMemoryTracker = {
+    val newTracker = new OperatorWorkerThreadDelegatingMemoryTracker(operatorId, enableScopedHeapEstimatorCache = true)
+    newTracker.setInitializationMemoryTracker(_initializationMemoryTracker)
+    newTracker
+  }
+
   @VisibleForTesting
   def initializationMemoryTracker: MemoryTracker = {
     _initializationMemoryTracker
+  }
+}
+
+class OperatorWorkerThreadDelegatingMemoryTracker(
+  operatorId: Int = Id.INVALID_ID.x,
+  enableScopedHeapEstimatorCache: Boolean = false
+) extends WorkerThreadDelegatingMemoryTracker {
+
+  // NOTE: We assume that getting a scoped memory tracker from WorkerThreadDelegatingMemoryTracker
+  //       needs to be able to support a concurrent use-case,
+  //       e.g. by a heap tracking concurrent collection used for hash join or aggregation.
+  override def getScopedMemoryTracker: MemoryTracker = {
+    new ParallelScopedMemoryTracker(this)
+  }
+
+  override def getScopedHeapEstimatorCache: HeapEstimatorCache = {
+    if (enableScopedHeapEstimatorCache) {
+      // Create a new cache instance for each call.
+      // This is only expected to be used by a single thread at a time.
+      getHeapEstimatorCache.newWithSameSettings()
+    } else {
+      super.getScopedHeapEstimatorCache
+    }
   }
 }
 
@@ -381,7 +443,7 @@ class TransactionWorkerThreadDelegatingMemoryTracker extends MemoryTracker with 
     }
   }
 
-  override def memoryTrackerForOperator(operatorId: Int): MemoryTracker = {
+  override def memoryTrackerForOperator(operatorId: Int, enableScopedHeapEstimatorCache: Boolean): MemoryTracker = {
     // NOTE: We currently do not support tracking query heap usage high water mark per operator
     this
   }
@@ -421,13 +483,13 @@ private class ProfilingParallelHighWaterMarkTrackingWorkerMemoryTracker(
   private def computeNewHighWaterMark(): Unit = {
     var current = -1L
     var newValue = -1L
-    do {
+    doWhile {
       newValue = heapUsage.sum()
       current = highWaterMark.get()
       if (current >= newValue) {
         return
       }
-    } while (!highWaterMark.weakCompareAndSetVolatile(current, newValue))
+    }(!highWaterMark.weakCompareAndSetVolatile(current, newValue))
   }
 
   override def heapHighWaterMark(): Long = {
@@ -450,6 +512,7 @@ private class ProfilingParallelHighWaterMarkTrackingWorkerMemoryTracker(
 
   override def releaseNative(bytes: Long): Unit = delegate.releaseNative(bytes)
 
+  override def getHeapEstimatorCache: HeapEstimatorCache = delegate.getHeapEstimatorCache
 }
 
 class ParallelDebugMemoryTracker(delegate: MemoryTracker with MemoryTrackerForOperatorProvider) extends MemoryTracker
@@ -510,6 +573,7 @@ class ParallelDebugMemoryTracker(delegate: MemoryTracker with MemoryTrackerForOp
   override def heapHighWaterMark(): Long = delegate.heapHighWaterMark()
   override def reset(): Unit = delegate.reset()
   override def getScopedMemoryTracker: MemoryTracker = delegate.getScopedMemoryTracker
+  override def getHeapEstimatorCache: HeapEstimatorCache = delegate.getHeapEstimatorCache
 
   private def stackTraceKey(t: Throwable): String = {
     // Make a key of the stack trace
@@ -524,7 +588,7 @@ class ParallelDebugMemoryTracker(delegate: MemoryTracker with MemoryTrackerForOp
     sb.result()
   }
 
-  override def memoryTrackerForOperator(operatorId: Int): MemoryTracker = {
+  override def memoryTrackerForOperator(operatorId: Int, enableScopedHeapEstimatorCache: Boolean): MemoryTracker = {
     this
   }
 
@@ -631,4 +695,12 @@ private class ParallelScopedMemoryTracker(delegate: MemoryTracker) extends Scope
   }
 
   override def isClosed: Boolean = _isClosed.get()
+
+  override def getHeapEstimatorCache: HeapEstimatorCache = {
+    delegate.getHeapEstimatorCache
+  }
+
+  override def getScopedHeapEstimatorCache: HeapEstimatorCache = {
+    delegate.getScopedHeapEstimatorCache()
+  }
 }

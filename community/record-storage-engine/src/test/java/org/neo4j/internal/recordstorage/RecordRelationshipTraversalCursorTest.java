@@ -20,6 +20,9 @@
 package org.neo4j.internal.recordstorage;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.junit.jupiter.params.provider.Arguments.of;
 import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.immediate;
 import static org.neo4j.internal.helpers.ArrayUtil.concatArrays;
@@ -43,7 +46,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
-import org.eclipse.collections.api.factory.Sets;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -52,12 +54,14 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.neo4j.configuration.Config;
 import org.neo4j.graphdb.Direction;
+import org.neo4j.graphdb.TransientTransactionFailureException;
 import org.neo4j.internal.id.DefaultIdGeneratorFactory;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.recordstorage.RecordDatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.store.NeoStores;
 import org.neo4j.kernel.impl.store.RelationshipGroupStore;
 import org.neo4j.kernel.impl.store.RelationshipStore;
@@ -68,7 +72,6 @@ import org.neo4j.kernel.impl.store.record.Record;
 import org.neo4j.kernel.impl.store.record.RecordLoad;
 import org.neo4j.kernel.impl.store.record.RelationshipGroupRecord;
 import org.neo4j.kernel.impl.store.record.RelationshipRecord;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.LongReference;
@@ -133,8 +136,7 @@ public class RecordRelationshipTraversalCursorTest {
                 NullLogProvider.getInstance(),
                 new CursorContextFactory(pageCacheTracer, EMPTY_CONTEXT_SUPPLIER),
                 false,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL,
-                Sets.immutable.empty());
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
         neoStores = storeFactory.openAllNeoStores();
         storeCursors = new CachedStoreCursors(neoStores, NULL_CONTEXT);
     }
@@ -368,6 +370,91 @@ public class RecordRelationshipTraversalCursorTest {
         }
     }
 
+    @Test
+    void shouldFailTransactionOnTraversalOfSparseNodeThatTurnsDense() {
+        // Does not work on high limit
+        assumeThat(getRecordFormats()).isEqualTo(defaultFormat());
+
+        RelationshipSpec[] relationshipSpecs = homogenousRelationships(10, TYPE1, OUTGOING);
+        long reference = createRelationshipStructure(false, relationshipSpecs);
+        try (var cursor = getNodeRelationshipCursor()) {
+            cursor.init(FIRST_OWNING_NODE, reference, ALL_RELATIONSHIPS);
+
+            // Next a couple of times
+            int stopAt = 5;
+            for (int i = 0; i < stopAt; i++) {
+                cursor.next();
+            }
+
+            // Make next relationship think that FIRST_OWNING_NODE got dense
+            RelationshipStore relationshipStore = neoStores.getRelationshipStore();
+            try (var pageCursor = storeCursors.writeCursor(RELATIONSHIP_CURSOR)) {
+                RelationshipRecord relationship = new RelationshipRecord(stopAt);
+                relationship.initialize(
+                        true,
+                        NO_NEXT_PROPERTY.intValue(),
+                        getFirstNode(relationshipSpecs[stopAt].direction),
+                        getSecondNode(relationshipSpecs[stopAt].direction),
+                        relationshipSpecs[stopAt].type,
+                        NO_NEXT_RELATIONSHIP.intValue(),
+                        stopAt + 1,
+                        NO_NEXT_RELATIONSHIP.intValue(),
+                        stopAt + 1,
+                        false,
+                        false,
+                        true, // this node
+                        false);
+
+                relationshipStore.updateRecord(relationship, pageCursor, NULL_CONTEXT, storeCursors);
+            }
+
+            assertThatThrownBy(cursor::next)
+                    .isInstanceOf(TransientTransactionFailureException.class)
+                    .hasMessageContaining(
+                            "The transaction read outdated data and cannot be recovered due to concurrent data modification. Retry the transaction.");
+        }
+    }
+
+    @Test
+    void shouldNotFailTransactionOnTraversalOfSparseNodeIfOtherNodeTurnsDense() {
+        RelationshipSpec[] relationshipSpecs = homogenousRelationships(10, TYPE1, OUTGOING);
+        long reference = createRelationshipStructure(false, relationshipSpecs);
+        try (var cursor = getNodeRelationshipCursor()) {
+            cursor.init(FIRST_OWNING_NODE, reference, ALL_RELATIONSHIPS);
+
+            // Next a couple of times
+            int stopAt = 5;
+            for (int i = 0; i < stopAt; i++) {
+                cursor.next();
+            }
+
+            // Make next relationship think that other node got dense
+            RelationshipStore relationshipStore = neoStores.getRelationshipStore();
+            try (var pageCursor = storeCursors.writeCursor(RELATIONSHIP_CURSOR)) {
+                RelationshipRecord relationship = new RelationshipRecord(stopAt);
+                relationship.initialize(
+                        true,
+                        NO_NEXT_PROPERTY.intValue(),
+                        getFirstNode(relationshipSpecs[stopAt].direction),
+                        getSecondNode(relationshipSpecs[stopAt].direction),
+                        relationshipSpecs[stopAt].type,
+                        NO_NEXT_RELATIONSHIP.intValue(),
+                        stopAt + 1,
+                        NO_NEXT_RELATIONSHIP.intValue(),
+                        stopAt + 1,
+                        false,
+                        false,
+                        false,
+                        true // other node
+                        );
+
+                relationshipStore.updateRecord(relationship, pageCursor, NULL_CONTEXT, storeCursors);
+            }
+
+            assertThatCode(cursor::next).doesNotThrowAnyException();
+        }
+    }
+
     private static void assertRelationships(
             RecordRelationshipTraversalCursor cursor, int count, Direction direction, int... types) {
         var expectedTypes = IntStream.of(types).boxed().collect(Collectors.toSet());
@@ -378,9 +465,10 @@ public class RecordRelationshipTraversalCursorTest {
             switch (direction) {
                 case OUTGOING -> assertThat(cursor.sourceNodeReference()).isEqualTo(FIRST_OWNING_NODE);
                 case INCOMING -> assertThat(cursor.targetNodeReference()).isEqualTo(FIRST_OWNING_NODE);
-                case BOTH -> assertThat(FIRST_OWNING_NODE == cursor.sourceNodeReference()
-                                || FIRST_OWNING_NODE == cursor.targetNodeReference())
-                        .isTrue();
+                case BOTH ->
+                    assertThat(FIRST_OWNING_NODE == cursor.sourceNodeReference()
+                                    || FIRST_OWNING_NODE == cursor.targetNodeReference())
+                            .isTrue();
             }
         }
         assertThat(found).isEqualTo(count);
@@ -416,7 +504,7 @@ public class RecordRelationshipTraversalCursorTest {
                 for (int i = 0; i < relationshipSpecs.length; i++) {
                     long nextRelationshipId = i == relationshipSpecs.length - 1 ? NULL : i + 1;
                     relationshipStore.updateRecord(
-                            createRelationship(i, nextRelationshipId, relationshipSpecs[i]),
+                            createRelationship(i, nextRelationshipId, relationshipSpecs[i], false),
                             cursor,
                             NULL_CONTEXT,
                             storeCursors);
@@ -451,7 +539,7 @@ public class RecordRelationshipTraversalCursorTest {
                     long nextRelationshipId =
                             i < relationshipSpecs.length - 1 && relationshipSpecs[i + 1].equals(spec) ? i + 1 : NULL;
                     relationshipStore.updateRecord(
-                            createRelationship(relationshipId, nextRelationshipId, relationshipSpecs[i]),
+                            createRelationship(relationshipId, nextRelationshipId, relationshipSpecs[i], true),
                             relCursor,
                             NULL_CONTEXT,
                             storeCursors);
@@ -470,7 +558,7 @@ public class RecordRelationshipTraversalCursorTest {
     }
 
     protected static RelationshipRecord createRelationship(
-            long id, long nextRelationship, RelationshipSpec relationshipSpec) {
+            long id, long nextRelationship, RelationshipSpec relationshipSpec, boolean dense) {
         RelationshipRecord relationship = new RelationshipRecord(id);
         relationship.initialize(
                 true,
@@ -483,7 +571,9 @@ public class RecordRelationshipTraversalCursorTest {
                 NO_NEXT_RELATIONSHIP.intValue(),
                 nextRelationship,
                 false,
-                false);
+                false,
+                dense,
+                dense);
         return relationship;
     }
 

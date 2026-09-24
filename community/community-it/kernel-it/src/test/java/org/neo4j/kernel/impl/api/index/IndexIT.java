@@ -64,6 +64,7 @@ import org.neo4j.internal.schema.SchemaDescriptor;
 import org.neo4j.internal.schema.SchemaDescriptors;
 import org.neo4j.internal.schema.constraints.IndexBackedConstraintDescriptor;
 import org.neo4j.kernel.api.KernelTransaction;
+import org.neo4j.kernel.api.exceptions.schema.DropIndexFailureException;
 import org.neo4j.kernel.impl.api.integrationtest.KernelIntegrationTest;
 import org.neo4j.kernel.impl.api.state.ConstraintIndexCreator;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
@@ -276,8 +277,17 @@ class IndexIT extends KernelIntegrationTest {
 
         // when
         SchemaWrite statement = schemaWriteInNewTransaction();
-        SchemaKernelException e = assertThrows(SchemaKernelException.class, () -> statement.indexDrop(indexName));
-        assertEquals(e.getMessage(), "Unable to drop index called `My fancy index`. There is no such index.");
+        SchemaKernelException e = assertThrows(DropIndexFailureException.class, () -> statement.indexDrop(indexName));
+        assertThat(e).hasMessageContaining("Unable to drop index called `My fancy index`. There is no such index.");
+        assertThat(e.gqlStatus()).isEqualTo("50N10");
+        assertThat(e.statusDescription())
+                .isEqualTo("error: general processing exception - index drop failed. Unable to drop 'My fancy index'.");
+        assertThat(e.cause()).isPresent();
+        var gqlCause = e.cause().get();
+        assertThat(gqlCause.gqlStatus()).isEqualTo("22N69");
+        assertThat(gqlCause.statusDescription())
+                .isEqualTo("error: data exception - index does not exist. The index 'My fancy index' does not exist.");
+        assertThat(gqlCause.cause()).isNotPresent();
         rollback();
     }
 
@@ -361,7 +371,7 @@ class IndexIT extends KernelIntegrationTest {
         try (org.neo4j.graphdb.Transaction tx = db.beginTx()) {
             // then
             Set<IndexDefinition> indexes = Iterables.asSet(tx.schema().getIndexes());
-            assertThat(indexes.size()).isEqualTo(initialIndexCount + 1);
+            assertThat(indexes).hasSize((int) (initialIndexCount + 1));
 
             IndexDefinition index = tx.schema().getIndexByName("constraint name");
             assertThat(index.getLabels()).map(Label::name).containsOnly("Label1");
@@ -380,9 +390,9 @@ class IndexIT extends KernelIntegrationTest {
     void shouldListMultiTokenIndexesInTheCoreAPI() throws Exception {
         KernelTransaction transaction = newTransaction(AUTH_DISABLED);
         long initialIndexCount = Iterators.count(transaction.schemaRead().indexesGetAll());
-        SchemaDescriptor schema =
-                SchemaDescriptors.fulltext(EntityType.NODE, new int[] {labelId, labelId2}, new int[] {propertyKeyId});
-        IndexPrototype prototype = IndexPrototype.forSchema(schema, AllIndexProviderDescriptors.FULLTEXT_DESCRIPTOR)
+        SchemaDescriptor schema = SchemaDescriptors.forSemanticSearch(
+                EntityType.NODE, new int[] {labelId, labelId2}, new int[] {propertyKeyId});
+        IndexPrototype prototype = IndexPrototype.forSchema(schema, AllIndexProviderDescriptors.FULLTEXT_V2_DESCRIPTOR)
                 .withIndexType(IndexType.FULLTEXT)
                 .withName("multi token index");
         transaction.schemaWrite().indexCreate(prototype);
@@ -391,7 +401,7 @@ class IndexIT extends KernelIntegrationTest {
         try (org.neo4j.graphdb.Transaction tx = db.beginTx()) {
             // then
             Set<IndexDefinition> indexes = Iterables.asSet(tx.schema().getIndexes());
-            assertThat(indexes.size()).isEqualTo(initialIndexCount + 1);
+            assertThat(indexes).hasSize((int) (initialIndexCount + 1));
 
             IndexDefinition index = tx.schema().getIndexByName("multi token index");
             assertThrows(IllegalStateException.class, index::getRelationshipTypes);
@@ -416,7 +426,7 @@ class IndexIT extends KernelIntegrationTest {
         try (org.neo4j.graphdb.Transaction tx = db.beginTx()) {
             // then
             Set<IndexDefinition> indexes = Iterables.asSet(tx.schema().getIndexes());
-            assertThat(indexes.size()).isEqualTo(initialIndexCount + 1);
+            assertThat(indexes).hasSize((int) (initialIndexCount + 1));
 
             IndexDefinition index = tx.schema().getIndexByName("my index");
             assertThrows(IllegalStateException.class, index::getRelationshipTypes);
@@ -441,7 +451,7 @@ class IndexIT extends KernelIntegrationTest {
         try (org.neo4j.graphdb.Transaction tx = db.beginTx()) {
             // then
             Set<IndexDefinition> indexes = Iterables.asSet(tx.schema().getIndexes());
-            assertThat(indexes.size()).isEqualTo(initialIndexCount + 1);
+            assertThat(indexes).hasSize((int) (initialIndexCount + 1));
 
             IndexDefinition index = tx.schema().getIndexByName("my index");
             assertThrows(IllegalStateException.class, index::getLabels);
@@ -459,9 +469,9 @@ class IndexIT extends KernelIntegrationTest {
     void shouldListCompositeMultiTokenRelationshipIndexesInTheCoreAPI() throws Exception {
         KernelTransaction transaction = newTransaction(AUTH_DISABLED);
         long initialIndexCount = Iterators.count(transaction.schemaRead().indexesGetAll());
-        SchemaDescriptor schema = SchemaDescriptors.fulltext(
+        SchemaDescriptor schema = SchemaDescriptors.forSemanticSearch(
                 EntityType.RELATIONSHIP, new int[] {relType, relType2}, new int[] {propertyKeyId, propertyKeyId2});
-        IndexPrototype prototype = IndexPrototype.forSchema(schema, AllIndexProviderDescriptors.FULLTEXT_DESCRIPTOR)
+        IndexPrototype prototype = IndexPrototype.forSchema(schema, AllIndexProviderDescriptors.FULLTEXT_V1_DESCRIPTOR)
                 .withIndexType(IndexType.FULLTEXT)
                 .withName("index name");
         transaction.schemaWrite().indexCreate(prototype);
@@ -470,7 +480,7 @@ class IndexIT extends KernelIntegrationTest {
         try (org.neo4j.graphdb.Transaction tx = db.beginTx()) {
             // then
             Set<IndexDefinition> indexes = Iterables.asSet(tx.schema().getIndexes());
-            assertThat(indexes.size()).isEqualTo(initialIndexCount + 1);
+            assertThat(indexes).hasSize((int) (initialIndexCount + 1));
 
             IndexDefinition index = tx.schema().getIndexByName("index name");
             assertThrows(IllegalStateException.class, index::getLabels);

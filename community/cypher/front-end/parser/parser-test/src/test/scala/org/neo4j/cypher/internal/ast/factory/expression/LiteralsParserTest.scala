@@ -24,16 +24,13 @@ import org.neo4j.cypher.internal.ast.factory.expression.LiteralsParserTest.genCy
 import org.neo4j.cypher.internal.ast.factory.expression.LiteralsParserTest.toCypherHex
 import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher25
 import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
 import org.neo4j.cypher.internal.ast.test.util.AstParsingTestBase
 import org.neo4j.cypher.internal.expressions.DecimalDoubleLiteral
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
-import org.neo4j.cypher.internal.expressions.FunctionName
 import org.neo4j.cypher.internal.expressions.Infinity
 import org.neo4j.cypher.internal.expressions.Literal
 import org.neo4j.cypher.internal.expressions.NaN
-import org.neo4j.cypher.internal.expressions.Namespace
 import org.neo4j.cypher.internal.expressions.Null
 import org.neo4j.cypher.internal.expressions.NumberLiteral
 import org.neo4j.cypher.internal.expressions.Parameter
@@ -41,13 +38,16 @@ import org.neo4j.cypher.internal.expressions.SignedDecimalIntegerLiteral
 import org.neo4j.cypher.internal.expressions.SignedHexIntegerLiteral
 import org.neo4j.cypher.internal.expressions.SignedOctalIntegerLiteral
 import org.neo4j.cypher.internal.expressions.StringLiteral
+import org.neo4j.cypher.internal.util.FunctionName
 import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.cypher.internal.util.Namespace
 import org.neo4j.cypher.internal.util.symbols.CTAny
 import org.neo4j.cypher.internal.util.test_helpers.CypherScalaCheckDrivenPropertyChecks
+import org.neo4j.gqlstatus.GqlStatusInfoCodes
 import org.scalacheck.Gen
 import org.scalacheck.Shrink
 
-import scala.collection.compat.immutable.ArraySeq
+import scala.collection.immutable.ArraySeq
 
 class LiteralsParserTest extends AstParsingTestBase
     with CypherScalaCheckDrivenPropertyChecks {
@@ -100,14 +100,11 @@ class LiteralsParserTest extends AstParsingTestBase
       d should parseTo[NumberLiteral](DecimalDoubleLiteral(d)(pos))
     }
     "- 1.4" should parseTo[NumberLiteral](DecimalDoubleLiteral("-1.4")(pos))
-    "--1.0" should notParse[NumberLiteral].in {
-      case Cypher5JavaCc => _.withMessageStart("Encountered \" \"-\" \"-\"\" at line 1, column 2.")
-      case _ => _.withSyntaxError(
-          """Invalid input '-': expected a number (line 1, column 2 (offset: 1))
-            |"--1.0"
-            |  ^""".stripMargin
-        )
-    }
+    "--1.0" should notParse[NumberLiteral].withSyntaxError(
+      """Invalid input '-': expected a number (line 1, column 2 (offset: 1))
+        |"--1.0"
+        |  ^""".stripMargin
+    )
 
     "RETURN NaN" should parseTo[Statements](
       Statements(Seq(singleQuery(return_(returnItem(NaN()(pos), "NaN")))))
@@ -119,14 +116,13 @@ class LiteralsParserTest extends AstParsingTestBase
       Statements(Seq(singleQuery(return_(returnItem(varFor("Ox"), "Ox")))))
     )
     "RETURN 0_.0" should notParse[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '.0'")
       case Cypher5 => _.withSyntaxError(
-          """Invalid input '.0': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 10 (offset: 9))
+          """Invalid input '.0': expected an expression, ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'FOREACH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 10 (offset: 9))
             |"RETURN 0_.0"
             |          ^""".stripMargin
         )
-      case Cypher25 => _.withSyntaxError(
-          """Invalid input '0_': expected an expression, '*' or 'DISTINCT' (line 1, column 8 (offset: 7))
+      case _ => _.withSyntaxError(
+          """Invalid input '0_': expected an expression, '*', 'ALL' or 'DISTINCT' (line 1, column 8 (offset: 7))
             |"RETURN 0_.0"
             |        ^""".stripMargin
         )
@@ -135,11 +131,13 @@ class LiteralsParserTest extends AstParsingTestBase
       Statements(Seq(singleQuery(return_(returnItem(prop(SignedDecimalIntegerLiteral("1_")(pos), "_1"), "1_._1")))))
     )
     "RETURN ._2" should notParse[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart(
-          "Invalid input '.': expected \"*\", \"DISTINCT\" or an expression (line 1, column 8 (offset: 7))"
+      case Cypher5 => _.withSyntaxError(
+          """Invalid input '.': expected an expression, '*' or 'DISTINCT' (line 1, column 8 (offset: 7))
+            |"RETURN ._2"
+            |        ^""".stripMargin
         )
       case _ => _.withSyntaxError(
-          """Invalid input '.': expected an expression, '*' or 'DISTINCT' (line 1, column 8 (offset: 7))
+          """Invalid input '.': expected an expression, '*', 'ALL' or 'DISTINCT' (line 1, column 8 (offset: 7))
             |"RETURN ._2"
             |        ^""".stripMargin
         )
@@ -162,16 +160,14 @@ class LiteralsParserTest extends AstParsingTestBase
     "$1gibberish" should parseTo(parameter("1gibberish", CTAny))
 
     "$0_2" should parseIn[Parameter] {
-      case Cypher5JavaCc => _.withMessageStart("Encountered")
       case Cypher5 => _.withSyntaxError(
           """Invalid input '0_2': expected an identifier or an integer value (line 1, column 2 (offset: 1))
             |"$0_2"
             |  ^""".stripMargin
         )
-      case Cypher25 => _.toAst(parameter("0_2", CTAny))
+      case _ => _.toAst(parameter("0_2", CTAny))
     }
     "return $1.0f" should notParse[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '$': expected \"+\" or \"-\"")
       case Cypher5 => _.withSyntaxError(
           """Invalid input '1.0f': expected an identifier or an integer value (line 1, column 9 (offset: 8))
             |"return $1.0f"
@@ -186,20 +182,20 @@ class LiteralsParserTest extends AstParsingTestBase
   }
 
   test("keyword literals") {
-    "  \n NaN" should parse[Literal].toAstPositioned(NaN()(InputPosition(4, 2, 2)))
-    "   nan" should parse[Literal].toAstPositioned(NaN()(InputPosition(3, 1, 4)))
-    "  \n inf" should parse[Literal].toAstPositioned(Infinity()(InputPosition(4, 2, 2)))
-    " INF" should parse[Literal].toAstPositioned(Infinity()(InputPosition(1, 1, 2)))
-    "  INFINITY" should parse[Literal].toAstPositioned(Infinity()(InputPosition(2, 1, 3)))
-    "  \n null" should parse[Literal].toAstPositioned(Null()(InputPosition(4, 2, 2)))
-    " NULL" should parse[Literal].toAstPositioned(Null()(InputPosition(1, 1, 2)))
-    " ( \n NaN)" should parse[Expression].toAstPositioned(NaN()(InputPosition(5, 2, 2)))
-    " (  nan  )" should parse[Expression].toAstPositioned(NaN()(InputPosition(4, 1, 5)))
-    "  (\n inf )" should parse[Expression].toAstPositioned(Infinity()(InputPosition(5, 2, 2)))
-    " (INF)" should parse[Expression].toAstPositioned(Infinity()(InputPosition(2, 1, 3)))
-    "(  INFINITY)" should parse[Expression].toAstPositioned(Infinity()(InputPosition(3, 1, 4)))
-    "  \n (null)" should parse[Expression].toAstPositioned(Null()(InputPosition(5, 2, 3)))
-    " (NULL)" should parse[Expression].toAstPositioned(Null()(InputPosition(2, 1, 3)))
+    "  \n NaN" should parse[Literal].toAstPositioned(NaN()(InputPosition(4, 2, 2).withInputLength(3)))
+    "   nan" should parse[Literal].toAstPositioned(NaN()(InputPosition(3, 1, 4).withInputLength(3)))
+    "  \n inf" should parse[Literal].toAstPositioned(Infinity()(InputPosition(4, 2, 2).withInputLength(3)))
+    " INF" should parse[Literal].toAstPositioned(Infinity()(InputPosition(1, 1, 2).withInputLength(3)))
+    "  INFINITY" should parse[Literal].toAstPositioned(Infinity()(InputPosition(2, 1, 3).withInputLength(8)))
+    "  \n null" should parse[Literal].toAstPositioned(Null()(InputPosition(4, 2, 2).withInputLength(4)))
+    " NULL" should parse[Literal].toAstPositioned(Null()(InputPosition(1, 1, 2).withInputLength(4)))
+    " ( \n NaN)" should parse[Expression].toAstPositioned(NaN()(InputPosition(5, 2, 2).withInputLength(3)))
+    " (  nan  )" should parse[Expression].toAstPositioned(NaN()(InputPosition(4, 1, 5).withInputLength(3)))
+    "  (\n inf )" should parse[Expression].toAstPositioned(Infinity()(InputPosition(5, 2, 2).withInputLength(3)))
+    " (INF)" should parse[Expression].toAstPositioned(Infinity()(InputPosition(2, 1, 3).withInputLength(3)))
+    "(  INFINITY)" should parse[Expression].toAstPositioned(Infinity()(InputPosition(3, 1, 4).withInputLength(8)))
+    "  \n (null)" should parse[Expression].toAstPositioned(Null()(InputPosition(5, 2, 3).withInputLength(4)))
+    " (NULL)" should parse[Expression].toAstPositioned(Null()(InputPosition(2, 1, 3).withInputLength(4)))
   }
 
   test("string literal escape sequences") {
@@ -218,18 +214,16 @@ class LiteralsParserTest extends AstParsingTestBase
       }
     }
 
-    "'\\'" should notParse[Literal].in {
-      case Cypher5JavaCc => _.withMessageStart("Lexical error")
-      case _ => _.withSyntaxErrorContaining(
-          "Failed to parse string literal. The query must contain an even number of non-escaped quotes."
-        )
-    }
-    "'\\\\\\'" should notParse[Literal].in {
-      case Cypher5JavaCc => _.withMessageStart("Lexical error")
-      case _ => _.withSyntaxErrorContaining(
-          "Failed to parse string literal. The query must contain an even number of non-escaped quotes."
-        )
-    }
+    "'\\'" should notParse[Literal].withSyntaxErrorContaining(
+      "Failed to parse string literal. The query must contain an even number of non-escaped quotes.",
+      GqlStatusInfoCodes.STATUS_42I19,
+      "error: syntax error or access rule violation - invalid string literal. Failed to parse string literal. The query must contain an even number of non-escaped quotes."
+    )
+    "'\\\\\\'" should notParse[Literal].withSyntaxErrorContaining(
+      "Failed to parse string literal. The query must contain an even number of non-escaped quotes.",
+      GqlStatusInfoCodes.STATUS_42I19,
+      "error: syntax error or access rule violation - invalid string literal. Failed to parse string literal. The query must contain an even number of non-escaped quotes."
+    )
   }
 
   test("string literal unicode escape") {
@@ -237,39 +231,38 @@ class LiteralsParserTest extends AstParsingTestBase
 
     // Arbitrary unicode escape codes
     forAll(genCodepoint, minSuccessful(100)) { codepoint =>
-      whenever(codepoint != 0 && codepoint != '\'') {
+      whenever(codepoint != 0 && codepoint != '\'' && codepoint != '\\') {
         s"'${toCypherHex(codepoint)}'" should parseTo[Literal](literalString(Character.toString(codepoint)))
       }
     }
 
-    s"RETURN '${toCypherHex('\\')}'" should notParse[Statements]
-    s"RETURN '${toCypherHex('\'')}'" should notParse[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Lexical error")
-      case _ => _.withSyntaxErrorContaining(
-          """Failed to parse string literal. The query must contain an even number of non-escaped quotes. (line 1, column 15 (offset: 14))"""
-        )
-    }
+    s"RETURN '${toCypherHex('\\')}'" should notParse[Statements].withSyntaxErrorContaining(
+      """Failed to parse string literal. The query must contain an even number of non-escaped quotes. (line 1, column 8 (offset: 7))""",
+      GqlStatusInfoCodes.STATUS_42I19,
+      "error: syntax error or access rule violation - invalid string literal. Failed to parse string literal. The query must contain an even number of non-escaped quotes.",
+      position = Some(InputPosition(7, 1, 8))
+    )
+    s"RETURN '${toCypherHex('\'')}'" should notParse[Statements].withSyntaxErrorContaining(
+      """Failed to parse string literal. The query must contain an even number of non-escaped quotes. (line 1, column 15 (offset: 14))""",
+      GqlStatusInfoCodes.STATUS_42I19,
+      "error: syntax error or access rule violation - invalid string literal. Failed to parse string literal. The query must contain an even number of non-escaped quotes.",
+      position = Some(InputPosition(14, 1, 15))
+    )
 
     "'\\U1'" should parseTo[Literal](literalString("\\U1"))
     "'\\U12'" should parseTo[Literal](literalString("\\U12"))
     "'\\U123'" should parseTo[Literal](literalString("\\U123"))
 
-    "'\\u1'" should notParse[Literal].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input ''': expected four hexadecimal digits")
-      case _             => _.withSyntaxErrorContaining("Invalid input '1'': expected four hexadecimal digits")
-    }
-    "'\\u12'" should notParse[Literal].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input ''': expected four hexadecimal digits")
-      case _             => _.withSyntaxErrorContaining("Invalid input '12'': expected four hexadecimal digits")
-    }
-    "'\\u123'" should notParse[Literal].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input ''': expected four hexadecimal digits")
-      case _             => _.withSyntaxErrorContaining("Invalid input '123'': expected four hexadecimal digits")
-    }
-    "'\\ux111'" should notParse[Literal].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'x': expected four hexadecimal digits")
-      case _             => _.withSyntaxErrorContaining("Invalid input 'x111': expected four hexadecimal digits")
-    }
+    "'\\u1'" should notParse[Literal].withSyntaxErrorContaining("Invalid input '1'': expected four hexadecimal digits")
+    "'\\u12'" should notParse[Literal].withSyntaxErrorContaining(
+      "Invalid input '12'': expected four hexadecimal digits"
+    )
+    "'\\u123'" should notParse[Literal].withSyntaxErrorContaining(
+      "Invalid input '123'': expected four hexadecimal digits"
+    )
+    "'\\ux111'" should notParse[Literal].withSyntaxErrorContaining(
+      "Invalid input 'x111': expected four hexadecimal digits"
+    )
   }
 
   test("arbitrary string literals") {

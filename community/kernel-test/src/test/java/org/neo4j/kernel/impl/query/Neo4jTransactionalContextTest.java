@@ -19,9 +19,10 @@
  */
 package org.neo4j.kernel.impl.query;
 
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Answers.RETURNS_DEEP_STUBS;
@@ -45,7 +46,10 @@ import org.mockito.InOrder;
 import org.mockito.Mockito;
 import org.mockito.internal.stubbing.defaultanswers.ReturnsDeepStubs;
 import org.neo4j.common.DependencyResolver;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 import org.neo4j.graphdb.TransactionTerminatedException;
+import org.neo4j.graphdb.TransactionTerminatedHelper;
 import org.neo4j.internal.kernel.api.ExecutionStatistics;
 import org.neo4j.internal.kernel.api.connectioninfo.ClientConnectionInfo;
 import org.neo4j.internal.kernel.api.exceptions.TransactionFailureException;
@@ -152,7 +156,8 @@ class Neo4jTransactionalContextTest {
         when(transaction.transactionType()).thenReturn(KernelTransaction.Type.IMPLICIT);
         GraphDatabaseQueryService graph = mock(GraphDatabaseQueryService.class);
         when(graph.beginTransaction(any(), any(), any())).thenReturn(innerTransaction);
-        TransactionTerminatedException error = new TransactionTerminatedException(Status.Transaction.Terminated);
+        TransactionTerminatedException error =
+                TransactionTerminatedHelper.transactionTerminated(Status.Transaction.Terminated);
         when(innerTransaction.kernelTransaction()).thenThrow(error);
 
         // When
@@ -165,7 +170,12 @@ class Neo4jTransactionalContextTest {
                 QueryExecutionConfiguration.DEFAULT_CONFIG);
 
         // Then
-        assertThatThrownBy(transactionalContext::contextWithNewTransaction).isSameAs(error);
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(transactionalContext::contextWithNewTransaction)
+                .isSameAs(error)
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_25N14)
+                .hasStatusDescription("error: invalid transaction state - transaction termination client error. "
+                        + "The transaction has been terminated. Retry your operation in a new transaction, "
+                        + "and you should see a successful result. Reason: Explicitly terminated by the user.");
         verify(innerTransaction).close();
     }
 
@@ -301,6 +311,32 @@ class Neo4jTransactionalContextTest {
         inOrder.verify(statement).close();
         inOrder.verify(tx).commit(any());
         inOrder.verify(queryRegistry).unbindExecutingQuery(any(), anyLong());
+    }
+
+    @Test
+    void shouldPreserveStatusOfTransactionFailureException() throws TransactionFailureException {
+        // Given
+        var tx = mock(InternalTransaction.class, RETURNS_DEEP_STUBS);
+        var kernelTx = mockTransaction(statement);
+        when(tx.kernelTransaction()).thenReturn(kernelTx);
+        when(tx.terminationReason()).thenReturn(Optional.empty());
+        var nextStatement = mock(KernelStatement.class);
+        when(nextStatement.queryRegistry()).thenReturn(mock(QueryRegistry.class));
+        var nextKernelTx = mockTransaction(nextStatement);
+        when(transactionFactory.beginKernelTransaction(any(), any(), any(), any()))
+                .thenReturn(nextKernelTx);
+
+        // When
+        var context = newContext(tx);
+        var expectedException = TransactionFailureException.leaseExpired(2, 1);
+        when(kernelTx.commit(any())).thenThrow(expectedException);
+
+        // Then
+        var thrown = assertThrows(org.neo4j.graphdb.TransactionFailureException.class, context::commitAndRestartTx);
+        assertEquals(expectedException.getMessage(), thrown.getMessage());
+        assertEquals(expectedException.gqlStatusObject(), thrown.gqlStatusObject());
+        assertEquals(expectedException.status(), thrown.status());
+        assertSame(expectedException, thrown.getCause());
     }
 
     private void setUpMocks() {

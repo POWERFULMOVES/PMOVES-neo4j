@@ -19,8 +19,8 @@
  */
 package org.neo4j.test.extension;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Fail.fail;
 import static org.junit.jupiter.api.extension.ConditionEvaluationResult.disabled;
 import static org.neo4j.test.extension.ExecutionSharedContext.CREATED_TEST_FILE_PAIRS_KEY;
 import static org.neo4j.test.extension.ExecutionSharedContext.LOCKED_TEST_FILE_KEY;
@@ -33,6 +33,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -65,6 +66,7 @@ abstract class DirectoryExtensionLifecycleVerificationTest {
     @Inject
     private FileSystemAbstraction fs;
 
+    @TestInstance(TestInstance.Lifecycle.PER_CLASS)
     @TestDirectoryExtension
     static class WithRealFs extends DirectoryExtensionLifecycleVerificationTest {
         @Nested
@@ -72,8 +74,20 @@ abstract class DirectoryExtensionLifecycleVerificationTest {
         class PerClassTest extends SecondTestFailTest {}
 
         @Nested
+        @TestInstance(TestInstance.Lifecycle.PER_CLASS)
+        class PerClassAfterEachTest extends AfterEachTestFail {}
+
+        @Nested
         @TestInstance(TestInstance.Lifecycle.PER_METHOD)
         class PerMethodTest extends SecondTestFailTest {}
+
+        @Nested
+        @TestInstance(TestInstance.Lifecycle.PER_METHOD)
+        class PerMethodAfterEachTest extends AfterEachTestFail {}
+
+        @Nested
+        @TestInstance(TestInstance.Lifecycle.PER_METHOD)
+        class PerMethodAllPass extends AllPassTest {}
     }
 
     @EphemeralTestDirectoryExtension
@@ -83,14 +97,26 @@ abstract class DirectoryExtensionLifecycleVerificationTest {
         class PerClassTest extends SecondTestFailTest {}
 
         @Nested
+        @TestInstance(TestInstance.Lifecycle.PER_CLASS)
+        class PerClassAfterEachTest extends AfterEachTestFail {}
+
+        @Nested
         @TestInstance(TestInstance.Lifecycle.PER_METHOD)
         class PerMethodTest extends SecondTestFailTest {}
+
+        @Nested
+        @TestInstance(TestInstance.Lifecycle.PER_METHOD)
+        class PerMethodAfterEachTest extends AfterEachTestFail {}
+
+        @Nested
+        @TestInstance(TestInstance.Lifecycle.PER_METHOD)
+        class PerMethodAllPass extends AllPassTest {}
     }
 
     @Test
     void executeAndCleanupDirectory() {
         Path file = directory.createFile("a");
-        assertTrue(fs.fileExists(file));
+        assertThat(fs.fileExists(file)).isTrue();
         ExecutionSharedContext.setValue(SUCCESSFUL_TEST_FILE_KEY, file);
     }
 
@@ -105,7 +131,7 @@ abstract class DirectoryExtensionLifecycleVerificationTest {
     void lockFileAndFailToDeleteDirectory() {
         Path nonDeletableDirectory = directory.directory("c");
         ExecutionSharedContext.setValue(LOCKED_TEST_FILE_KEY, nonDeletableDirectory);
-        assertTrue(nonDeletableDirectory.toFile().setReadable(false, false));
+        assertThat(nonDeletableDirectory.toFile().setReadable(false, false)).isTrue();
     }
 
     @TestFactory
@@ -134,31 +160,70 @@ abstract class DirectoryExtensionLifecycleVerificationTest {
 
         @Test
         void createAFileAndThenPass() {
-            createFileSaveAndFailIfNeeded(Boolean.FALSE);
+            createFileSaveAndFailIfNeeded(false);
         }
 
         @Test
         void createAFileAndThenFail() {
-            createFileSaveAndFailIfNeeded(Boolean.TRUE);
+            createFileSaveAndFailIfNeeded(true);
         }
 
         @Test
         void createAnotherFileAndThenPass() {
-            createFileSaveAndFailIfNeeded(Boolean.FALSE);
+            createFileSaveAndFailIfNeeded(false);
         }
 
         @ValueSource(booleans = {false, true, false})
         @ParameterizedTest
         void createFileSaveAndFailIfNeeded(Boolean fail) {
-            var filename = UUID.randomUUID().toString();
-            var file = testDirectory.createFile(filename);
-            List<Pair<Path, Boolean>> pairs = ExecutionSharedContext.getValue(CREATED_TEST_FILE_PAIRS_KEY);
-            pairs = pairs == null ? new ArrayList<>() : pairs;
-            pairs.add(Pair.of(file, fail));
-            ExecutionSharedContext.setValue(CREATED_TEST_FILE_PAIRS_KEY, pairs);
-            if (fail) {
-                fail();
-            }
+            DirectoryExtensionLifecycleVerificationTest.createFileSaveAndFailIfNeeded(fail, testDirectory);
+        }
+    }
+
+    static class AfterEachTestFail {
+        @Inject
+        TestDirectory testDirectory;
+
+        @AfterEach
+        void tearDown() {
+            fail();
+        }
+
+        @Test
+        void createAFileAndThenPass() {
+            createFileSaveAndFailIfNeeded(false, testDirectory);
+        }
+    }
+
+    static class AllPassTest {
+        @Inject
+        TestDirectory testDirectory;
+
+        @Test
+        void pass1() {
+            createFileSaveAndFailIfNeeded(false, testDirectory);
+        }
+
+        @Test
+        void pass2() {
+            createFileSaveAndFailIfNeeded(false, testDirectory);
+        }
+
+        @Test
+        void pass3() {
+            createFileSaveAndFailIfNeeded(false, testDirectory);
+        }
+    }
+
+    private static void createFileSaveAndFailIfNeeded(boolean fail, TestDirectory testDirectory) {
+        var filename = UUID.randomUUID().toString();
+        var file = testDirectory.createFile(filename);
+        List<Pair<Path, Boolean>> pairs = ExecutionSharedContext.getValue(CREATED_TEST_FILE_PAIRS_KEY);
+        pairs = pairs == null ? new ArrayList<>() : pairs;
+        pairs.add(Pair.of(file, fail));
+        ExecutionSharedContext.setValue(CREATED_TEST_FILE_PAIRS_KEY, pairs);
+        if (fail) {
+            fail();
         }
     }
 

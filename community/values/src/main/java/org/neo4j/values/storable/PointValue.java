@@ -115,14 +115,17 @@ public class PointValue extends HashMemoizingScalarValue implements Point, Compa
             }
 
             double x = coordinate[0];
-            // Valid range for X is  [-180,180]
-            while (x > 180) {
-                x = x - 360;
+            // Valid range for x is [-180,180]; wrap in constant time.
+            // The floating-point remainder is exact and O(1), so this also terminates regardless of the size of x.
+            if (x > 180 || x < -180) {
+                x = x % 360; // result in (-360, 360)
+                if (x > 180) {
+                    x -= 360;
+                } else if (x < -180) {
+                    x += 360;
+                }
             }
-            while (x < -180) {
-                x = x + 360;
-            }
-            this.coordinate[0] = x;
+            this.coordinate[0] = x == 0 ? 0.0 : x; // normalize -0.0 (e.g. from -360 % 360) to +0.0
         }
     }
 
@@ -139,13 +142,13 @@ public class PointValue extends HashMemoizingScalarValue implements Point, Compa
     }
 
     @Override
-    public ValueRepresentation valueRepresentation() {
-        return ValueRepresentation.GEOMETRY;
+    public String prettify() {
+        return toString();
     }
 
     @Override
-    public NumberType numberType() {
-        return NumberType.NO_NUMBER;
+    public ValueRepresentation valueRepresentation() {
+        return ValueRepresentation.GEOMETRY;
     }
 
     @Override
@@ -368,14 +371,10 @@ public class PointValue extends HashMemoizingScalarValue implements Point, Compa
                 crs = coordinates.length == 3 ? CoordinateReferenceSystem.WGS_84_3D : CoordinateReferenceSystem.WGS_84;
             }
             if (!crs.isGeographic()) {
-                throw new InvalidArgumentException(String.format(
-                        "Geographic points does not support coordinate reference system: %s."
-                                + "This is set either in the csv header or the actual data column",
-                        crs));
+                throw InvalidArgumentException.invalidCRSForGeographic(String.valueOf(crs));
             }
         } else {
             if (crs == null) {
-
                 throw InvalidArgumentException.invalidCoordinateNames();
             }
 
@@ -413,10 +412,11 @@ public class PointValue extends HashMemoizingScalarValue implements Point, Compa
     }
 
     DoubleValue getNthCoordinate(int n, String fieldName, boolean onlyGeographic) {
+
         if (onlyGeographic && !this.getCoordinateReferenceSystem().isGeographic()) {
-            throw new InvalidArgumentException("Field: " + fieldName + " is not available on cartesian point: " + this);
+            throw InvalidArgumentException.fieldNotAvailableOnPoint(fieldName, String.valueOf(this), true);
         } else if (n >= this.coordinate().length) {
-            throw new InvalidArgumentException("Field: " + fieldName + " is not available on point: " + this);
+            throw InvalidArgumentException.fieldNotAvailableOnPoint(fieldName, String.valueOf(this), false);
         } else {
             return Values.doubleValue(coordinate[n]);
         }
@@ -475,7 +475,7 @@ public class PointValue extends HashMemoizingScalarValue implements Point, Compa
                     if (srid != -1) {
                         throw InvalidArgumentException.duplicateFieldNotAllowed(key);
                     }
-                    assignIntegral(key, value, i -> srid = i);
+                    assignSrid(value);
                 }
 
                 default -> {}
@@ -501,13 +501,13 @@ public class PointValue extends HashMemoizingScalarValue implements Point, Compa
             } else {
                 String prettyVal = value instanceof Value v ? v.prettyPrint() : String.valueOf(value);
                 throw InvalidArgumentException.cannotAssignPointField(
-                        String.valueOf(value), prettyVal, key, List.of("STRING"));
+                        String.valueOf(value), key, prettyVal, List.of("STRING"));
             }
         }
 
         private static void assignFloatingPoint(String key, Object value, Consumer<Double> assigner) {
-            if (value instanceof String) {
-                assigner.accept(assertConvertible(() -> Double.parseDouble((String) value)));
+            if (value instanceof String s) {
+                assigner.accept(assertConvertible(() -> Double.parseDouble(s), s));
             } else if (value instanceof IntegralValue) {
                 assigner.accept(((IntegralValue) value).doubleValue());
             } else if (value instanceof FloatingPointValue) {
@@ -516,27 +516,34 @@ public class PointValue extends HashMemoizingScalarValue implements Point, Compa
                 String prettyVal = value instanceof Value v ? v.prettyPrint() : String.valueOf(value);
 
                 throw InvalidArgumentException.cannotAssignPointField(
-                        String.valueOf(value), prettyVal, key, List.of("FLOAT", "INTEGER"));
+                        String.valueOf(value), key, prettyVal, List.of("FLOAT", "INTEGER"));
             }
         }
 
-        private static void assignIntegral(String key, Object value, Consumer<Integer> assigner) {
-            if (value instanceof String) {
-                assigner.accept(assertConvertible(() -> Integer.parseInt((String) value)));
+        private void assignSrid(Object value) {
+            long sridValue;
+            if (value instanceof String s) {
+                sridValue = assertConvertible(() -> Long.parseLong(s), s);
             } else if (value instanceof IntegralValue) {
-                assigner.accept((int) ((IntegralValue) value).longValue());
+                sridValue = ((IntegralValue) value).longValue();
             } else {
                 String prettyVal = value instanceof Value v ? v.prettyPrint() : String.valueOf(value);
                 throw InvalidArgumentException.cannotAssignPointField(
-                        String.valueOf(value), prettyVal, key, List.of("INTEGER"));
+                        String.valueOf(value), "srid", prettyVal, List.of("INTEGER"));
             }
+            // The CRS catalog only holds codes far below 2^31, so anything outside int range cannot be a
+            // valid code; -1 is the internal marker for "no SRID specified" and must not be user-assignable.
+            if (sridValue == -1 || sridValue > Integer.MAX_VALUE || sridValue < Integer.MIN_VALUE) {
+                throw InvalidSpatialArgumentException.invalidCoordinateSystem(sridValue);
+            }
+            srid = (int) sridValue;
         }
 
-        private static <T extends Number> T assertConvertible(Supplier<T> func) {
+        private static <T extends Number> T assertConvertible(Supplier<T> func, String input) {
             try {
                 return func.get();
             } catch (NumberFormatException e) {
-                throw new InvalidArgumentException(e.getMessage(), e);
+                throw InvalidArgumentException.failedConvertFunction(input, e);
             }
         }
 

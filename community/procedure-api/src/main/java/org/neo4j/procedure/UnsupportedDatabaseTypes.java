@@ -34,6 +34,7 @@ public @interface UnsupportedDatabaseTypes {
     DatabaseType[] value();
 
     enum DatabaseType {
-        SPD
+        SPD,
+        COMPOSITE
     }
 }

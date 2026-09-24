@@ -24,8 +24,9 @@ import static org.neo4j.storageengine.AppendIndexProvider.UNKNOWN_APPEND_INDEX;
 
 import org.neo4j.io.pagecache.context.TransactionIdSnapshot;
 import org.neo4j.kernel.KernelVersion;
-import org.neo4j.kernel.impl.transaction.log.AppendBatchInfo;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
+import org.neo4j.util.concurrent.OutOfOrderSequence;
+import org.neo4j.wal.AppendBatchInfo;
+import org.neo4j.wal.LogPosition;
 
 /**
  * Keeps a latest transaction id. There's one counter for {@code committed transaction id} and one for
@@ -148,7 +149,7 @@ public interface TransactionIdStore {
     /**
      * @return highest seen gap-free {@link #transactionClosed(long, long, KernelVersion, long, long, int, long, long)}  closed transaction id}.
      */
-    long getLastClosedTransactionId();
+    long getHighestGapFreeClosedTransactionId();
 
     /**
      * @return current snapshot of closed and visible transaction ids
@@ -161,7 +162,7 @@ public interface TransactionIdStore {
      *
      * @return transaction information about the last closed (highest gap-free) transaction.
      */
-    ClosedTransactionMetadata getLastClosedTransaction();
+    ClosedTransactionMetadata getHighestGapFreeClosedTransaction();
 
     /**
      * Returns information about the last closed transactional batch, i.e.
@@ -179,6 +180,7 @@ public interface TransactionIdStore {
      * @param lastBatch is the batch last for particular transaction
      * @param kernelVersion the closed batch kernel version
      * @param logPositionAfter log position after closed batch
+     * @param consensusIndex consensus index of the closed batch, or {@link #UNKNOWN_CONSENSUS_INDEX} if not known
      */
     void batchClosed(
             long transactionId,
@@ -186,7 +188,8 @@ public interface TransactionIdStore {
             boolean firstBatch,
             boolean lastBatch,
             KernelVersion kernelVersion,
-            LogPosition logPositionAfter);
+            LogPosition logPositionAfter,
+            long consensusIndex);
 
     /**
      * Used by recovery, where last committed/closed transaction ids are set.
@@ -199,6 +202,9 @@ public interface TransactionIdStore {
      * @param consensusIndex consensus index of the transaction.
      * @param byteOffset offset in the log file where the committed entry has been written.
      * @param logVersion version of log the committed entry has been written into.
+     * @param lastClosedBatchConsensusIndex consensus index of the last closed batch, which may differ from
+     * {@code consensusIndex} if the last closed batch was a rollback or a not-yet-committed chunk of a bigger
+     * transaction.
      */
     void setLastCommittedAndClosedTransactionId(
             long transactionId,
@@ -209,7 +215,42 @@ public interface TransactionIdStore {
             long consensusIndex,
             long byteOffset,
             long logVersion,
-            long logsAppendIndex);
+            long logsAppendIndex,
+            long lastClosedBatchConsensusIndex);
+
+    /**
+     * Used by recovery, where last committed/closed transaction ids are set.
+     *
+     * @param lastCommitedTxId                transaction id that will be the last committed id.
+     * @param lastClosedTxId                  transaction id that will be the last closed
+     * @param transactionAppendIndex          append index to set sequence to
+     * @param kernelVersion                   kernel version of transaction that was last closed/committed
+     * @param checksum                        checksum of the transaction.
+     * @param commitTimestamp                 the timestamp of the transaction commit.
+     * @param consensusIndex                  consensus index of the transaction.
+     * @param byteOffset                      offset in the log file where the committed entry has been written.
+     * @param logVersion                      version of log the committed entry has been written into.
+     * @param earliestOpenTransactionMetadata metadata about earliest still open transaction if any
+     * @param lastClosedTxIdInfo              last closed tx id info
+     * @param lastClosedBatchConsensusIndex   consensus index of the last closed batch, which may differ from
+     * {@code consensusIndex} if the last closed batch was a rollback or a not-yet-committed chunk of a bigger
+     * transaction.
+     */
+    void setLastCommittedAndClosedTransactionId(
+            long lastCommitedTxId,
+            long lastClosedTxId,
+            long[] notClosedTransactions,
+            long transactionAppendIndex,
+            KernelVersion kernelVersion,
+            int checksum,
+            long commitTimestamp,
+            long consensusIndex,
+            long byteOffset,
+            long logVersion,
+            long logsAppendIndex,
+            long lastClosedBatchConsensusIndex,
+            OpenTransactionMetadata earliestOpenTransactionMetadata,
+            OutOfOrderSequence.NumberWithMeta lastClosedTxIdInfo);
 
     /**
      * Signals that a transaction with the given transaction id has been fully applied. Calls to this method
@@ -266,6 +307,7 @@ public interface TransactionIdStore {
      * @param lastBatch is the batch last for particular transaction
      * @param logPositionBefore log position before entry with provided appendIndex
      * @param logPositionAfter log position after entry with provided appendIndex
+     * @param consensusIndex consensus index of the batch, or {@link #UNKNOWN_CONSENSUS_INDEX} if not known
      */
     void appendBatch(
             long transactionId,
@@ -273,7 +315,8 @@ public interface TransactionIdStore {
             boolean firstBatch,
             boolean lastBatch,
             LogPosition logPositionBefore,
-            LogPosition logPositionAfter);
+            LogPosition logPositionAfter,
+            long consensusIndex);
 
     /**
      * Returns information about last encountered appended registered batch.
@@ -291,4 +334,14 @@ public interface TransactionIdStore {
      * Returns highest ever closed transaction info
      */
     TransactionId getHighestEverClosedTransaction();
+
+    /**
+     * Updates the lowest available committed transaction ID, typically after tx log pruning has occurred.
+     */
+    void setLowestAvailableCommittedTransactionId(long transactionId);
+
+    /**
+     * @return lowest available committed transaction ID, as set by {@link #setLowestAvailableCommittedTransactionId(long)}.
+     */
+    long getLowestAvailableCommittedTransactionId();
 }

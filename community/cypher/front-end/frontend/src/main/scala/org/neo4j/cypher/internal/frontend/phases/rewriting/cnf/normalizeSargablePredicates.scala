@@ -67,14 +67,11 @@ case class normalizeSargablePredicatesRewriter(semanticTable: SemanticTable) ext
   def apply(that: AnyRef): AnyRef = instance().apply(that)
 }
 
-case object normalizeSargablePredicates extends CnfPhase {
+case object normalizeSargablePredicates extends CnfPhaseRewriter {
 
   override def preConditions: Set[StepSequencer.Condition] = SemanticInfoAvailable
 
   override def postConditions: Set[StepSequencer.Condition] = Set(NoInequalityInsideNot)
-
-  // Can invalidate semantic info as it may introduce a new AST
-  override def invalidatedConditions: Set[StepSequencer.Condition] = SemanticInfoAvailable
 
   override def instance(from: BaseState, context: BaseContext): Rewriter =
     normalizeSargablePredicatesRewriter(from.semanticTable())

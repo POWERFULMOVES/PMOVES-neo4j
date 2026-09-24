@@ -22,6 +22,8 @@ package org.neo4j.kernel.internal.event;
 import static org.neo4j.kernel.api.exceptions.Status.Transaction.TransactionHookFailed;
 
 import java.util.Collection;
+import java.util.HashSet;
+import java.util.Set;
 import org.neo4j.graphdb.TransientFailureException;
 import org.neo4j.graphdb.event.TransactionData;
 import org.neo4j.graphdb.event.TransactionEventListener;
@@ -29,7 +31,7 @@ import org.neo4j.internal.helpers.Exceptions;
 import org.neo4j.internal.kernel.api.exceptions.TransactionFailureException;
 import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.api.exceptions.Status;
-import org.neo4j.kernel.impl.api.state.TxState;
+import org.neo4j.kernel.api.txstate.TransactionState;
 import org.neo4j.kernel.impl.factory.GraphDatabaseFacade;
 import org.neo4j.storageengine.api.StorageReader;
 import org.neo4j.storageengine.api.txstate.ReadableTransactionState;
@@ -52,7 +54,7 @@ public class TransactionEventListeners {
         this.storageReader = storageReader;
     }
 
-    public void beforeCommit(TxState txState, boolean isCommitCall) throws TransactionFailureException {
+    public void beforeCommit(TransactionState txState, boolean isCommitCall) throws TransactionFailureException {
         if (listenersSnapshot == null) {
             listenersSnapshot = databaseEventListeners.getCurrentRegisteredTransactionEventListeners();
         }
@@ -63,10 +65,11 @@ public class TransactionEventListeners {
                 if (cause instanceof TransientFailureException tfe) {
                     throw tfe;
                 }
-                if (cause instanceof Status.HasStatus se) {
-                    throw new TransactionFailureException(se.status(), cause, cause.getMessage());
+                if (cause instanceof Status.HasStatus) {
+                    throw TransactionFailureException.wrapError((Throwable & Status.HasStatus) cause);
                 }
-                throw new TransactionFailureException(TransactionHookFailed, cause, cause.getMessage());
+                throw TransactionFailureException.internalError(
+                        TransactionHookFailed, cause, this.getClass().getSimpleName(), cause.getMessage());
             }
         } finally {
             this.listenersState = newState;
@@ -104,7 +107,10 @@ public class TransactionEventListeners {
             return null;
         }
 
-        TransactionData txData = new TxStateTransactionDataSnapshot(state, storageReader, transaction, isCommitCall);
+        Set<TransactionData.DataSelection> dataSelection = collectDataSelection(eventListeners);
+
+        TransactionData txData =
+                new TxStateTransactionDataSnapshot(state, storageReader, transaction, isCommitCall, dataSelection);
         TransactionListenersState listenersStates = new TransactionListenersState(txData);
 
         boolean hasDataChanges = state.hasDataChanges();
@@ -128,6 +134,25 @@ public class TransactionEventListeners {
         }
 
         return listenersStates;
+    }
+
+    static Set<TransactionData.DataSelection> collectDataSelection(
+            Collection<TransactionEventListener<?>> eventListeners) {
+        Set<TransactionData.DataSelection> result = null;
+        for (TransactionEventListener<?> listener : eventListeners) {
+            Set<TransactionData.DataSelection> dataSelection = listener.transactionDataSelection();
+            if (dataSelection == null) {
+                // As soon as observing a listener that needs all requirements, we can return
+                return null;
+            }
+
+            if (result == null) {
+                result = new HashSet<>(dataSelection);
+            } else {
+                result.addAll(dataSelection);
+            }
+        }
+        return result;
     }
 
     void afterCommit(TransactionListenersState listeners) {

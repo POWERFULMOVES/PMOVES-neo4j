@@ -19,7 +19,6 @@
  */
 package org.neo4j.io.fs;
 
-import static java.lang.String.format;
 import static java.nio.file.FileVisitResult.CONTINUE;
 import static java.nio.file.FileVisitResult.SKIP_SUBTREE;
 import static java.nio.file.Files.createDirectory;
@@ -31,12 +30,10 @@ import static java.nio.file.StandardCopyOption.COPY_ATTRIBUTES;
 import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
 import static java.nio.file.StandardOpenOption.READ;
 import static java.nio.file.StandardOpenOption.WRITE;
-import static java.util.Collections.singleton;
 import static java.util.Objects.requireNonNull;
 import static org.neo4j.function.Predicates.alwaysTrue;
 import static org.neo4j.util.Preconditions.checkArgument;
 
-import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -65,7 +62,6 @@ import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-import org.apache.commons.lang3.SystemUtils;
 import org.neo4j.io.fs.DefaultFileSystemAbstraction.NativeByteBufferOutputStream;
 
 /**
@@ -267,7 +263,7 @@ public final class FileUtils {
         requireNonNull(to);
         checkArgument(from.isAbsolute(), "From directory must be absolute");
         checkArgument(to.isAbsolute(), "To directory must be absolute");
-        checkArgument(isDirectory(from), "From is not a directory");
+        checkArgument(isDirectory(from), "From is not a directory, From:" + from);
         checkArgument(!from.normalize().equals(to.normalize()), "From and to directories are the same");
 
         if (notExists(to.getParent())) {
@@ -396,24 +392,8 @@ public final class FileUtils {
     }
 
     public static void tryForceDirectory(Path directory) throws IOException {
-        if (notExists(directory)) {
-            return;
-        } else if (!isDirectory(directory)) {
-            throw new NotDirectoryException(
-                    format("The path %s must refer to a directory!", directory.toAbsolutePath()));
-        }
-
-        if (SystemUtils.IS_OS_WINDOWS) {
-            // Windows doesn't allow us to open a FileChannel against a directory for reading, so we can't attempt to
-            // "fsync" there
-            return;
-        }
-
-        // Attempts to fsync the directory, guaranting e.g. file creation/deletion/rename events are durable
-        // See http://mail.openjdk.java.net/pipermail/nio-dev/2015-May/003140.html
-        // See also https://github.com/apache/lucene-solr/commit/7bea628bf3961a10581833935e4c1b61ad708c5c
-        try (FileChannel directoryChannel = FileChannel.open(directory, singleton(READ))) {
-            directoryChannel.force(true);
+        try (var fs = new DefaultFileSystemAbstraction()) {
+            fs.tryForceDirectory(directory);
         }
     }
 
@@ -441,20 +421,44 @@ public final class FileUtils {
     }
 
     /**
-     * Wrap the {@link StoreFileChannel} for the provider path as an {@link OutputStream}
-     * @param path the path to write to
-     * @param storeChannelProvider factory for creating the store channel
-     * @param options the options to use when creating the channel
+     * Wrap an already opened {@link StoreChannel} as a buffered {@link OutputStream}. The returned stream takes
+     * ownership of the channel, i.e. closing the stream closes the channel.
+     * @param channel the channel to write to
      * @return the output stream
-     * @throws IOException if unable to open the channel
+     */
+    public static OutputStream toBufferedStream(StoreChannel channel) {
+        return new NativeByteBufferOutputStream(channel, FileSystemAbstraction.DEFAULT_OUTPUT_STREAM_BUFFER_SIZE);
+    }
+
+    /**
+     * @see #toBufferedStream(Path, Function, Set, int, boolean) .
      */
     public static OutputStream toBufferedStream(
             Path path, Function<FileChannel, StoreFileChannel> storeChannelProvider, Set<OpenOption> options)
             throws IOException {
+        return toBufferedStream(
+                path, storeChannelProvider, options, FileSystemAbstraction.DEFAULT_OUTPUT_STREAM_BUFFER_SIZE);
+    }
+
+    /**
+     * Wrap the {@link StoreFileChannel} for the provider path as an {@link OutputStream}
+     * @param path the path to write to
+     * @param storeChannelProvider factory for creating the store channel
+     * @param options the options to use when creating the channel
+     * @param bufferSize size of the buffer for the {@link OutputStream}.
+     * @return the output stream
+     * @throws IOException if unable to open the channel
+     */
+    public static OutputStream toBufferedStream(
+            Path path,
+            Function<FileChannel, StoreFileChannel> storeChannelProvider,
+            Set<OpenOption> options,
+            int bufferSize)
+            throws IOException {
         FileChannel channel = FileChannel.open(path, options);
         StoreFileChannel fileChannel = storeChannelProvider.apply(channel);
         fileChannel.tryMakeUninterruptible();
-        return new BufferedOutputStream(new NativeByteBufferOutputStream(fileChannel));
+        return new NativeByteBufferOutputStream(fileChannel, bufferSize);
     }
 
     private static Path resolve(Path source, Path other) {

@@ -28,6 +28,7 @@ import static org.neo4j.graphdb.RelationshipType.withName;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Collection;
 import java.util.function.Predicate;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -41,18 +42,23 @@ import org.neo4j.graphdb.Transaction;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.kernel.database.NamedDatabaseId;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointer;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.SimpleTriggerInfo;
-import org.neo4j.kernel.impl.transaction.log.files.LogFile;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
+import org.neo4j.storageengine.api.StorageEngine;
+import org.neo4j.storageengine.api.StorageFileSelection;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
+import org.neo4j.wal.LogFile;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.checkpoint.CheckPointer;
+import org.neo4j.wal.checkpoint.SimpleTriggerInfo;
 
 @TestDirectoryExtension
 class MissingStoreFilesRecoveryIT {
+    private static final Label testNodes = Label.label("testNodes");
+
     @Inject
     private TestDirectory testDirectory;
 
@@ -63,7 +69,7 @@ class MissingStoreFilesRecoveryIT {
     private DatabaseLayout databaseLayout;
     private TestDatabaseManagementServiceBuilder serviceBuilder;
     private NamedDatabaseId defaultNamedDatabaseId;
-    private static final Label testNodes = Label.label("testNodes");
+    private Collection<Path> storeFiles;
 
     @BeforeEach
     void setUp() throws IOException {
@@ -73,10 +79,14 @@ class MissingStoreFilesRecoveryIT {
         createSomeData(databaseApi);
         databaseLayout = databaseApi.databaseLayout();
 
-        defaultNamedDatabaseId = getDatabaseManager()
+        defaultNamedDatabaseId = getDatabaseContextProvider()
                 .databaseIdRepository()
                 .getByName(DEFAULT_DATABASE_NAME)
                 .orElseThrow();
+        storeFiles = databaseApi
+                .getDependencyResolver()
+                .resolveDependency(StorageEngine.class)
+                .listStorageFiles(new StorageFileSelection(true, true, false));
 
         managementService.shutdown();
     }
@@ -88,18 +98,24 @@ class MissingStoreFilesRecoveryIT {
         }
     }
 
+    @SkipOnSpd(
+            reason =
+                    "Cluster simply cannot handle starting a db w/o tx logs - see ClusterIllegalSeedingIT#shouldFailToStartReadReplicaWithNoLogsButStandaloneShouldPass",
+            notes = {SkipOnSpd.Note.incompatible})
     @Test
     void databaseStartFailingOnMissingFilesAndMissedTxLogs() throws IOException {
-        Path storeFile = getStoreFile(databaseLayout);
-        fileSystem.deleteFile(storeFile);
+        Path[] storeFiles = getStoreFiles(databaseLayout);
+        for (Path storeFile : storeFiles) {
+            fileSystem.deleteFile(storeFile);
+        }
         fileSystem.deleteRecursively(databaseLayout.getTransactionLogsDirectory());
 
         managementService = serviceBuilder.build();
         var dbStateService = getDatabaseStateService();
         assertThat(dbStateService.causeOfFailure(defaultNamedDatabaseId).orElseThrow())
-                .hasRootCauseMessage(String.format(
-                        "Store files [%s] is(are) missing and recovery is not possible. Please restore from a consistent backup.",
-                        storeFile.toAbsolutePath()));
+                .rootCause()
+                .hasMessageContaining(
+                        "are missing and recovery is not possible. Please restore from a consistent backup.");
     }
 
     @Test
@@ -107,20 +123,24 @@ class MissingStoreFilesRecoveryIT {
         LogFiles logFiles = prepareDatabaseWithTwoTxLogFiles();
 
         fileSystem.deleteFile(logFiles.getLogFile().getLogFileForVersion(0));
-        Path storeFile = getStoreFile(databaseLayout);
-        fileSystem.deleteFile(storeFile);
+        Path[] storeFiles = getStoreFiles(databaseLayout);
+        for (Path storeFile : storeFiles) {
+            fileSystem.deleteFile(storeFile);
+        }
 
         var dbStateService = getDatabaseStateService();
         var failure = dbStateService.causeOfFailure(defaultNamedDatabaseId);
         assertFalse(failure.isPresent());
-        assertFalse(fileSystem.fileExists(storeFile));
+        for (Path storeFile : storeFiles) {
+            assertFalse(fileSystem.fileExists(storeFile));
+        }
     }
 
-    private static Path getStoreFile(DatabaseLayout layout) {
-        return layout.mandatoryStoreFiles().stream()
+    private Path[] getStoreFiles(DatabaseLayout layout) {
+        return storeFiles.stream()
                 .filter(Predicate.not(layout.pathForExistsMarker()::equals))
-                .findAny()
-                .orElseThrow();
+                .limit(5)
+                .toArray(Path[]::new);
     }
 
     private LogFiles prepareDatabaseWithTwoTxLogFiles() throws IOException {
@@ -133,13 +153,13 @@ class MissingStoreFilesRecoveryIT {
         return logFiles;
     }
 
-    private DatabaseContextProvider getDatabaseManager() {
+    private DatabaseContextProvider<?> getDatabaseContextProvider() {
         return defaultDatabase(managementService)
                 .getDependencyResolver()
                 .resolveDependency(DatabaseContextProvider.class);
     }
 
-    private DatabaseStateService getDatabaseStateService() {
+    private DatabaseStateService<?> getDatabaseStateService() {
         return defaultDatabase(managementService).getDependencyResolver().resolveDependency(DatabaseStateService.class);
     }
 

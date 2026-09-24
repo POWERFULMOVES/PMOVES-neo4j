@@ -21,7 +21,7 @@ package org.neo4j.procedure.impl;
 
 import static java.util.Arrays.asList;
 import static java.util.Collections.singletonList;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.neo4j.kernel.api.ResourceTracker.EMPTY_RESOURCE_TRACKER;
 import static org.neo4j.kernel.api.procedure.BasicContext.buildContext;
@@ -55,8 +55,7 @@ import org.neo4j.values.AnyValue;
 import org.neo4j.values.ValueMapper;
 import org.neo4j.values.storable.Values;
 
-@SuppressWarnings("WeakerAccess")
-public class ResourceInjectionTest {
+class ResourceInjectionTest {
     private ProcedureCompiler compiler;
     private final DependencyResolver dependencyResolver = new Dependencies();
     private final ValueMapper<Object> valueMapper = new DefaultValueMapper(mock(InternalTransaction.class));
@@ -91,10 +90,9 @@ public class ResourceInjectionTest {
 
     @Test
     void shouldFailNicelyWhenUnknownAPI() {
-        ProcedureException exception = assertThrows(
-                ProcedureException.class, () -> compiler.compileProcedure(ProcedureWithUnknownAPI.class, true));
-        assertThat(exception.getMessage())
-                .isEqualTo("Unable to set up injection for procedure `ProcedureWithUnknownAPI`, "
+        assertThatThrownBy(() -> compiler.compileProcedure(ProcedureWithUnknownAPI.class, true))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage("Unable to set up injection for procedure `ProcedureWithUnknownAPI`, "
                         + "the field `api` has type `class org.neo4j.procedure.impl.ResourceInjectionTest$UnknownAPI` "
                         + "which is not a known injectable component.");
     }
@@ -125,9 +123,10 @@ public class ResourceInjectionTest {
                 .containsMessages("org.neo4j.procedure.impl.listCoolPeople", "unavailable");
 
         assertThat(procList.size()).isEqualTo(1);
-        ProcedureException exception = assertThrows(ProcedureException.class, () -> procList.get(0)
-                .apply(prepareContext(), new AnyValue[0], EMPTY_RESOURCE_TRACKER));
-        assertThat(exception.getMessage()).contains("org.neo4j.procedure.impl.listCoolPeople", "unavailable");
+        assertThatThrownBy(() -> procList.get(0).apply(prepareContext(), new AnyValue[0], EMPTY_RESOURCE_TRACKER))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessageContaining("org.neo4j.procedure.impl.listCoolPeople")
+                .hasMessageContaining("unavailable");
     }
 
     @Test
@@ -145,10 +144,9 @@ public class ResourceInjectionTest {
 
     @Test
     void shouldFailNicelyWhenFunctionUsesUnknownAPI() {
-        ProcedureException exception = assertThrows(
-                ProcedureException.class, () -> compiler.compileFunction(FunctionWithUnknownAPI.class, false));
-        assertThat(exception.getMessage())
-                .isEqualTo(
+        assertThatThrownBy(() -> compiler.compileFunction(FunctionWithUnknownAPI.class, false))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(
                         "Unable to set up injection for procedure `FunctionWithUnknownAPI`, "
                                 + "the field `api` has type `class org.neo4j.procedure.impl.ResourceInjectionTest$UnknownAPI` which is not a known injectable component.");
     }
@@ -163,9 +161,10 @@ public class ResourceInjectionTest {
                 .containsMessages("org.neo4j.procedure.impl.listCoolPeople", "unavailable");
 
         assertThat(procList.size()).isEqualTo(1);
-        ProcedureException exception =
-                assertThrows(ProcedureException.class, () -> procList.get(0).apply(prepareContext(), new AnyValue[0]));
-        assertThat(exception.getMessage()).contains("org.neo4j.procedure.impl.listCoolPeople", "unavailable");
+        assertThatThrownBy(() -> procList.get(0).apply(prepareContext(), new AnyValue[0]))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessageContaining("org.neo4j.procedure.impl.listCoolPeople")
+                .hasMessageContaining("unavailable");
     }
 
     @Test
@@ -186,11 +185,9 @@ public class ResourceInjectionTest {
 
     @Test
     void shouldFailNicelyWhenAggregationFunctionUsesUnknownAPI() {
-        ProcedureException exception = assertThrows(
-                ProcedureException.class,
-                () -> compiler.compileAggregationFunction(AggregationFunctionWithUnknownAPI.class));
-        assertThat(exception.getMessage())
-                .isEqualTo(
+        assertThatThrownBy(() -> compiler.compileAggregationFunction(AggregationFunctionWithUnknownAPI.class))
+                .isInstanceOf(ProcedureException.class)
+                .hasMessage(
                         "Unable to set up injection for procedure `AggregationFunctionWithUnknownAPI`, "
                                 + "the field `api` has type `class org.neo4j.procedure.impl.ResourceInjectionTest$UnknownAPI` which is not a known injectable component.");
     }
@@ -206,13 +203,15 @@ public class ResourceInjectionTest {
                 .containsMessages("org.neo4j.procedure.impl.listCoolPeople", "unavailable");
 
         assertThat(procList.size()).isEqualTo(1);
-        ProcedureException exception = assertThrows(ProcedureException.class, () -> {
-            var reducer = procList.get(0).createReducer(prepareContext());
-            var updater = reducer.newUpdater();
-            updater.update(new AnyValue[] {});
-            reducer.result();
-        });
-        assertThat(exception.getMessage()).contains("org.neo4j.procedure.impl.listCoolPeople", "unavailable");
+        assertThatThrownBy(() -> {
+                    var reducer = procList.get(0).createReducer(prepareContext());
+                    var updater = reducer.newUpdater();
+                    updater.update(new AnyValue[] {});
+                    reducer.result();
+                })
+                .isInstanceOf(ProcedureException.class)
+                .hasMessageContaining("org.neo4j.procedure.impl.listCoolPeople")
+                .hasMessageContaining("unavailable");
     }
 
     @Test

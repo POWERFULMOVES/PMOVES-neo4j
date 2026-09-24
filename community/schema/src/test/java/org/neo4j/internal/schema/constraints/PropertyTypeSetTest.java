@@ -46,7 +46,7 @@ class PropertyTypeSetTest {
 
     @ParameterizedTest
     @MethodSource("descriptions")
-    void testUserDescription(List<SchemaValueType> types, String expected) {
+    void shouldSortAndRemoveDuplicationFromUserDescription(List<SchemaValueType> types, String expected) {
         assertThat(PropertyTypeSet.of(types).userDescription()).isEqualTo(expected);
     }
 
@@ -66,26 +66,26 @@ class PropertyTypeSetTest {
 
     @ParameterizedTest
     @MethodSource("setSizes")
-    void testSize(List<SchemaValueType> types, int expectedSize) {
+    void shouldCountOnlyDistinctTypes(List<SchemaValueType> types, int expectedSize) {
         assertThat(PropertyTypeSet.of(types).size()).isEqualTo(expectedSize);
     }
 
     @Test
-    void testEquality() {
-        var a = PropertyTypeSet.of(SchemaValueType.BOOLEAN, SchemaValueType.INTEGER);
-        var b = PropertyTypeSet.of(SchemaValueType.INTEGER, SchemaValueType.BOOLEAN);
+    void shouldBeEqualForSetsWithSameTypesRegardlessOfOrder() {
+        PropertyTypeSet a = PropertyTypeSet.of(SchemaValueType.BOOLEAN, SchemaValueType.INTEGER);
+        PropertyTypeSet b = PropertyTypeSet.of(SchemaValueType.INTEGER, SchemaValueType.BOOLEAN);
         assertThat(a).isEqualTo(b);
 
-        var c = PropertyTypeSet.of(SchemaValueType.INTEGER, SchemaValueType.STRING);
+        PropertyTypeSet c = PropertyTypeSet.of(SchemaValueType.INTEGER, SchemaValueType.STRING);
         assertThat(a).isNotEqualTo(c);
     }
 
     @Test
-    void testSetOperations() {
-        var empty = PropertyTypeSet.of();
-        var set1 = PropertyTypeSet.of(SchemaValueType.BOOLEAN);
-        var set2 = PropertyTypeSet.of(SchemaValueType.INTEGER);
-        var union = PropertyTypeSet.of(SchemaValueType.INTEGER, SchemaValueType.BOOLEAN);
+    void shouldComputeSetOperations() {
+        PropertyTypeSet empty = PropertyTypeSet.of();
+        PropertyTypeSet set1 = PropertyTypeSet.of(SchemaValueType.BOOLEAN);
+        PropertyTypeSet set2 = PropertyTypeSet.of(SchemaValueType.INTEGER);
+        PropertyTypeSet union = PropertyTypeSet.of(SchemaValueType.INTEGER, SchemaValueType.BOOLEAN);
 
         // Unions
         assertThat(set1.union(set2)).isEqualTo(union);

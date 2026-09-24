@@ -23,14 +23,16 @@ import org.neo4j.cypher.internal
 import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.semantics.TokenTable
 import org.neo4j.cypher.internal.expressions
+import org.neo4j.cypher.internal.expressions.Ands
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.NODE_TYPE
+import org.neo4j.cypher.internal.expressions.PropertyKeyName
 import org.neo4j.cypher.internal.expressions.RELATIONSHIP_TYPE
-import org.neo4j.cypher.internal.expressions.SemanticDirection
 import org.neo4j.cypher.internal.frontend.phases.QueryLanguage.toKernelScope
-import org.neo4j.cypher.internal.frontend.phases.ResolvedCall
+import org.neo4j.cypher.internal.frontend.phases.ResolvedNonLocalCall
 import org.neo4j.cypher.internal.ir.CreatePattern
 import org.neo4j.cypher.internal.ir.RemoveLabelPattern
+import org.neo4j.cypher.internal.ir.SelectivePathPattern
 import org.neo4j.cypher.internal.ir.SetDynamicPropertyPattern
 import org.neo4j.cypher.internal.ir.SetLabelPattern
 import org.neo4j.cypher.internal.ir.SetNodePropertiesFromMapPattern
@@ -50,12 +52,15 @@ import org.neo4j.cypher.internal.logical.plans.AllNodesScan
 import org.neo4j.cypher.internal.logical.plans.AntiConditionalApply
 import org.neo4j.cypher.internal.logical.plans.AntiSemiApply
 import org.neo4j.cypher.internal.logical.plans.Apply
+import org.neo4j.cypher.internal.logical.plans.ApplyPlan
 import org.neo4j.cypher.internal.logical.plans.Argument
+import org.neo4j.cypher.internal.logical.plans.AssertCachedProperties
 import org.neo4j.cypher.internal.logical.plans.AssertSameNode
 import org.neo4j.cypher.internal.logical.plans.AssertSameRelationship
 import org.neo4j.cypher.internal.logical.plans.BFSPruningVarExpand
 import org.neo4j.cypher.internal.logical.plans.CacheProperties
 import org.neo4j.cypher.internal.logical.plans.CartesianProduct
+import org.neo4j.cypher.internal.logical.plans.CommandLogicalPlan
 import org.neo4j.cypher.internal.logical.plans.ConditionalApply
 import org.neo4j.cypher.internal.logical.plans.Create
 import org.neo4j.cypher.internal.logical.plans.DeleteExpression
@@ -68,14 +73,20 @@ import org.neo4j.cypher.internal.logical.plans.DetachDeletePath
 import org.neo4j.cypher.internal.logical.plans.DirectedAllRelationshipsScan
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipByElementIdSeek
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipByIdSeek
+import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipFulltextIndexSearch
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipIndexContainsScan
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipIndexEndsWithScan
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipIndexScan
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipIndexSeek
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipTypeScan
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipUniqueIndexSeek
+import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipVectorIndexSearch
 import org.neo4j.cypher.internal.logical.plans.DirectedUnionRelationshipTypesScan
 import org.neo4j.cypher.internal.logical.plans.Distinct
+import org.neo4j.cypher.internal.logical.plans.DynamicDirectedRelationshipTypeLookup
+import org.neo4j.cypher.internal.logical.plans.DynamicElement
+import org.neo4j.cypher.internal.logical.plans.DynamicLabelNodeLookup
+import org.neo4j.cypher.internal.logical.plans.DynamicUndirectedRelationshipTypeLookup
 import org.neo4j.cypher.internal.logical.plans.Eager
 import org.neo4j.cypher.internal.logical.plans.EmptyResult
 import org.neo4j.cypher.internal.logical.plans.ErrorPlan
@@ -85,7 +96,6 @@ import org.neo4j.cypher.internal.logical.plans.Expand.ExpandAll
 import org.neo4j.cypher.internal.logical.plans.Expand.ExpandInto
 import org.neo4j.cypher.internal.logical.plans.Expand.VariablePredicate
 import org.neo4j.cypher.internal.logical.plans.FindShortestPaths
-import org.neo4j.cypher.internal.logical.plans.FindShortestPaths.AllowSameNode
 import org.neo4j.cypher.internal.logical.plans.Foreach
 import org.neo4j.cypher.internal.logical.plans.ForeachApply
 import org.neo4j.cypher.internal.logical.plans.IndexOrderNone
@@ -99,19 +109,25 @@ import org.neo4j.cypher.internal.logical.plans.LetSelectOrSemiApply
 import org.neo4j.cypher.internal.logical.plans.LetSemiApply
 import org.neo4j.cypher.internal.logical.plans.Limit
 import org.neo4j.cypher.internal.logical.plans.LoadCSV
+import org.neo4j.cypher.internal.logical.plans.LockNodes
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
+import org.neo4j.cypher.internal.logical.plans.LogicalPlans
 import org.neo4j.cypher.internal.logical.plans.Merge
+import org.neo4j.cypher.internal.logical.plans.MergeInto
+import org.neo4j.cypher.internal.logical.plans.MergeUniqueNode
 import org.neo4j.cypher.internal.logical.plans.MultiNodeIndexSeek
 import org.neo4j.cypher.internal.logical.plans.NodeByElementIdSeek
 import org.neo4j.cypher.internal.logical.plans.NodeByIdSeek
 import org.neo4j.cypher.internal.logical.plans.NodeByLabelScan
 import org.neo4j.cypher.internal.logical.plans.NodeCountFromCountStore
+import org.neo4j.cypher.internal.logical.plans.NodeFulltextIndexSearch
 import org.neo4j.cypher.internal.logical.plans.NodeHashJoin
 import org.neo4j.cypher.internal.logical.plans.NodeIndexContainsScan
 import org.neo4j.cypher.internal.logical.plans.NodeIndexEndsWithScan
 import org.neo4j.cypher.internal.logical.plans.NodeIndexScan
 import org.neo4j.cypher.internal.logical.plans.NodeIndexSeek
 import org.neo4j.cypher.internal.logical.plans.NodeUniqueIndexSeek
+import org.neo4j.cypher.internal.logical.plans.NodeVectorIndexSearch
 import org.neo4j.cypher.internal.logical.plans.NonFuseable
 import org.neo4j.cypher.internal.logical.plans.NonPipelined
 import org.neo4j.cypher.internal.logical.plans.NonPipelinedStreaming
@@ -148,7 +164,11 @@ import org.neo4j.cypher.internal.logical.plans.Projection
 import org.neo4j.cypher.internal.logical.plans.PruningVarExpand
 import org.neo4j.cypher.internal.logical.plans.RelationshipCountFromCountStore
 import org.neo4j.cypher.internal.logical.plans.RemoteBatchProperties
+import org.neo4j.cypher.internal.logical.plans.RemoteBatchPropertiesWithFilter
+import org.neo4j.cypher.internal.logical.plans.RemoteNodeIndexSeek
+import org.neo4j.cypher.internal.logical.plans.RemoteNodeUniqueIndexSeek
 import org.neo4j.cypher.internal.logical.plans.RemoveLabels
+import org.neo4j.cypher.internal.logical.plans.RepeatAcyclic
 import org.neo4j.cypher.internal.logical.plans.RepeatTrail
 import org.neo4j.cypher.internal.logical.plans.RepeatWalk
 import org.neo4j.cypher.internal.logical.plans.RightOuterHashJoin
@@ -170,6 +190,7 @@ import org.neo4j.cypher.internal.logical.plans.SetRelationshipProperties
 import org.neo4j.cypher.internal.logical.plans.SetRelationshipPropertiesFromMap
 import org.neo4j.cypher.internal.logical.plans.SetRelationshipProperty
 import org.neo4j.cypher.internal.logical.plans.ShowConstraints
+import org.neo4j.cypher.internal.logical.plans.ShowDatabases
 import org.neo4j.cypher.internal.logical.plans.ShowFunctions
 import org.neo4j.cypher.internal.logical.plans.ShowIndexes
 import org.neo4j.cypher.internal.logical.plans.ShowProcedures
@@ -190,18 +211,21 @@ import org.neo4j.cypher.internal.logical.plans.TriadicSelection
 import org.neo4j.cypher.internal.logical.plans.UndirectedAllRelationshipsScan
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipByElementIdSeek
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipByIdSeek
+import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipFulltextIndexSearch
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipIndexContainsScan
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipIndexEndsWithScan
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipIndexScan
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipIndexSeek
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipTypeScan
 import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipUniqueIndexSeek
+import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipVectorIndexSearch
 import org.neo4j.cypher.internal.logical.plans.UndirectedUnionRelationshipTypesScan
 import org.neo4j.cypher.internal.logical.plans.Union
 import org.neo4j.cypher.internal.logical.plans.UnionNodeByLabelsScan
 import org.neo4j.cypher.internal.logical.plans.UnwindCollection
 import org.neo4j.cypher.internal.logical.plans.ValueHashJoin
 import org.neo4j.cypher.internal.logical.plans.VarExpand
+import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.StableLeafPlans
 import org.neo4j.cypher.internal.planner.spi.ReadTokenContext
 import org.neo4j.cypher.internal.runtime.CypherRow
 import org.neo4j.cypher.internal.runtime.ParameterMapping
@@ -223,6 +247,7 @@ import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.SideEf
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.ValuePopulatingReferenceByName
 import org.neo4j.cypher.internal.runtime.interpreted.commands.predicates.Predicate
 import org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands.ShowConstraintsCommand
+import org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands.ShowDatabaseCommand
 import org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands.ShowFunctionsCommand
 import org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands.ShowIndexesCommand
 import org.neo4j.cypher.internal.runtime.interpreted.commands.showcommands.ShowProceduresCommand
@@ -250,13 +275,18 @@ import org.neo4j.cypher.internal.runtime.interpreted.pipes.CreateRelationshipCom
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.DeletePipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.DirectedAllRelationshipsScanPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.DirectedRelationshipByIdSeekPipe
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.DirectedRelationshipFulltextIndexSearchPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.DirectedRelationshipIndexContainsScanPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.DirectedRelationshipIndexEndsWithScanPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.DirectedRelationshipIndexScanPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.DirectedRelationshipIndexSeekPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.DirectedRelationshipTypeScanPipe
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.DirectedRelationshipVectorIndexSearchPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.DirectedUnionRelationshipTypesScanPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.DistinctPipe
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.DynamicDirectedRelationshipTypeLookupPipe
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.DynamicLabelNodeLookupPipe
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.DynamicUndirectedRelationshipTypeLookupPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.EagerAggregationPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.EagerPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.EmptyResultPipe
@@ -267,7 +297,7 @@ import org.neo4j.cypher.internal.runtime.interpreted.pipes.ExpandIntoPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.FilterPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.ForeachApplyPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.ForeachPipe
-import org.neo4j.cypher.internal.runtime.interpreted.pipes.IndexSeekModeFactory
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.IndexSeekMode
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.InputPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.IntersectionNodeByLabelsScanPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.LazyLabel
@@ -277,11 +307,16 @@ import org.neo4j.cypher.internal.runtime.interpreted.pipes.LetSelectOrSemiApplyP
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.LetSemiApplyPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.LimitPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.LoadCSVPipe
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.LockNodesPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.LockingMergePipe
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.MergeIntoPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.MergePipe
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.MergePropertySets
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.MergeUniqueNodePipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.NodeByIdSeekPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.NodeByLabelScanPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.NodeCountFromCountStorePipe
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.NodeFulltextIndexSearchPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.NodeHashJoinPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.NodeIndexContainsScanPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.NodeIndexEndsWithScanPipe
@@ -289,6 +324,7 @@ import org.neo4j.cypher.internal.runtime.interpreted.pipes.NodeIndexScanPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.NodeIndexSeekPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.NodeLeftOuterHashJoinPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.NodeRightOuterHashJoinPipe
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.NodeVectorIndexSearchPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.NonPipelinedStreamingTestPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.NonPipelinedTestPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.OptionalExpandAllPipe
@@ -313,6 +349,7 @@ import org.neo4j.cypher.internal.runtime.interpreted.pipes.RelationshipCountFrom
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.RelationshipTypes
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.RemoveLabelsPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.RepeatPipe
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.RepeatPipe.AllReduceAcc
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.RollUpApplyPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.RunQueryAtPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.SelectOrSemiApplyPipe
@@ -341,15 +378,18 @@ import org.neo4j.cypher.internal.runtime.interpreted.pipes.Top1WithTiesPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.TopNPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.TransactionApplyPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.TransactionForeachPipe
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.TransactionRetryPolicy
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.TraversalPredicates
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.TriadicSelectionPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.UndirectedAllRelationshipsScanPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.UndirectedRelationshipByIdSeekPipe
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.UndirectedRelationshipFulltextIndexSearchPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.UndirectedRelationshipIndexContainsScanPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.UndirectedRelationshipIndexEndsWithScanPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.UndirectedRelationshipIndexScanPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.UndirectedRelationshipIndexSeekPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.UndirectedRelationshipTypeScanPipe
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.UndirectedRelationshipVectorIndexSearchPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.UndirectedUnionRelationshipTypesScanPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.UnionNodeByLabelsScanPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.UnionPipe
@@ -362,11 +402,17 @@ import org.neo4j.cypher.internal.runtime.interpreted.pipes.aggregation.NonGroupi
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.aggregation.OrderedGroupingAggTable
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.aggregation.OrderedNonGroupingAggTable
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
+import org.neo4j.cypher.internal.util.CancellationChecker
 import org.neo4j.cypher.internal.util.Eagerly
+import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.attribution.Id
+import org.neo4j.cypher.internal.util.attribution.SameId
+import org.neo4j.exceptions.CantCompileQueryException
 import org.neo4j.exceptions.InternalException
+import org.neo4j.graphdb.schema.IndexType
 import org.neo4j.internal.kernel.api.helpers.traversal.SlotOrName
 import org.neo4j.values.AnyValue
+import org.neo4j.values.storable.Values
 
 /**
  * Responsible for turning a logical plan with argument pipes into a new pipe.
@@ -380,12 +426,28 @@ case class InterpretedPipeMapper(
   indexRegistrator: QueryIndexRegistrator,
   anonymousVariableNameGenerator: AnonymousVariableNameGenerator,
   isCommunity: Boolean,
-  parameterMapping: ParameterMapping
+  parameterMapping: ParameterMapping,
+  stableLeafPlans: StableLeafPlans
 )(implicit semanticTable: TokenTable) extends PipeMapper {
 
   private def getBuildExpression(id: Id): internal.expressions.Expression => Expression =
     ((e: internal.expressions.Expression) => expressionConverters.toCommandExpression(id, e)) andThen
       (expression => expression.rewrite(KeyTokenResolver.resolveExpressions(_, tokenContext)))
+
+  // State set onBeginMap
+  private[this] var rootPlan: LogicalPlan = _
+  private[this] var cancellationChecker: CancellationChecker = _
+  private[this] var isNestedPlan: Boolean = _
+
+  override def onBeginMap(
+    rootPlan: LogicalPlan,
+    cancellationChecker: CancellationChecker,
+    isNestedPlan: Boolean
+  ): Unit = {
+    this.rootPlan = rootPlan
+    this.cancellationChecker = cancellationChecker
+    this.isNestedPlan = isNestedPlan
+  }
 
   override def onLeaf(plan: LogicalPlan): Pipe = {
     val id = plan.id
@@ -395,12 +457,12 @@ case class InterpretedPipeMapper(
         ArgumentPipe()(id)
 
       case AllNodesScan(ident, _) =>
-        AllNodesScanPipe(ident.name)(id = id)
+        AllNodesScanPipe(ident.name, stableLeafPlans.includeChangesFromThisTransaction(id))(id = id)
 
       // Note: this plan shouldn't really be used here, but having it mapped here helps
       //      fallback and makes testing easier
       case PartitionedAllNodesScan(ident, _) =>
-        AllNodesScanPipe(ident.name)(id = id)
+        AllNodesScanPipe(ident.name, includeChangesFromThisTransaction = true)(id = id)
 
       case NodeCountFromCountStore(ident, labels, _) =>
         NodeCountFromCountStorePipe(ident.name, labels.map(l => l.map(LazyLabel.apply)))(id = id)
@@ -415,29 +477,70 @@ case class InterpretedPipeMapper(
 
       case NodeByLabelScan(ident, label, _, indexOrder) =>
         indexRegistrator.registerLabelScan()
-        NodeByLabelScanPipe(ident.name, LazyLabel(label), indexOrder)(id = id)
+        NodeByLabelScanPipe(
+          ident.name,
+          LazyLabel(label),
+          indexOrder,
+          stableLeafPlans.includeChangesFromThisTransaction(id)
+        )(id = id)
+
+      case DynamicLabelNodeLookup(ident, DynamicElement.Simple(expr, operator), _, propertyConstraints) =>
+        indexRegistrator.registerLabelScan()
+
+        DynamicLabelNodeLookupPipe(
+          ident.name,
+          expressionConverters.toCommandExpression(id, expr),
+          operator,
+          propertyConstraints.map { case (property, expr) =>
+            property -> expressionConverters.toCommandExpression(id, expr)
+          },
+          readOnly = readOnly,
+          includeChangesFromThisTransaction = stableLeafPlans.includeChangesFromThisTransaction(id)
+        )(id = id)
 
       // Note: this plan shouldn't really be used here, but having it mapped here helps
       //      fallback and makes testing easier
       case PartitionedNodeByLabelScan(ident, label, _) =>
         indexRegistrator.registerLabelScan()
-        NodeByLabelScanPipe(ident.name, LazyLabel(label), IndexOrderNone)(id = id)
+        NodeByLabelScanPipe(ident.name, LazyLabel(label), IndexOrderNone, includeChangesFromThisTransaction = true)(
+          id = id
+        )
 
       case UnionNodeByLabelsScan(ident, labels, _, indexOrder) =>
         indexRegistrator.registerLabelScan()
-        UnionNodeByLabelsScanPipe(ident.name, labels.map(l => LazyLabel(l)), indexOrder)(id = id)
+        UnionNodeByLabelsScanPipe(
+          ident.name,
+          labels.map(l => LazyLabel(l)),
+          indexOrder,
+          stableLeafPlans.includeChangesFromThisTransaction(id)
+        )(id = id)
 
       case PartitionedUnionNodeByLabelsScan(ident, labels, _) =>
         indexRegistrator.registerLabelScan()
-        UnionNodeByLabelsScanPipe(ident.name, labels.map(l => LazyLabel(l)), IndexOrderNone)(id = id)
+        UnionNodeByLabelsScanPipe(
+          ident.name,
+          labels.map(l => LazyLabel(l)),
+          IndexOrderNone,
+          includeChangesFromThisTransaction = true
+        )(id = id)
 
       case IntersectionNodeByLabelsScan(ident, labels, _, indexOrder) =>
         indexRegistrator.registerLabelScan()
-        IntersectionNodeByLabelsScanPipe(ident.name, labels.map(l => LazyLabel(l)), indexOrder)(id = id)
+        IntersectionNodeByLabelsScanPipe(
+          ident.name,
+          labels.map(l => LazyLabel(l)),
+          indexOrder,
+          stableLeafPlans.includeChangesFromThisTransaction(id)
+        )(id = id)
 
       case PartitionedIntersectionNodeByLabelsScan(ident, labels, _) =>
         indexRegistrator.registerLabelScan()
-        IntersectionNodeByLabelsScanPipe(ident.name, labels.map(l => LazyLabel(l)), IndexOrderNone)(id = id)
+        IntersectionNodeByLabelsScanPipe(
+          ident.name,
+          labels.map(l => LazyLabel(l)),
+          IndexOrderNone,
+          includeChangesFromThisTransaction = true
+        )(id = id)
 
       case SubtractionNodeByLabelsScan(ident, positiveLabels, negativeLabels, _, indexOrder) =>
         indexRegistrator.registerLabelScan()
@@ -445,10 +548,9 @@ case class InterpretedPipeMapper(
           ident.name,
           positiveLabels.map(l => LazyLabel(l)),
           negativeLabels.map(l => LazyLabel(l)),
-          indexOrder
-        )(id =
-          id
-        )
+          indexOrder,
+          stableLeafPlans.includeChangesFromThisTransaction(id)
+        )(id = id)
 
       case PartitionedSubtractionNodeByLabelsScan(ident, positiveLabels, negativeLabels, _) =>
         indexRegistrator.registerLabelScan()
@@ -456,10 +558,9 @@ case class InterpretedPipeMapper(
           ident.name,
           positiveLabels.map(l => LazyLabel(l)),
           negativeLabels.map(l => LazyLabel(l)),
-          IndexOrderNone
-        )(id =
-          id
-        )
+          IndexOrderNone,
+          includeChangesFromThisTransaction = true
+        )(id = id)
 
       case NodeByIdSeek(ident, nodeIdExpr, _) =>
         NodeByIdSeekPipe(ident.name, expressionConverters.toCommandSeekArgs(id, nodeIdExpr))(id = id)
@@ -471,126 +572,186 @@ case class InterpretedPipeMapper(
 
       case DirectedRelationshipByIdSeek(ident, relIdExpr, fromNode, toNode, _) =>
         DirectedRelationshipByIdSeekPipe(
-          ident.name,
+          ident.map(_.name),
           expressionConverters.toCommandSeekArgs(id, relIdExpr),
-          toNode.name,
-          fromNode.name
+          toNode.map(_.name),
+          fromNode.map(_.name)
         )(id = id)
 
       case DirectedRelationshipByElementIdSeek(ident, relIdExpr, fromNode, toNode, _) =>
         DirectedRelationshipByIdSeekPipe(
-          ident.name,
+          ident.map(_.name),
           expressionConverters.toCommandElementIdSeekArgs(id, relIdExpr, RELATIONSHIP_TYPE),
-          toNode.name,
-          fromNode.name
+          toNode.map(_.name),
+          fromNode.map(_.name)
         )(id = id)
 
       case UndirectedRelationshipByIdSeek(ident, relIdExpr, fromNode, toNode, _) =>
         UndirectedRelationshipByIdSeekPipe(
-          ident.name,
+          ident.map(_.name),
           expressionConverters.toCommandSeekArgs(id, relIdExpr),
-          toNode.name,
-          fromNode.name
+          toNode.map(_.name),
+          fromNode.map(_.name)
         )(id = id)
 
       case UndirectedRelationshipByElementIdSeek(ident, relIdExpr, fromNode, toNode, _) =>
         UndirectedRelationshipByIdSeekPipe(
-          ident.name,
+          ident.map(_.name),
           expressionConverters.toCommandElementIdSeekArgs(id, relIdExpr, RELATIONSHIP_TYPE),
-          toNode.name,
-          fromNode.name
+          toNode.map(_.name),
+          fromNode.map(_.name)
         )(id = id)
 
       case DirectedAllRelationshipsScan(ident, fromNode, toNode, _) =>
-        DirectedAllRelationshipsScanPipe(ident.name, fromNode.name, toNode.name)(id = id)
+        DirectedAllRelationshipsScanPipe(
+          ident.map(_.name),
+          fromNode.map(_.name),
+          toNode.map(_.name),
+          stableLeafPlans.includeChangesFromThisTransaction(id)
+        )(id = id)
 
       case UndirectedAllRelationshipsScan(ident, fromNode, toNode, _) =>
-        UndirectedAllRelationshipsScanPipe(ident.name, fromNode.name, toNode.name)(id = id)
+        UndirectedAllRelationshipsScanPipe(
+          ident.map(_.name),
+          fromNode.map(_.name),
+          toNode.map(_.name),
+          stableLeafPlans.includeChangesFromThisTransaction(id)
+        )(id = id)
 
       case PartitionedDirectedAllRelationshipsScan(ident, fromNode, toNode, _) =>
-        DirectedAllRelationshipsScanPipe(ident.name, fromNode.name, toNode.name)(id = id)
+        DirectedAllRelationshipsScanPipe(
+          ident.map(_.name),
+          fromNode.map(_.name),
+          toNode.map(_.name),
+          includeChangesFromThisTransaction = true
+        )(id = id)
 
       case PartitionedUndirectedAllRelationshipsScan(ident, fromNode, toNode, _) =>
-        UndirectedAllRelationshipsScanPipe(ident.name, fromNode.name, toNode.name)(id = id)
+        UndirectedAllRelationshipsScanPipe(
+          ident.map(_.name),
+          fromNode.map(_.name),
+          toNode.map(_.name),
+          includeChangesFromThisTransaction = true
+        )(id = id)
 
       case DirectedRelationshipTypeScan(ident, fromNode, typ, toNode, _, indexOrder) =>
         indexRegistrator.registerTypeScan()
         DirectedRelationshipTypeScanPipe(
-          ident.name,
-          fromNode.name,
+          ident.map(_.name),
+          fromNode.map(_.name),
           LazyType(typ)(semanticTable),
-          toNode.name,
-          indexOrder
+          toNode.map(_.name),
+          indexOrder,
+          stableLeafPlans.includeChangesFromThisTransaction(id)
         )(id = id)
+
+      case DynamicDirectedRelationshipTypeLookup(ident, fromNode, typeExpr, toNode, _, _, propertyPredicates) =>
+        indexRegistrator.registerTypeScan()
+        typeExpr match {
+          case DynamicElement.Simple(expr, operator) =>
+            DynamicDirectedRelationshipTypeLookupPipe(
+              ident.map(_.name),
+              fromNode.map(_.name),
+              expressionConverters.toCommandExpression(id, expr),
+              toNode.map(_.name),
+              operator,
+              propertyPredicates.transform((_, v) => expressionConverters.toCommandExpression(id, v)),
+              readOnly = true,
+              stableLeafPlans.includeChangesFromThisTransaction(id)
+            )(id = id)
+        }
 
       case UndirectedRelationshipTypeScan(ident, fromNode, typ, toNode, _, indexOrder) =>
         indexRegistrator.registerTypeScan()
         UndirectedRelationshipTypeScanPipe(
-          ident.name,
-          fromNode.name,
+          ident.map(_.name),
+          fromNode.map(_.name),
           LazyType(typ)(semanticTable),
-          toNode.name,
-          indexOrder
+          toNode.map(_.name),
+          indexOrder,
+          stableLeafPlans.includeChangesFromThisTransaction(id)
         )(id = id)
+
+      case DynamicUndirectedRelationshipTypeLookup(ident, fromNode, typeExpr, toNode, _, _, propertyPredicates) =>
+        indexRegistrator.registerTypeScan()
+        typeExpr match {
+          case DynamicElement.Simple(expr, operator) =>
+            DynamicUndirectedRelationshipTypeLookupPipe(
+              ident.map(_.name),
+              fromNode.map(_.name),
+              expressionConverters.toCommandExpression(id, expr),
+              toNode.map(_.name),
+              operator,
+              propertyPredicates.transform((_, v) => expressionConverters.toCommandExpression(id, v)),
+              readOnly = true,
+              stableLeafPlans.includeChangesFromThisTransaction(id)
+            )(id = id)
+        }
 
       case PartitionedDirectedRelationshipTypeScan(ident, fromNode, typ, toNode, _) =>
         indexRegistrator.registerTypeScan()
         DirectedRelationshipTypeScanPipe(
-          ident.name,
-          fromNode.name,
+          ident.map(_.name),
+          fromNode.map(_.name),
           LazyType(typ)(semanticTable),
-          toNode.name,
-          IndexOrderNone
+          toNode.map(_.name),
+          IndexOrderNone,
+          includeChangesFromThisTransaction = true
         )(id = id)
 
       case PartitionedUndirectedRelationshipTypeScan(ident, fromNode, typ, toNode, _) =>
         indexRegistrator.registerTypeScan()
         UndirectedRelationshipTypeScanPipe(
-          ident.name,
-          fromNode.name,
+          ident.map(_.name),
+          fromNode.map(_.name),
           LazyType(typ)(semanticTable),
-          toNode.name,
-          IndexOrderNone
+          toNode.map(_.name),
+          IndexOrderNone,
+          includeChangesFromThisTransaction = true
         )(id = id)
 
       case DirectedUnionRelationshipTypesScan(ident, fromNode, types, endNode, _, indexOrder) =>
         indexRegistrator.registerTypeScan()
         DirectedUnionRelationshipTypesScanPipe(
-          ident.name,
-          fromNode.name,
+          ident.map(_.name),
+          fromNode.map(_.name),
           types.map(l => LazyType(l)(semanticTable)),
-          endNode.name,
-          indexOrder
+          endNode.map(_.name),
+          indexOrder,
+          stableLeafPlans.includeChangesFromThisTransaction(id)
         )(id = id)
 
       case UndirectedUnionRelationshipTypesScan(ident, fromNode, types, endNode, _, indexOrder) =>
         indexRegistrator.registerTypeScan()
         UndirectedUnionRelationshipTypesScanPipe(
-          ident.name,
-          fromNode.name,
+          ident.map(_.name),
+          fromNode.map(_.name),
           types.map(l => LazyType(l)(semanticTable)),
-          endNode.name,
-          indexOrder
+          endNode.map(_.name),
+          indexOrder,
+          stableLeafPlans.includeChangesFromThisTransaction(id)
         )(id = id)
 
       case PartitionedDirectedUnionRelationshipTypesScan(ident, fromNode, types, endNode, _) =>
         indexRegistrator.registerTypeScan()
         DirectedUnionRelationshipTypesScanPipe(
-          ident.name,
-          fromNode.name,
+          ident.map(_.name),
+          fromNode.map(_.name),
           types.map(l => LazyType(l)(semanticTable)),
-          endNode.name,
-          IndexOrderNone
+          endNode.map(_.name),
+          IndexOrderNone,
+          includeChangesFromThisTransaction = true
         )(id = id)
 
       case PartitionedUndirectedUnionRelationshipTypesScan(ident, fromNode, types, endNode, _) =>
         indexRegistrator.registerTypeScan()
         UndirectedUnionRelationshipTypesScanPipe(
-          ident.name,
-          fromNode.name,
+          ident.map(_.name),
+          fromNode.map(_.name),
           types.map(l => LazyType(l)(semanticTable)),
-          endNode.name,
-          IndexOrderNone
+          endNode.map(_.name),
+          IndexOrderNone,
+          includeChangesFromThisTransaction = true
         )(id = id)
 
       case DirectedRelationshipUniqueIndexSeek(
@@ -604,17 +765,18 @@ case class InterpretedPipeMapper(
           indexOrder,
           indexType
         ) =>
-        val indexSeekMode = IndexSeekModeFactory(unique = true, readOnly = readOnly).fromQueryExpression(valueExpr)
+        val indexSeekMode = IndexSeekMode(unique = true, readOnly = readOnly, valueExpr)
         DirectedRelationshipIndexSeekPipe(
-          idName.name,
-          startNode.name,
-          endNode.name,
+          idName.map(_.name),
+          startNode.map(_.name),
+          endNode.map(_.name),
           typeToken,
           properties.toArray,
           indexRegistrator.registerQueryIndex(indexType, typeToken, properties),
           valueExpr.map(buildExpression),
           indexSeekMode,
-          indexOrder
+          indexOrder,
+          includeChangesFromThisTransaction = true
         )(id = id)
 
       case DirectedRelationshipIndexSeek(
@@ -629,17 +791,18 @@ case class InterpretedPipeMapper(
           indexType,
           _
         ) =>
-        val indexSeekMode = IndexSeekModeFactory(unique = false, readOnly = readOnly).fromQueryExpression(valueExpr)
+        val indexSeekMode = IndexSeekMode(unique = false, readOnly = readOnly, valueExpr)
         DirectedRelationshipIndexSeekPipe(
-          idName.name,
-          startNode.name,
-          endNode.name,
+          idName.map(_.name),
+          startNode.map(_.name),
+          endNode.map(_.name),
           typeToken,
           properties.toArray,
           indexRegistrator.registerQueryIndex(indexType, typeToken, properties),
           valueExpr.map(buildExpression),
           indexSeekMode,
-          indexOrder
+          indexOrder,
+          stableLeafPlans.includeChangesFromThisTransaction(id)
         )(id = id)
 
       case PartitionedDirectedRelationshipIndexSeek(
@@ -652,17 +815,18 @@ case class InterpretedPipeMapper(
           _,
           indexType
         ) =>
-        val indexSeekMode = IndexSeekModeFactory(unique = false, readOnly = readOnly).fromQueryExpression(valueExpr)
+        val indexSeekMode = IndexSeekMode(unique = false, readOnly = readOnly, valueExpr)
         DirectedRelationshipIndexSeekPipe(
-          idName.name,
-          startNode.name,
-          endNode.name,
+          idName.map(_.name),
+          startNode.map(_.name),
+          endNode.map(_.name),
           typeToken,
           properties.toArray,
           indexRegistrator.registerQueryIndex(indexType, typeToken, properties),
           valueExpr.map(buildExpression),
           indexSeekMode,
-          IndexOrderNone
+          IndexOrderNone,
+          includeChangesFromThisTransaction = true
         )(id = id)
 
       case UndirectedRelationshipUniqueIndexSeek(
@@ -676,17 +840,18 @@ case class InterpretedPipeMapper(
           indexOrder,
           indexType
         ) =>
-        val indexSeekMode = IndexSeekModeFactory(unique = true, readOnly = readOnly).fromQueryExpression(valueExpr)
+        val indexSeekMode = IndexSeekMode(unique = true, readOnly = readOnly, valueExpr)
         UndirectedRelationshipIndexSeekPipe(
-          idName.name,
-          startNode.name,
-          endNode.name,
+          idName.map(_.name),
+          startNode.map(_.name),
+          endNode.map(_.name),
           typeToken,
           properties.toArray,
           indexRegistrator.registerQueryIndex(indexType, typeToken, properties),
           valueExpr.map(buildExpression),
           indexSeekMode,
-          indexOrder
+          indexOrder,
+          includeChangesFromThisTransaction = true
         )(id = id)
 
       case UndirectedRelationshipIndexSeek(
@@ -701,17 +866,18 @@ case class InterpretedPipeMapper(
           indexType,
           _
         ) =>
-        val indexSeekMode = IndexSeekModeFactory(unique = false, readOnly = readOnly).fromQueryExpression(valueExpr)
+        val indexSeekMode = IndexSeekMode(unique = false, readOnly = readOnly, valueExpr)
         UndirectedRelationshipIndexSeekPipe(
-          idName.name,
-          startNode.name,
-          endNode.name,
+          idName.map(_.name),
+          startNode.map(_.name),
+          endNode.map(_.name),
           typeToken,
           properties.toArray,
           indexRegistrator.registerQueryIndex(indexType, typeToken, properties),
           valueExpr.map(buildExpression),
           indexSeekMode,
-          indexOrder
+          indexOrder,
+          stableLeafPlans.includeChangesFromThisTransaction(id)
         )(id = id)
 
       case PartitionedUndirectedRelationshipIndexSeek(
@@ -724,17 +890,18 @@ case class InterpretedPipeMapper(
           _,
           indexType
         ) =>
-        val indexSeekMode = IndexSeekModeFactory(unique = false, readOnly = readOnly).fromQueryExpression(valueExpr)
+        val indexSeekMode = IndexSeekMode(unique = false, readOnly = readOnly, valueExpr)
         UndirectedRelationshipIndexSeekPipe(
-          idName.name,
-          startNode.name,
-          endNode.name,
+          idName.map(_.name),
+          startNode.map(_.name),
+          endNode.map(_.name),
           typeToken,
           properties.toArray,
           indexRegistrator.registerQueryIndex(indexType, typeToken, properties),
           valueExpr.map(buildExpression),
           indexSeekMode,
-          IndexOrderNone
+          IndexOrderNone,
+          includeChangesFromThisTransaction = true
         )(id = id)
 
       case DirectedRelationshipIndexScan(
@@ -749,13 +916,14 @@ case class InterpretedPipeMapper(
           _
         ) =>
         DirectedRelationshipIndexScanPipe(
-          idName.name,
-          startNode.name,
-          endNode.name,
+          idName.map(_.name),
+          startNode.map(_.name),
+          endNode.map(_.name),
           typeToken,
           properties.toArray,
           indexRegistrator.registerQueryIndex(indexType, typeToken, properties),
-          indexOrder
+          indexOrder,
+          stableLeafPlans.includeChangesFromThisTransaction(id)
         )(id = id)
 
       case UndirectedRelationshipIndexScan(
@@ -770,23 +938,25 @@ case class InterpretedPipeMapper(
           _
         ) =>
         UndirectedRelationshipIndexScanPipe(
-          idName.name,
-          startNode.name,
-          endNode.name,
+          idName.map(_.name),
+          startNode.map(_.name),
+          endNode.map(_.name),
           typeToken,
           properties.toArray,
           indexRegistrator.registerQueryIndex(indexType, typeToken, properties),
-          indexOrder
+          indexOrder,
+          stableLeafPlans.includeChangesFromThisTransaction(id)
         )(id = id)
       case PartitionedDirectedRelationshipIndexScan(idName, startNode, endNode, typeToken, properties, _, indexType) =>
         DirectedRelationshipIndexScanPipe(
-          idName.name,
-          startNode.name,
-          endNode.name,
+          idName.map(_.name),
+          startNode.map(_.name),
+          endNode.map(_.name),
           typeToken,
           properties.toArray,
           indexRegistrator.registerQueryIndex(indexType, typeToken, properties),
-          IndexOrderNone
+          IndexOrderNone,
+          includeChangesFromThisTransaction = true
         )(id = id)
 
       case PartitionedUndirectedRelationshipIndexScan(
@@ -799,13 +969,14 @@ case class InterpretedPipeMapper(
           indexType
         ) =>
         UndirectedRelationshipIndexScanPipe(
-          idName.name,
-          startNode.name,
-          endNode.name,
+          idName.map(_.name),
+          startNode.map(_.name),
+          endNode.map(_.name),
           typeToken,
           properties.toArray,
           indexRegistrator.registerQueryIndex(indexType, typeToken, properties),
-          IndexOrderNone
+          IndexOrderNone,
+          includeChangesFromThisTransaction = true
         )(id = id)
 
       case DirectedRelationshipIndexContainsScan(
@@ -820,14 +991,15 @@ case class InterpretedPipeMapper(
           indexType
         ) =>
         DirectedRelationshipIndexContainsScanPipe(
-          idName.name,
-          startNode.name,
-          endNode.name,
+          idName.map(_.name),
+          startNode.map(_.name),
+          endNode.map(_.name),
           typeToken,
           property,
           indexRegistrator.registerQueryIndex(indexType, typeToken, property),
           buildExpression(valueExpr),
-          indexOrder
+          indexOrder,
+          stableLeafPlans.includeChangesFromThisTransaction(id)
         )(id = id)
 
       case UndirectedRelationshipIndexContainsScan(
@@ -842,14 +1014,15 @@ case class InterpretedPipeMapper(
           indexType
         ) =>
         UndirectedRelationshipIndexContainsScanPipe(
-          idName.name,
-          startNode.name,
-          endNode.name,
+          idName.map(_.name),
+          startNode.map(_.name),
+          endNode.map(_.name),
           typeToken,
           property,
           indexRegistrator.registerQueryIndex(indexType, typeToken, property),
           buildExpression(valueExpr),
-          indexOrder
+          indexOrder,
+          stableLeafPlans.includeChangesFromThisTransaction(id)
         )(id = id)
 
       case DirectedRelationshipIndexEndsWithScan(
@@ -864,14 +1037,15 @@ case class InterpretedPipeMapper(
           indexType
         ) =>
         DirectedRelationshipIndexEndsWithScanPipe(
-          idName.name,
-          startNode.name,
-          endNode.name,
+          idName.map(_.name),
+          startNode.map(_.name),
+          endNode.map(_.name),
           typeToken,
           property,
           indexRegistrator.registerQueryIndex(indexType, typeToken, property),
           buildExpression(valueExpr),
-          indexOrder
+          indexOrder,
+          stableLeafPlans.includeChangesFromThisTransaction(id)
         )(id = id)
 
       case UndirectedRelationshipIndexEndsWithScan(
@@ -886,18 +1060,19 @@ case class InterpretedPipeMapper(
           indexType
         ) =>
         UndirectedRelationshipIndexEndsWithScanPipe(
-          idName.name,
-          startNode.name,
-          endNode.name,
+          idName.map(_.name),
+          startNode.map(_.name),
+          endNode.map(_.name),
           typeToken,
           property,
           indexRegistrator.registerQueryIndex(indexType, typeToken, property),
           buildExpression(valueExpr),
-          indexOrder
+          indexOrder,
+          stableLeafPlans.includeChangesFromThisTransaction(id)
         )(id = id)
 
       case NodeIndexSeek(ident, label, properties, valueExpr, _, indexOrder, indexType, _) =>
-        val indexSeekMode = IndexSeekModeFactory(unique = false, readOnly = readOnly).fromQueryExpression(valueExpr)
+        val indexSeekMode = IndexSeekMode(unique = false, readOnly = readOnly, valueExpr)
         NodeIndexSeekPipe(
           ident.name,
           label,
@@ -905,11 +1080,56 @@ case class InterpretedPipeMapper(
           indexRegistrator.registerQueryIndex(indexType, label, properties),
           valueExpr.map(buildExpression),
           indexSeekMode,
-          indexOrder
+          indexOrder,
+          stableLeafPlans.includeChangesFromThisTransaction(id)
         )(id = id)
 
+      case RemoteNodeIndexSeek(
+          idName,
+          label,
+          properties,
+          valueExpr,
+          argumentIds,
+          indexOrder,
+          indexType,
+          supportPartitionedScan
+        ) =>
+        onLeaf(NodeIndexSeek(
+          idName,
+          label,
+          properties,
+          valueExpr,
+          argumentIds,
+          indexOrder,
+          indexType,
+          supportPartitionedScan
+        )(SameId(id)))
+
+      case RemoteNodeUniqueIndexSeek(
+          idName,
+          label,
+          properties,
+          valueExpr,
+          argumentIds,
+          indexOrder,
+          indexType,
+          supportPartitionedScan
+        ) =>
+        onLeaf(NodeUniqueIndexSeek(
+          idName,
+          label,
+          properties,
+          valueExpr,
+          argumentIds,
+          indexOrder,
+          indexType,
+          supportPartitionedScan
+        )(
+          SameId(id)
+        ))
+
       case PartitionedNodeIndexSeek(ident, label, properties, valueExpr, _, indexType) =>
-        val indexSeekMode = IndexSeekModeFactory(unique = false, readOnly = readOnly).fromQueryExpression(valueExpr)
+        val indexSeekMode = IndexSeekMode(unique = false, readOnly = readOnly, valueExpr)
         NodeIndexSeekPipe(
           ident.name,
           label,
@@ -917,11 +1137,12 @@ case class InterpretedPipeMapper(
           indexRegistrator.registerQueryIndex(indexType, label, properties),
           valueExpr.map(buildExpression),
           indexSeekMode,
-          IndexOrderNone
+          IndexOrderNone,
+          includeChangesFromThisTransaction = true
         )(id = id)
 
       case NodeUniqueIndexSeek(ident, label, properties, valueExpr, _, indexOrder, indexType, _) =>
-        val indexSeekMode = IndexSeekModeFactory(unique = true, readOnly = readOnly).fromQueryExpression(valueExpr)
+        val indexSeekMode = IndexSeekMode(unique = true, readOnly = readOnly, valueExpr)
         NodeIndexSeekPipe(
           ident.name,
           label,
@@ -929,8 +1150,31 @@ case class InterpretedPipeMapper(
           indexRegistrator.registerQueryIndex(indexType, label, properties),
           valueExpr.map(buildExpression),
           indexSeekMode,
-          indexOrder
+          indexOrder,
+          includeChangesFromThisTransaction = true
         )(id = id)
+
+      case MergeUniqueNode(
+          idName,
+          label,
+          properties,
+          seekExpressions,
+          _,
+          _,
+          indexType,
+          onMatchProperties,
+          onCreateProperties
+        ) =>
+
+        new MergeUniqueNodePipe(
+          idName.name,
+          label.name,
+          indexRegistrator.registerQueryIndex(indexType, label, properties),
+          properties.toArray,
+          seekExpressions.map(buildExpression).toArray,
+          MergePropertySets(compilePropertyExpressions(id, onMatchProperties)),
+          MergePropertySets(compilePropertyExpressions(id, onCreateProperties))
+        )(id)
 
       case NodeIndexScan(ident, label, properties, _, indexOrder, indexType, _) =>
         NodeIndexScanPipe(
@@ -938,7 +1182,8 @@ case class InterpretedPipeMapper(
           label,
           properties,
           indexRegistrator.registerQueryIndex(indexType, label, properties),
-          indexOrder
+          indexOrder,
+          stableLeafPlans.includeChangesFromThisTransaction(id)
         )(id = id)
 
       case PartitionedNodeIndexScan(ident, label, properties, _, indexType) =>
@@ -947,7 +1192,8 @@ case class InterpretedPipeMapper(
           label,
           properties,
           indexRegistrator.registerQueryIndex(indexType, label, properties),
-          IndexOrderNone
+          IndexOrderNone,
+          includeChangesFromThisTransaction = true
         )(id = id)
 
       case NodeIndexContainsScan(ident, label, property, valueExpr, _, indexOrder, indexType) =>
@@ -957,7 +1203,8 @@ case class InterpretedPipeMapper(
           property,
           indexRegistrator.registerQueryIndex(indexType, label, property),
           buildExpression(valueExpr),
-          indexOrder
+          indexOrder,
+          stableLeafPlans.includeChangesFromThisTransaction(id)
         )(id = id)
 
       case NodeIndexEndsWithScan(ident, label, property, valueExpr, _, indexOrder, indexType) =>
@@ -967,48 +1214,220 @@ case class InterpretedPipeMapper(
           property,
           indexRegistrator.registerQueryIndex(indexType, label, property),
           buildExpression(valueExpr),
-          indexOrder
+          indexOrder,
+          stableLeafPlans.includeChangesFromThisTransaction(id)
         )(id = id)
 
-      case ShowIndexes(indexType, columns, yields, _) =>
-        CommandPipe(ShowIndexesCommand(indexType, columns, yields, cypherVersion))(id)
+      case NodeVectorIndexSearch(
+          node,
+          labels,
+          properties,
+          score,
+          indexName,
+          vector,
+          limit,
+          entityFilter,
+          maybePropertyFilter,
+          _
+        ) =>
+        NodeVectorIndexSearchPipe(
+          node.name,
+          score.map(_.name),
+          properties.map(_.propertyKeyId).toArray,
+          buildExpression(vector),
+          buildExpression(limit),
+          indexRegistrator.registerNamedQueryIndex(indexName, IndexType.VECTOR, labels, properties),
+          entityFilter.map(buildExpression),
+          maybePropertyFilter.map(_.map(buildExpression))
+        )(id)
 
-      case ShowConstraints(constraintType, columns, yields, _) =>
-        CommandPipe(ShowConstraintsCommand(constraintType, columns, yields, cypherVersion))(id)
+      case NodeFulltextIndexSearch(
+          node,
+          labels,
+          properties,
+          score,
+          indexName,
+          queryString,
+          analyzer,
+          skip,
+          limit,
+          _
+        ) =>
+        NodeFulltextIndexSearchPipe(
+          node.name,
+          score.map(_.name),
+          buildExpression(queryString),
+          analyzer.map(buildExpression),
+          skip.map(buildExpression),
+          buildExpression(limit),
+          indexRegistrator.registerNamedQueryIndex(indexName, IndexType.FULLTEXT, labels, properties)
+        )(id)
 
-      case ShowProcedures(executableBy, columns, yields, _) =>
-        CommandPipe(ShowProceduresCommand(executableBy, columns, yields, isCommunity, toKernelScope(cypherVersion)))(id)
+      case DirectedRelationshipVectorIndexSearch(
+          relationship,
+          left,
+          right,
+          types,
+          properties,
+          score,
+          indexName,
+          vector,
+          limit,
+          entityFilter,
+          maybePropertyFilter,
+          _
+        ) =>
+        DirectedRelationshipVectorIndexSearchPipe(
+          relationship.map(_.name),
+          left.map(_.name),
+          right.map(_.name),
+          score.map(_.name),
+          properties.map(_.propertyKeyId).toArray,
+          buildExpression(vector),
+          buildExpression(limit),
+          indexRegistrator.registerNamedRelationshipQueryIndex(indexName, IndexType.VECTOR, types, properties),
+          entityFilter.map(buildExpression),
+          maybePropertyFilter.map(_.map(buildExpression))
+        )(id)
 
-      case ShowFunctions(functionType, executableBy, columns, yields, _) =>
-        CommandPipe(ShowFunctionsCommand(
-          functionType,
-          executableBy,
-          columns,
-          yields,
+      case UndirectedRelationshipVectorIndexSearch(
+          relationship,
+          left,
+          right,
+          types,
+          properties,
+          score,
+          indexName,
+          vector,
+          limit,
+          entityFilter,
+          maybePropertyFilter,
+          _
+        ) =>
+        UndirectedRelationshipVectorIndexSearchPipe(
+          relationship.map(_.name),
+          left.map(_.name),
+          right.map(_.name),
+          score.map(_.name),
+          properties.map(_.propertyKeyId).toArray,
+          buildExpression(vector),
+          buildExpression(limit),
+          indexRegistrator.registerNamedRelationshipQueryIndex(indexName, IndexType.VECTOR, types, properties),
+          entityFilter.map(buildExpression),
+          maybePropertyFilter.map(_.map(buildExpression))
+        )(id)
+
+      case DirectedRelationshipFulltextIndexSearch(
+          relationship,
+          left,
+          right,
+          types,
+          properties,
+          score,
+          indexName,
+          queryString,
+          limit,
+          analyzer,
+          skip,
+          _
+        ) =>
+        DirectedRelationshipFulltextIndexSearchPipe(
+          relationship.map(_.name),
+          left.map(_.name),
+          right.map(_.name),
+          score.map(_.name),
+          buildExpression(queryString),
+          analyzer.map(buildExpression),
+          skip.map(buildExpression),
+          buildExpression(limit),
+          indexRegistrator.registerNamedRelationshipQueryIndex(indexName, IndexType.FULLTEXT, types, properties)
+        )(id)
+
+      case UndirectedRelationshipFulltextIndexSearch(
+          relationship,
+          left,
+          right,
+          types,
+          properties,
+          score,
+          indexName,
+          queryString,
+          limit,
+          analyzer,
+          skip,
+          _
+        ) =>
+        UndirectedRelationshipFulltextIndexSearchPipe(
+          relationship.map(_.name),
+          left.map(_.name),
+          right.map(_.name),
+          score.map(_.name),
+          buildExpression(queryString),
+          analyzer.map(buildExpression),
+          skip.map(buildExpression),
+          buildExpression(limit),
+          indexRegistrator.registerNamedRelationshipQueryIndex(indexName, IndexType.FULLTEXT, types, properties)
+        )(id)
+
+      case s: ShowIndexes =>
+        CommandPipe(ShowIndexesCommand(
+          s.indexType,
+          s.defaultColumns,
+          s.yieldColumns,
+          cypherVersion
+        ))(id)
+
+      case s: ShowConstraints =>
+        CommandPipe(ShowConstraintsCommand(
+          s.constraintType,
+          s.defaultColumns,
+          s.yieldColumns,
+          cypherVersion
+        ))(id)
+
+      case s: ShowProcedures =>
+        CommandPipe(ShowProceduresCommand(
+          s.executableBy,
+          s.defaultColumns,
+          s.yieldColumns,
           isCommunity,
           toKernelScope(cypherVersion)
         ))(id)
 
-      case ShowTransactions(ids, columns, yields, _) =>
-        val newIds = ids match {
-          case Right(e) => Right(buildExpression(e))
-          case Left(l)  => Left(l)
-        }
-        CommandPipe(ShowTransactionsCommand(newIds, columns, yields, cypherVersion))(id)
+      case s: ShowFunctions =>
+        CommandPipe(ShowFunctionsCommand(
+          s.functionType,
+          s.executableBy,
+          s.defaultColumns,
+          s.yieldColumns,
+          isCommunity,
+          toKernelScope(cypherVersion)
+        ))(id)
 
-      case TerminateTransactions(ids, columns, yields, _) =>
-        val newIds = ids match {
-          case Right(e) => Right(buildExpression(e))
-          case Left(l)  => Left(l)
-        }
-        CommandPipe(TerminateTransactionsCommand(newIds, columns, yields))(id)
+      case s: ShowTransactions =>
+        val newIds = s.ids.maybeExpression.map(e => buildExpression(e))
+        CommandPipe(ShowTransactionsCommand(
+          newIds,
+          s.defaultColumns,
+          s.yieldColumns,
+          cypherVersion
+        )(id))(id)
 
-      case ShowSettings(names, columns, yields, _) =>
-        val newNames = names match {
-          case Right(e) => Right(buildExpression(e))
-          case Left(l)  => Left(l)
-        }
-        CommandPipe(ShowSettingsCommand(newNames, columns, yields))(id)
+      case t: TerminateTransactions =>
+        val newIds = t.ids.maybeExpression.map(e => buildExpression(e))
+        CommandPipe(TerminateTransactionsCommand(newIds, t.defaultColumns, t.yieldColumns, cypherVersion))(id)
+
+      case s: ShowSettings =>
+        val newNames = s.names.maybeExpression.map(e => buildExpression(e))
+        CommandPipe(ShowSettingsCommand(newNames, s.defaultColumns, s.yieldColumns, cypherVersion))(id)
+
+      // System database only
+      case s: ShowDatabases =>
+        CommandPipe(ShowDatabaseCommand(s.dbScope, s.defaultColumns, s.yieldColumns, cypherVersion))(id)
+
+      // Throw on non-community show/terminate commands
+      case c: CommandLogicalPlan =>
+        throw CantCompileQueryException.commandUnsupportedInCommunityEdition(c.commandDescription)
 
       // Currently used for testing only
       case MultiNodeIndexSeek(indexLeafPlans) =>
@@ -1023,7 +1442,10 @@ case class InterpretedPipeMapper(
         InputPipe((nodes ++ relationships ++ variables).map(_.name).toArray)(id = id)
 
       case x =>
-        throw new InternalException(s"Received a logical plan that has no physical operator $x")
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"Received a logical plan that has no physical operator $x"
+        )
     }
   }
 
@@ -1045,21 +1467,14 @@ case class InterpretedPipeMapper(
                 ),
                 allowNullOrNaNProperty = true
               )
-            case org.neo4j.cypher.internal.ir.CreateRelationship(
-                variable,
-                leftNode,
-                relType,
-                rightNode,
-                _,
-                properties
-              ) =>
+            case r: org.neo4j.cypher.internal.ir.CreateRelationship =>
               CreateRelationship(
                 CreateRelationshipCommand(
-                  variable.name,
-                  leftNode.name,
-                  LazyType(relType, semanticTable, buildExpression),
-                  rightNode.name,
-                  properties.map(buildExpression)
+                  r.variable.name,
+                  r.startNode.name,
+                  LazyType(r.relType, semanticTable, buildExpression),
+                  r.endNode.name,
+                  r.properties.map(buildExpression)
                 ),
                 allowNullOrNaNProperty = true
               )
@@ -1084,15 +1499,7 @@ case class InterpretedPipeMapper(
           val needsExclusiveLock = items.exists {
             case (p, e) => internal.expressions.Expression.hasPropertyReadDependency(node, e, p)
           }
-          val size = items.size
-          val keys = new Array[LazyPropertyKey](size)
-          val values = new Array[Expression](size)
-          items.zipWithIndex.foreach {
-            case ((k, e), i) =>
-              keys(i) = LazyPropertyKey(k)
-              values(i) = buildExpression(e)
-          }
-
+          val (keys, values) = compilePropertyExpressions(id, items)
           Seq(SetNodePropertiesOperation(node.name, keys, values, needsExclusiveLock))
         case SetNodePropertiesFromMapPattern(node, map, removeOtherProps) =>
           val needsExclusiveLock =
@@ -1111,15 +1518,7 @@ case class InterpretedPipeMapper(
           val needsExclusiveLock = items.exists {
             case (p, e) => internal.expressions.Expression.hasPropertyReadDependency(rel, e, p)
           }
-          val size = items.size
-          val keys = new Array[LazyPropertyKey](size)
-          val values = new Array[Expression](size)
-          items.zipWithIndex.foreach {
-            case ((k, e), i) =>
-              keys(i) = LazyPropertyKey(k)
-              values(i) = buildExpression(e)
-          }
-
+          val (keys, values) = compilePropertyExpressions(id, items)
           Seq(SetRelationshipPropertiesOperation(rel.name, keys, values, needsExclusiveLock))
         case SetRelationshipPropertiesFromMapPattern(relationship, map, removeOtherProps) =>
           val needsExclusiveLock =
@@ -1143,14 +1542,7 @@ case class InterpretedPipeMapper(
             buildExpression(expression)
           ))
         case SetPropertiesPattern(entityExpression, items) =>
-          val size = items.size
-          val keys = new Array[LazyPropertyKey](size)
-          val values = new Array[Expression](size)
-          items.zipWithIndex.foreach {
-            case ((k, e), i) =>
-              keys(i) = LazyPropertyKey(k)
-              values(i) = buildExpression(e)
-          }
+          val (keys, values) = compilePropertyExpressions(id, items)
           Seq(SetPropertiesOperation(buildExpression(entityExpression), keys, values))
         case SetPropertiesFromMapPattern(entityExpression, expression, removeOtherProps) =>
           Seq(SetPropertyFromMapOperation(
@@ -1159,7 +1551,7 @@ case class InterpretedPipeMapper(
             removeOtherProps
           ))
 
-        case other => throw new IllegalStateException(s"Cannot compile $other")
+        case other @ null => throw new IllegalStateException(s"Cannot compile $other")
       }
     }
 
@@ -1206,6 +1598,9 @@ case class InterpretedPipeMapper(
       case Prober(_, probe) =>
         ProberPipe(source, probe)(id = id)
 
+      case _: AssertCachedProperties =>
+        TestPipe(source)(id = id)
+
       case Selection(predicate, _) =>
         val predicateExpression =
           if (predicate.exprs.size == 1) buildExpression(predicate.exprs.head) else buildExpression(predicate)
@@ -1215,31 +1610,68 @@ case class InterpretedPipeMapper(
         val runtimeProperties = properties.toArray.map(buildExpression(_))
         CachePropertiesPipe(source, runtimeProperties)(id = id)
 
-      case RemoteBatchProperties(_, _) =>
-        source // TODO: implement
+      case RemoteBatchProperties(_, properties) =>
+        val runtimeProperties = properties.toArray.map(buildExpression(_))
+        CachePropertiesPipe(source, runtimeProperties)(id = id)
 
-      case Expand(_, fromName, dir, types: Seq[internal.expressions.RelTypeName], toName, relName, ExpandAll) =>
-        ExpandAllPipe(source, fromName.name, relName.name, toName.name, dir, RelationshipTypes(types.toArray))(id = id)
+      case RemoteBatchPropertiesWithFilter(_, predicates, _) => // TODO: implement
+        val ands = Ands(predicates)(InputPosition.NONE)
+        val predicateExpression =
+          if (ands.exprs.size == 1) buildExpression(ands.exprs.head) else buildExpression(ands)
+        FilterPipe(source, predicateExpression)(id = id)
 
-      case Expand(_, fromName, dir, types: Seq[internal.expressions.RelTypeName], toName, relName, ExpandInto) =>
-        ExpandIntoPipe(source, fromName.name, relName.name, toName.name, dir, RelationshipTypes(types.toArray))(id = id)
+      case Expand(
+          _,
+          fromName,
+          dir,
+          types: Seq[internal.expressions.RelTypeName],
+          maybeToName,
+          maybeRelName,
+          ExpandAll
+        ) =>
+        ExpandAllPipe(
+          source,
+          fromName.name,
+          maybeRelName.map(_.name),
+          maybeToName.map(_.name),
+          dir,
+          RelationshipTypes(types.toArray)
+        )(id = id)
 
-      case OptionalExpand(_, fromName, dir, types, toName, relName, ExpandAll, predicate) =>
+      case Expand(
+          _,
+          fromName,
+          dir,
+          types: Seq[internal.expressions.RelTypeName],
+          Some(toName),
+          maybeRelName,
+          ExpandInto
+        ) =>
+        ExpandIntoPipe(
+          source,
+          fromName.name,
+          maybeRelName.map(_.name),
+          toName.name,
+          dir,
+          RelationshipTypes(types.toArray)
+        )(id = id)
+
+      case OptionalExpand(_, fromName, dir, types, maybeToName, maybeRelName, ExpandAll, predicate) =>
         OptionalExpandAllPipe(
           source,
           fromName.name,
-          relName.name,
-          toName.name,
+          maybeRelName.map(_.name),
+          maybeToName.map(_.name),
           dir,
           RelationshipTypes(types.toArray),
           predicate.map(buildExpression)
         )(id = id)
 
-      case OptionalExpand(_, fromName, dir, types, toName, relName, ExpandInto, predicate) =>
+      case OptionalExpand(_, fromName, dir, types, Some(toName), maybeRelName, ExpandInto, predicate) =>
         OptionalExpandIntoPipe(
           source,
           fromName.name,
-          relName.name,
+          maybeRelName.map(_.name),
           toName.name,
           dir,
           RelationshipTypes(types.toArray),
@@ -1270,8 +1702,8 @@ case class InterpretedPipeMapper(
         VarLengthExpandPipe(
           source,
           fromName.name,
-          relName.name,
-          toName.name,
+          relName.map(_.name),
+          toName.map(_.name),
           dir,
           projectedDir,
           RelationshipTypes(types.toArray),
@@ -1285,16 +1717,28 @@ case class InterpretedPipeMapper(
       case Optional(inner, protectedSymbols) =>
         OptionalPipe(inner.availableSymbols.map(_.name) -- protectedSymbols.map(_.name), source)(id = id)
 
-      case PruningVarExpand(_, from, dir, types, toName, minLength, maxLength, nodePredicate, relationshipPredicate) =>
+      case PruningVarExpand(
+          _,
+          from,
+          dir,
+          types,
+          toName,
+          minLength,
+          maxLength,
+          nodePredicate,
+          relationshipPredicate,
+          matchMode
+        ) =>
         val predicate = createTraversalPredicates(id, nodePredicate, relationshipPredicate)
         PruningVarLengthExpandPipe(
           source,
           from.name,
-          toName.name,
+          toName.map(_.name),
           RelationshipTypes(types.toArray),
           dir,
           minLength,
           maxLength,
+          matchMode,
           predicate
         )(id = id)
 
@@ -1309,19 +1753,21 @@ case class InterpretedPipeMapper(
           depthName,
           mode,
           nodePredicate,
-          relationshipPredicate
+          relationshipPredicate,
+          matchMode
         ) =>
         val predicate = createTraversalPredicates(id, nodePredicate, relationshipPredicate)
         BFSPruningVarLengthExpandPipe(
           source,
           from.name,
-          to.name,
+          to.map(_.name),
           depthName.map(_.name),
           RelationshipTypes(types.toArray),
           dir,
           includeStartNode,
           max,
           mode,
+          matchMode,
           predicate
         )(id = id)
 
@@ -1399,7 +1845,11 @@ case class InterpretedPipeMapper(
         val projection = groupingExpressions.map {
           case (key, value) => DistinctPipe.GroupingCol(key.name, buildExpression(value))
         }.toArray
-        DistinctPipe(source, projection)(id = id)
+        // NOTE: This is doing a bit of unnecessary recursive traversal that could have been tracked in
+        //       the pipe mapper traversal logic itself.
+        //       However, this case only applies when explicitly requesting legacy runtime.
+        val isTopLevel = !isNestedPlan && !InterpretedPipeMapper.isOnRhsOfApplyPlan(plan, rootPlan, cancellationChecker)
+        DistinctPipe(source, projection, enableScopedHeapEstimatorCache = isTopLevel)(id = id)
 
       case OrderedDistinct(_, groupingExpressions, orderToLeverage) =>
         val projection = groupingExpressions.map {
@@ -1476,7 +1926,8 @@ case class InterpretedPipeMapper(
           perStepRelPredicates,
           pathPredicates,
           withFallBack,
-          sameNodeMode
+          sameNodeMode,
+          traversalMode
         ) =>
         val single = shortestPathPattern.expr.single
 
@@ -1501,10 +1952,6 @@ case class InterpretedPipeMapper(
           case _    => (false, None)
         }
 
-        if (!allowZeroLength && sameNodeMode == AllowSameNode && rel.direction == SemanticDirection.BOTH) {
-          throw new IllegalArgumentException("We don't allow -[*1..]- for AllowSameNode")
-        }
-
         val pathName = shortestPathPattern.maybePathVar.map(_.name).getOrElse(anonymousVariableNameGenerator.nextName)
         ShortestPathPipe(
           source,
@@ -1520,7 +1967,8 @@ case class InterpretedPipeMapper(
           sameNodeMode,
           allowZeroLength,
           maxDepth,
-          single && !withFallBack
+          single && !withFallBack,
+          traversalMode
         )(id)
 
       case StatefulShortestPath(
@@ -1570,6 +2018,13 @@ case class InterpretedPipeMapper(
           case ExpandAll  => None
         }
 
+        val kExpression: Expression = selector.k match {
+          case SelectivePathPattern.CountInteger(k) =>
+            Literal(Values.numberValue(k))
+          case SelectivePathPattern.CountParam(param) =>
+            expressionConverters.toCommandExpression(id, param)
+        }
+
         StatefulShortestPathPipe(
           source,
           sourceNode.name,
@@ -1578,20 +2033,21 @@ case class InterpretedPipeMapper(
           bounds,
           commandPreFilters,
           selector,
+          kExpression,
           groupMap.values.toSet,
           reverseGroupVariableProjections,
           matchMode
         )(id = id)
 
-      case UnwindCollection(_, variable, collection) =>
-        UnwindPipe(source, buildExpression(collection), variable.name)(id = id)
+      case UnwindCollection(_, maybeVariable, collection) =>
+        UnwindPipe(source, buildExpression(collection), maybeVariable.map(_.name))(id = id)
 
       // Note: this plan shouldn't really be used here, but having it mapped here helps
       //      fallback and makes testing easier
-      case PartitionedUnwindCollection(_, variable, collection) =>
-        UnwindPipe(source, buildExpression(collection), variable.name)(id = id)
+      case PartitionedUnwindCollection(_, maybeVariable, collection) =>
+        UnwindPipe(source, buildExpression(collection), maybeVariable.map(_.name))(id = id)
 
-      case ProcedureCall(_, call @ ResolvedCall(signature, callArguments, _, _, _, _, _)) =>
+      case ProcedureCall(_, call @ ResolvedNonLocalCall(signature, callArguments, _, _, _, _, _)) =>
         val callMode = ProcedureCallMode.fromAccessMode(signature.accessMode)
         val callArgumentCommands: Array[Expression] = callArguments
           .map(Some(_))
@@ -1670,6 +2126,30 @@ case class InterpretedPipeMapper(
           }.toArray
         )(id = id)
 
+      case LockNodes(_, nodesToLock) =>
+        LockNodesPipe(source, nodesToLock.map(n => n.name).toArray)(id)
+
+      case MergeInto(
+          _,
+          idName,
+          leftNode,
+          dir,
+          relType,
+          rightNode,
+          onMatchProperties,
+          onCreateProperties
+        ) =>
+        new MergeIntoPipe(
+          source,
+          leftNode.name,
+          idName.name,
+          rightNode.name,
+          dir,
+          LazyType(relType),
+          MergePropertySets(compilePropertyExpressions(id, onMatchProperties)),
+          MergePropertySets(compilePropertyExpressions(id, onCreateProperties))
+        )(id)
+
       case Merge(_, createNodes, createRelationships, onMatch, onCreate, nodesToLock) =>
         val creates = createNodes.map {
           case org.neo4j.cypher.internal.ir.CreateNode(node, labels, dynamicLabels, properties) =>
@@ -1730,14 +2210,7 @@ case class InterpretedPipeMapper(
         val needsExclusiveLock = items.exists {
           case (p, e) => internal.expressions.Expression.hasPropertyReadDependency(name, e, p)
         }
-        val size = items.size
-        val keys = new Array[LazyPropertyKey](size)
-        val values = new Array[Expression](size)
-        items.zipWithIndex.foreach {
-          case ((k, e), i) =>
-            keys(i) = LazyPropertyKey(k)
-            values(i) = buildExpression(e)
-        }
+        val (keys, values) = compilePropertyExpressions(id, items)
         SetPipe(source, SetNodePropertiesOperation(name.name, keys, values, needsExclusiveLock))(id = id)
 
       case SetNodePropertiesFromMap(_, name, expression, removeOtherProps) =>
@@ -1771,14 +2244,7 @@ case class InterpretedPipeMapper(
         val needsExclusiveLock = items.exists {
           case (p, e) => internal.expressions.Expression.hasPropertyReadDependency(name, e, p)
         }
-        val size = items.size
-        val keys = new Array[LazyPropertyKey](size)
-        val values = new Array[Expression](size)
-        items.zipWithIndex.foreach {
-          case ((k, e), i) =>
-            keys(i) = LazyPropertyKey(k)
-            values(i) = buildExpression(e)
-        }
+        val (keys, values) = compilePropertyExpressions(id, items)
         SetPipe(source, SetRelationshipPropertiesOperation(name.name, keys, values, needsExclusiveLock))(id = id)
 
       case SetRelationshipPropertiesFromMap(_, name, expression, removeOtherProps) =>
@@ -1815,14 +2281,7 @@ case class InterpretedPipeMapper(
         )(id = id)
 
       case SetProperties(_, entityExpr, items) =>
-        val size = items.size
-        val keys = new Array[LazyPropertyKey](size)
-        val values = new Array[Expression](size)
-        items.zipWithIndex.foreach {
-          case ((k, e), i) =>
-            keys(i) = LazyPropertyKey(k)
-            values(i) = buildExpression(e)
-        }
+        val (keys, values) = compilePropertyExpressions(id, items)
         SetPipe(source, SetPropertiesOperation(buildExpression(entityExpr), keys, values))(id = id)
 
       case RemoveLabels(_, name, labels, dynamicLabels) =>
@@ -1866,7 +2325,10 @@ case class InterpretedPipeMapper(
         )
 
       case x =>
-        throw new InternalException(s"Received a logical plan that has no physical operator $x")
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"Received a logical plan that has no physical operator $x"
+        )
     }
   }
 
@@ -1975,13 +2437,25 @@ case class InterpretedPipeMapper(
       case SubqueryForeach(_, _) =>
         SubqueryForeachPipe(lhs, rhs)(id = id)
 
-      case TransactionForeach(_, _, batchSize, TransactionConcurrency.Serial, onErrorBehaviour, maybeReportAs) =>
+      case TransactionForeach(
+          _,
+          _,
+          batchSize,
+          TransactionConcurrency.Serial,
+          onErrorBehaviour,
+          maybeReportAs,
+          _,
+          _
+        ) =>
+        val retryPolicy =
+          TransactionRetryPolicy.forRuntime(onErrorBehaviour, expressionConverters.toCommandExpression(id, _))
         TransactionForeachPipe(
           lhs,
           rhs,
           buildExpression(batchSize),
-          onErrorBehaviour,
-          maybeReportAs.map(_.name)
+          onErrorBehaviour.recovery,
+          maybeReportAs.map(_.name),
+          retryPolicy
         )(id = id)
 
       case TransactionApply(
@@ -1990,15 +2464,20 @@ case class InterpretedPipeMapper(
           batchSize,
           TransactionConcurrency.Serial,
           onErrorBehaviour,
-          maybeReportAs
+          maybeReportAs,
+          _,
+          _
         ) =>
+        val retryPolicy =
+          TransactionRetryPolicy.forRuntime(onErrorBehaviour, expressionConverters.toCommandExpression(id, _))
         TransactionApplyPipe(
           lhs,
           rhs,
           buildExpression(batchSize),
-          onErrorBehaviour,
+          onErrorBehaviour.recovery,
           rhsPlan.availableSymbols.map(_.name) -- lhsPlan.availableSymbols.map(_.name),
-          maybeReportAs.map(_.name)
+          maybeReportAs.map(_.name),
+          retryPolicy
         )(id = id)
 
       case TransactionForeach(
@@ -2007,15 +2486,21 @@ case class InterpretedPipeMapper(
           batchSize,
           TransactionConcurrency.Concurrent(maybeConcurrency),
           onErrorBehaviour,
-          maybeReportAs
+          maybeReportAs,
+          _,
+          effectiveDisjointBy
         ) =>
+        val retryPolicy =
+          TransactionRetryPolicy.forRuntime(onErrorBehaviour, expressionConverters.toCommandExpression(id, _))
         ConcurrentTransactionForeachLegacyPipe(
           lhs,
           rhs,
           buildExpression(batchSize),
           maybeConcurrency.map(expressionConverters.toCommandExpression(id, _)),
-          onErrorBehaviour,
-          maybeReportAs.map(_.name)
+          onErrorBehaviour.recovery,
+          maybeReportAs.map(_.name),
+          retryPolicy,
+          effectiveDisjointBy.map(expressionConverters.toCommandExpression(id, _))
         )(id = id)
 
       case TransactionApply(
@@ -2024,16 +2509,74 @@ case class InterpretedPipeMapper(
           batchSize,
           TransactionConcurrency.Concurrent(maybeConcurrency),
           onErrorBehaviour,
-          maybeReportAs
+          maybeReportAs,
+          _,
+          effectiveDisjointBy
         ) =>
+        val retryPolicy =
+          TransactionRetryPolicy.forRuntime(onErrorBehaviour, expressionConverters.toCommandExpression(id, _))
         ConcurrentTransactionApplyLegacyPipe(
           lhs,
           rhs,
           buildExpression(batchSize),
           maybeConcurrency.map(expressionConverters.toCommandExpression(id, _)),
-          onErrorBehaviour,
+          onErrorBehaviour.recovery,
           rhsPlan.availableSymbols.map(_.name) -- lhsPlan.availableSymbols.map(_.name),
-          maybeReportAs.map(_.name)
+          maybeReportAs.map(_.name),
+          retryPolicy,
+          effectiveDisjointBy.map(expressionConverters.toCommandExpression(id, _))
+        )(id = id)
+
+      case repeat @ RepeatAcyclic(
+          _,
+          _,
+          repetition,
+          start,
+          end,
+          innerStart,
+          innerEnd,
+          groupNodes,
+          innerNodes,
+          previouslyBoundNodes,
+          previouslyBoundNodeGroups,
+          groupRelationships,
+          innerRelationships,
+          previouslyBoundRelationships,
+          previouslyBoundRelationshipGroups,
+          reverseGroupVariableProjections,
+          expansionMode,
+          accumulatorMappings
+        ) =>
+        val runtimeAccumulatorMappings = accumulatorMappings.toArray.map(acc =>
+          AllReduceAcc(expressionConverters.toCommandExpression(id, acc.initial), acc.previous.name, acc.next.name)
+        )
+
+        val nodeInScope = expansionMode match {
+          case ExpandAll  => false
+          case ExpandInto => true
+        }
+
+        RepeatPipe(
+          lhs,
+          rhs,
+          repetition,
+          start.name,
+          end.name,
+          innerStart.name,
+          innerEnd.name,
+          groupNodes,
+          groupRelationships,
+          RepeatPipe.AcyclicModeConstraint(
+            innerRelationships.map(_.name).toArray,
+            innerNodes.toArray.sortBy(repeat.orderInnerNode).map(_.name), // ensure node to skip is first
+            previouslyBoundRelationships.map(_.name),
+            previouslyBoundRelationshipGroups.map(_.name),
+            previouslyBoundNodes.map(_.name),
+            previouslyBoundNodeGroups.map(_.name)
+          ),
+          reverseGroupVariableProjections,
+          nodeInScope,
+          runtimeAccumulatorMappings
         )(id = id)
 
       case RepeatTrail(
@@ -2049,8 +2592,19 @@ case class InterpretedPipeMapper(
           innerRelationships,
           previouslyBoundRelationships,
           previouslyBoundRelationshipGroups,
-          reverseGroupVariableProjections
+          reverseGroupVariableProjections,
+          expansionMode,
+          accumulatorMappings
         ) =>
+        val runtimeAccumulatorMappings = accumulatorMappings.toArray.map(acc =>
+          AllReduceAcc(expressionConverters.toCommandExpression(id, acc.initial), acc.previous.name, acc.next.name)
+        )
+
+        val nodeInScope = expansionMode match {
+          case ExpandAll  => false
+          case ExpandInto => true
+        }
+
         RepeatPipe(
           lhs,
           rhs,
@@ -2066,7 +2620,9 @@ case class InterpretedPipeMapper(
             previouslyBoundRelationships.map(_.name),
             previouslyBoundRelationshipGroups.map(_.name)
           ),
-          reverseGroupVariableProjections
+          reverseGroupVariableProjections,
+          nodeInScope,
+          runtimeAccumulatorMappings
         )(id = id)
 
       case RepeatWalk(
@@ -2079,8 +2635,19 @@ case class InterpretedPipeMapper(
           innerEnd,
           groupNodes,
           groupRelationships,
-          reverseGroupVariableProjections
+          reverseGroupVariableProjections,
+          innerRelationships,
+          expansionMode,
+          accumulatorMappings
         ) =>
+        val runtimeAccumulatorMappings = accumulatorMappings.toArray.map(acc =>
+          AllReduceAcc(expressionConverters.toCommandExpression(id, acc.initial), acc.previous.name, acc.next.name)
+        )
+
+        val nodeInScope = expansionMode match {
+          case ExpandAll  => false
+          case ExpandInto => true
+        }
         RepeatPipe(
           lhs,
           rhs,
@@ -2092,11 +2659,16 @@ case class InterpretedPipeMapper(
           groupNodes,
           groupRelationships,
           RepeatPipe.WalkModeConstraint,
-          reverseGroupVariableProjections
+          reverseGroupVariableProjections,
+          nodeInScope,
+          runtimeAccumulatorMappings
         )(id = id)
 
       case x =>
-        throw new InternalException(s"Received a logical plan that has no physical operator $x")
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"Received a logical plan that has no physical operator $x"
+        )
     }
   }
 
@@ -2121,4 +2693,66 @@ case class InterpretedPipeMapper(
       case plans.Ascending(name)  => org.neo4j.cypher.internal.runtime.interpreted.Ascending(name.name)
       case plans.Descending(name) => org.neo4j.cypher.internal.runtime.interpreted.Descending(name.name)
     }
+
+  private def compilePropertyExpressions(id: Id, items: Seq[(PropertyKeyName, internal.expressions.Expression)]) = {
+    val buildExpression = getBuildExpression(id)
+    val size = items.size
+    val keys = new Array[LazyPropertyKey](size)
+    val values = new Array[Expression](size)
+    items.zipWithIndex.foreach {
+      case ((k, e), i) =>
+        keys(i) = LazyPropertyKey(k)(semanticTable)
+        values(i) = buildExpression(e)
+    }
+    (keys, values)
+  }
+}
+
+object InterpretedPipeMapper {
+
+  def isOnRhsOfApplyPlan(
+    plan: LogicalPlan,
+    rootPlan: LogicalPlan,
+    cancellationChecker: CancellationChecker
+  ): Boolean = {
+
+    case class Acc(
+      foundOnRhs: Boolean = false,
+      applyNestingDepth: Int = 0
+    )
+
+    val result = LogicalPlans.foldPlan(Acc())(
+      root = rootPlan,
+      f = { (acc, p) =>
+        if (p == plan && acc.applyNestingDepth > 0) {
+          acc.copy(foundOnRhs = true)
+        } else {
+          acc
+        }
+      },
+      combineLeftAndRight = { (lhsAcc, rhsAcc, plan) =>
+        Acc(
+          foundOnRhs = lhsAcc.foundOnRhs || rhsAcc.foundOnRhs,
+          applyNestingDepth = plan match {
+            case _: ApplyPlan =>
+              // Coming back from ApplyPlan: decrement nesting depth
+              rhsAcc.applyNestingDepth - 1
+            case _ =>
+              // Coming back from non-ApplyPlan: restore LHS depth
+              lhsAcc.applyNestingDepth
+          }
+        )
+      },
+      mapArguments = { (acc, plan) =>
+        plan match {
+          case _: ApplyPlan =>
+            acc.copy(applyNestingDepth = acc.applyNestingDepth + 1)
+          case _ =>
+            acc
+        }
+      }
+    )(cancellationChecker)
+
+    result.foundOnRhs
+  }
 }

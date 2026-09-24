@@ -52,6 +52,7 @@ import org.neo4j.logging.InternalLogProvider;
 import org.neo4j.test.DbRepresentation;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
 import org.neo4j.test.extension.Inject;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.test.extension.testdirectory.EphemeralTestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
 
@@ -72,6 +73,10 @@ class TestReadOnlyNeo4j {
         }
     }
 
+    @SkipOnSpd(
+            reason =
+                    "SPD (cluster) uses LeaderCanWrite AccessCapability which won't trigger this exact exception. "
+                            + "Instead DatabaseReadOnlyChecker.Default#check() will throw a slightly different exception, also wrapped in a RuntimeException (-‸ლ)")
     @Test
     void testSimple() {
         DbRepresentation someData = createSomeData();
@@ -90,8 +95,8 @@ class TestReadOnlyNeo4j {
 
     @Test
     void databaseNotStartInReadOnlyModeWithMissingIndex() throws IOException {
-        createIndex();
-        deleteIndexFolder();
+        String dbName = createIndex();
+        deleteIndexFolder(dbName);
 
         AssertableLogProvider logProvider = new AssertableLogProvider();
         managementService = dbmsReadOnly(logProvider);
@@ -112,10 +117,16 @@ class TestReadOnlyNeo4j {
         managementService = dbms();
         GraphDatabaseService db = managementService.database(DEFAULT_DATABASE_NAME);
 
+        String node1Id;
+        String node2Id;
+        String relId;
         Transaction tx = db.beginTx();
         Node node1 = tx.createNode();
+        node1Id = node1.getElementId();
         Node node2 = tx.createNode();
+        node2Id = node2.getElementId();
         Relationship rel = node1.createRelationshipTo(node2, withName("TEST"));
+        relId = rel.getElementId();
         node1.setProperty("key1", "value1");
         rel.setProperty("key1", "value1");
         tx.commit();
@@ -126,11 +137,11 @@ class TestReadOnlyNeo4j {
         assertThrows(NotInTransactionException.class, () -> rel.removeProperty("key1"));
 
         try (Transaction transaction = db.beginTx()) {
-            assertEquals(node1, transaction.getNodeById(node1.getId()));
-            assertEquals(node2, transaction.getNodeById(node2.getId()));
-            assertEquals(rel, transaction.getRelationshipById(rel.getId()));
+            assertEquals(node1, transaction.getNodeByElementId(node1Id));
+            assertEquals(node2, transaction.getNodeByElementId(node2Id));
+            assertEquals(rel, transaction.getRelationshipByElementId(relId));
 
-            var loadedNode = transaction.getNodeById(node1.getId());
+            var loadedNode = transaction.getNodeByElementId(node1Id);
             assertEquals("value1", loadedNode.getProperty("key1"));
             Relationship loadedRel = loadedNode.getSingleRelationship(withName("TEST"), Direction.OUTGOING);
             assertEquals(rel, loadedRel);
@@ -138,11 +149,12 @@ class TestReadOnlyNeo4j {
         }
     }
 
-    private void createIndex() {
+    private String createIndex() {
         DatabaseManagementService managementService = new TestDatabaseManagementServiceBuilder(testDirectory.homePath())
                 .setFileSystem(new UncloseableDelegatingFileSystemAbstraction(fs))
                 .build();
         GraphDatabaseService db = managementService.database(DEFAULT_DATABASE_NAME);
+        String dbName = db.databaseName();
         try (Transaction tx = db.beginTx()) {
             tx.schema().indexFor(Label.label("label")).on("prop").create();
             tx.commit();
@@ -152,12 +164,12 @@ class TestReadOnlyNeo4j {
             tx.commit();
         }
         managementService.shutdown();
+        return dbName;
     }
 
-    private void deleteIndexFolder() throws IOException {
-        Path databaseDir = Neo4jLayout.of(testDirectory.homePath())
-                .databaseLayout(DEFAULT_DATABASE_NAME)
-                .databaseDirectory();
+    private void deleteIndexFolder(String dbName) throws IOException {
+        Path databaseDir =
+                Neo4jLayout.of(testDirectory.homePath()).databaseLayout(dbName).databaseDirectory();
         fs.deleteRecursively(IndexDirectoryStructure.baseSchemaIndexFolder(databaseDir));
     }
 

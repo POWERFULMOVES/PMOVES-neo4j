@@ -20,18 +20,21 @@ import org.neo4j.cypher.internal.ast.AstConstructionTestSupport
 import org.neo4j.cypher.internal.ast.Statements
 import org.neo4j.cypher.internal.ast.factory.expression.TypePredicateExpressionParserTest.allCombinations
 import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
 import org.neo4j.cypher.internal.ast.test.util.AstParsingTestBase
+import org.neo4j.cypher.internal.ast.test.util.Parses
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.util.InputPosition
-import org.neo4j.cypher.internal.util.OpenCypherExceptionFactory
 import org.neo4j.cypher.internal.util.symbols.AnyType
 import org.neo4j.cypher.internal.util.symbols.BooleanType
 import org.neo4j.cypher.internal.util.symbols.ClosedDynamicUnionType
 import org.neo4j.cypher.internal.util.symbols.CypherType
 import org.neo4j.cypher.internal.util.symbols.DateType
 import org.neo4j.cypher.internal.util.symbols.DurationType
+import org.neo4j.cypher.internal.util.symbols.Float32Type
 import org.neo4j.cypher.internal.util.symbols.FloatType
+import org.neo4j.cypher.internal.util.symbols.Integer16Type
+import org.neo4j.cypher.internal.util.symbols.Integer32Type
+import org.neo4j.cypher.internal.util.symbols.Integer8Type
 import org.neo4j.cypher.internal.util.symbols.IntegerType
 import org.neo4j.cypher.internal.util.symbols.ListType
 import org.neo4j.cypher.internal.util.symbols.LocalDateTimeType
@@ -42,12 +45,15 @@ import org.neo4j.cypher.internal.util.symbols.NothingType
 import org.neo4j.cypher.internal.util.symbols.NullType
 import org.neo4j.cypher.internal.util.symbols.PathType
 import org.neo4j.cypher.internal.util.symbols.PointType
+import org.neo4j.cypher.internal.util.symbols.PropertyValueCypher5Type
 import org.neo4j.cypher.internal.util.symbols.PropertyValueType
 import org.neo4j.cypher.internal.util.symbols.RelationshipType
 import org.neo4j.cypher.internal.util.symbols.StringType
+import org.neo4j.cypher.internal.util.symbols.UUIDType
+import org.neo4j.cypher.internal.util.symbols.VectorType
 import org.neo4j.cypher.internal.util.symbols.ZonedDateTimeType
 import org.neo4j.cypher.internal.util.symbols.ZonedTimeType
-import org.neo4j.exceptions.SyntaxException
+import org.neo4j.gqlstatus.GqlStatusInfoCodes
 import org.scalatest.prop.TableDrivenPropertyChecks
 import org.scalatest.prop.TableFor2
 import org.scalatest.prop.Tables
@@ -56,10 +62,14 @@ class TypePredicateExpressionParserTest extends AstParsingTestBase
     with TableDrivenPropertyChecks {
 
   test("RETURN x :: BOOLEAN NOT NULL NOT NULL") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'NOT'")
-      case _ => _.withMessage(
+    parseIn[Statements] {
+      case Cypher5 => _.withMessage(
           """Invalid input 'NOT': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 30 (offset: 29))
+            |"RETURN x :: BOOLEAN NOT NULL NOT NULL"
+            |                              ^""".stripMargin
+        )
+      case _ => _.withMessage(
+          """Invalid input 'NOT': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 30 (offset: 29))
             |"RETURN x :: BOOLEAN NOT NULL NOT NULL"
             |                              ^""".stripMargin
         )
@@ -67,10 +77,14 @@ class TypePredicateExpressionParserTest extends AstParsingTestBase
   }
 
   test("RETURN x :: BOOLEAN! NOT NULL") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'NOT'")
-      case _ => _.withMessage(
+    parseIn[Statements] {
+      case Cypher5 => _.withMessage(
           """Invalid input 'NOT': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 22 (offset: 21))
+            |"RETURN x :: BOOLEAN! NOT NULL"
+            |                      ^""".stripMargin
+        )
+      case _ => _.withMessage(
+          """Invalid input 'NOT': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 22 (offset: 21))
             |"RETURN x :: BOOLEAN! NOT NULL"
             |                      ^""".stripMargin
         )
@@ -78,10 +92,14 @@ class TypePredicateExpressionParserTest extends AstParsingTestBase
   }
 
   test("RETURN x :: BOOLEAN NOT NULL!") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '!'")
-      case _ => _.withMessage(
+    parseIn[Statements] {
+      case Cypher5 => _.withMessage(
           """Invalid input '!': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 29 (offset: 28))
+            |"RETURN x :: BOOLEAN NOT NULL!"
+            |                             ^""".stripMargin
+        )
+      case _ => _.withMessage(
+          """Invalid input '!': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 29 (offset: 28))
             |"RETURN x :: BOOLEAN NOT NULL!"
             |                             ^""".stripMargin
         )
@@ -89,10 +107,14 @@ class TypePredicateExpressionParserTest extends AstParsingTestBase
   }
 
   test("RETURN x :: BOOLEAN!!") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '!'")
-      case _ => _.withMessage(
+    parseIn[Statements] {
+      case Cypher5 => _.withMessage(
           """Invalid input '!': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 21 (offset: 20))
+            |"RETURN x :: BOOLEAN!!"
+            |                     ^""".stripMargin
+        )
+      case _ => _.withMessage(
+          """Invalid input '!': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 21 (offset: 20))
             |"RETURN x :: BOOLEAN!!"
             |                     ^""".stripMargin
         )
@@ -100,10 +122,14 @@ class TypePredicateExpressionParserTest extends AstParsingTestBase
   }
 
   test("RETURN x :: LIST<BOOLEAN> NOT NULL NOT NULL") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'NOT'")
-      case _ => _.withMessage(
+    parseIn[Statements] {
+      case Cypher5 => _.withMessage(
           """Invalid input 'NOT': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 36 (offset: 35))
+            |"RETURN x :: LIST<BOOLEAN> NOT NULL NOT NULL"
+            |                                    ^""".stripMargin
+        )
+      case _ => _.withMessage(
+          """Invalid input 'NOT': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 36 (offset: 35))
             |"RETURN x :: LIST<BOOLEAN> NOT NULL NOT NULL"
             |                                    ^""".stripMargin
         )
@@ -111,10 +137,14 @@ class TypePredicateExpressionParserTest extends AstParsingTestBase
   }
 
   test("RETURN x :: LIST<BOOLEAN>! NOT NULL") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'NOT'")
-      case _ => _.withMessage(
+    parseIn[Statements] {
+      case Cypher5 => _.withMessage(
           """Invalid input 'NOT': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 28 (offset: 27))
+            |"RETURN x :: LIST<BOOLEAN>! NOT NULL"
+            |                            ^""".stripMargin
+        )
+      case _ => _.withMessage(
+          """Invalid input 'NOT': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 28 (offset: 27))
             |"RETURN x :: LIST<BOOLEAN>! NOT NULL"
             |                            ^""".stripMargin
         )
@@ -122,10 +152,14 @@ class TypePredicateExpressionParserTest extends AstParsingTestBase
   }
 
   test("RETURN x :: LIST<BOOLEAN> NOT NULL!") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '!'")
-      case _ => _.withMessage(
+    parseIn[Statements] {
+      case Cypher5 => _.withMessage(
           """Invalid input '!': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 35 (offset: 34))
+            |"RETURN x :: LIST<BOOLEAN> NOT NULL!"
+            |                                   ^""".stripMargin
+        )
+      case _ => _.withMessage(
+          """Invalid input '!': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 35 (offset: 34))
             |"RETURN x :: LIST<BOOLEAN> NOT NULL!"
             |                                   ^""".stripMargin
         )
@@ -133,10 +167,14 @@ class TypePredicateExpressionParserTest extends AstParsingTestBase
   }
 
   test("RETURN x :: LIST<BOOLEAN>!!") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '!'")
-      case _ => _.withMessage(
+    parseIn[Statements] {
+      case Cypher5 => _.withMessage(
           """Invalid input '!': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 27 (offset: 26))
+            |"RETURN x :: LIST<BOOLEAN>!!"
+            |                           ^""".stripMargin
+        )
+      case _ => _.withMessage(
+          """Invalid input '!': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 27 (offset: 26))
             |"RETURN x :: LIST<BOOLEAN>!!"
             |                           ^""".stripMargin
         )
@@ -144,10 +182,14 @@ class TypePredicateExpressionParserTest extends AstParsingTestBase
   }
 
   test("RETURN x :: BOOLEAN LIST NOT NULL NOT NULL") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'NOT'")
-      case _ => _.withMessage(
+    parseIn[Statements] {
+      case Cypher5 => _.withMessage(
           """Invalid input 'NOT': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 35 (offset: 34))
+            |"RETURN x :: BOOLEAN LIST NOT NULL NOT NULL"
+            |                                   ^""".stripMargin
+        )
+      case _ => _.withMessage(
+          """Invalid input 'NOT': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 35 (offset: 34))
             |"RETURN x :: BOOLEAN LIST NOT NULL NOT NULL"
             |                                   ^""".stripMargin
         )
@@ -155,10 +197,14 @@ class TypePredicateExpressionParserTest extends AstParsingTestBase
   }
 
   test("RETURN x :: BOOLEAN LIST! NOT NULL") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'NOT'")
-      case _ => _.withMessage(
+    parseIn[Statements] {
+      case Cypher5 => _.withMessage(
           """Invalid input 'NOT': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 27 (offset: 26))
+            |"RETURN x :: BOOLEAN LIST! NOT NULL"
+            |                           ^""".stripMargin
+        )
+      case _ => _.withMessage(
+          """Invalid input 'NOT': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 27 (offset: 26))
             |"RETURN x :: BOOLEAN LIST! NOT NULL"
             |                           ^""".stripMargin
         )
@@ -166,10 +212,14 @@ class TypePredicateExpressionParserTest extends AstParsingTestBase
   }
 
   test("RETURN x :: BOOLEAN LIST NOT NULL !") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '!'")
-      case _ => _.withMessage(
+    parseIn[Statements] {
+      case Cypher5 => _.withMessage(
           """Invalid input '!': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 35 (offset: 34))
+            |"RETURN x :: BOOLEAN LIST NOT NULL !"
+            |                                   ^""".stripMargin
+        )
+      case _ => _.withMessage(
+          """Invalid input '!': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 35 (offset: 34))
             |"RETURN x :: BOOLEAN LIST NOT NULL !"
             |                                   ^""".stripMargin
         )
@@ -177,10 +227,14 @@ class TypePredicateExpressionParserTest extends AstParsingTestBase
   }
 
   test("RETURN x :: BOOLEAN LIST!!") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '!'")
-      case _ => _.withMessage(
+    parseIn[Statements] {
+      case Cypher5 => _.withMessage(
           """Invalid input '!': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 26 (offset: 25))
+            |"RETURN x :: BOOLEAN LIST!!"
+            |                          ^""".stripMargin
+        )
+      case _ => _.withMessage(
+          """Invalid input '!': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 26 (offset: 25))
             |"RETURN x :: BOOLEAN LIST!!"
             |                          ^""".stripMargin
         )
@@ -188,120 +242,62 @@ class TypePredicateExpressionParserTest extends AstParsingTestBase
   }
 
   test("x :: ANY<BOOLEAN> NOT NULL") {
-    failsParsing[Expression]
-      .withMessageStart(
-        "Closed Dynamic Union Types can not be appended with `NOT NULL`, specify `NOT NULL` on all inner types instead."
-      )
-      .in {
-        case Cypher5JavaCc => _.throws[OpenCypherExceptionFactory.SyntaxException]
-        case _             => _.throws[SyntaxException]
-      }
+    failsWithClosedDynamicUnionNotNullError
   }
 
   test("x :: ANY<BOOLEAN>!") {
-    failsParsing[Expression]
-      .withMessageStart(
-        "Closed Dynamic Union Types can not be appended with `NOT NULL`, specify `NOT NULL` on all inner types instead."
-      )
-      .in {
-        case Cypher5JavaCc => _.throws[OpenCypherExceptionFactory.SyntaxException]
-        case _             => _.throws[SyntaxException]
-      }
+    failsWithClosedDynamicUnionNotNullError
   }
 
   test("x :: ANY VALUE<BOOLEAN> NOT NULL") {
-    failsParsing[Expression]
-      .withMessageStart(
-        "Closed Dynamic Union Types can not be appended with `NOT NULL`, specify `NOT NULL` on all inner types instead."
-      )
-      .in {
-        case Cypher5JavaCc => _.throws[OpenCypherExceptionFactory.SyntaxException]
-        case _             => _.throws[SyntaxException]
-      }
+    failsWithClosedDynamicUnionNotNullError
   }
 
   test("x :: ANY VALUE<BOOLEAN>!") {
-    failsParsing[Expression]
-      .withMessageStart(
-        "Closed Dynamic Union Types can not be appended with `NOT NULL`, specify `NOT NULL` on all inner types instead."
-      )
-      .in {
-        case Cypher5JavaCc => _.throws[OpenCypherExceptionFactory.SyntaxException]
-        case _             => _.throws[SyntaxException]
-      }
+    failsWithClosedDynamicUnionNotNullError
   }
 
   test("x :: ANY<ANY <BOOLEAN> NOT NULL>") {
-    failsParsing[Expression]
-      .withMessageStart(
-        "Closed Dynamic Union Types can not be appended with `NOT NULL`, specify `NOT NULL` on all inner types instead."
-      )
-      .in {
-        case Cypher5JavaCc => _.throws[OpenCypherExceptionFactory.SyntaxException]
-        case _             => _.throws[SyntaxException]
-      }
+    failsWithClosedDynamicUnionNotNullError
   }
 
   test("x :: ANY<ANY <BOOLEAN>> NOT NULL") {
-    failsParsing[Expression]
-      .withMessageStart(
-        "Closed Dynamic Union Types can not be appended with `NOT NULL`, specify `NOT NULL` on all inner types instead."
-      )
-      .in {
-        case Cypher5JavaCc => _.throws[OpenCypherExceptionFactory.SyntaxException]
-        case _             => _.throws[SyntaxException]
-      }
+    failsWithClosedDynamicUnionNotNullError
   }
 
   test("x :: ANY<ANY <BOOLEAN> NOT NULL> NOT NULL") {
-    failsParsing[Expression]
-      .withMessageStart(
-        "Closed Dynamic Union Types can not be appended with `NOT NULL`, specify `NOT NULL` on all inner types instead."
-      )
-      .in {
-        case Cypher5JavaCc => _.throws[OpenCypherExceptionFactory.SyntaxException]
-        case _             => _.throws[SyntaxException]
-      }
+    failsWithClosedDynamicUnionNotNullError
   }
 
   test("x :: ANY<STRING|BOOLEAN> NOT NULL") {
-    failsParsing[Expression]
-      .withMessageStart(
-        "Closed Dynamic Union Types can not be appended with `NOT NULL`, specify `NOT NULL` on all inner types instead."
-      )
-      .in {
-        case Cypher5JavaCc => _.throws[OpenCypherExceptionFactory.SyntaxException]
-        case _             => _.throws[SyntaxException]
-      }
+    failsWithClosedDynamicUnionNotNullError
   }
 
   test("RETURN x :: ANY VALUE<>") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input ''")
-      case _ => _.withMessage(
-          """Invalid input '': expected an expression (line 1, column 24 (offset: 23))
-            |"RETURN x :: ANY VALUE<>"
-            |                        ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withMessage(
+      """Invalid input '': expected an expression (line 1, column 24 (offset: 23))
+        |"RETURN x :: ANY VALUE<>"
+        |                        ^""".stripMargin
+    )
   }
 
   test("RETURN x :: ANY <>") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input ''")
-      case _ => _.withMessage(
-          """Invalid input '': expected an expression (line 1, column 19 (offset: 18))
-            |"RETURN x :: ANY <>"
-            |                   ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withMessage(
+      """Invalid input '': expected an expression (line 1, column 19 (offset: 18))
+        |"RETURN x :: ANY <>"
+        |                   ^""".stripMargin
+    )
   }
 
   test("RETURN x :: ") {
     failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input ''")
-      case _ => _.withMessage(
-          """Invalid input '': expected 'ARRAY', 'LIST', 'ANY', 'BOOL', 'BOOLEAN', 'DATE', 'DURATION', 'EDGE', 'FLOAT', 'INT', 'INTEGER', 'LOCAL', 'MAP', 'NODE', 'NOTHING', 'NULL', 'PATH', 'PATHS', 'POINT', 'RELATIONSHIP', 'SIGNED', 'STRING', 'TIME', 'TIMESTAMP', 'PROPERTY VALUE', 'VARCHAR', 'VERTEX' or 'ZONED' (line 1, column 12 (offset: 11))
+      case Cypher5 => _.withSyntaxError(
+          """Invalid input '': expected 'ANY', 'ARRAY', 'BOOL', 'BOOLEAN', 'DATE', 'DURATION', 'EDGE', 'FLOAT', 'INT', 'INTEGER', 'LIST', 'LOCAL', 'MAP', 'NODE', 'NOTHING', 'NULL', 'PATH', 'PATHS', 'POINT', 'RELATIONSHIP', 'SIGNED', 'STRING', 'TIME', 'TIMESTAMP', 'PROPERTY VALUE', 'VARCHAR', 'VERTEX' or 'ZONED' (line 1, column 12 (offset: 11))
+            |"RETURN x ::"
+            |            ^""".stripMargin
+        )
+      case _ => _.withSyntaxError(
+          """Invalid input '': expected 'ANY', 'ARRAY', 'BOOL', 'BOOLEAN', 'DATE', 'DURATION', 'EDGE', 'FLOAT', 'FLOAT64', 'INT', 'INT64', 'INTEGER', 'INTEGER64', 'LIST', 'LOCAL', 'MAP', 'NODE', 'NOTHING', 'NULL', 'PATH', 'PATHS', 'POINT', 'RELATIONSHIP', 'SIGNED', 'STRING', 'TIME', 'TIMESTAMP', 'UUID', 'PROPERTY VALUE', 'VARCHAR', 'VECTOR', 'VERTEX' or 'ZONED' (line 1, column 12 (offset: 11))
             |"RETURN x ::"
             |            ^""".stripMargin
         )
@@ -309,10 +305,14 @@ class TypePredicateExpressionParserTest extends AstParsingTestBase
   }
 
   test("RETURN x :: ANY VALUE<> NOT NULL") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'NULL'")
-      case _ => _.withMessage(
+    parseIn[Statements] {
+      case Cypher5 => _.withMessage(
           """Invalid input 'NULL': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 29 (offset: 28))
+            |"RETURN x :: ANY VALUE<> NOT NULL"
+            |                             ^""".stripMargin
+        )
+      case _ => _.withMessage(
+          """Invalid input 'NULL': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 29 (offset: 28))
             |"RETURN x :: ANY VALUE<> NOT NULL"
             |                             ^""".stripMargin
         )
@@ -320,10 +320,14 @@ class TypePredicateExpressionParserTest extends AstParsingTestBase
   }
 
   test("RETURN x :: ANY <> NOT NULL") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'NULL'")
-      case _ => _.withMessage(
+    parseIn[Statements] {
+      case Cypher5 => _.withMessage(
           """Invalid input 'NULL': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 24 (offset: 23))
+            |"RETURN x :: ANY <> NOT NULL"
+            |                        ^""".stripMargin
+        )
+      case _ => _.withMessage(
+          """Invalid input 'NULL': expected an expression, 'FOREACH', ',', 'AS', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 24 (offset: 23))
             |"RETURN x :: ANY <> NOT NULL"
             |                        ^""".stripMargin
         )
@@ -331,10 +335,14 @@ class TypePredicateExpressionParserTest extends AstParsingTestBase
   }
 
   test("RETURN x :: NOT NULL") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'NOT'")
+    parseIn[Statements] {
+      case Cypher5 => _.withMessage(
+          """Invalid input 'NOT': expected 'ANY', 'ARRAY', 'BOOL', 'BOOLEAN', 'DATE', 'DURATION', 'EDGE', 'FLOAT', 'INT', 'INTEGER', 'LIST', 'LOCAL', 'MAP', 'NODE', 'NOTHING', 'NULL', 'PATH', 'PATHS', 'POINT', 'RELATIONSHIP', 'SIGNED', 'STRING', 'TIME', 'TIMESTAMP', 'PROPERTY VALUE', 'VARCHAR', 'VERTEX' or 'ZONED' (line 1, column 13 (offset: 12))
+            |"RETURN x :: NOT NULL"
+            |             ^""".stripMargin
+        )
       case _ => _.withMessage(
-          """Invalid input 'NOT': expected 'ARRAY', 'LIST', 'ANY', 'BOOL', 'BOOLEAN', 'DATE', 'DURATION', 'EDGE', 'FLOAT', 'INT', 'INTEGER', 'LOCAL', 'MAP', 'NODE', 'NOTHING', 'NULL', 'PATH', 'PATHS', 'POINT', 'RELATIONSHIP', 'SIGNED', 'STRING', 'TIME', 'TIMESTAMP', 'PROPERTY VALUE', 'VARCHAR', 'VERTEX' or 'ZONED' (line 1, column 13 (offset: 12))
+          """Invalid input 'NOT': expected 'ANY', 'ARRAY', 'BOOL', 'BOOLEAN', 'DATE', 'DURATION', 'EDGE', 'FLOAT', 'INT', 'INTEGER', 'LIST', 'LOCAL', 'MAP', 'NODE', 'NOTHING', 'NULL', 'PATH', 'PATHS', 'POINT', 'RELATIONSHIP', 'SIGNED', 'STRING', 'TIME', 'TIMESTAMP', 'UUID', 'PROPERTY VALUE', 'VARCHAR', 'VECTOR', 'VERTEX' or 'ZONED' (line 1, column 13 (offset: 12))
             |"RETURN x :: NOT NULL"
             |             ^""".stripMargin
         )
@@ -342,78 +350,171 @@ class TypePredicateExpressionParserTest extends AstParsingTestBase
   }
 
   test("RETURN x :: LIST<>") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '<>': expected \"<\" (line 1, column 17 (offset: 16))")
-      case _ => _.withMessage(
-          """Invalid input '<>': expected '<' (line 1, column 17 (offset: 16))
-            |"RETURN x :: LIST<>"
-            |                 ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withMessage(
+      """Invalid input '<>': expected '<' (line 1, column 17 (offset: 16))
+        |"RETURN x :: LIST<>"
+        |                 ^""".stripMargin
+    )
   }
 
   test("RETURN x :: LIST") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '': expected \"<\" (line 1, column 17 (offset: 16))")
-      case _ => _.withMessage(
-          """Invalid input '': expected '<' (line 1, column 17 (offset: 16))
-            |"RETURN x :: LIST"
-            |                 ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withMessage(
+      """Invalid input '': expected '<' (line 1, column 17 (offset: 16))
+        |"RETURN x :: LIST"
+        |                 ^""".stripMargin
+    )
   }
 
   test("RETURN x :: ARRAY") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '': expected \"<\" (line 1, column 18 (offset: 17))")
-      case _ => _.withMessage(
-          """Invalid input '': expected '<' (line 1, column 18 (offset: 17))
-            |"RETURN x :: ARRAY"
-            |                  ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withMessage(
+      """Invalid input '': expected '<' (line 1, column 18 (offset: 17))
+        |"RETURN x :: ARRAY"
+        |                  ^""".stripMargin
+    )
   }
 
   test("RETURN x :: ARRAY<>") {
+    failsParsing[Statements].withMessage(
+      """Invalid input '<>': expected '<' (line 1, column 18 (offset: 17))
+        |"RETURN x :: ARRAY<>"
+        |                  ^""".stripMargin
+    )
+  }
+
+  // VECTOR Types
+  test("RETURN x :: VECTOR<STRING>") {
     failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '<>': expected \"<\" (line 1, column 18 (offset: 17))")
-      case _ => _.withMessage(
-          """Invalid input '<>': expected '<' (line 1, column 18 (offset: 17))
-            |"RETURN x :: ARRAY<>"
-            |                  ^""".stripMargin
+      case Cypher5 => _.withSyntaxError(
+          """Invalid input 'VECTOR': expected 'ANY', 'ARRAY', 'BOOL', 'BOOLEAN', 'DATE', 'DURATION', 'EDGE', 'FLOAT', 'INT', 'INTEGER', 'LIST', 'LOCAL', 'MAP', 'NODE', 'NOTHING', 'NULL', 'PATH', 'PATHS', 'POINT', 'RELATIONSHIP', 'SIGNED', 'STRING', 'TIME', 'TIMESTAMP', 'PROPERTY VALUE', 'VARCHAR', 'VERTEX' or 'ZONED' (line 1, column 13 (offset: 12))
+            |"RETURN x :: VECTOR<STRING>"
+            |             ^""".stripMargin
+        )
+      case _ => _.withSyntaxError(
+          """Invalid input '': expected an expression (line 1, column 27 (offset: 26))
+            |"RETURN x :: VECTOR<STRING>"
+            |                           ^""".stripMargin
         )
     }
   }
 
+  // Coordinate types are specific to vectors
+  test("RETURN x :: FLOAT32") {
+    failsParsing[Statements].in {
+      case Cypher5 => _.withSyntaxError(
+          """Invalid input 'FLOAT32': expected 'ANY', 'ARRAY', 'BOOL', 'BOOLEAN', 'DATE', 'DURATION', 'EDGE', 'FLOAT', 'INT', 'INTEGER', 'LIST', 'LOCAL', 'MAP', 'NODE', 'NOTHING', 'NULL', 'PATH', 'PATHS', 'POINT', 'RELATIONSHIP', 'SIGNED', 'STRING', 'TIME', 'TIMESTAMP', 'PROPERTY VALUE', 'VARCHAR', 'VERTEX' or 'ZONED' (line 1, column 13 (offset: 12))
+            |"RETURN x :: FLOAT32"
+            |             ^""".stripMargin
+        )
+      case _ => _.withSyntaxError(
+          """Invalid input 'FLOAT32': expected 'ANY', 'ARRAY', 'BOOL', 'BOOLEAN', 'DATE', 'DURATION', 'EDGE', 'FLOAT', 'FLOAT64', 'INT', 'INT64', 'INTEGER', 'INTEGER64', 'LIST', 'LOCAL', 'MAP', 'NODE', 'NOTHING', 'NULL', 'PATH', 'PATHS', 'POINT', 'RELATIONSHIP', 'SIGNED', 'STRING', 'TIME', 'TIMESTAMP', 'UUID', 'PROPERTY VALUE', 'VARCHAR', 'VECTOR', 'VERTEX' or 'ZONED' (line 1, column 13 (offset: 12))
+            |"RETURN x :: FLOAT32"
+            |             ^""".stripMargin
+        )
+    }
+  }
+
+  test("RETURN x :: INTEGER8") {
+    failsParsing[Statements].in {
+      case Cypher5 => _.withSyntaxError(
+          """Invalid input 'INTEGER8': expected 'ANY', 'ARRAY', 'BOOL', 'BOOLEAN', 'DATE', 'DURATION', 'EDGE', 'FLOAT', 'INT', 'INTEGER', 'LIST', 'LOCAL', 'MAP', 'NODE', 'NOTHING', 'NULL', 'PATH', 'PATHS', 'POINT', 'RELATIONSHIP', 'SIGNED', 'STRING', 'TIME', 'TIMESTAMP', 'PROPERTY VALUE', 'VARCHAR', 'VERTEX' or 'ZONED' (line 1, column 13 (offset: 12))
+            |"RETURN x :: INTEGER8"
+            |             ^""".stripMargin
+        )
+      case _ => _.withSyntaxError(
+          """Invalid input 'INTEGER8': expected 'ANY', 'ARRAY', 'BOOL', 'BOOLEAN', 'DATE', 'DURATION', 'EDGE', 'FLOAT', 'FLOAT64', 'INT', 'INT64', 'INTEGER', 'INTEGER64', 'LIST', 'LOCAL', 'MAP', 'NODE', 'NOTHING', 'NULL', 'PATH', 'PATHS', 'POINT', 'RELATIONSHIP', 'SIGNED', 'STRING', 'TIME', 'TIMESTAMP', 'UUID', 'PROPERTY VALUE', 'VARCHAR', 'VECTOR', 'VERTEX' or 'ZONED' (line 1, column 13 (offset: 12))
+            |"RETURN x :: INTEGER8"
+            |             ^""".stripMargin
+        )
+    }
+  }
+
+  // In Cypher 5 the property set is different (doesn't contain vector type), so this updates
+  // the types accordingly
+  def getCorrectCypherVersionOfType(fromCypher5: Boolean, typeExpr: CypherType): CypherType = {
+    if (fromCypher5) {
+      typeExpr match {
+        case _: PropertyValueType =>
+          PropertyValueCypher5Type(isNullable = typeExpr.isNullable)(typeExpr.position)
+        case listType: ListType => ListType(
+            getCorrectCypherVersionOfType(fromCypher5, listType.innerType),
+            listType.isNullable
+          )(listType.position)
+        case unionType: ClosedDynamicUnionType => ClosedDynamicUnionType(unionType.innerTypes.map(innerType =>
+            getCorrectCypherVersionOfType(fromCypher5, innerType)
+          ))(unionType.position)
+        case _ => typeExpr
+      }
+    } else typeExpr
+  }
+
+  val cypher25OnlyTypes: Seq[String] = Seq(
+    "INT64",
+    "INTEGER64",
+    "FLOAT64",
+    "VECTOR",
+    "UUID"
+  )
+
   test("all combinations of types should behave") {
     forAll(allCombinations) { case (typeString, typeExpr) =>
-      // Java CC produces invalid input positions in some cases
-      s"x IS :: $typeString" should parse[Expression].toAstIgnorePos {
-        isTyped(varFor("x"), typeExpr)
+      s"x IS :: $typeString" should parseIn[Expression] {
+        case Cypher5 if cypher25OnlyTypes.exists(typeString.contains(_)) =>
+          _.withMessageStart("Invalid input ")
+        case Cypher5 => _.toAstIgnorePos {
+            isTyped(varFor("x"), getCorrectCypherVersionOfType(fromCypher5 = true, typeExpr))
+          }
+        case _ => _.toAstIgnorePos {
+            isTyped(varFor("x"), typeExpr)
+          }
       }
 
-      // Java CC produces invalid input positions in some cases
-      s"n.prop IS TYPED $typeString" should parse[Expression].toAstIgnorePos {
-        isTyped(prop(varFor("n"), "prop"), typeExpr)
+      s"n.prop IS TYPED $typeString" should parseIn[Expression] {
+        case Cypher5 if cypher25OnlyTypes.exists(typeString.contains(_)) =>
+          _.withMessageStart("Invalid input ")
+        case Cypher5 => _.toAstIgnorePos {
+            isTyped(prop(varFor("n"), "prop"), getCorrectCypherVersionOfType(fromCypher5 = true, typeExpr))
+          }
+        case _ => _.toAstIgnorePos {
+            isTyped(prop(varFor("n"), "prop"), typeExpr)
+          }
       }
 
       // Java CC produces invalid input positions in some cases
       s"5 :: $typeString" should parseIn[Expression] {
+        case Cypher5 if cypher25OnlyTypes.exists(typeString.contains(_)) =>
+          _.withMessageStart("Invalid input ")
         case Cypher5 => _.toAstIgnorePos {
-            isTyped(literalInt(5L), typeExpr, withDoubleColonOnly = true)
+            isTyped(
+              literalInt(5L),
+              getCorrectCypherVersionOfType(fromCypher5 = true, typeExpr),
+              withDoubleColonOnly = true
+            )
           }
         case _ => _.toAstIgnorePos {
             isTyped(literalInt(5L), typeExpr)
           }
       }
 
-      // Java CC produces invalid input positions in some cases
-      s"x + y IS NOT :: $typeString" should parse[Expression].toAstIgnorePos {
-        isNotTyped(add(varFor("x"), varFor("y")), typeExpr)
+      s"x + y IS NOT :: $typeString" should parseIn[Expression] {
+        case Cypher5 if cypher25OnlyTypes.exists(typeString.contains(_)) =>
+          _.withMessageStart("Invalid input ")
+        case Cypher5 => _.toAstIgnorePos {
+            isNotTyped(add(varFor("x"), varFor("y")), getCorrectCypherVersionOfType(fromCypher5 = true, typeExpr))
+          }
+        case _ => _.toAstIgnorePos {
+            isNotTyped(add(varFor("x"), varFor("y")), typeExpr)
+          }
       }
 
-      s"['a', 'b', 'c'] IS NOT TYPED $typeString" should parse[Expression].toAstIgnorePos {
-        isNotTyped(listOfString("a", "b", "c"), typeExpr)
+      s"['a', 'b', 'c'] IS NOT TYPED $typeString" should parseIn[Expression] {
+        case Cypher5 if cypher25OnlyTypes.exists(typeString.contains(_)) =>
+          _.withMessageStart("Invalid input ")
+        case Cypher5 => _.toAstIgnorePos {
+            isNotTyped(listOfString("a", "b", "c"), getCorrectCypherVersionOfType(fromCypher5 = true, typeExpr))
+          }
+        case _ => _.toAstIgnorePos {
+            isNotTyped(listOfString("a", "b", "c"), typeExpr)
+          }
       }
 
       // This should not be supported according to CIP-87
@@ -451,9 +552,92 @@ class TypePredicateExpressionParserTest extends AstParsingTestBase
         }
     }
   }
+
+  private def failsWithClosedDynamicUnionNotNullError: Parses[Expression] = {
+    failsParsing[Expression]
+      .withSyntaxErrorContaining(
+        "Closed Dynamic Union Types can not be appended with `NOT NULL`, specify `NOT NULL` on all inner types instead.",
+        GqlStatusInfoCodes.STATUS_42I33,
+        "error: syntax error or access rule violation - invalid use of NOT NULL. Closed Dynamic Union types cannot be appended with 'NOT NULL', specify 'NOT NULL' on inner types instead."
+      )
+  }
 }
 
 object TypePredicateExpressionParserTest extends AstConstructionTestSupport {
+
+  private def vectorCoordinateTypes = Seq(
+    ("INTEGER", IntegerType(isNullable = false)(pos)),
+    ("INTEGER NOT NULL", IntegerType(isNullable = false)(pos)),
+    ("INTEGER!", IntegerType(isNullable = false)(pos)),
+    ("INTEGER64", IntegerType(isNullable = false)(pos)),
+    ("INTEGER64 NOT NULL", IntegerType(isNullable = false)(pos)),
+    ("INTEGER64!", IntegerType(isNullable = false)(pos)),
+    ("INTEGER32", Integer32Type(isNullable = false)(pos)),
+    ("INTEGER32 NOT NULL", Integer32Type(isNullable = false)(pos)),
+    ("INTEGER32!", Integer32Type(isNullable = false)(pos)),
+    ("INTEGER16", Integer16Type(isNullable = false)(pos)),
+    ("INTEGER16 NOT NULL", Integer16Type(isNullable = false)(pos)),
+    ("INTEGER16!", Integer16Type(isNullable = false)(pos)),
+    ("INTEGER8", Integer8Type(isNullable = false)(pos)),
+    ("INTEGER8 NOT NULL", Integer8Type(isNullable = false)(pos)),
+    ("INTEGER8!", Integer8Type(isNullable = false)(pos)),
+    ("INT", IntegerType(isNullable = false)(pos)),
+    ("INT NOT NULL", IntegerType(isNullable = false)(pos)),
+    ("INT!", IntegerType(isNullable = false)(pos)),
+    ("INT64", IntegerType(isNullable = false)(pos)),
+    ("INT64 NOT NULL", IntegerType(isNullable = false)(pos)),
+    ("INT64!", IntegerType(isNullable = false)(pos)),
+    ("INT32", Integer32Type(isNullable = false)(pos)),
+    ("INT32 NOT NULL", Integer32Type(isNullable = false)(pos)),
+    ("INT32!", Integer32Type(isNullable = false)(pos)),
+    ("INT16", Integer16Type(isNullable = false)(pos)),
+    ("INT16 NOT NULL", Integer16Type(isNullable = false)(pos)),
+    ("INT16!", Integer16Type(isNullable = false)(pos)),
+    ("INT8", Integer8Type(isNullable = false)(pos)),
+    ("INT8 NOT NULL", Integer8Type(isNullable = false)(pos)),
+    ("INT8!", Integer8Type(isNullable = false)(pos)),
+    ("SIGNED INTEGER", IntegerType(isNullable = false)(pos)),
+    ("SIGNED INTEGER NOT NULL", IntegerType(isNullable = false)(pos)),
+    ("SIGNED INTEGER!", IntegerType(isNullable = false)(pos)),
+    ("FLOAT", FloatType(isNullable = false)(pos)),
+    ("FLOAT NOT NULL", FloatType(isNullable = false)(pos)),
+    ("FLOAT!", FloatType(isNullable = false)(pos)),
+    ("FLOAT64", FloatType(isNullable = false)(pos)),
+    ("FLOAT64 NOT NULL", FloatType(isNullable = false)(pos)),
+    ("FLOAT64!", FloatType(isNullable = false)(pos)),
+    ("FLOAT32", Float32Type(isNullable = false)(pos)),
+    ("FLOAT32 NOT NULL", Float32Type(isNullable = false)(pos)),
+    ("FLOAT32!", Float32Type(isNullable = false)(pos))
+  )
+
+  private def vectorTypes = {
+    Seq(
+      // Basic Vector with no inner type or dimension
+      ("VECTOR", VectorType(None, None, isNullable = true)(pos)),
+      ("VECTOR!", VectorType(None, None, isNullable = false)(pos)),
+      ("VECTOR NOT NULL", VectorType(None, None, isNullable = false)(pos)),
+      // Vectors with dimensions only
+      ("VECTOR(5)", VectorType(None, Some(5), isNullable = true)(pos)),
+      ("VECTOR(5)!", VectorType(None, Some(5), isNullable = false)(pos)),
+      ("VECTOR(5) NOT NULL", VectorType(None, Some(5), isNullable = false)(pos))
+    ) ++
+      vectorCoordinateTypes.flatMap { case (innerTypeString, innerTypeExpr: CypherType) =>
+        Seq(
+          // Vectors with inner types
+          (s"VECTOR<$innerTypeString>", VectorType(Some(innerTypeExpr), None, isNullable = true)(pos)),
+          (s"VECTOR<$innerTypeString>!", VectorType(Some(innerTypeExpr), None, isNullable = false)(pos)),
+          (s"VECTOR<$innerTypeString> NOT NULL", VectorType(Some(innerTypeExpr), None, isNullable = false)(pos)),
+          // Vectors with inner types and dimensions
+          (s"VECTOR<$innerTypeString>(5)", VectorType(Some(innerTypeExpr), Some(5), isNullable = true)(pos)),
+          (s"VECTOR<$innerTypeString>(5)!", VectorType(Some(innerTypeExpr), Some(5), isNullable = false)(pos)),
+          (s"VECTOR<$innerTypeString>(5) NOT NULL", VectorType(Some(innerTypeExpr), Some(5), isNullable = false)(pos)),
+          // Vectors with inner types and dimensions (alternate form)
+          (s"VECTOR(5, $innerTypeString)", VectorType(Some(innerTypeExpr), Some(5), isNullable = true)(pos)),
+          (s"VECTOR(5, $innerTypeString)!", VectorType(Some(innerTypeExpr), Some(5), isNullable = false)(pos)),
+          (s"VECTOR(5, $innerTypeString) NOT NULL", VectorType(Some(innerTypeExpr), Some(5), isNullable = false)(pos))
+        )
+      }
+  }
 
   private def allNonListTypes = Seq(
     ("NOTHING", NothingType()(pos)),
@@ -474,18 +658,30 @@ object TypePredicateExpressionParserTest extends AstConstructionTestSupport {
     ("STRING", StringType(isNullable = true)(pos)),
     ("STRING NOT NULL", StringType(isNullable = false)(pos)),
     ("STRING!", StringType(isNullable = false)(pos)),
+    ("UUID", UUIDType(isNullable = true)(pos)),
+    ("UUID NOT NULL", UUIDType(isNullable = false)(pos)),
+    ("UUID!", UUIDType(isNullable = false)(pos)),
     ("INTEGER", IntegerType(isNullable = true)(pos)),
     ("INTEGER NOT NULL", IntegerType(isNullable = false)(pos)),
     ("INTEGER!", IntegerType(isNullable = false)(pos)),
+    ("INTEGER64", IntegerType(isNullable = true)(pos)),
+    ("INTEGER64 NOT NULL", IntegerType(isNullable = false)(pos)),
+    ("INTEGER64!", IntegerType(isNullable = false)(pos)),
     ("INT", IntegerType(isNullable = true)(pos)),
     ("INT NOT NULL", IntegerType(isNullable = false)(pos)),
     ("INT!", IntegerType(isNullable = false)(pos)),
+    ("INT64", IntegerType(isNullable = true)(pos)),
+    ("INT64 NOT NULL", IntegerType(isNullable = false)(pos)),
+    ("INT64!", IntegerType(isNullable = false)(pos)),
     ("SIGNED INTEGER", IntegerType(isNullable = true)(pos)),
     ("SIGNED INTEGER NOT NULL", IntegerType(isNullable = false)(pos)),
     ("SIGNED INTEGER!", IntegerType(isNullable = false)(pos)),
     ("FLOAT", FloatType(isNullable = true)(pos)),
     ("FLOAT NOT NULL", FloatType(isNullable = false)(pos)),
     ("FLOAT!", FloatType(isNullable = false)(pos)),
+    ("FLOAT64", FloatType(isNullable = true)(pos)),
+    ("FLOAT64 NOT NULL", FloatType(isNullable = false)(pos)),
+    ("FLOAT64!", FloatType(isNullable = false)(pos)),
     ("DATE", DateType(isNullable = true)(pos)),
     ("DATE NOT NULL", DateType(isNullable = false)(pos)),
     ("DATE!", DateType(isNullable = false)(pos)),
@@ -570,7 +766,7 @@ object TypePredicateExpressionParserTest extends AstConstructionTestSupport {
     ("PROPERTY VALUE", PropertyValueType(isNullable = true)(pos)),
     ("PROPERTY VALUE NOT NULL", PropertyValueType(isNullable = false)(pos)),
     ("PROPERTY VALUE!", PropertyValueType(isNullable = false)(pos))
-  )
+  ) ++ vectorTypes
 
   private def superTypes = Seq(
     ("ANY VALUE", AnyType(isNullable = true)(pos)),
@@ -928,6 +1124,6 @@ object TypePredicateExpressionParserTest extends AstConstructionTestSupport {
 
   def allCombinations: TableFor2[String, CypherType] = Tables.Table(
     ("typeString", "typeExpr"),
-    (allNonListTypes ++ superTypes ++ listTypes ++ closedUnionOfAllNonListTypes ++ otherClosedUnionTypes): _*
+    allNonListTypes ++ superTypes ++ listTypes ++ closedUnionOfAllNonListTypes ++ otherClosedUnionTypes: _*
   )
 }

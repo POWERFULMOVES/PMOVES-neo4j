@@ -64,4 +64,14 @@ public interface FlushableChannel extends WritableChannel {
 
     @Override
     FlushableChannel putVersion(byte version) throws IOException;
+
+    @Override
+    default FlushableChannel putContentType(byte contentType) {
+        return this;
+    }
+
+    @Override
+    default FlushableChannel putTerm(long term) {
+        return this;
+    }
 }

@@ -19,6 +19,7 @@
  */
 package org.neo4j.server.http.cypher.format.api;
 
+import java.util.List;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
 import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation;
 import org.neo4j.gqlstatus.GqlParams;
@@ -33,6 +34,7 @@ public class InputFormatException extends RuntimeException implements ErrorGqlSt
     private final ErrorGqlStatusObject gqlStatusObject;
     private final String oldMessage;
 
+    @Deprecated
     public InputFormatException(String message, Throwable cause) {
         super(message, cause);
 
@@ -40,8 +42,15 @@ public class InputFormatException extends RuntimeException implements ErrorGqlSt
         this.oldMessage = message;
     }
 
-    public InputFormatException(ErrorGqlStatusObject errorGqlStatusObject, String message, Throwable cause) {
+    private InputFormatException(ErrorGqlStatusObject errorGqlStatusObject, String message, Throwable cause) {
         super(message, cause);
+
+        this.gqlStatusObject = errorGqlStatusObject;
+        this.oldMessage = message;
+    }
+
+    private InputFormatException(ErrorGqlStatusObject errorGqlStatusObject, String message) {
+        super(message);
 
         this.gqlStatusObject = errorGqlStatusObject;
         this.oldMessage = message;
@@ -67,24 +76,10 @@ public class InputFormatException extends RuntimeException implements ErrorGqlSt
                 cause);
     }
 
-    @Deprecated
-    private InputFormatException(String message) {
-        super(message);
-
-        this.gqlStatusObject = null;
-        this.oldMessage = message;
-    }
-
-    public InputFormatException(ErrorGqlStatusObject errorGqlStatusObject, String message) {
-        super(message);
-
-        this.gqlStatusObject = errorGqlStatusObject;
-        this.oldMessage = message;
-    }
-
-    public static InputFormatException emptyInputString(String requiredOption, String message) {
+    public static InputFormatException missingRequiredInput(String requiredOption, String message) {
         var gql = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_08N11)
                 .withCause(ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_22N06)
+                        .withParam(GqlParams.ListParam.inputList, List.of(requiredOption))
                         .build())
                 .build();
         throw new InputFormatException(gql, message);

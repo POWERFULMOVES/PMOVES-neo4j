@@ -22,6 +22,7 @@ package org.neo4j.values.storable;
 import static java.lang.String.format;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.neo4j.hashing.HashFunction;
@@ -32,6 +33,8 @@ import org.neo4j.values.virtual.ListValueBuilder;
 import org.neo4j.values.virtual.VirtualValues;
 
 public abstract class StringValue extends TextValue {
+    public static final String CYPHER_TYPE_NAME = "STRING";
+
     protected abstract String value();
 
     @Override
@@ -56,12 +59,12 @@ public abstract class StringValue extends TextValue {
 
     @Override
     public TextValue toLower() {
-        return new StringWrappingStringValue(value().toLowerCase());
+        return new StringWrappingStringValue(value().toLowerCase(Locale.ROOT));
     }
 
     @Override
     public TextValue toUpper() {
-        return new StringWrappingStringValue(value().toUpperCase());
+        return new StringWrappingStringValue(value().toUpperCase(Locale.ROOT));
     }
 
     @Override
@@ -72,7 +75,7 @@ public abstract class StringValue extends TextValue {
         // is exactly the value, in cypher we expect two empty arrays
         // where as java returns an empty array
         if (separator.equals(asString)) {
-            return EMPTY_SPLIT;
+            return emptySplit();
         } else if (separator.isEmpty()) {
             return splitOnEmptySeparator(asString);
         }
@@ -97,7 +100,7 @@ public abstract class StringValue extends TextValue {
         // is exactly the value, in cypher we expect two empty arrays
         // where as java returns an empty array
         if (separators.stream().anyMatch(sep -> sep.equals(asString))) {
-            return EMPTY_SPLIT;
+            return emptySplit();
         } else if (separators.stream().anyMatch(String::isEmpty)) {
             String reduced = asString;
             for (var sep : separators) {
@@ -134,7 +137,7 @@ public abstract class StringValue extends TextValue {
     /**
      * Splits a string with multiple separator strings
      *
-     * @param input String to be split
+     * @param input  String to be split
      * @param delims delimiters, must not be not empty
      * @return the split string as a List of TextValues
      */
@@ -195,6 +198,74 @@ public abstract class StringValue extends TextValue {
     }
 
     @Override
+    public TextValue replaceWithLimit(String find, String replace, int limit) {
+        assert find != null;
+        assert replace != null;
+
+        if (limit < 1) {
+            return this;
+        }
+
+        return Values.stringValue(replaceStringWithLimit(find, replace, limit));
+    }
+
+    private String replaceStringWithLimit(String target, String replacement, int limit) {
+        int thisLen = length();
+        int trgtLen = target.length();
+        int replLen = replacement.length();
+
+        if (trgtLen > 0) {
+            // Replace all occurrences
+            if (trgtLen == 1 && replLen == 1 && limit > thisLen) {
+                return value().replace(target, replacement);
+            }
+
+            String str = value();
+            StringBuilder sb = new StringBuilder();
+            int count = 0;
+            int i = 0;
+
+            while (i < thisLen) {
+                if (count < limit) {
+                    if (str.startsWith(target, i)) {
+                        sb.append(replacement);
+                        i += target.length();
+                        count++;
+                    } else {
+                        sb.append(str.charAt(i));
+                        i++;
+                    }
+                } else {
+                    sb.append(str, i, thisLen);
+                    i = thisLen;
+                }
+            }
+
+            return sb.toString();
+
+        } else { // trgtLen == 0
+            int resultLen;
+            try {
+                resultLen =
+                        Math.addExact(thisLen, Math.multiplyExact(Math.min(limit, Math.addExact(thisLen, 1)), replLen));
+            } catch (ArithmeticException ignored) {
+                throw new OutOfMemoryError("Required length exceeds implementation limit");
+            }
+
+            StringBuilder sb = new StringBuilder(resultLen);
+            sb.append(replacement);
+            for (int i = 0; i < Math.min(limit - 1, thisLen); ++i) {
+                sb.append(this.value().charAt(i)).append(replacement);
+            }
+            if (limit <= thisLen) {
+                sb.append(this.value(), limit - 1, thisLen);
+            }
+
+            return sb.toString();
+        }
+    }
+
+    @Override
     public Object asObjectCopy() {
         return value();
     }
@@ -212,6 +283,11 @@ public abstract class StringValue extends TextValue {
     @Override
     public String stringValue() {
         return value();
+    }
+
+    @Override
+    public StringValue asStringValue() {
+        return this;
     }
 
     @Override
@@ -237,7 +313,7 @@ public abstract class StringValue extends TextValue {
         return value instanceof StringValue;
     }
 
-    static final TextValue EMPTY = new StringValue() {
+    static final StringValue EMPTY = new StringValue() {
         @Override
         protected int computeHashToMemoize() {
             return 0;
@@ -305,17 +381,17 @@ public abstract class StringValue extends TextValue {
 
         @Override
         public boolean startsWith(TextValue other) {
-            return other.length() == 0;
+            return other.isEmpty();
         }
 
         @Override
         public boolean endsWith(TextValue other) {
-            return other.length() == 0;
+            return other.isEmpty();
         }
 
         @Override
         public boolean contains(TextValue other) {
-            return other.length() == 0;
+            return other.isEmpty();
         }
 
         @Override
@@ -330,6 +406,15 @@ public abstract class StringValue extends TextValue {
 
         @Override
         public TextValue replace(String find, String replace) {
+            if (find.isEmpty()) {
+                return Values.stringValue(replace);
+            } else {
+                return this;
+            }
+        }
+
+        @Override
+        public TextValue replaceWithLimit(String find, String replace, int limit) {
             if (find.isEmpty()) {
                 return Values.stringValue(replace);
             } else {

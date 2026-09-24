@@ -48,10 +48,6 @@ public class JlineCompleter implements Completer {
 
     @Override
     public void complete(LineReader reader, ParsedLine line, List<Candidate> candidates) {
-        // Note, the JavaCC parser doesn't provide good enough completion for
-        // us to release it yet. For this reason, cypher completion is
-        // disabled by default for now until we decide exactly where we want to
-        // go with this.
         try {
             if (line instanceof BlankCompletion) {
                 candidates.addAll(commandCompleter.complete());
@@ -108,28 +104,28 @@ public class JlineCompleter implements Completer {
                 if (completionType.equals(SuggestionType.LABEL_OR_RELATIONSHIP.name)) {
                     return new Suggestion(
                             textUntilSentinel(lastToken, ':') + completion.value(),
-                            completion.value(),
+                            completion.displ(),
                             SuggestionType.LABEL_OR_RELATIONSHIP,
                             completion.descr(),
                             completion.complete());
                 } else if (completionType.equals(SuggestionType.PROPERTY.name)) {
                     return new Suggestion(
                             textUntilSentinel(lastToken, '.') + completion.value(),
-                            completion.value(),
+                            completion.displ(),
                             SuggestionType.PROPERTY,
                             completion.descr(),
                             completion.complete());
                 } else if (completionType.equals(SuggestionType.FUNCTION.name)) {
                     return new Suggestion(
                             textUntilSentinel(lastToken, '.') + completion.value(),
-                            completion.value(),
+                            completion.displ(),
                             SuggestionType.FUNCTION,
                             completion.descr(),
                             completion.complete());
                 } else if (completionType.equals(SuggestionType.PROCEDURE.name)) {
                     return new Suggestion(
                             textUntilSentinel(lastToken, '.') + completion.value(),
-                            completion.value(),
+                            completion.displ(),
                             SuggestionType.PROCEDURE,
                             completion.descr(),
                             completion.complete());

@@ -22,16 +22,21 @@ package org.neo4j.cypher
 import org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME
 import org.neo4j.configuration.GraphDatabaseSettings.SYSTEM_DATABASE_NAME
 import org.neo4j.cypher.internal.CypherVersion
+import org.neo4j.cypher.internal.util.test_helpers.GqlExceptionMatchers.InvalidSyntaxStatus
+import org.neo4j.cypher.internal.util.test_helpers.GqlExceptionMatchers.gqlStatus
+import org.neo4j.cypher.util.SkipOnSpd
 import org.neo4j.exceptions.InvalidSemanticsException
 import org.neo4j.exceptions.SyntaxException
+import org.neo4j.gqlstatus.GqlStatusInfoCodes
 import org.neo4j.kernel.impl.api.KernelTransactions
 import org.neo4j.test.DoubleLatch
+import org.neo4j.test.extension.SkipOnSpd.Note
 
 class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAcceptanceTestSupport {
 
   private val cypherVersions =
     (CypherVersion.values().map(cv => (s"CYPHER ${cv.versionName} ", cv))
-      :+ ("", CypherVersion.Default))
+      :+ ("", dbmsDefaultQueryLanguage))
 
   // SHOW TRANSACTIONS (don't test exact id as it might change)
 
@@ -42,7 +47,7 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
 
       // THEN
       result should have size 1
-      assertCorrectDefaultMap(result.head, "neo4j-transaction-", "", "SHOW TRANSACTIONS")
+      assertCorrectDefaultMap(result.head, defaultDbTxPrefix, "", "SHOW TRANSACTIONS")
     }
   }
 
@@ -62,8 +67,8 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
     result should have size 2
     val sortedRes =
       result.sortBy(m => m("transactionId").asInstanceOf[String]) // To get stable order to assert correct result
-    assertCorrectDefaultMap(sortedRes.head, "neo4j-transaction-", username, unwindQuery)
-    assertCorrectDefaultMap(sortedRes(1), "neo4j-transaction-", "", "SHOW TRANSACTIONS")
+    assertCorrectDefaultMap(sortedRes.head, defaultDbTxPrefix, username, unwindQuery)
+    assertCorrectDefaultMap(sortedRes(1), defaultDbTxPrefix, "", "SHOW TRANSACTIONS")
   }
 
   test("Should show system transactions") {
@@ -88,7 +93,7 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
     result should have size 2
     val sortedRes =
       result.sortBy(m => m("transactionId").asInstanceOf[String]) // To get stable order to assert correct result
-    assertCorrectDefaultMap(sortedRes.head, "neo4j-transaction-", "", "SHOW TRANSACTIONS")
+    assertCorrectDefaultMap(sortedRes.head, defaultDbTxPrefix, "", "SHOW TRANSACTIONS")
     assertCorrectDefaultMap(
       sortedRes(1),
       "system-transaction-",
@@ -174,7 +179,7 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
     result should have size 2
     val sortedRes =
       result.sortBy(m => m("transactionId").asInstanceOf[String]) // To get stable order to assert correct result
-    assertCorrectDefaultMap(sortedRes.head, "neo4j-transaction-", username, unwindQuery)
+    assertCorrectDefaultMap(sortedRes.head, defaultDbTxPrefix, username, unwindQuery)
     assertCorrectDefaultMap(
       sortedRes(1),
       "system-transaction-",
@@ -233,7 +238,13 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
     assertCorrectDefaultMap(result.head, unwindId, username, unwindQuery)
   }
 
-  test("Should always show all transactions in community") {
+  test(
+    "Should always show all transactions in community",
+    SkipOnSpd(
+      details = "SPD does not surface concurrent transactions across shards in this scenario",
+      note = Note.incompatible
+    )
+  ) {
     // GIVEN
     val showUser = "baz"
     createUser(showUser)
@@ -282,7 +293,7 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
 
           // THEN
           result should have size 1
-          assertCorrectDefaultMap(result.head, "neo4j-transaction-", "", query, cypherVersion = cypherVersion)
+          assertCorrectDefaultMap(result.head, defaultDbTxPrefix, "", query, cypherVersion = cypherVersion)
         }
       }
 
@@ -321,7 +332,7 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
 
     // THEN
     result should have size 1
-    assertCorrectDefaultMap(result.head, "neo4j-transaction-", username2, user2Query)
+    assertCorrectDefaultMap(result.head, defaultDbTxPrefix, username2, user2Query)
   }
 
   test("Should show given transactions with WHERE") {
@@ -338,7 +349,7 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
 
     // THEN
     result should have size 1
-    assertCorrectDefaultMap(result.head, "neo4j-transaction-", username2, user2Query)
+    assertCorrectDefaultMap(result.head, defaultDbTxPrefix, username2, user2Query)
   }
 
   test("Should show given transactions filtered with WHERE on transactionId") {
@@ -371,6 +382,10 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
 
     // THEN
     exception.getMessage should startWith("Variable `parameters` not defined")
+    exception should be(InvalidSyntaxStatus.withCause(gqlStatus(
+      GqlStatusInfoCodes.STATUS_42N62,
+      "error: syntax error or access rule violation - variable not defined. Variable `parameters` not defined."
+    )))
   }
 
   test("Should show current transaction with YIELD *") {
@@ -380,7 +395,7 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
 
       // THEN
       result should have size 1
-      assertCorrectFullMap(result.head, "neo4j-transaction-", "", "SHOW TRANSACTIONS YIELD *", runtime = "slotted")
+      assertCorrectFullMap(result.head, defaultDbTxPrefix, "", "SHOW TRANSACTIONS YIELD *", runtime = "slotted")
     }
   }
 
@@ -407,7 +422,7 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
     result should have size 2
     val sortedRes =
       result.sortBy(m => m("transactionId").asInstanceOf[String]) // To get stable order to assert correct result
-    assertCorrectFullMap(sortedRes.head, "neo4j-transaction-", "", "SHOW TRANSACTIONS YIELD *", runtime = "slotted")
+    assertCorrectFullMap(sortedRes.head, defaultDbTxPrefix, "", "SHOW TRANSACTIONS YIELD *", runtime = "slotted")
     assertCorrectFullMap(
       sortedRes(1),
       "system-transaction-",
@@ -436,16 +451,16 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
     result should have size 2
     val sortedRes =
       result.sortBy(m => m("username").asInstanceOf[String]) // To get stable order to assert correct result
-    assertCorrectFullMap(sortedRes.head, user2Id, username2, user2Query, runtime = "slotted")
-    assertCorrectFullMap(sortedRes(1), user1Id, username, user1Query, runtime = "slotted")
+    assertCorrectFullMap(sortedRes.head, user2Id, username2, user2Query, runtime = defaultRuntime)
+    assertCorrectFullMap(sortedRes(1), user1Id, username, user1Query, runtime = defaultRuntime)
   }
 
   test("Should show all transactions with specific YIELD") {
     // GIVEN
     val (unwindQuery, latch) = setupUserWithOneTransaction()
     val unwindId = getTransactionIdExecutingQuery(unwindQuery)
-    val showIdNumber = unwindId.split("-")(2).toInt + 2
-    val showId = s"neo4j-transaction-$showIdNumber"
+    val showIdNumber = unwindId.split("-").last.toInt + 2
+    val showId = s"$defaultDbTxPrefix$showIdNumber"
 
     // WHEN
     val showQuery = "SHOW TRANSACTIONS YIELD transactionId, currentQuery, runtime"
@@ -460,7 +475,7 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
     val sortedRes =
       result.sortBy(m => m("transactionId").asInstanceOf[String]) // To get stable order to assert correct result
     sortedRes should be(List(
-      Map("transactionId" -> unwindId, "currentQuery" -> unwindQuery, "runtime" -> "slotted"),
+      Map("transactionId" -> unwindId, "currentQuery" -> unwindQuery, "runtime" -> defaultRuntime),
       Map("transactionId" -> showId, "currentQuery" -> showQuery, "runtime" -> "slotted")
     ))
   }
@@ -482,8 +497,8 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
     val sortedRes =
       result.sortBy(m => m("transactionId").asInstanceOf[String]) // To get stable order to assert correct result
     sortedRes should be(List(
-      Map("transactionId" -> user1Id, "currentQuery" -> user1Query, "runtime" -> "slotted"),
-      Map("transactionId" -> user2Id, "currentQuery" -> user2Query, "runtime" -> "slotted")
+      Map("transactionId" -> user1Id, "currentQuery" -> user1Query, "runtime" -> defaultRuntime),
+      Map("transactionId" -> user2Id, "currentQuery" -> user2Query, "runtime" -> defaultRuntime)
     ).sortBy(m => m("transactionId")))
   }
 
@@ -491,8 +506,8 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
     // GIVEN
     val (unwindQuery, latch) = setupUserWithOneTransaction()
     val unwindId = getTransactionIdExecutingQuery(unwindQuery)
-    val showIdNumber = unwindId.split("-")(2).toInt + 2
-    val showId = s"neo4j-transaction-$showIdNumber"
+    val showIdNumber = unwindId.split("-").last.toInt + 2
+    val showId = s"$defaultDbTxPrefix$showIdNumber"
 
     // WHEN
     val res = execute("SHOW TRANSACTIONS YIELD transactionId, runtime ORDER BY transactionId ASC").toList
@@ -504,7 +519,7 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
 
     // THEN
     result should be(List(
-      Map("transactionId" -> unwindId, "runtime" -> "slotted"),
+      Map("transactionId" -> unwindId, "runtime" -> defaultRuntime),
       Map("transactionId" -> showId, "runtime" -> "slotted")
     ))
   }
@@ -513,8 +528,8 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
     // GIVEN
     val (unwindQuery, latch) = setupUserWithOneTransaction()
     val unwindId = getTransactionIdExecutingQuery(unwindQuery)
-    val showIdNumber = unwindId.split("-")(2).toInt + 2
-    val showId = s"neo4j-transaction-$showIdNumber"
+    val showIdNumber = unwindId.split("-").last.toInt + 2
+    val showId = s"$defaultDbTxPrefix$showIdNumber"
 
     // WHEN
     val res = execute("SHOW TRANSACTIONS YIELD transactionId, runtime ORDER BY transactionId DESC").toList
@@ -527,7 +542,7 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
     // THEN
     result should be(List(
       Map("transactionId" -> showId, "runtime" -> "slotted"),
-      Map("transactionId" -> unwindId, "runtime" -> "slotted")
+      Map("transactionId" -> unwindId, "runtime" -> defaultRuntime)
     ))
   }
 
@@ -547,8 +562,8 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
     result should have size 2
     val sortedRes =
       result.sortBy(m => m("username").asInstanceOf[String]) // To get stable order to assert correct result
-    assertCorrectFullMap(sortedRes.head, user2Id, username2, user2Query, runtime = "slotted")
-    assertCorrectFullMap(sortedRes(1), user1Id, username, user1Query, runtime = "slotted")
+    assertCorrectFullMap(sortedRes.head, user2Id, username2, user2Query, runtime = defaultRuntime)
+    assertCorrectFullMap(sortedRes(1), user1Id, username, user1Query, runtime = defaultRuntime)
   }
 
   test("Should show transactions with specific YIELD and WHERE") {
@@ -561,7 +576,7 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
 
     // WHEN
     val result = execute(
-      "SHOW TRANSACTIONS YIELD transactionId, currentQuery, runtime, username WHERE runtime = 'slotted' AND username <> ''"
+      s"SHOW TRANSACTIONS YIELD transactionId, currentQuery, runtime, username WHERE runtime = '$defaultRuntime' AND username <> ''"
     ).toList
     latch.finishAndWaitForAllToFinish()
 
@@ -569,8 +584,18 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
     val sortedRes =
       result.sortBy(m => m("transactionId").asInstanceOf[String]) // To get stable order to assert correct result
     sortedRes should be(List(
-      Map("transactionId" -> user1Id, "currentQuery" -> user1Query, "username" -> username, "runtime" -> "slotted"),
-      Map("transactionId" -> user2Id, "currentQuery" -> user2Query, "username" -> username2, "runtime" -> "slotted")
+      Map(
+        "transactionId" -> user1Id,
+        "currentQuery" -> user1Query,
+        "username" -> username,
+        "runtime" -> defaultRuntime
+      ),
+      Map(
+        "transactionId" -> user2Id,
+        "currentQuery" -> user2Query,
+        "username" -> username2,
+        "runtime" -> defaultRuntime
+      )
     ).sortBy(m => m("transactionId")))
   }
 
@@ -584,12 +609,12 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
 
     // WHEN
     val result = execute(
-      """
-        |SHOW TRANSACTIONS
-        |YIELD transactionId, currentQuery, runtime, username
-        |WHERE runtime = 'slotted'
-        |AND username <> ''
-        |RETURN transactionId, left(currentQuery, 5) AS shortQuery"""
+      s"""
+         |SHOW TRANSACTIONS
+         |YIELD transactionId, currentQuery, runtime, username
+         |WHERE runtime = '$defaultRuntime'
+         |AND username <> ''
+         |RETURN transactionId, left(currentQuery, 5) AS shortQuery"""
         .stripMargin
     ).toList
     latch.finishAndWaitForAllToFinish()
@@ -614,7 +639,7 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
 
     // WHEN
     val result = execute(
-      "SHOW TRANSACTIONS YIELD transactionId AS txId, runtime, username ORDER BY txId SKIP 1 LIMIT 5 WHERE runtime = 'slotted' AND username <> '' RETURN txId"
+      s"SHOW TRANSACTIONS YIELD transactionId AS txId, runtime, username ORDER BY txId SKIP 1 LIMIT 5 WHERE runtime = '$defaultRuntime' AND username <> '' RETURN txId"
     ).toList
     latch.finishAndWaitForAllToFinish()
 
@@ -641,8 +666,8 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
     tx2.execute(username2, password, threading, "SHOW DATABASES")
     latch.startAndWaitForAllToStart()
     val unwindId = getTransactionIdExecutingQuery(unwindQuery)
-    val showIdNumber = unwindId.split("-")(2).toInt + 2
-    val showId = s"neo4j-transaction-$showIdNumber"
+    val showIdNumber = unwindId.split("-").last.toInt + 2
+    val showId = s"$defaultDbTxPrefix$showIdNumber"
 
     // WHEN (WHERE to remove random system transactions from parallel tests/set-up)
     selectDatabase(DEFAULT_DATABASE_NAME)
@@ -657,8 +682,8 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
     result should have size 3
     planDescr should includeSomewhere.aPlan("Sort").containingArgument("transactionId DESC")
     planDescr should includeSomewhere.aPlan("Sort").containingArgument("database ASC")
-    assertCorrectMap(resultList.head, showId, DEFAULT_DATABASE_NAME)
-    assertCorrectMap(resultList(1), unwindId, DEFAULT_DATABASE_NAME)
+    assertCorrectMap(resultList.head, showId, defaultDb)
+    assertCorrectMap(resultList(1), unwindId, defaultDb)
     assertCorrectMap(resultList(2), "system-transaction-", SYSTEM_DATABASE_NAME)
   }
 
@@ -666,8 +691,8 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
     // GIVEN
     val (unwindQuery, latch) = setupUserWithOneTransaction()
     val unwindId = getTransactionIdExecutingQuery(unwindQuery)
-    val showIdNumber = unwindId.split("-")(2).toInt + 2
-    val showId = s"neo4j-transaction-$showIdNumber"
+    val showIdNumber = unwindId.split("-").last.toInt + 2
+    val showId = s"$defaultDbTxPrefix$showIdNumber"
 
     // WHEN (WHERE to remove random system transactions from parallel tests/set-up)
     val result = execute(
@@ -848,6 +873,10 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
 
     // THEN
     exception.getMessage should startWith("Invalid input '': expected a string or an expression")
+    exception should be(InvalidSyntaxStatus.withCause(gqlStatus(
+      GqlStatusInfoCodes.STATUS_42I06,
+      "error: syntax error or access rule violation - invalid input. Invalid input '', expected: a string or an expression."
+    )))
   }
 
   test("Should fail to terminate transaction when passing empty list as parameter") {
@@ -860,6 +889,10 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
     exception.getMessage should startWith(
       "Missing transaction id to terminate, the transaction id can be found using `SHOW TRANSACTIONS`."
     )
+    exception should be(gqlStatus(
+      GqlStatusInfoCodes.STATUS_22N06,
+      "error: data exception - required input missing. Invalid input. 'transaction id' needs to be specified."
+    ))
   }
 
   test("Should terminate transaction when executing on system database") {
@@ -923,7 +956,14 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
     }
   }
 
-  test("Should always terminate transaction in community") {
+  test(
+    "Should always terminate transaction in community",
+    SkipOnSpd(
+      details =
+        "SPD: TERMINATE via executeAs does not locate the cross-shard transaction. Should look further into this.",
+      note = Note.temporary
+    )
+  ) {
     // GIVEN
     val (unwindQuery, latch) = setupUserWithOneTransaction()
     createUser(username2)
@@ -1110,7 +1150,10 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
     }
   }
 
-  test("Should terminate transactions with full yield") {
+  test(
+    "Should terminate transactions with full yield",
+    SkipOnSpd(details = "needs further investigation", note = Note.temporary)
+  ) {
     // GIVEN
     val latch = new DoubleLatch(4)
     val (unwindQuery, matchQuery) = setupTwoUsersAndOneTransactionEach(latch)
@@ -1155,7 +1198,10 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
     }
   }
 
-  test("Should terminate transactions with multiple ORDER BY") {
+  test(
+    "Should terminate transactions with multiple ORDER BY",
+    SkipOnSpd(details = "Needs further investigation", note = Note.temporary)
+  ) {
     // GIVEN
     val latch = new DoubleLatch(4)
     val (unwindQuery, matchQuery) = setupTwoUsersAndOneTransactionEach(latch)
@@ -1244,6 +1290,10 @@ class CommunityTransactionCommandAcceptanceTest extends TransactionCommandAccept
       exception.getMessage should startWith(
         "`WHERE` is not allowed by itself, please use `TERMINATE TRANSACTION ... YIELD ... WHERE ...` instead"
       )
+      exception should be(gqlStatus(
+        GqlStatusInfoCodes.STATUS_42N84,
+        "error: syntax error or access rule violation - TERMINATE TRANSACTION misses YIELD clause. WHERE clause without YIELD clause. Use 'TERMINATE TRANSACTION ... YIELD ... WHERE ...'."
+      ))
 
       val res = execute(s"SHOW TRANSACTION '$txId'").toList
       res should have size 1

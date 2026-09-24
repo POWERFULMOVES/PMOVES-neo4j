@@ -20,11 +20,13 @@
 package org.neo4j.io.pagecache.impl.muninn;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -34,6 +36,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.neo4j.test.ThreadTestUtils;
 import org.neo4j.util.concurrent.BinaryLatch;
+import org.neo4j.util.concurrent.Futures;
 
 class LatchMapTest {
     @ValueSource(ints = {LatchMap.DEFAULT_FAULT_LOCK_STRIPING, 1 << 10, 1 << 11})
@@ -52,9 +55,7 @@ class LatchMapTest {
         AtomicReference<Thread> threadRef = new AtomicReference<>();
         BinaryLatch latch = latches.takeOrAwaitLatch(42);
         assertThat(latch).isNotNull();
-        ExecutorService executor = null;
-        try {
-            executor = Executors.newSingleThreadExecutor();
+        try (var executor = Executors.newSingleThreadExecutor()) {
             Future<BinaryLatch> future = executor.submit(() -> {
                 threadRef.set(Thread.currentThread());
                 return latches.takeOrAwaitLatch(42);
@@ -66,10 +67,6 @@ class LatchMapTest {
             ThreadTestUtils.awaitThreadState(th, 10_000, Thread.State.WAITING);
             latch.release();
             assertThat(future.get(1, TimeUnit.SECONDS)).isNull();
-        } finally {
-            if (executor != null) {
-                executor.shutdown();
-            }
         }
     }
 
@@ -79,16 +76,10 @@ class LatchMapTest {
         LatchMap latches = new LatchMap(size);
         BinaryLatch latch = latches.takeOrAwaitLatch(42);
         assertThat(latch).isNotNull();
-        ExecutorService executor = null;
-        try {
-            executor = Executors.newSingleThreadExecutor();
+        try (var executor = Executors.newSingleThreadExecutor()) {
             Future<BinaryLatch> future = executor.submit(() -> latches.takeOrAwaitLatch(33));
             assertThat(future.get(30, TimeUnit.SECONDS)).isNotNull();
             latch.release();
-        } finally {
-            if (executor != null) {
-                executor.shutdown();
-            }
         }
     }
 
@@ -116,5 +107,93 @@ class LatchMapTest {
             latchList.add(latches.takeOrAwaitLatch(i)); // should not contend
         }
         latchList.forEach(LatchMap.Latch::release);
+    }
+
+    @Test
+    void maxContinuousLatchesShouldRespectCapacity() {
+        int size = 1024;
+        LatchMap latches = new LatchMap(size);
+
+        assertThat(latches.maxContinuousLatches(0, 100)).isEqualTo(100);
+        assertThat(latches.maxContinuousLatches(0, 2000)).isEqualTo(size);
+        assertThat(latches.maxContinuousLatches(512, 100)).isEqualTo(100);
+        assertThat(latches.maxContinuousLatches(512, 1000)).isEqualTo(512);
+        assertThat(latches.maxContinuousLatches(size - 1, 10)).isEqualTo(1);
+        assertThat(latches.maxContinuousLatches(size, 100)).isEqualTo(100);
+    }
+
+    @Test
+    void closePreventNewLatchesFromBeingTaken() {
+        LatchMap latches = new LatchMap(8);
+        latches.close();
+        assertThat(latches.takeOrAwaitLatch(0)).isNull();
+        assertThat(latches.takeOrAwaitLatch(3)).isNull();
+        assertThat(latches.takeOrAwaitLatch(7)).isNull();
+    }
+
+    @Test
+    void closeMustWaitForHeldLatchToBeReleasedBeforeCompleting() {
+        LatchMap latches = new LatchMap(8);
+        LatchMap.Latch heldLatch = latches.takeOrAwaitLatch(0);
+        assertThat(heldLatch).isNotNull();
+
+        BinaryLatch closeStarted = new BinaryLatch();
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            Future<?> closeFuture = executor.submit(() -> {
+                closeStarted.release();
+                latches.close();
+            });
+            closeStarted.await();
+
+            assertThat(closeFuture.isDone()).isFalse();
+            heldLatch.release();
+
+            assertThatCode(closeFuture::get).doesNotThrowAnyException();
+        }
+    }
+
+    @Test
+    void closedLatchMapNotAllowsAnyMoreLatches() {
+        LatchMap latches = new LatchMap(8);
+        LatchMap.Latch heldLatch = latches.takeOrAwaitLatch(0);
+        assertThat(heldLatch).isNotNull();
+
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            Future<?> closeFuture = executor.submit(latches::close);
+
+            heldLatch.release();
+            assertThatCode(closeFuture::get).doesNotThrowAnyException();
+        }
+
+        assertNull(latches.takeOrAwaitLatch(5));
+    }
+
+    @Test
+    void concurrentReadersAndCloseMustNotLock() throws Exception {
+        int numReaders = 8;
+        LatchMap latches = new LatchMap(16);
+        CountDownLatch allStarted = new CountDownLatch(numReaders);
+        try (var executor = Executors.newFixedThreadPool(numReaders)) {
+            List<Future<?>> readers = new ArrayList<>();
+            for (int i = 0; i < numReaders; i++) {
+                int latchId = i;
+                readers.add(executor.submit(() -> {
+                    allStarted.countDown();
+                    // Keep taking and releasing the latch until the map is closed
+                    while (true) {
+                        LatchMap.Latch latch = latches.takeOrAwaitLatch(latchId);
+                        if (latch == null) {
+                            return;
+                        }
+                        latch.release();
+                    }
+                }));
+            }
+
+            allStarted.await();
+            latches.close();
+
+            Futures.getAll(readers);
+        }
     }
 }

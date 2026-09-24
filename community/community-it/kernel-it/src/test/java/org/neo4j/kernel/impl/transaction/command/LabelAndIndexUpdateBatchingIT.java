@@ -37,15 +37,17 @@ import org.neo4j.kernel.impl.api.CompleteTransaction;
 import org.neo4j.kernel.impl.api.TransactionCommitProcess;
 import org.neo4j.kernel.impl.api.txid.TransactionIdGenerator;
 import org.neo4j.kernel.impl.transaction.CommittedCommandBatchRepresentation;
-import org.neo4j.kernel.impl.transaction.log.CommandBatchCursor;
-import org.neo4j.kernel.impl.transaction.log.LogicalTransactionStore;
-import org.neo4j.kernel.impl.transaction.log.TransactionCommitmentFactory;
 import org.neo4j.kernel.impl.transaction.tracing.TransactionWriteEvent;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
-import org.neo4j.storageengine.api.MetadataProvider;
+import org.neo4j.memory.EmptyMemoryTracker;
+import org.neo4j.storageengine.api.LogMetadataProvider;
 import org.neo4j.storageengine.api.StorageEngine;
 import org.neo4j.storageengine.api.TransactionIdStore;
 import org.neo4j.test.TestDatabaseManagementServiceBuilder;
+import org.neo4j.test.extension.SkipOnSpd;
+import org.neo4j.wal.CommandBatchCursor;
+import org.neo4j.wal.LogicalTransactionStore;
+import org.neo4j.wal.TransactionCommitmentFactory;
 
 /**
  * This test is for an issue with transaction batching where there would be a batch of transactions
@@ -56,6 +58,10 @@ import org.neo4j.test.TestDatabaseManagementServiceBuilder;
  * the batch state, to be applied at the end of the batch. Hence, the node would be forgotten when the
  * index was being built.
  */
+@SkipOnSpd(
+        reason =
+                "This test is specific to how a tx applier works for a storage engine and doesn't need to be run in a SPD setup",
+        notes = {SkipOnSpd.Note.incompatible})
 class LabelAndIndexUpdateBatchingIT {
     private static final String PROPERTY_KEY = "key";
     private static final Label LABEL = Label.label("label");
@@ -93,7 +99,7 @@ class LabelAndIndexUpdateBatchingIT {
             }
             txIdCutOffPoint = db.getDependencyResolver()
                     .resolveDependency(TransactionIdStore.class)
-                    .getLastClosedTransactionId();
+                    .getHighestGapFreeClosedTransactionId();
             // uniqueness constraint affecting N
             try (Transaction tx = db.beginTx()) {
                 tx.schema()
@@ -115,13 +121,17 @@ class LabelAndIndexUpdateBatchingIT {
         try {
             int cutoffIndex = findCutoffIndex(transactions, txIdCutOffPoint);
             commitProcess.commit(
-                    toApply(transactions.subList(0, cutoffIndex), db), TransactionWriteEvent.NULL, EXTERNAL);
+                    toApply(transactions.subList(0, cutoffIndex), db),
+                    TransactionWriteEvent.NULL,
+                    EXTERNAL,
+                    EmptyMemoryTracker.INSTANCE);
 
             // WHEN applying the two transactions (node N and the constraint) in the same batch
             commitProcess.commit(
                     toApply(transactions.subList(cutoffIndex, transactions.size()), db),
                     TransactionWriteEvent.NULL,
-                    EXTERNAL);
+                    EXTERNAL,
+                    EmptyMemoryTracker.INSTANCE);
 
             // THEN node N should've ended up in the index too
             try (Transaction tx = db.beginTx()) {
@@ -180,7 +190,11 @@ class LabelAndIndexUpdateBatchingIT {
     }
 
     private static long getLastClosedTransactionId(GraphDatabaseAPI database) {
-        MetadataProvider metaDataStore = database.getDependencyResolver().resolveDependency(MetadataProvider.class);
-        return metaDataStore.getLastClosedTransaction().transactionId().id();
+        LogMetadataProvider logMetadataProvider =
+                database.getDependencyResolver().resolveDependency(LogMetadataProvider.class);
+        return logMetadataProvider
+                .getHighestGapFreeClosedTransaction()
+                .transactionId()
+                .id();
     }
 }

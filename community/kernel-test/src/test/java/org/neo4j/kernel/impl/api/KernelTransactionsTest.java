@@ -23,6 +23,7 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.locks.LockSupport.parkNanos;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -32,14 +33,18 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_MOCKS;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.neo4j.collection.Dependencies.dependenciesOf;
+import static org.neo4j.configuration.GraphDatabaseInternalSettings.shutdown_terminated_transaction_wait_timeout;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
 import static org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker.writable;
+import static org.neo4j.graphdb.security.AuthorizationExpiredException.LDAP_AUTH_INFO_EXPIRED;
 import static org.neo4j.internal.helpers.collection.Iterators.asSet;
 import static org.neo4j.internal.kernel.api.connectioninfo.ClientConnectionInfo.EMBEDDED_CONNECTION;
 import static org.neo4j.internal.kernel.api.security.LoginContext.AUTH_DISABLED;
@@ -51,12 +56,14 @@ import static org.neo4j.kernel.api.TransactionTimeout.NO_TIMEOUT;
 import static org.neo4j.kernel.api.security.AnonymousContext.access;
 import static org.neo4j.kernel.api.security.AnonymousContext.full;
 import static org.neo4j.kernel.database.DatabaseIdFactory.from;
+import static org.neo4j.kernel.impl.api.KernelTransactionTestBase.mockedStorageReader;
+import static org.neo4j.kernel.impl.api.TransactionIdSequence.TRANSACTION_SEQUENCE_INITIAL_VALUE;
 import static org.neo4j.kernel.impl.api.chunk.TransactionRollbackProcess.EMPTY_ROLLBACK_PROCESS;
-import static org.neo4j.kernel.impl.util.collection.CollectionsFactorySupplier.ON_HEAP;
 import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_CONSENSUS_INDEX;
 import static org.neo4j.storageengine.api.txstate.validation.TransactionValidatorFactory.EMPTY_VALIDATOR_FACTORY;
 import static org.neo4j.util.concurrent.Futures.combine;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -99,8 +106,10 @@ import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.api.procedure.GlobalProcedures;
 import org.neo4j.kernel.api.security.AnonymousContext;
 import org.neo4j.kernel.availability.AvailabilityGuard;
+import org.neo4j.kernel.availability.AvailabilityRequirement;
 import org.neo4j.kernel.availability.CompositeDatabaseAvailabilityGuard;
 import org.neo4j.kernel.availability.DatabaseAvailabilityGuard;
+import org.neo4j.kernel.database.DatabaseMonitors;
 import org.neo4j.kernel.database.DatabaseReferenceImpl;
 import org.neo4j.kernel.database.DatabaseReferenceRepository;
 import org.neo4j.kernel.database.DatabaseTracers;
@@ -117,18 +126,20 @@ import org.neo4j.kernel.impl.factory.GraphDatabaseFacade;
 import org.neo4j.kernel.impl.locking.LockManager;
 import org.neo4j.kernel.impl.monitoring.TransactionMonitor;
 import org.neo4j.kernel.impl.query.TransactionExecutionMonitor;
-import org.neo4j.kernel.impl.transaction.log.TransactionCommitmentFactory;
+import org.neo4j.kernel.impl.security.URIAccessRules;
 import org.neo4j.kernel.internal.event.DatabaseTransactionEventListeners;
 import org.neo4j.kernel.lifecycle.LifeSupport;
 import org.neo4j.kernel.monitoring.tracing.DefaultTracers;
 import org.neo4j.lock.LockTracer;
 import org.neo4j.logging.NullLog;
 import org.neo4j.logging.NullLogProvider;
-import org.neo4j.memory.GlobalMemoryGroupTracker;
+import org.neo4j.logging.internal.DatabaseLogProvider;
 import org.neo4j.memory.MemoryGroup;
 import org.neo4j.memory.MemoryPools;
 import org.neo4j.memory.MemoryTracker;
+import org.neo4j.memory.ScopedMemoryPool;
 import org.neo4j.monitoring.DatabaseHealth;
+import org.neo4j.monitoring.ExceptionHandlerService;
 import org.neo4j.monitoring.Monitors;
 import org.neo4j.resources.CpuClock;
 import org.neo4j.scheduler.JobScheduler;
@@ -153,6 +164,7 @@ import org.neo4j.time.SystemNanoClock;
 import org.neo4j.token.TokenHolders;
 import org.neo4j.token.api.TokenHolder;
 import org.neo4j.values.ElementIdMapper;
+import org.neo4j.wal.TransactionCommitmentFactory;
 
 @ExtendWith(OtherThreadExtension.class)
 class KernelTransactionsTest {
@@ -171,6 +183,7 @@ class KernelTransactionsTest {
         databaseAvailabilityGuard = new DatabaseAvailabilityGuard(
                 DEFAULT_DATABASE_ID, clock, NullLog.getInstance(), 0, mock(CompositeDatabaseAvailabilityGuard.class));
         databaseAvailabilityGuard.init();
+        databaseAvailabilityGuard.start();
     }
 
     @AfterEach
@@ -211,8 +224,6 @@ class KernelTransactionsTest {
         // Given
         KernelTransactions transactions = newKernelTransactions();
 
-        transactions.disposeAll();
-
         KernelTransaction first = getKernelTransaction(transactions);
         KernelTransaction second = getKernelTransaction(transactions);
         KernelTransaction leftOpen = getKernelTransaction(transactions);
@@ -220,13 +231,11 @@ class KernelTransactionsTest {
         second.close();
 
         // When
-        transactions.disposeAll();
+        transactions.stop();
+        transactions.shutdown();
 
         // Then
-        KernelTransaction postDispose = getKernelTransaction(transactions);
-        assertThat(postDispose).isNotEqualTo(first);
-        assertThat(postDispose).isNotEqualTo(second);
-
+        assertThatThrownBy(() -> getKernelTransaction(transactions)).isInstanceOf(IllegalStateException.class);
         assertNotNull(leftOpen.getReasonIfTerminated());
     }
 
@@ -390,7 +399,8 @@ class KernelTransactionsTest {
         KernelTransaction tx2 = getKernelTransaction(kernelTransactions);
         KernelTransaction tx3 = getKernelTransaction(kernelTransactions);
 
-        kernelTransactions.disposeAll();
+        kernelTransactions.stop();
+        kernelTransactions.shutdown();
 
         assertEquals(
                 Status.General.DatabaseUnavailable, tx1.getReasonIfTerminated().get());
@@ -401,24 +411,78 @@ class KernelTransactionsTest {
     }
 
     @Test
+    void terminateOldLeaseTransactionsSkipsTransactionsWithNoLease() throws Throwable {
+        KernelTransactions kernelTransactions = newKernelTransactions();
+
+        KernelTransaction tx = getKernelTransaction(kernelTransactions);
+
+        kernelTransactions.terminateOldLeaseTransactions(42);
+        assertTrue(tx.getReasonIfTerminated().isEmpty());
+    }
+
+    @Test
+    void doNotTerminateNonWriteOldLeaseTransaction() throws Throwable {
+        int oldLeaseId = 1;
+        int currentLeaseId = 2;
+        KernelTransactions kernelTransactions = newKernelTransactions(leaseServiceWithFixedId(oldLeaseId));
+
+        KernelTransaction tx = getKernelTransaction(kernelTransactions);
+        ((KernelTransactionImplementation) tx).ensureValid();
+
+        kernelTransactions.terminateOldLeaseTransactions(currentLeaseId);
+
+        assertThat(tx.getReasonIfTerminated()).isEmpty();
+    }
+
+    @Test
+    void terminateOldLeaseTransactionsTerminatesTransactionsWithOldLeaseId() throws Throwable {
+        int oldLeaseId = 1;
+        int currentLeaseId = 2;
+        KernelTransactions kernelTransactions = newKernelTransactions(leaseServiceWithFixedId(oldLeaseId));
+
+        KernelTransaction tx = getKernelTransaction(kernelTransactions);
+        ((KernelTransactionImplementation) tx).ensureValid();
+        // mark tx as write
+        tx.dataWrite();
+
+        kernelTransactions.terminateOldLeaseTransactions(currentLeaseId);
+
+        assertEquals(Status.Transaction.LeaseExpired, tx.getReasonIfTerminated().get());
+    }
+
+    @Test
+    void terminateOldLeaseTransactionsSkipsTransactionsWithCurrentLeaseId() throws Throwable {
+        int leaseId = 1;
+        KernelTransactions kernelTransactions = newKernelTransactions(leaseServiceWithFixedId(leaseId));
+
+        KernelTransaction tx = getKernelTransaction(kernelTransactions);
+        ((KernelTransactionImplementation) tx).ensureValid();
+
+        kernelTransactions.terminateOldLeaseTransactions(leaseId);
+
+        assertTrue(tx.getReasonIfTerminated().isEmpty());
+    }
+
+    @Test
     void transactionClosesUnderlyingStoreReaderWhenDisposed() throws Throwable {
         // Given
-        StorageReader storeStatement1 = mock(StorageReader.class);
-        StorageReader storeStatement2 = mock(StorageReader.class);
-        StorageReader storeStatement3 = mock(StorageReader.class);
+        StorageReader storeStatement1 = mockedStorageReader();
+        StorageReader storeStatement2 = mockedStorageReader();
+        StorageReader storeStatement3 = mockedStorageReader();
         KernelTransactions kernelTransactions = newKernelTransactions(
                 mock(TransactionCommitProcess.class), storeStatement1, storeStatement2, storeStatement3);
         // And three active transactions
         var txOne = kernelTransactions.newInstance(EXPLICIT, AUTH_DISABLED, EMBEDDED_CONNECTION, NO_TIMEOUT);
         var txTwo = kernelTransactions.newInstance(EXPLICIT, AUTH_DISABLED, EMBEDDED_CONNECTION, NO_TIMEOUT);
         var txThree = kernelTransactions.newInstance(EXPLICIT, AUTH_DISABLED, EMBEDDED_CONNECTION, NO_TIMEOUT);
-        assertThat(kernelTransactions.activeTransactions().size()).isEqualTo(3);
+        assertThat(kernelTransactions.activeTransactions()).hasSize(3);
 
         // When
         txOne.close();
         txTwo.close();
         txThree.close();
-        kernelTransactions.disposeAll();
+        kernelTransactions.stop();
+        kernelTransactions.shutdown();
 
         // Then
         verify(storeStatement1).close();
@@ -430,11 +494,9 @@ class KernelTransactionsTest {
     void threadThatBlocksNewTxsCantStartNewTxs() throws Throwable {
         KernelTransactions kernelTransactions = newKernelTransactions();
         kernelTransactions.blockNewTransactions();
-        var e = assertThrows(
-                Exception.class,
-                () -> kernelTransactions.newInstance(
-                        IMPLICIT, AnonymousContext.write(), EMBEDDED_CONNECTION, NO_TIMEOUT));
-        assertThat(e).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> kernelTransactions.newInstance(
+                        IMPLICIT, AnonymousContext.write(), EMBEDDED_CONNECTION, NO_TIMEOUT))
+                .isInstanceOf(IllegalStateException.class);
     }
 
     @Test
@@ -476,16 +538,16 @@ class KernelTransactionsTest {
     }
 
     @Test
-    void shouldNotLeakTransactionOnSecurityContextFreezeFailure() throws Throwable {
+    void shouldNotLeakTransactionOnSecurityContextFailure() throws Throwable {
         KernelTransactions kernelTransactions = newKernelTransactions();
         LoginContext loginContext = mock(LoginContext.class);
-        when(loginContext.authorize(any(), any(), any()))
-                .thenThrow(new AuthorizationExpiredException("Freeze failed."));
+        when(loginContext.authorize(any(), any(), any(), anyLong()))
+                .thenThrow(AuthorizationExpiredException.ldapAuthInfoExpired());
 
         assertThatThrownBy(
                         () -> kernelTransactions.newInstance(EXPLICIT, loginContext, EMBEDDED_CONNECTION, NO_TIMEOUT))
                 .isInstanceOf(AuthorizationExpiredException.class)
-                .hasMessage("Freeze failed.");
+                .hasMessage(LDAP_AUTH_INFO_EXPIRED);
 
         assertThat(kernelTransactions.activeTransactions())
                 .as("We should not have any transaction")
@@ -498,6 +560,32 @@ class KernelTransactionsTest {
 
         databaseAvailabilityGuard.shutdown();
 
+        assertThrows(
+                DatabaseShutdownException.class,
+                () -> kernelTransactions.newInstance(EXPLICIT, AUTH_DISABLED, EMBEDDED_CONNECTION, NO_TIMEOUT));
+    }
+
+    @Test
+    void shouldNotLeakTransactionCreatedDuringShutdown() throws Throwable {
+        LockManager.Client client = mock(LockManager.Client.class);
+        when(locks.newClient()).thenAnswer(inv -> {
+            // This is called during tx.initialize, after the tx has been acquired for the pool
+            databaseAvailabilityGuard.shutdown();
+            return client;
+        });
+
+        KernelTransactions kernelTransactions = newKernelTransactions();
+
+        assertThrows(
+                DatabaseShutdownException.class,
+                () -> kernelTransactions.newInstance(EXPLICIT, AUTH_DISABLED, EMBEDDED_CONNECTION, NO_TIMEOUT));
+        assertThat(kernelTransactions.haveActiveTransaction()).isFalse();
+    }
+
+    @Test
+    void exceptionWhenStartingNewTransactionOnUnavailableInstance() throws Throwable {
+        KernelTransactions kernelTransactions = newKernelTransactions();
+        databaseAvailabilityGuard.require(new AvailabilityRequirement("unavailable instance"));
         assertThrows(
                 DatabaseShutdownException.class,
                 () -> kernelTransactions.newInstance(EXPLICIT, AUTH_DISABLED, EMBEDDED_CONNECTION, NO_TIMEOUT));
@@ -518,7 +606,7 @@ class KernelTransactionsTest {
     }
 
     @Test
-    void startNewTransactionOnRestartedKErnelTransactions() throws Throwable {
+    void startNewTransactionOnRestartedKernelTransactions() throws Throwable {
         KernelTransactions kernelTransactions = newKernelTransactions();
 
         kernelTransactions.stop();
@@ -557,9 +645,13 @@ class KernelTransactionsTest {
         KernelTransaction ignore = kernelTransactions.newInstance(EXPLICIT, access(), EMBEDDED_CONNECTION, NO_TIMEOUT);
         KernelTransaction ignore2 = kernelTransactions.newInstance(EXPLICIT, access(), EMBEDDED_CONNECTION, NO_TIMEOUT);
 
-        assertThrows(
+        var exception = catchThrowableOfType(
                 MaximumTransactionLimitExceededException.class,
                 () -> kernelTransactions.newInstance(EXPLICIT, access(), EMBEDDED_CONNECTION, NO_TIMEOUT));
+        assertThat(exception.gqlStatus()).isEqualTo("51N74");
+        assertThat(exception.statusDescription())
+                .isEqualTo(
+                        "error: system configuration or operation exception - maximum number of transactions reached. Failed to start a new transaction. The limit of concurrent transactions is reached. Increase the number of concurrent transactions using db.transaction.concurrent.maximum in the neo4j.conf file.");
     }
 
     @Test
@@ -633,36 +725,6 @@ class KernelTransactionsTest {
     }
 
     @Test
-    void shouldRegisterTransactionMemoryPoolOnInit() throws Exception {
-        // given
-        GlobalMemoryGroupTracker memoryPools = new MemoryPools().pool(MemoryGroup.TRANSACTION, 0, null);
-        KernelTransactions transactions = createTransactions(
-                mock(StorageEngine.class, RETURNS_MOCKS),
-                mock(TransactionCommitProcess.class),
-                mock(TransactionIdStore.class),
-                mock(KernelVersionProvider.class),
-                DatabaseTracers.EMPTY,
-                mock(LockManager.class),
-                Clocks.nanoClock(),
-                mock(AvailabilityGuard.class),
-                Config.defaults(),
-                memoryPools);
-        assertThat(memoryPools.getDatabasePools()).isEmpty();
-
-        // when
-        transactions.init();
-
-        // then
-        assertThat(memoryPools.getDatabasePools().size()).isEqualTo(1);
-
-        // and when
-        transactions.shutdown();
-
-        // then
-        assertThat(memoryPools.getDatabasePools().size()).isEqualTo(0);
-    }
-
-    @Test
     void shouldReturnLongMaxAsOldestTxWhenEmpty() throws Throwable {
         KernelTransactions ktxs = newKernelTransactions();
         assertThat(ktxs.getNumberOfActiveTransactions()).isEqualTo(0);
@@ -672,8 +734,45 @@ class KernelTransactionsTest {
             assertThat(ktxs.startTimeOfOldestExecutingTransaction()).isNotEqualTo(Long.MAX_VALUE);
 
             ktx.dataWrite().nodeCreate(); // Make it a write TX
-            ktx.commit(KernelTransaction.KernelTransactionMonitor.withBeforeApply(() ->
+            ktx.commit(KernelTransaction.Monitor.withBeforeApply(() ->
                     assertThat(ktxs.startTimeOfOldestExecutingTransaction()).isNotEqualTo(Long.MAX_VALUE)));
+        }
+    }
+
+    @Test
+    void earliestTransactionSequenceNumberOnEmptyTransactions() throws Throwable {
+        KernelTransactions kernelTransactions = newKernelTransactions();
+        assertThat(kernelTransactions.getNumberOfActiveTransactions()).isEqualTo(0);
+        assertThat(kernelTransactions.earliestTransactionSequenceNumber()).isEqualTo(Long.MAX_VALUE);
+    }
+
+    @Test
+    void earliestTransactionSequenceNumberOfRunningTransactions() throws Throwable {
+        KernelTransactions kernelTransactions = newKernelTransactions();
+        assertThat(kernelTransactions.getNumberOfActiveTransactions()).isEqualTo(0);
+        try (KernelTransaction earliestTransaction =
+                        kernelTransactions.newInstance(EXPLICIT, full(), EMBEDDED_CONNECTION, NO_TIMEOUT);
+                KernelTransaction laterTransaction =
+                        kernelTransactions.newInstance(EXPLICIT, full(), EMBEDDED_CONNECTION, NO_TIMEOUT)) {
+
+            assertThat(kernelTransactions.earliestTransactionSequenceNumber())
+                    .isEqualTo(earliestTransaction.getTransactionSequenceNumber())
+                    .isGreaterThan(TRANSACTION_SEQUENCE_INITIAL_VALUE);
+
+            earliestTransaction.close();
+            assertThat(kernelTransactions.earliestTransactionSequenceNumber())
+                    .isEqualTo(laterTransaction.getTransactionSequenceNumber())
+                    .isGreaterThan(TRANSACTION_SEQUENCE_INITIAL_VALUE);
+        }
+    }
+
+    @Test
+    void shouldSynchronizeTransactionStartTimeWithAuthorizationEvaluationTime() throws Throwable {
+        KernelTransactions kernelTransactions = newKernelTransactions();
+        LoginContext loginContext = mock(LoginContext.class);
+        try (KernelTransaction tx =
+                kernelTransactions.newInstance(EXPLICIT, loginContext, EMBEDDED_CONNECTION, NO_TIMEOUT)) {
+            verify(loginContext).authorize(any(), any(), any(), eq(tx.startTime()));
         }
     }
 
@@ -689,28 +788,39 @@ class KernelTransactionsTest {
         return newKernelTransactions(mock(TransactionCommitProcess.class));
     }
 
+    private KernelTransactions newKernelTransactions(LeaseService leaseService) throws Throwable {
+        return newKernelTransactions(
+                true, mock(TransactionCommitProcess.class), mockedStorageReader(), Config.defaults(), leaseService);
+    }
+
     private KernelTransactions newKernelTransactions(Config config) throws Throwable {
         return newKernelTransactions(mock(TransactionCommitProcess.class), config);
     }
 
     private KernelTransactions newTestKernelTransactions() throws Throwable {
         return newKernelTransactions(
-                true, mock(TransactionCommitProcess.class), mock(StorageReader.class), Config.defaults());
+                true,
+                mock(TransactionCommitProcess.class),
+                mockedStorageReader(),
+                Config.defaults(),
+                LeaseService.NO_LEASES);
     }
 
     private KernelTransactions newKernelTransactions(TransactionCommitProcess commitProcess, Config config)
             throws Throwable {
-        return newKernelTransactions(false, commitProcess, mock(StorageReader.class), config);
+        return newKernelTransactions(false, commitProcess, mockedStorageReader(), config, LeaseService.NO_LEASES);
     }
 
     private KernelTransactions newKernelTransactions(TransactionCommitProcess commitProcess) throws Throwable {
-        return newKernelTransactions(false, commitProcess, mock(StorageReader.class), Config.defaults());
+        return newKernelTransactions(
+                false, commitProcess, mockedStorageReader(), Config.defaults(), LeaseService.NO_LEASES);
     }
 
     private KernelTransactions newKernelTransactions(
             TransactionCommitProcess commitProcess, StorageReader firstReader, StorageReader... otherReaders)
             throws Throwable {
-        return newKernelTransactions(false, commitProcess, firstReader, Config.defaults(), otherReaders);
+        return newKernelTransactions(
+                false, commitProcess, firstReader, Config.defaults(), LeaseService.NO_LEASES, otherReaders);
     }
 
     private KernelTransactions newKernelTransactions(
@@ -718,6 +828,7 @@ class KernelTransactionsTest {
             TransactionCommitProcess commitProcess,
             StorageReader firstReader,
             Config config,
+            LeaseService leaseService,
             StorageReader... otherReaders)
             throws Throwable {
         LockManager.Client client = mock(LockManager.Client.class);
@@ -725,7 +836,8 @@ class KernelTransactionsTest {
 
         StorageEngine storageEngine = mock(StorageEngine.class, RETURNS_MOCKS);
         when(storageEngine.newReader()).thenReturn(firstReader, otherReaders);
-        when(storageEngine.newCommandCreationContext(anyBoolean())).thenReturn(mock(CommandCreationContext.class));
+        when(storageEngine.newCommandCreationContext(anyBoolean(), any()))
+                .thenReturn(mock(CommandCreationContext.class));
         when(storageEngine.createStorageCursors(any())).thenReturn(StoreCursors.NULL);
         when(storageEngine.createCommands(
                         any(ReadableTransactionState.class),
@@ -738,13 +850,14 @@ class KernelTransactionsTest {
                         any(MemoryTracker.class)))
                 .thenReturn(List.of(mock(StorageCommand.class)));
 
-        return newKernelTransactions(locks, storageEngine, commitProcess, testKernelTransactions, config);
+        return newKernelTransactions(locks, storageEngine, commitProcess, leaseService, testKernelTransactions, config);
     }
 
     private KernelTransactions newKernelTransactions(
             LockManager locks,
             StorageEngine storageEngine,
             TransactionCommitProcess commitProcess,
+            LeaseService leaseService,
             boolean testKernelTransactions,
             Config config) {
         LifeSupport life = new LifeSupport();
@@ -760,6 +873,8 @@ class KernelTransactionsTest {
                 "null", NullLog.getInstance(), new Monitors(), mock(JobScheduler.class), clock, config);
         final DatabaseTracers databaseTracers = new DatabaseTracers(tracers, DEFAULT_DATABASE_ID);
 
+        config.setIfNotSet(shutdown_terminated_transaction_wait_timeout, Duration.ZERO);
+
         KernelTransactions transactions;
         if (testKernelTransactions) {
             transactions = createTestTransactions(
@@ -770,6 +885,7 @@ class KernelTransactionsTest {
                     databaseTracers,
                     locks,
                     clock,
+                    leaseService,
                     databaseAvailabilityGuard);
         } else {
             transactions = createTransactions(
@@ -782,7 +898,8 @@ class KernelTransactionsTest {
                     clock,
                     databaseAvailabilityGuard,
                     config,
-                    new MemoryPools().pool(MemoryGroup.TRANSACTION, 0, null));
+                    leaseService,
+                    new MemoryPools().pool(MemoryGroup.TRANSACTION, 0, null).newDatabasePool("test", 0, null));
         }
         life.add(transactions);
         return transactions;
@@ -798,7 +915,8 @@ class KernelTransactionsTest {
             SystemNanoClock clock,
             AvailabilityGuard databaseAvailabilityGuard,
             Config config,
-            GlobalMemoryGroupTracker memoryGroupTracker) {
+            LeaseService leaseService,
+            ScopedMemoryPool transactionMemoryPool) {
         return new KernelTransactions(
                 config,
                 locks,
@@ -818,7 +936,6 @@ class KernelTransactionsTest {
                 new AtomicReference<>(CpuClock.NOT_AVAILABLE),
                 any -> CanWrite.INSTANCE,
                 NULL_CONTEXT_FACTORY,
-                ON_HEAP,
                 mock(ConstraintSemantics.class),
                 mock(SchemaState.class),
                 mockedTokenHolders(),
@@ -828,8 +945,8 @@ class KernelTransactionsTest {
                 mock(IndexStatisticsStore.class),
                 createDependencies(),
                 tracers,
-                LeaseService.NO_LEASES,
-                memoryGroupTracker,
+                leaseService,
+                transactionMemoryPool,
                 writable(),
                 TransactionExecutionMonitor.NO_OP,
                 snapshot -> true,
@@ -838,8 +955,11 @@ class KernelTransactionsTest {
                 TransactionIdGenerator.EMPTY,
                 mock(DatabaseHealth.class),
                 EMPTY_VALIDATOR_FACTORY,
+                mock(ExceptionHandlerService.class),
                 NullLogProvider.getInstance(),
-                TopologyGraphDbmsModel.HostedOnMode.SINGLE);
+                TopologyGraphDbmsModel.HostedOnMode.SINGLE,
+                new DatabaseMonitors(new Monitors(), DatabaseLogProvider.nullDatabaseLogProvider()),
+                RaftUpgradeBarrier.NO_OP);
     }
 
     private static TestKernelTransactions createTestTransactions(
@@ -850,6 +970,7 @@ class KernelTransactionsTest {
             DatabaseTracers tracers,
             LockManager locks,
             SystemNanoClock clock,
+            LeaseService leaseService,
             AvailabilityGuard databaseAvailabilityGuard) {
         Dependencies dependencies = createDependencies();
         return new TestKernelTransactions(
@@ -868,6 +989,7 @@ class KernelTransactionsTest {
                 any -> CanWrite.INSTANCE,
                 new CursorContextFactory(new DefaultPageCacheTracer(), EMPTY_CONTEXT_SUPPLIER),
                 mockedTokenHolders(),
+                leaseService,
                 dependencies);
     }
 
@@ -884,6 +1006,7 @@ class KernelTransactionsTest {
                 enrichmentStrategy,
                 mock(GraphDatabaseFacade.class),
                 CommunitySecurityLog.NULL_LOG,
+                mock(URIAccessRules.class),
                 databaseReferenceRepository);
     }
 
@@ -897,6 +1020,22 @@ class KernelTransactionsTest {
 
     private static KernelTransactionHandle newHandle(KernelTransaction tx) {
         return new TestKernelTransactionHandle(tx);
+    }
+
+    private static LeaseService leaseServiceWithFixedId(int fixedLeaseId) {
+        return () -> new LeaseClient() {
+            private int id = LeaseService.NO_LEASE;
+
+            @Override
+            public int leaseId() {
+                return id;
+            }
+
+            @Override
+            public void ensureValid() throws LeaseException {
+                id = fixedLeaseId;
+            }
+        };
     }
 
     private static KernelTransaction getKernelTransaction(KernelTransactions transactions) {
@@ -924,9 +1063,10 @@ class KernelTransactionsTest {
                 AccessCapabilityFactory accessCapabilityFactory,
                 CursorContextFactory contextFactory,
                 TokenHolders tokenHolders,
+                LeaseService leaseService,
                 Dependencies databaseDependencies) {
             super(
-                    Config.defaults(),
+                    Config.defaults(shutdown_terminated_transaction_wait_timeout, Duration.ZERO),
                     locks,
                     constraintIndexCreator,
                     transactionCommitProcess,
@@ -944,7 +1084,6 @@ class KernelTransactionsTest {
                     new AtomicReference<>(CpuClock.NOT_AVAILABLE),
                     accessCapabilityFactory,
                     contextFactory,
-                    ON_HEAP,
                     new StandardConstraintSemantics(),
                     mock(SchemaState.class),
                     tokenHolders,
@@ -954,8 +1093,8 @@ class KernelTransactionsTest {
                     mock(IndexStatisticsStore.class),
                     databaseDependencies,
                     tracers,
-                    LeaseService.NO_LEASES,
-                    new MemoryPools().pool(MemoryGroup.TRANSACTION, 0, null),
+                    leaseService,
+                    new MemoryPools().pool(MemoryGroup.TRANSACTION, 0, null).newDatabasePool("test", 0, null),
                     writable(),
                     TransactionExecutionMonitor.NO_OP,
                     snapshot -> true,
@@ -964,8 +1103,11 @@ class KernelTransactionsTest {
                     TransactionIdGenerator.EMPTY,
                     mock(DatabaseHealth.class),
                     EMPTY_VALIDATOR_FACTORY,
+                    mock(ExceptionHandlerService.class),
                     NullLogProvider.getInstance(),
-                    TopologyGraphDbmsModel.HostedOnMode.SINGLE);
+                    TopologyGraphDbmsModel.HostedOnMode.SINGLE,
+                    new DatabaseMonitors(new Monitors(), DatabaseLogProvider.nullDatabaseLogProvider()),
+                    RaftUpgradeBarrier.NO_OP);
         }
 
         @Override

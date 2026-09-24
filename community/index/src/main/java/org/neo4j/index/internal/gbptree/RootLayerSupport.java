@@ -21,7 +21,6 @@ package org.neo4j.index.internal.gbptree;
 
 import static org.neo4j.index.internal.gbptree.Generation.stableGeneration;
 import static org.neo4j.index.internal.gbptree.Generation.unstableGeneration;
-import static org.neo4j.index.internal.gbptree.LatchCrabbingCoordination.DEFAULT_RESET_FREQUENCY;
 import static org.neo4j.index.internal.gbptree.PointerChecking.checkOutOfBounds;
 import static org.neo4j.index.internal.gbptree.SeekCursor.DEFAULT_MAX_READ_AHEAD;
 import static org.neo4j.index.internal.gbptree.SeekCursor.LEAF_LEVEL;
@@ -50,7 +49,7 @@ class RootLayerSupport {
     private final LongSupplier generationSupplier;
     private final Consumer<Throwable> exceptionDecorator;
     private final TreeNodeLatchService latchService;
-    private final FreeListIdProvider freeList;
+    private final FreelistIdProvider freeList;
     private final MultiRootGBPTree.Monitor monitor;
     private final ThrowingAction<IOException> cleanCheck;
     private final ReadWriteLock checkpointLock;
@@ -67,7 +66,7 @@ class RootLayerSupport {
             LongSupplier generationSupplier,
             Consumer<Throwable> exceptionDecorator,
             TreeNodeLatchService latchService,
-            FreeListIdProvider freeList,
+            FreelistIdProvider freeList,
             MultiRootGBPTree.Monitor monitor,
             ThrowingAction<IOException> cleanCheck,
             ReadWriteLock checkpointLock,
@@ -202,12 +201,15 @@ class RootLayerSupport {
                     DEFAULT_MAX_READ_AHEAD,
                     searchLevel,
                     depthMonitor)) {
-                if (depthMonitor.reachedLeafLevel) {
-                    // Don't partition any further if we've reached leaf level.
-                    break;
-                }
                 while (seek.next()) {
-                    splitterKeysInRange.add(layout.copyKey(seek.key(), layout.newKey()));
+                    if (depthMonitor.reachedLeafLevel) {
+                        // Don't partition any further if we've reached leaf level.
+                        break;
+                    }
+                    splitterKeysInRange.add(layout.copyKey(seek.key()));
+                }
+                if (depthMonitor.reachedLeafLevel) {
+                    break;
                 }
             }
             searchLevel++;
@@ -215,24 +217,47 @@ class RootLayerSupport {
         } while (numberOfSubtrees < desiredNumberOfPartitions);
 
         // From the set of splitter keys, create sorted list of partition edges
-        return new KeyPartitioning<>(layout)
-                .partition(splitterKeysInRange, fromInclusive, toExclusive, desiredNumberOfPartitions);
+        return KeyPartitioning.partition(
+                layout, splitterKeysInRange, fromInclusive, toExclusive, desiredNumberOfPartitions);
     }
 
-    <K, V> Writer<K, V> internalParallelWriter(
+    <K, V> Writer<K, V> newInitializedWriter(
             Layout<K, V> layout,
+            TreeRootExchange rootChangeMonitor,
             LeafNodeBehaviour<K, V> leafNode,
             InternalNodeBehaviour<K> internalNode,
-            double ratioToKeepInLeftOnSplit,
             CursorContext cursorContext,
-            TreeRootExchange rootChangeMonitor,
+            int flags,
             byte layerType)
             throws IOException {
-        TreeWriterCoordination traversalMonitor =
-                new LatchCrabbingCoordination(latchService, leafNode.underflowThreshold(), DEFAULT_RESET_FREQUENCY);
-        GBPTreeWriter<K, V> writer =
-                newWriter(layout, rootChangeMonitor, leafNode, internalNode, traversalMonitor, true, layerType);
-        return initializeWriter(writer, ratioToKeepInLeftOnSplit, cursorContext);
+        boolean singleThreaded = (flags & DataTree.W_BATCHED_SINGLE_THREADED) != 0;
+        boolean escalating = (flags & DataTree.W_ESCALATING_COORDINATION) != 0;
+        var traversalMonitor = selectCoordination(leafNode, internalNode, singleThreaded, escalating);
+        var writer = newWriter(
+                layout,
+                rootChangeMonitor,
+                leafNode,
+                internalNode,
+                traversalMonitor,
+                !singleThreaded || escalating,
+                layerType);
+        return initializeWriter(writer, flags, cursorContext);
+    }
+
+    private <K, V> TreeWriterCoordination selectCoordination(
+            LeafNodeBehaviour<K, V> leafNode,
+            InternalNodeBehaviour<K> internalNode,
+            boolean singleThreaded,
+            boolean escalating) {
+        if (singleThreaded) {
+            return TreeWriterCoordination.NO_COORDINATION;
+        }
+        if (escalating) {
+            return new EscalatingLatchCrabbingCoordination(
+                    latchService, internalNode::maxEntrySizeBound, leafNode.underflowThreshold(), monitor);
+        }
+        return new LatchCrabbingCoordination(
+                latchService, leafNode.underflowThreshold(), LatchCrabbingCoordination.DEFAULT_RESET_FREQUENCY);
     }
 
     <K, V> GBPTreeWriter<K, V> newWriter(
@@ -262,14 +287,13 @@ class RootLayerSupport {
                 structureWriteLog.newSession());
     }
 
-    <K, V> GBPTreeWriter<K, V> initializeWriter(
-            GBPTreeWriter<K, V> writer, double ratioToKeepInLeftOnSplit, CursorContext cursorContext)
+    <K, V> GBPTreeWriter<K, V> initializeWriter(GBPTreeWriter<K, V> writer, int flags, CursorContext cursorContext)
             throws IOException {
         if (readOnly) {
             throw new IllegalStateException(String.format("'%s' is read-only", pagedFile.path()));
         }
         cleanCheck.apply();
-        writer.initialize(ratioToKeepInLeftOnSplit, cursorContext);
+        writer.initialize(RootLayer.splitRatio(flags), cursorContext);
         changesSinceLastCheckpoint.set(true);
         return writer;
     }
@@ -350,7 +374,7 @@ class RootLayerSupport {
         }
     }
 
-    IdProvider idProvider() {
+    FreelistIdProvider idProvider() {
         return freeList;
     }
 
@@ -420,6 +444,7 @@ class RootLayerSupport {
 
                 @Override
                 public Seeker<K, V> seek(Seeker<K, V> seeker, K fromInclusive, K toExclusive) throws IOException {
+                    layout.assertValidSeekKeys(fromInclusive, toExclusive);
                     return initializeSeeker(seeker, rootSupplier, fromInclusive, toExclusive, 1, LEAF_LEVEL, monitor);
                 }
 
@@ -458,5 +483,9 @@ class RootLayerSupport {
 
     StructureWriteLog structureWriteLog() {
         return structureWriteLog;
+    }
+
+    MultiRootGBPTree.Monitor monitor() {
+        return monitor;
     }
 }

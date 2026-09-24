@@ -29,6 +29,7 @@ import static org.neo4j.io.pagecache.PagedFile.PF_SHARED_READ_LOCK;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.List;
+import java.util.OptionalLong;
 import org.neo4j.common.DependencyResolver;
 import org.neo4j.io.pagecache.PageCursor;
 import org.neo4j.io.pagecache.context.CursorContext;
@@ -180,6 +181,26 @@ class SingleRootLayer<KEY, VALUE> extends RootLayer<SingleRoot, KEY, VALUE> {
         }
     }
 
+    @Override
+    void visitDataTreeRoots(
+            CursorContext cursorContext,
+            TreeRootsVisitor<SingleRoot> visitor,
+            SingleRoot fromInclusiveKey,
+            SingleRoot toExclusiveKey) {
+        visitor.accept(SingleRoot.SINGLE_ROOT);
+    }
+
+    @Override
+    public void clearCache() {
+        // Not needed in SingleRootLayer, but must be used in testing for MultiRootLayer
+    }
+
+    @Override
+    GBPTreeWriter writer(byte layerType) {
+        return support.newWriter(
+                layout, this, leafNode, internalNode, TreeWriterCoordination.NO_COORDINATION, false, layerType);
+    }
+
     private class SingleDataTree implements DataTree<KEY, VALUE> {
         private final GBPTreeWriter<KEY, VALUE> batchedWriter;
 
@@ -202,6 +223,7 @@ class SingleRootLayer<KEY, VALUE> extends RootLayer<SingleRoot, KEY, VALUE> {
         @Override
         public Seeker<KEY, VALUE> seek(Seeker<KEY, VALUE> seeker, KEY fromInclusive, KEY toExclusive)
                 throws IOException {
+            layout.assertValidSeekKeys(fromInclusive, toExclusive);
             return support.initializeSeeker(
                     seeker,
                     SingleRootLayer.this,
@@ -229,18 +251,11 @@ class SingleRootLayer<KEY, VALUE> extends RootLayer<SingleRoot, KEY, VALUE> {
 
         @Override
         public Writer<KEY, VALUE> writer(int flags, CursorContext cursorContext) throws IOException {
-            double splitRatio = splitRatio(flags);
             if ((flags & DataTree.W_BATCHED_SINGLE_THREADED) != 0) {
-                return support.initializeWriter(batchedWriter, splitRatio, cursorContext);
+                return support.initializeWriter(batchedWriter, flags, cursorContext);
             } else {
-                return support.internalParallelWriter(
-                        layout,
-                        leafNode,
-                        internalNode,
-                        splitRatio,
-                        cursorContext,
-                        SingleRootLayer.this,
-                        DATA_LAYER_FLAG);
+                return support.newInitializedWriter(
+                        layout, SingleRootLayer.this, leafNode, internalNode, cursorContext, flags, DATA_LAYER_FLAG);
             }
         }
 
@@ -253,6 +268,11 @@ class SingleRootLayer<KEY, VALUE> extends RootLayer<SingleRoot, KEY, VALUE> {
         @Override
         public boolean exists(CursorContext cursorContext) {
             return true;
+        }
+
+        @Override
+        public OptionalLong rootTreeNodeId(CursorContext cursorContext) {
+            return OptionalLong.of(getRoot(cursorContext).id());
         }
     }
 }

@@ -21,6 +21,7 @@ package org.neo4j.kernel.impl.index.schema;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
 import static org.neo4j.graphdb.schema.IndexSettingUtil.spatialMaxSettingForCrs;
 import static org.neo4j.graphdb.schema.IndexSettingUtil.spatialMinSettingForCrs;
@@ -39,6 +40,7 @@ import org.neo4j.internal.schema.SchemaDescriptors;
 import org.neo4j.internal.schema.StorageEngineIndexingBehaviour;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.kernel.api.index.IndexDirectoryStructure;
+import org.neo4j.logging.NullLogProvider;
 import org.neo4j.values.storable.CoordinateReferenceSystem;
 import org.neo4j.values.storable.DoubleArray;
 import org.neo4j.values.storable.Value;
@@ -51,8 +53,8 @@ class PointIndexProviderConfigTest {
         DatabaseIndexContext context = DatabaseIndexContext.builder(
                         null, null, NULL_CONTEXT_FACTORY, PageCacheTracer.NULL, DEFAULT_DATABASE_NAME)
                 .build();
-        PointIndexProvider provider =
-                new PointIndexProvider(context, IndexDirectoryStructure.NONE, null, Config.defaults());
+        PointIndexProvider provider = new PointIndexProvider(
+                context, IndexDirectoryStructure.NONE, null, Config.defaults(), NullLogProvider.getInstance());
         LabelSchemaDescriptor incompleteSchema = SchemaDescriptors.forLabel(1, 1);
         IndexDescriptor incompleteDescriptor = IndexPrototype.forSchema(
                         incompleteSchema, AllIndexProviderDescriptors.UNDECIDED)
@@ -66,8 +68,7 @@ class PointIndexProviderConfigTest {
         // Then
         IndexConfig sinfulIndexConfig = incompleteDescriptor.getIndexConfig();
         IndexConfig completedIndexConfig = completedDescriptor.getIndexConfig();
-        assertEquals(
-                0, sinfulIndexConfig.entries().count(p -> true), "expected sinful index config to have no entries");
+        assertTrue(sinfulIndexConfig.entries().isEmpty(), "expected sinful index config to have no entries");
         for (CoordinateReferenceSystem crs : CoordinateReferenceSystem.all()) {
             assertNotNull(completedIndexConfig.get(spatialMinSettingForCrs(crs).getSettingName()));
             assertNotNull(completedIndexConfig.get(spatialMaxSettingForCrs(crs).getSettingName()));
@@ -80,8 +81,8 @@ class PointIndexProviderConfigTest {
         DatabaseIndexContext context = DatabaseIndexContext.builder(
                         null, null, NULL_CONTEXT_FACTORY, PageCacheTracer.NULL, DEFAULT_DATABASE_NAME)
                 .build();
-        PointIndexProvider provider =
-                new PointIndexProvider(context, IndexDirectoryStructure.NONE, null, Config.defaults());
+        PointIndexProvider provider = new PointIndexProvider(
+                context, IndexDirectoryStructure.NONE, null, Config.defaults(), NullLogProvider.getInstance());
         Map<String, Value> existingSettings = new HashMap<>();
         CoordinateReferenceSystem existingCrs = CoordinateReferenceSystem.CARTESIAN;
         DoubleArray min = Values.doubleArray(new double[] {0, 0});

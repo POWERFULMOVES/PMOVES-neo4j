@@ -21,7 +21,6 @@ package org.neo4j.cypher.internal.physicalplanning
 
 import org.neo4j.cypher.internal
 import org.neo4j.cypher.internal.ast.ProcedureResultItem
-import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour.OnErrorFail
 import org.neo4j.cypher.internal.ast.semantics.CachableSemanticTable
 import org.neo4j.cypher.internal.expressions.CachedHasProperty
 import org.neo4j.cypher.internal.expressions.CachedProperty
@@ -33,7 +32,7 @@ import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.Null
 import org.neo4j.cypher.internal.expressions.PathExpression
 import org.neo4j.cypher.internal.expressions.UnPositionedVariable.varFor
-import org.neo4j.cypher.internal.frontend.phases.ResolvedCall
+import org.neo4j.cypher.internal.frontend.phases.ResolvedNonLocalCall
 import org.neo4j.cypher.internal.ir.CreatePattern
 import org.neo4j.cypher.internal.ir.HasHeaders
 import org.neo4j.cypher.internal.ir.NoHeaders
@@ -46,6 +45,7 @@ import org.neo4j.cypher.internal.logical.plans.Apply
 import org.neo4j.cypher.internal.logical.plans.ApplyPlan
 import org.neo4j.cypher.internal.logical.plans.Argument
 import org.neo4j.cypher.internal.logical.plans.ArgumentTracker
+import org.neo4j.cypher.internal.logical.plans.AssertCachedProperties
 import org.neo4j.cypher.internal.logical.plans.AssertSameNode
 import org.neo4j.cypher.internal.logical.plans.AssertSameRelationship
 import org.neo4j.cypher.internal.logical.plans.AssertingMultiNodeIndexSeek
@@ -63,6 +63,8 @@ import org.neo4j.cypher.internal.logical.plans.DeleteRelationship
 import org.neo4j.cypher.internal.logical.plans.DetachDeleteExpression
 import org.neo4j.cypher.internal.logical.plans.DetachDeleteNode
 import org.neo4j.cypher.internal.logical.plans.DetachDeletePath
+import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipFulltextIndexSearch
+import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipVectorIndexSearch
 import org.neo4j.cypher.internal.logical.plans.Eager
 import org.neo4j.cypher.internal.logical.plans.EmptyResult
 import org.neo4j.cypher.internal.logical.plans.ErrorPlan
@@ -73,6 +75,8 @@ import org.neo4j.cypher.internal.logical.plans.Expand.ExpandInto
 import org.neo4j.cypher.internal.logical.plans.FindShortestPaths
 import org.neo4j.cypher.internal.logical.plans.Foreach
 import org.neo4j.cypher.internal.logical.plans.ForeachApply
+import org.neo4j.cypher.internal.logical.plans.ForeignLeafPlan
+import org.neo4j.cypher.internal.logical.plans.FusedMerge
 import org.neo4j.cypher.internal.logical.plans.InjectCompilationError
 import org.neo4j.cypher.internal.logical.plans.Input
 import org.neo4j.cypher.internal.logical.plans.LeftOuterHashJoin
@@ -82,15 +86,19 @@ import org.neo4j.cypher.internal.logical.plans.LetSelectOrSemiApply
 import org.neo4j.cypher.internal.logical.plans.LetSemiApply
 import org.neo4j.cypher.internal.logical.plans.Limit
 import org.neo4j.cypher.internal.logical.plans.LoadCSV
+import org.neo4j.cypher.internal.logical.plans.LockNodes
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 import org.neo4j.cypher.internal.logical.plans.Merge
+import org.neo4j.cypher.internal.logical.plans.MergeInto
 import org.neo4j.cypher.internal.logical.plans.MultiNodeIndexSeek
 import org.neo4j.cypher.internal.logical.plans.NestedPlanCollectExpression
 import org.neo4j.cypher.internal.logical.plans.NestedPlanExpression
 import org.neo4j.cypher.internal.logical.plans.NodeCountFromCountStore
+import org.neo4j.cypher.internal.logical.plans.NodeFulltextIndexSearch
 import org.neo4j.cypher.internal.logical.plans.NodeHashJoin
 import org.neo4j.cypher.internal.logical.plans.NodeIndexLeafPlan
 import org.neo4j.cypher.internal.logical.plans.NodeLogicalLeafPlan
+import org.neo4j.cypher.internal.logical.plans.NodeVectorIndexSearch
 import org.neo4j.cypher.internal.logical.plans.NonFuseable
 import org.neo4j.cypher.internal.logical.plans.NonPipelined
 import org.neo4j.cypher.internal.logical.plans.NonPipelinedStreaming
@@ -102,6 +110,7 @@ import org.neo4j.cypher.internal.logical.plans.OrderedUnion
 import org.neo4j.cypher.internal.logical.plans.PartialSort
 import org.neo4j.cypher.internal.logical.plans.PartialTop
 import org.neo4j.cypher.internal.logical.plans.PartitionedUnwindCollection
+import org.neo4j.cypher.internal.logical.plans.PipelineBreaker
 import org.neo4j.cypher.internal.logical.plans.PreserveOrder
 import org.neo4j.cypher.internal.logical.plans.Prober
 import org.neo4j.cypher.internal.logical.plans.ProcedureCall
@@ -113,8 +122,10 @@ import org.neo4j.cypher.internal.logical.plans.RelationshipCountFromCountStore
 import org.neo4j.cypher.internal.logical.plans.RelationshipIndexLeafPlan
 import org.neo4j.cypher.internal.logical.plans.RelationshipLogicalLeafPlan
 import org.neo4j.cypher.internal.logical.plans.RemoteBatchProperties
+import org.neo4j.cypher.internal.logical.plans.RemoteBatchPropertiesWithFilter
 import org.neo4j.cypher.internal.logical.plans.RemoveLabels
 import org.neo4j.cypher.internal.logical.plans.Repeat
+import org.neo4j.cypher.internal.logical.plans.RepeatAcyclic
 import org.neo4j.cypher.internal.logical.plans.RepeatTrail
 import org.neo4j.cypher.internal.logical.plans.RepeatWalk
 import org.neo4j.cypher.internal.logical.plans.RightOuterHashJoin
@@ -142,13 +153,18 @@ import org.neo4j.cypher.internal.logical.plans.Top
 import org.neo4j.cypher.internal.logical.plans.Top1WithTies
 import org.neo4j.cypher.internal.logical.plans.TransactionApply
 import org.neo4j.cypher.internal.logical.plans.TransactionForeach
+import org.neo4j.cypher.internal.logical.plans.TransactionalPlan.RecoveryMode
 import org.neo4j.cypher.internal.logical.plans.TriadicBuild
 import org.neo4j.cypher.internal.logical.plans.TriadicFilter
 import org.neo4j.cypher.internal.logical.plans.TriadicSelection
+import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipFulltextIndexSearch
+import org.neo4j.cypher.internal.logical.plans.UndirectedRelationshipVectorIndexSearch
 import org.neo4j.cypher.internal.logical.plans.Union
 import org.neo4j.cypher.internal.logical.plans.UnwindCollection
 import org.neo4j.cypher.internal.logical.plans.ValueHashJoin
+import org.neo4j.cypher.internal.logical.plans.ValueMergeJoin
 import org.neo4j.cypher.internal.logical.plans.VarExpand
+import org.neo4j.cypher.internal.physicalplanning.PhysicalPlanningAttributes.AcyclicPlans
 import org.neo4j.cypher.internal.physicalplanning.PhysicalPlanningAttributes.ApplyPlans
 import org.neo4j.cypher.internal.physicalplanning.PhysicalPlanningAttributes.ArgumentSizes
 import org.neo4j.cypher.internal.physicalplanning.PhysicalPlanningAttributes.LiveVariables
@@ -158,6 +174,7 @@ import org.neo4j.cypher.internal.physicalplanning.PhysicalPlanningAttributes.Tra
 import org.neo4j.cypher.internal.physicalplanning.PipelineBreakingPolicy.DiscardFromLhs
 import org.neo4j.cypher.internal.physicalplanning.PipelineBreakingPolicy.DiscardFromRhs
 import org.neo4j.cypher.internal.physicalplanning.PipelineBreakingPolicy.DoNotDiscard
+import org.neo4j.cypher.internal.physicalplanning.SlotAllocation.ACYCLIC_STATE_METADATA_KEY
 import org.neo4j.cypher.internal.physicalplanning.SlotAllocation.LOAD_CSV_METADATA_KEY
 import org.neo4j.cypher.internal.physicalplanning.SlotAllocation.NO_ARGUMENT
 import org.neo4j.cypher.internal.physicalplanning.SlotAllocation.SlotMetaData
@@ -189,6 +206,7 @@ import org.neo4j.cypher.internal.util.symbols.CTPath
 import org.neo4j.cypher.internal.util.symbols.CTRelationship
 import org.neo4j.exceptions.InternalException
 import org.neo4j.gqlstatus.ErrorGqlStatusObject
+import org.neo4j.gqlstatus.GqlHelper
 
 import java.util
 
@@ -213,13 +231,15 @@ object SlotAllocation {
    * @param argumentPlan the plan which introduced this argument
    * @param conditionalApplyPlan the nearest outer [Anti]ConditionalApply plan
    * @param trailPlan the nearest outer Trail plan
+   * @param acyclicPlan the nearest outer Acyclic plan
    */
   case class SlotsAndArgument(
     slotConfiguration: SlotConfigurationBuilder,
     argumentSize: Size,
     argumentPlan: Id,
     conditionalApplyPlan: Id,
-    trailPlan: Id
+    trailPlan: Id,
+    acyclicPlan: Id
   ) {
 
     def isArgument(field: String): Boolean =
@@ -234,6 +254,7 @@ object SlotAllocation {
     argumentSizes: ArgumentSizes,
     applyPlans: ApplyPlans,
     trailPlans: TrailPlans,
+    acyclicPlans: AcyclicPlans,
     nestedPlanArgumentConfigurations: NestedPlanArgumentConfigurations
   )
 
@@ -242,7 +263,7 @@ object SlotAllocation {
     if (allocateArgumentSlots) {
       slots.newArgument(Id.INVALID_ID)
     }
-    SlotsAndArgument(slots, Size.zero, Id.INVALID_ID, Id.INVALID_ID, Id.INVALID_ID)
+    SlotsAndArgument(slots, Size.zero, Id.INVALID_ID, Id.INVALID_ID, Id.INVALID_ID, Id.INVALID_ID)
   }
 
   final val INITIAL_SLOT_CONFIGURATION: SlotConfiguration = NO_ARGUMENT(true).slotConfiguration.build()
@@ -270,6 +291,8 @@ object SlotAllocation {
   final val LOAD_CSV_METADATA_KEY: String = "csv"
 
   final val TRAIL_STATE_METADATA_KEY: String = "trailState"
+
+  final val ACYCLIC_STATE_METADATA_KEY: String = "acyclicState"
 }
 
 /**
@@ -286,6 +309,7 @@ class SingleQuerySlotAllocator private[physicalplanning] (
   private val argumentSizes: ArgumentSizes = new ArgumentSizes,
   private val applyPlans: ApplyPlans = new ApplyPlans,
   private val trailPlans: TrailPlans = new TrailPlans,
+  private val acyclicPlans: AcyclicPlans = new AcyclicPlans,
   private val liveVariables: LiveVariables = new LiveVariables,
   private val nestedPlanArgumentConfigurations: NestedPlanArgumentConfigurations = new NestedPlanArgumentConfigurations
 ) {
@@ -295,6 +319,27 @@ class SingleQuerySlotAllocator private[physicalplanning] (
    */
   private def argumentRowIdSlotForCartesianProductNeeded(plan: LogicalPlan): Boolean =
     allocateArgumentSlots && plan.isInstanceOf[CartesianProduct]
+
+  /**
+   * We need an additional nested argument row id slot for some plans
+   */
+  private def nestedArgumentRowIdSlotNeeded(plan: LogicalPlan): Boolean = {
+    allocateArgumentSlots && {
+      plan match {
+        // Repeat requires 2 arguments: one per incoming LHS row (regular ApplyPlan case), and one per RHS invocation (QPP repetition)
+        case _: Repeat =>
+          true
+        // TransactionApply with retry need an explicit argument slot for batch id
+        case p: TransactionApply =>
+          p.onErrorBehaviour.shouldRetry
+        // TransactionForeach with retry need an explicit argument slot for batch id
+        case p: TransactionForeach =>
+          p.onErrorBehaviour.shouldRetry
+        case _ =>
+          false
+      }
+    }
+  }
 
   /**
    * Allocate slot for every operator in the logical plan tree `lp`.
@@ -351,11 +396,13 @@ class SingleQuerySlotAllocator private[physicalplanning] (
       cancellationChecker.throwIfCancelled()
       val (nullable, current) = planStack.pop()
 
-      val (outerApplyPlan, outerTrailPlan) = if (argumentStack.isEmpty) (Id.INVALID_ID, Id.INVALID_ID)
-      else (argumentStack.getFirst.argumentPlan, argumentStack.getFirst.trailPlan)
+      val (outerApplyPlan, outerTrailPlan, outerAcyclicPlan) = if (argumentStack.isEmpty)
+        (Id.INVALID_ID, Id.INVALID_ID, Id.INVALID_ID)
+      else (argumentStack.getFirst.argumentPlan, argumentStack.getFirst.trailPlan, argumentStack.getFirst.acyclicPlan)
 
       applyPlans.set(current.id, outerApplyPlan)
       trailPlans.set(current.id, outerTrailPlan)
+      acyclicPlans.set(current.id, outerAcyclicPlan)
 
       (current.lhs, current.rhs) match {
         case (None, None) =>
@@ -400,15 +447,12 @@ class SingleQuerySlotAllocator private[physicalplanning] (
           val conditionalApplyPlan = if (isConditionalApplyPlan) current.id else argument.conditionalApplyPlan
           val trailPlan = if (current.isInstanceOf[RepeatTrail] || current.isInstanceOf[RepeatWalk]) current.id
           else argument.trailPlan
+          val acyclicPlan = if (current.isInstanceOf[RepeatAcyclic]) current.id else argument.acyclicPlan
           if (allocateArgumentSlots) {
-            current match {
-              case _: Repeat =>
-                // Repeat requires 2 arguments: one per incoming LHS row (regular ApplyPlan case), and one per RHS invocation (QPP repetition)
-                argumentSlots.newNestedArgument(current.id)
-                argumentSlots.newArgument(current.id)
-              case _ =>
-                argumentSlots.newArgument(current.id)
+            if (nestedArgumentRowIdSlotNeeded(current)) {
+              argumentSlots.newNestedArgument(current.id)
             }
+            argumentSlots.newArgument(current.id)
           }
           allocateLhsOfApply(current, nullable, argumentSlots, semanticTable)
           val lhsSlots = allocations.get(left.id)
@@ -418,7 +462,8 @@ class SingleQuerySlotAllocator private[physicalplanning] (
             argumentSlots.size(),
             current.id,
             conditionalApplyPlan,
-            trailPlan
+            trailPlan,
+            acyclicPlan
           ))
           populate(right, nullable)
 
@@ -435,7 +480,8 @@ class SingleQuerySlotAllocator private[physicalplanning] (
               newArgument.size(),
               current.id,
               previousArgument.conditionalApplyPlan,
-              previousArgument.trailPlan
+              previousArgument.trailPlan,
+              previousArgument.acyclicPlan
             ))
           }
           allocateExpressionsTwoChild(current, lhsSlots, semanticTable, comingFromLeft = true, cancellationChecker)
@@ -456,12 +502,17 @@ class SingleQuerySlotAllocator private[physicalplanning] (
             argumentStack.pop()
           }
           resultStack.push(result)
+
+        case _ => throw InternalException.internalError(
+            getClass.getSimpleName,
+            "Incorrect plan traversal during slot allocation"
+          )
       }
 
       comingFrom = current
     }
 
-    SlotMetaData(allocations, argumentSizes, applyPlans, trailPlans, nestedPlanArgumentConfigurations)
+    SlotMetaData(allocations, argumentSizes, applyPlans, trailPlans, acyclicPlans, nestedPlanArgumentConfigurations)
   }
 
   case class Accumulator(doNotTraverseExpression: Option[Expression])
@@ -475,8 +526,8 @@ class SingleQuerySlotAllocator private[physicalplanning] (
   ): Unit = plan match {
     case ssp: StatefulShortestPath =>
       allocateExpressionsInternal(ssp.nfa, slots, semanticTable, plan.id, cancellationChecker)
-    case _: OptionalExpand                                               =>
-    case FindShortestPaths(_, _, nodePredicates, relPredicates, _, _, _) =>
+    case _: OptionalExpand                                                  =>
+    case FindShortestPaths(_, _, nodePredicates, relPredicates, _, _, _, _) =>
       // Node & Relationship predicates may contain NestPlanExpressions.
       // In those cases the nested plan must have the same slot configuration as input rows,
       // otherwise argument copying breaks with index out of bounds.
@@ -496,7 +547,7 @@ class SingleQuerySlotAllocator private[physicalplanning] (
       allocateExpressionsInternal(ssp.nonInlinedPreFilters, slots, semanticTable, plan.id, cancellationChecker)
     case _: OptionalExpand =>
       allocateExpressionsOneChild(plan, nullable, slots, semanticTable, cancellationChecker)
-    case FindShortestPaths(_, pattern, _, _, pathPredicates, _, _) =>
+    case FindShortestPaths(_, pattern, _, _, pathPredicates, _, _, _) =>
       // Path predicates must be allocated after 'rels' and 'path' slots have been allocated.
       allocateExpressionsInternal(pattern, slots, semanticTable, plan.id, cancellationChecker)
       allocateExpressionsInternal(pathPredicates, slots, semanticTable, plan.id, cancellationChecker)
@@ -551,6 +602,14 @@ class SingleQuerySlotAllocator private[physicalplanning] (
           TraverseChildren(Accumulator(doNotTraverseExpression = Some(rhsExpression))) // Only look at lhsExpression
 
       case ValueHashJoin(_, _, Equals(lhsExpression, _)) if !comingFromLeft =>
+        (_: Accumulator) =>
+          TraverseChildren(Accumulator(doNotTraverseExpression = Some(lhsExpression))) // Only look at rhsExpression
+
+      case ValueMergeJoin(_, _, Equals(_, rhsExpression)) if comingFromLeft =>
+        (_: Accumulator) =>
+          TraverseChildren(Accumulator(doNotTraverseExpression = Some(rhsExpression))) // Only look at lhsExpression
+
+      case ValueMergeJoin(_, _, Equals(lhsExpression, _)) if !comingFromLeft =>
         (_: Accumulator) =>
           TraverseChildren(Accumulator(doNotTraverseExpression = Some(lhsExpression))) // Only look at rhsExpression
 
@@ -610,13 +669,15 @@ class SingleQuerySlotAllocator private[physicalplanning] (
              * nested plans are only ever run with slotted pipes.
              */
             val trailPlanId = Id.INVALID_ID
+            val acyclicPlanId = Id.INVALID_ID
             val slotsAndArgument =
               SlotsAndArgument(
                 argumentSlotConfiguration.copy(),
                 argumentSlotConfiguration.size(),
                 argumentPlan,
                 conditionalApplyPlan,
-                trailPlanId
+                trailPlanId,
+                acyclicPlanId
               )
 
             // Allocate slots for nested plan
@@ -635,7 +696,7 @@ class SingleQuerySlotAllocator private[physicalplanning] (
             val nestedSlots = nestedPhysicalPlan.slotConfigurations(e.plan.id)
             e match {
               case NestedPlanCollectExpression(_, projection, _) =>
-                allocateExpressionsInternal(projection, nestedSlots, semanticTable, planId, cancellationChecker)
+                allocateExpressionsInternal(projection, nestedSlots, semanticTable, planId, cancellationChecker, acc)
               case _ => // do nothing
             }
 
@@ -686,6 +747,42 @@ class SingleQuerySlotAllocator private[physicalplanning] (
    */
   private def allocateLeaf(lp: LogicalPlan, nullable: Boolean, slots: SlotConfigurationBuilder): Unit =
     lp match {
+      case leaf: NodeVectorIndexSearch =>
+        slots.newLong(leaf.idName, nullable, CTNode)
+        leaf.score.foreach(slots.newReference(_, nullable, CTInteger))
+
+      case leaf: NodeFulltextIndexSearch =>
+        slots.newLong(leaf.idName, nullable, CTNode)
+        leaf.score.foreach(slots.newReference(_, nullable, CTInteger))
+
+      case leaf: DirectedRelationshipVectorIndexSearch =>
+        leaf.idName.foreach(r => slots.newLong(r, nullable, CTRelationship))
+        leaf.leftNode.foreach(n => slots.newLong(n, nullable, CTNode))
+        leaf.rightNode.foreach(n => slots.newLong(n, nullable, CTNode))
+        leaf.cachedProperties.foreach(cp => slots.newCachedProperty(cp.runtimeKey))
+        leaf.score.foreach(slots.newReference(_, nullable, CTInteger))
+
+      case leaf: UndirectedRelationshipVectorIndexSearch =>
+        leaf.idName.foreach(r => slots.newLong(r, nullable, CTRelationship))
+        leaf.leftNode.foreach(n => slots.newLong(n, nullable, CTNode))
+        leaf.rightNode.foreach(n => slots.newLong(n, nullable, CTNode))
+        leaf.cachedProperties.foreach(cp => slots.newCachedProperty(cp.runtimeKey))
+        leaf.score.foreach(slots.newReference(_, nullable, CTInteger))
+
+      case leaf: DirectedRelationshipFulltextIndexSearch =>
+        leaf.idName.foreach(r => slots.newLong(r, nullable, CTRelationship))
+        leaf.leftNode.foreach(n => slots.newLong(n, nullable, CTNode))
+        leaf.rightNode.foreach(n => slots.newLong(n, nullable, CTNode))
+        leaf.cachedProperties.foreach(cp => slots.newCachedProperty(cp.runtimeKey))
+        leaf.score.foreach(slots.newReference(_, nullable, CTInteger))
+
+      case leaf: UndirectedRelationshipFulltextIndexSearch =>
+        leaf.idName.foreach(r => slots.newLong(r, nullable, CTRelationship))
+        leaf.leftNode.foreach(n => slots.newLong(n, nullable, CTNode))
+        leaf.rightNode.foreach(n => slots.newLong(n, nullable, CTNode))
+        leaf.cachedProperties.foreach(cp => slots.newCachedProperty(cp.runtimeKey))
+        leaf.score.foreach(slots.newReference(_, nullable, CTInteger))
+
       case MultiNodeIndexSeek(leafPlans) =>
         leafPlans.foreach { p =>
           allocateLeaf(p, nullable, slots)
@@ -709,18 +806,18 @@ class SingleQuerySlotAllocator private[physicalplanning] (
         leaf.cachedProperties.foreach(cp => slots.newCachedProperty(cp.runtimeKey))
 
       case leaf: RelationshipIndexLeafPlan =>
-        slots.newLong(leaf.idName, nullable, CTRelationship)
-        slots.newLong(leaf.leftNode, nullable, CTNode)
-        slots.newLong(leaf.rightNode, nullable, CTNode)
+        leaf.idName.foreach(r => slots.newLong(r, nullable, CTRelationship))
+        leaf.leftNode.foreach(n => slots.newLong(n, nullable, CTNode))
+        leaf.rightNode.foreach(n => slots.newLong(n, nullable, CTNode))
         leaf.cachedProperties.foreach(cp => slots.newCachedProperty(cp.runtimeKey))
 
       case leaf: NodeLogicalLeafPlan =>
         slots.newLong(leaf.idName, nullable, CTNode)
 
       case leaf: RelationshipLogicalLeafPlan =>
-        slots.newLong(leaf.idName, nullable, CTRelationship)
-        slots.newLong(leaf.leftNode, nullable, CTNode)
-        slots.newLong(leaf.rightNode, nullable, CTNode)
+        leaf.idName.foreach(r => slots.newLong(r, nullable, CTRelationship))
+        leaf.leftNode.foreach(n => slots.newLong(n, nullable, CTNode))
+        leaf.rightNode.foreach(n => slots.newLong(n, nullable, CTNode))
 
       case _: Argument =>
 
@@ -731,7 +828,7 @@ class SingleQuerySlotAllocator private[physicalplanning] (
         slots.newReference(leaf.idName, nullable, CTInteger)
 
       case leaf: CommandLogicalPlan =>
-        for (v <- leaf.availableSymbols.map(_.name) ++ leaf.defaultColumns.map(_.name))
+        for (v <- leaf.columnVariables.map(_.name))
           slots.newReference(v, nullable, CTAny)
 
       case Input(nodes, relationships, variables, nullableInput) =>
@@ -742,7 +839,10 @@ class SingleQuerySlotAllocator private[physicalplanning] (
         for (v <- variables)
           slots.newReference(v, nullableInput || nullable, CTAny)
 
-      case p => throw new SlotAllocationFailed(s"Don't know how to handle $p")
+      case ForeignLeafPlan(projections, _, _) =>
+        projections.foreach(variable => slots.newReference(variable, nullable = true, typ = CTAny))
+
+      case p => throw SlotAllocationFailed.internalError(this.getClass.getSimpleName, s"Don't know how to handle $p")
     }
 
   /**
@@ -782,15 +882,19 @@ class SingleQuerySlotAllocator private[physicalplanning] (
         recordArgument(lp)
 
       case Expand(_, _, _, _, to, relName, ExpandAll) =>
-        slots.newLong(relName, nullable, CTRelationship)
-        slots.newLong(to, nullable, CTNode)
+        relName.foreach(r => slots.newLong(r, nullable, CTRelationship))
+        to.foreach(t => slots.newLong(t, nullable, CTNode))
 
       case Expand(_, _, _, _, _, relName, ExpandInto) =>
-        slots.newLong(relName, nullable, CTRelationship)
+        relName.foreach(r => slots.newLong(r, nullable, CTRelationship))
 
       case SimulatedExpand(_, _, rel, to, _) =>
         slots.newLong(rel, nullable, CTRelationship)
         slots.newLong(to, nullable, CTNode)
+
+      case u: MergeInto =>
+        slots.newLong(u.idName, nullable, CTRelationship)
+        recordArgument(lp)
 
       case Optional(_, _) =>
         recordArgument(lp)
@@ -811,16 +915,20 @@ class SingleQuerySlotAllocator private[physicalplanning] (
         _: PartialTop |
         _: CacheProperties |
         _: RemoteBatchProperties |
+        _: RemoteBatchPropertiesWithFilter |
         _: NonFuseable |
         _: InjectCompilationError |
         _: NonPipelined |
         _: NonPipelinedStreaming |
+        _: PipelineBreaker |
+        _: AssertCachedProperties |
         _: Prober |
         _: TriadicBuild |
         _: TriadicFilter |
         _: PreserveOrder |
         _: EmptyResult |
-        _: ArgumentTracker =>
+        _: ArgumentTracker |
+        _: LockNodes =>
 
       case p: ProjectingPlan =>
         /**
@@ -856,25 +964,25 @@ class SingleQuerySlotAllocator private[physicalplanning] (
       case OptionalExpand(_, _, _, _, to, rel, ExpandAll, _) =>
         // Note that OptionalExpand only is optional on the expand and not on incoming rows, so
         // we do not need to record the argument here.
-        slots.newLong(rel, nullable = true, CTRelationship)
-        slots.newLong(to, nullable = true, CTNode)
+        rel.foreach(r => slots.newLong(r, nullable = true, CTRelationship))
+        to.foreach(t => slots.newLong(t, nullable = true, CTNode))
 
       case OptionalExpand(_, _, _, _, _, rel, ExpandInto, _) =>
         // Note that OptionalExpand only is optional on the expand and not on incoming rows, so
         // we do not need to record the argument here.
-        slots.newLong(rel, nullable = true, CTRelationship)
+        rel.foreach(r => slots.newLong(r, nullable = true, CTRelationship))
 
       case VarExpand(_, _, _, _, _, to, relationship, _, expansionMode, _, _, _) =>
         if (expansionMode == ExpandAll) {
-          slots.newLong(to, nullable, CTNode)
+          to.foreach(slots.newLong(_, nullable, CTNode))
         }
-        slots.newReference(relationship, nullable, CTList(CTRelationship))
+        relationship.foreach(slots.newReference(_, nullable, CTList(CTRelationship)))
 
-      case PruningVarExpand(_, _, _, _, to, _, _, _, _) =>
-        slots.newLong(to, nullable, CTNode)
+      case PruningVarExpand(_, _, _, _, to, _, _, _, _, _) =>
+        to.foreach(slots.newLong(_, nullable, CTNode))
 
       case expand: BFSPruningVarExpand =>
-        slots.newLong(expand.to, nullable, CTNode)
+        expand.maybeTo.foreach(slots.newLong(_, nullable, CTNode))
         expand.depthName.foreach(name => slots.newReference(name, nullable, CTInteger))
 
       case c: Create =>
@@ -925,13 +1033,32 @@ class SingleQuerySlotAllocator private[physicalplanning] (
         slots.newReference(variableName, nullable, CTMap)
         slots.newMetaData(LOAD_CSV_METADATA_KEY)
 
-      case ProcedureCall(_, ResolvedCall(_, _, callResults, _, _, _, _)) =>
+      case ProcedureCall(_, ResolvedNonLocalCall(_, _, callResults, _, _, _, _)) =>
         callResults.foreach {
           case ProcedureResultItem(_, variable) =>
             slots.newReference(variable.name, true, CTAny)
         }
 
-      case _: Merge =>
+      case m: Merge =>
+        // If we have set lenientCreateRelationship in the db, we may potentially
+        // need to update the relationship to nullable=true
+        if (config.lenientCreateRelationship) {
+          m.createRelationships.foreach(r =>
+            slots.newLong(r.variable, nullable = true, CTRelationship)
+          )
+        }
+
+        recordArgument(lp)
+
+      case m: FusedMerge =>
+        // If we have set lenientCreateRelationship in the db, we may potentially
+        // need to update the relationship to nullable=true
+        if (config.lenientCreateRelationship) {
+          m.createRelationships.foreach(r =>
+            slots.newLong(r.variable, nullable = true, CTRelationship)
+          )
+        }
+
         recordArgument(lp)
 
       case sp: FindShortestPaths =>
@@ -990,7 +1117,7 @@ class SingleQuerySlotAllocator private[physicalplanning] (
         p.columns.foreach(v => slots.newReference(v.name, true, CTAny))
 
       case p =>
-        throw new SlotAllocationFailed(s"Don't know how to handle $p")
+        throw SlotAllocationFailed.internalError(this.getClass.getSimpleName, s"Don't know how to handle $p")
     }
     discardUnusedSlots(lp, slots, source, None)
   }
@@ -1165,14 +1292,14 @@ class SingleQuerySlotAllocator private[physicalplanning] (
         }
         result
 
-      case _: ValueHashJoin =>
+      case _: ValueHashJoin | _: ValueMergeJoin =>
         // A new pipeline is not strictly needed here unless we have batching/vectorization
         recordArgument(lp)
         rhs.addArgumentAliasesTo(lhs, argument.argumentSize)
         val result = breakingPolicy.invoke(lp, lhs, argument.slotConfiguration, applyPlans)
         // For the implementation of the slotted pipe to use array copy
         // it is very important that we add the slots in the same order
-        // Note, we can potentially carry discaded slots from rhs here to save memory
+        // Note, we can potentially carry discarded slots from rhs here to save memory
         rhs.keyedSlotsOrdered(skipFirst = argument.argumentSize).foreach {
           case SlotWithKeyAndAliases(VariableSlotKey(key), slot, aliases) =>
             result.add(key, slot)
@@ -1294,9 +1421,9 @@ class SingleQuerySlotAllocator private[physicalplanning] (
           rhs.newReference(statusVar, nullable, CTMap)
         }
 
-        if (t.onErrorBehaviour != OnErrorFail) {
+        if (t.onErrorBehaviour.recovery != RecoveryMode.Fail) {
           // We need to make slots for variables inside the CALL {...} nullable,
-          // e.g. in CALL { CREATE p: Person(age : ...) RETURN p }, that's p,
+          // e.g. in CALL () { CREATE p: Person(age : ...) RETURN p }, that's p,
           // because we want to see a NULL if one of the transactions failed
           val nullableVars = t.right.availableSymbols.map(_.name) -- t.left.availableSymbols.map(_.name)
           nullableVars.foreach { name =>
@@ -1313,7 +1440,7 @@ class SingleQuerySlotAllocator private[physicalplanning] (
         breakingPolicy.invoke(lp, rhs, argument.slotConfiguration, applyPlans)
 
       case p =>
-        throw new SlotAllocationFailed(s"Don't know how to handle $p")
+        throw SlotAllocationFailed.internalError(this.getClass.getSimpleName, s"Don't know how to handle $p")
     }
     discardUnusedSlots(lp, result, lhs, Some(rhs))
     result
@@ -1343,11 +1470,18 @@ class SingleQuerySlotAllocator private[physicalplanning] (
         // so we allocate it on the LHS (even though its value will not be needed after the Repeat is done).
         // Additionally, to avoid copying rows emitted by Repeat, all Repeat slots are allocated on the LHS.
         lhs.newLong(repeat.innerStart, nullable, CTNode)
-        lhs.newLong(repeat.end, nullable, CTNode)
+        if (repeat.expansionMode == ExpandAll) {
+          lhs.newLong(repeat.end, nullable, CTNode)
+        }
         repeat.nodeVariableGroupings.foreach(n => lhs.newReference(n.group, nullable, CTList(CTNode)))
         repeat.relationshipVariableGroupings.foreach(r => lhs.newReference(r.group, nullable, CTList(CTRelationship)))
-        if (repeat.isInstanceOf[RepeatTrail]) {
-          lhs.newMetaData(TRAIL_STATE_METADATA_KEY, plan.id)
+        repeat.accumulatorMappings.foreach(acc => {
+          lhs.newReference(acc.next, nullable, CTAny)
+          lhs.newReference(acc.previous, nullable, CTAny)
+        })
+        repeat match {
+          case _: RepeatAcyclic => lhs.newMetaData(ACYCLIC_STATE_METADATA_KEY, plan.id)
+          case _                => lhs.newMetaData(TRAIL_STATE_METADATA_KEY, plan.id)
         }
 
       case _ =>
@@ -1409,7 +1543,7 @@ class SingleQuerySlotAllocator private[physicalplanning] (
   }
 
   private def allocateUnwind(
-    variable: LogicalVariable,
+    variable: Option[LogicalVariable],
     nullable: Boolean,
     expression: Expression,
     slots: SlotConfigurationBuilder
@@ -1425,15 +1559,17 @@ class SingleQuerySlotAllocator private[physicalplanning] (
       case _                  => true
     }
 
-    slots.newReference(variable, nullableExpression || nullable, CTAny)
+    variable.foreach(slots.newReference(_, nullableExpression || nullable, CTAny))
   }
 }
 
 class SlotAllocationFailed(gqlStatusObject: ErrorGqlStatusObject, str: String)
-    extends InternalException(gqlStatusObject, str) {
+    extends InternalException(gqlStatusObject, str)
 
-  def this(str: String) = {
-    this(null, str)
+object SlotAllocationFailed {
+
+  def internalError(msgTitle: String, message: String): SlotAllocationFailed = {
+    val gql = GqlHelper.get50N00(msgTitle, message)
+    new SlotAllocationFailed(gql, message)
   }
-
 }

@@ -20,11 +20,9 @@
 package org.neo4j.harness;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.neo4j.configuration.GraphDatabaseSettings.DEFAULT_DATABASE_NAME;
 import static org.neo4j.configuration.ssl.SslPolicyScope.HTTPS;
 import static org.neo4j.internal.helpers.collection.Iterators.single;
@@ -48,7 +46,9 @@ import javax.net.ssl.SSLServerSocketFactory;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 import org.junit.jupiter.api.Test;
+import org.neo4j.bolt.protocol.common.connector.transport.NioConnectorTransport;
 import org.neo4j.bolt.testing.client.SocketConnection;
+import org.neo4j.bolt.testing.messages.BoltWire;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.configuration.connectors.BoltConnector;
@@ -58,7 +58,6 @@ import org.neo4j.configuration.connectors.HttpsConnector;
 import org.neo4j.configuration.helpers.SocketAddress;
 import org.neo4j.configuration.ssl.ClientAuth;
 import org.neo4j.configuration.ssl.SslPolicyConfig;
-import org.neo4j.dbms.api.DatabaseManagementService;
 import org.neo4j.graphdb.GraphDatabaseService;
 import org.neo4j.graphdb.Label;
 import org.neo4j.graphdb.Node;
@@ -94,7 +93,7 @@ class InProcessServerBuilderIT {
         }
 
         // And after it's been closed, it should've cleaned up after itself.
-        assertTrue(FileUtils.isDirectoryEmpty(workDir));
+        assertThat(FileUtils.isDirectoryEmpty(workDir)).isTrue();
     }
 
     @Test
@@ -134,7 +133,7 @@ class InProcessServerBuilderIT {
             Config config = ((GraphDatabaseAPI) neo4j.defaultDatabaseService())
                     .getDependencyResolver()
                     .resolveDependency(Config.class);
-            assertEquals(20, config.get(GraphDatabaseSettings.dense_node_threshold));
+            assertThat(config.get(GraphDatabaseSettings.dense_node_threshold)).isEqualTo(20);
         }
     }
 
@@ -168,16 +167,17 @@ class InProcessServerBuilderIT {
     void startWithDisabledServer() {
         try (Neo4j neo4j =
                 getTestBuilder(directory.homePath()).withDisabledServer().build()) {
-            assertThrows(IllegalStateException.class, neo4j::httpURI);
-            assertThrows(IllegalStateException.class, neo4j::httpsURI);
+            assertThatExceptionOfType(IllegalStateException.class).isThrownBy(neo4j::httpURI);
+            assertThatExceptionOfType(IllegalStateException.class).isThrownBy(neo4j::httpsURI);
 
-            assertDoesNotThrow(() -> {
-                GraphDatabaseService service = neo4j.defaultDatabaseService();
-                try (Transaction transaction = service.beginTx()) {
-                    transaction.createNode();
-                    transaction.commit();
-                }
-            });
+            assertThatCode(() -> {
+                        GraphDatabaseService service = neo4j.defaultDatabaseService();
+                        try (Transaction transaction = service.beginTx()) {
+                            transaction.createNode();
+                            transaction.commit();
+                        }
+                    })
+                    .doesNotThrowAnyException();
         }
     }
 
@@ -200,13 +200,12 @@ class InProcessServerBuilderIT {
         // create graph db with one node upfront
         Path existingHomeDir = directory.homePath("existingStore");
 
-        DatabaseManagementService managementService = new TestDatabaseManagementServiceBuilder(existingHomeDir).build();
-        GraphDatabaseService db = managementService.database(DEFAULT_DATABASE_NAME);
-        try (Transaction transaction = db.beginTx()) {
-            transaction.execute("create ()");
-            transaction.commit();
-        } finally {
-            managementService.shutdown();
+        try (var managementService = new TestDatabaseManagementServiceBuilder(existingHomeDir).build()) {
+            GraphDatabaseService db = managementService.database(DEFAULT_DATABASE_NAME);
+            try (Transaction transaction = db.beginTx()) {
+                transaction.execute("create ()");
+                transaction.commit();
+            }
         }
 
         try (Neo4j neo4j =
@@ -214,7 +213,7 @@ class InProcessServerBuilderIT {
             // Then
             GraphDatabaseService graphDatabaseService = neo4j.defaultDatabaseService();
             try (Transaction tx = graphDatabaseService.beginTx()) {
-                assertTrue(Iterables.count(tx.getAllNodes()) > 0);
+                assertThat(Iterables.count(tx.getAllNodes())).isGreaterThan(0);
 
                 // When: create another node
                 tx.createNode();
@@ -223,15 +222,12 @@ class InProcessServerBuilderIT {
         }
 
         // Then: we still only have one node since the server is supposed to work on a copy
-        managementService = new TestDatabaseManagementServiceBuilder(existingHomeDir).build();
-        db = managementService.database(DEFAULT_DATABASE_NAME);
-        try {
+        try (var managementService = new TestDatabaseManagementServiceBuilder(existingHomeDir).build()) {
+            var db = managementService.database(DEFAULT_DATABASE_NAME);
             try (Transaction tx = db.beginTx()) {
-                assertEquals(1, Iterables.count(tx.getAllNodes()));
+                assertThat(Iterables.count(tx.getAllNodes())).isEqualTo(1);
                 tx.commit();
             }
-        } finally {
-            managementService.shutdown();
         }
     }
 
@@ -242,24 +238,28 @@ class InProcessServerBuilderIT {
             URI uri = neo4j.boltURI();
 
             // when
-            assertDoesNotThrow(() -> {
-                try (var connection = new SocketConnection(new InetSocketAddress(uri.getHost(), uri.getPort()))) {
-                    connection.connect();
-                }
-            });
+            assertThatCode(() -> {
+                        try (var connection = new SocketConnection(
+                                new NioConnectorTransport(),
+                                BoltWire.latest(),
+                                new InetSocketAddress(uri.getHost(), uri.getPort()))) {
+                            connection.connect();
+                        }
+                    })
+                    .doesNotThrowAnyException();
         }
     }
 
     @Test
     void shouldFailWhenProvidingANonDirectoryAsSource() throws IOException {
         Path notADirectory = Files.createTempFile("prefix", "suffix");
-        assertFalse(Files.isDirectory(notADirectory));
+        assertThat(Files.isDirectory(notADirectory)).isFalse();
 
-        IllegalArgumentException exception =
-                assertThrows(IllegalArgumentException.class, () -> getTestBuilder(directory.homePath())
+        assertThatThrownBy(() -> getTestBuilder(directory.homePath())
                         .copyFrom(notADirectory)
-                        .build());
-        assertThat(exception.getMessage()).contains("is not a directory");
+                        .build())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("is not a directory");
     }
 
     @Test
@@ -334,7 +334,7 @@ class InProcessServerBuilderIT {
         }
         try (Transaction tx = db.beginTx()) {
             Node node = single(tx.findNodes(label));
-            assertEquals(propertyValue, node.getProperty(propertyKey));
+            assertThat(node.getProperty(propertyKey)).isEqualTo(propertyValue);
             tx.commit();
         }
     }

@@ -23,14 +23,17 @@ import java.io.IOException;
 import org.neo4j.configuration.Config;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseLayout;
-import org.neo4j.kernel.KernelVersion;
 import org.neo4j.kernel.KernelVersionProvider;
+import org.neo4j.kernel.KernelVersionProviders;
 import org.neo4j.kernel.database.DatabaseTracers;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
-import org.neo4j.kernel.impl.transaction.log.files.LogFiles;
-import org.neo4j.kernel.impl.transaction.log.files.LogFilesBuilder;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.storageengine.api.StorageEngineFactory;
+import org.neo4j.wal.LogFiles;
+import org.neo4j.wal.LogFormatVersionProvider;
+import org.neo4j.wal.LogPosition;
+import org.neo4j.wal.LogTailMetadata;
+import org.neo4j.wal.entry.LogFormat;
+import org.neo4j.wal.files.LogFilesBuilder;
 
 public class LogTailExtractor {
     private final FileSystemAbstraction fs;
@@ -38,13 +41,14 @@ public class LogTailExtractor {
     private final StorageEngineFactory storageEngineFactory;
     private final DatabaseTracers databaseTracers;
     private final boolean readOnly;
+    private final LogPosition maxPosition;
 
     public LogTailExtractor(
             FileSystemAbstraction fs,
             Config config,
             StorageEngineFactory storageEngineFactory,
             DatabaseTracers databaseTracers) {
-        this(fs, config, storageEngineFactory, databaseTracers, true);
+        this(fs, config, storageEngineFactory, databaseTracers, true, LogPosition.UNSPECIFIED);
     }
 
     public LogTailExtractor(
@@ -52,12 +56,14 @@ public class LogTailExtractor {
             Config config,
             StorageEngineFactory storageEngineFactory,
             DatabaseTracers databaseTracers,
-            boolean readOnly) {
+            boolean readOnly,
+            LogPosition maxPosition) {
         this.fs = fs;
         this.config = config;
         this.storageEngineFactory = storageEngineFactory;
         this.databaseTracers = databaseTracers;
         this.readOnly = readOnly;
+        this.maxPosition = maxPosition;
     }
 
     /**
@@ -65,7 +71,7 @@ public class LogTailExtractor {
      */
     public LogTailMetadata getTailMetadata(DatabaseLayout databaseLayout, MemoryTracker memoryTracker)
             throws IOException {
-        return buildLogFiles(databaseLayout, memoryTracker, () -> KernelVersion.getLatestVersion(config))
+        return buildLogFiles(databaseLayout, memoryTracker, KernelVersionProviders.latestFromConfig(config))
                 .getTailMetadata();
     }
 
@@ -81,13 +87,19 @@ public class LogTailExtractor {
     private LogFiles buildLogFiles(
             DatabaseLayout databaseLayout, MemoryTracker memoryTracker, KernelVersionProvider kernelVersionProvider)
             throws IOException {
+        LogFormatVersionProvider emptyLogsFormatProvider =
+                () -> LogFormat.fromConfigAndKernelVersion(config, kernelVersionProvider.kernelVersion());
         var builder = readOnly
-                ? LogFilesBuilder.readOnlyBuilder(databaseLayout, fs, kernelVersionProvider)
-                : LogFilesBuilder.activeFilesBuilder(databaseLayout, fs, kernelVersionProvider);
+                ? LogFilesBuilder.readableBuilder(databaseLayout, fs, kernelVersionProvider, emptyLogsFormatProvider)
+                // Writeable to allow CheckpointFile to cleanup files without header on recovery
+                : LogFilesBuilder.writeableBuilder(databaseLayout, fs, kernelVersionProvider, emptyLogsFormatProvider)
+                        .withNoPreallocation();
         return builder.withConfig(config)
                 .withMemoryTracker(memoryTracker)
                 .withDatabaseTracers(databaseTracers)
                 .withStorageEngineFactory(storageEngineFactory)
+                .withNoInit()
+                .withTailReadingMaxPosition(maxPosition)
                 .build();
     }
 }

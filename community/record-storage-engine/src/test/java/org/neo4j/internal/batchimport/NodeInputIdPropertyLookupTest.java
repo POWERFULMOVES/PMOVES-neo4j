@@ -27,7 +27,6 @@ import static org.neo4j.io.pagecache.context.CursorContextFactory.NULL_CONTEXT_F
 import static org.neo4j.io.pagecache.tracing.PageCacheTracer.NULL;
 import static org.neo4j.kernel.impl.store.StoreType.PROPERTY_ARRAY;
 import static org.neo4j.kernel.impl.store.StoreType.PROPERTY_STRING;
-import static org.neo4j.kernel.impl.transaction.log.LogTailMetadata.EMPTY_LOG_TAIL;
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
 
 import java.util.concurrent.ThreadLocalRandom;
@@ -40,6 +39,7 @@ import org.neo4j.internal.id.DefaultIdGeneratorFactory;
 import org.neo4j.internal.id.IdGenerator;
 import org.neo4j.io.layout.Neo4jLayout;
 import org.neo4j.io.pagecache.PageCache;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.store.DynamicAllocatorProvider;
 import org.neo4j.kernel.impl.store.DynamicAllocatorProviders;
 import org.neo4j.kernel.impl.store.NeoStores;
@@ -75,14 +75,14 @@ class NodeInputIdPropertyLookupTest {
                         layout,
                         Config.defaults(),
                         new DefaultIdGeneratorFactory(
-                                fs, immediate(), false, NULL, layout.getDatabaseName(), true, true),
+                                fs, immediate(), false, NULL, layout.getDatabaseName(), true, true, null),
                         pageCache,
                         NULL,
                         fs,
                         NullLogProvider.getInstance(),
                         NULL_CONTEXT_FACTORY,
                         false,
-                        EMPTY_LOG_TAIL)
+                        DatabaseCreationOptions.EMPTY_CREATION_OPTIONS)
                 .openNeoStores(PROPERTY_ARRAY, PROPERTY_STRING, StoreType.PROPERTY);
     }
 
@@ -106,7 +106,7 @@ class NodeInputIdPropertyLookupTest {
         race.addContestants(
                 4,
                 () -> {
-                    try (var threadLookup = lookup.newLookup()) {
+                    try (var threadLookup = lookup.newLookup(true)) {
                         var rng = ThreadLocalRandom.current();
                         for (var i = 0; i < 1_000; i++) {
                             var nodeId = rng.nextLong(numNodes);
@@ -138,7 +138,8 @@ class NodeInputIdPropertyLookupTest {
                         allocatorProvider.allocator(PROPERTY_STRING),
                         allocatorProvider.allocator(PROPERTY_ARRAY),
                         NULL_CONTEXT,
-                        INSTANCE);
+                        INSTANCE,
+                        "db-format-2000");
                 record.addPropertyBlock(block);
                 record.setId(idGenerator.nextId(NULL_CONTEXT));
                 record.setInUse(true);

@@ -19,15 +19,19 @@
  */
 package org.neo4j.bolt.protocol.common.connector.connection;
 
+import io.netty.buffer.ByteBufAllocator;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelPipeline;
 import io.netty.channel.ChannelPromise;
 import io.netty.util.AttributeKey;
+import java.net.SocketAddress;
 import java.time.Clock;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.Future;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import org.neo4j.bolt.fsm.StateMachine;
 import org.neo4j.bolt.negotiation.message.ProtocolCapability;
@@ -37,9 +41,9 @@ import org.neo4j.bolt.protocol.common.connector.Connector;
 import org.neo4j.bolt.protocol.common.connector.connection.authentication.AuthenticationFlag;
 import org.neo4j.bolt.protocol.common.connector.connection.listener.ConnectionListener;
 import org.neo4j.bolt.protocol.common.connector.tx.TransactionOwner;
-import org.neo4j.bolt.protocol.common.message.request.RequestMessage;
 import org.neo4j.bolt.protocol.io.pipeline.PipelineContext;
 import org.neo4j.bolt.security.error.AuthenticationException;
+import org.neo4j.boltmessages.request.RequestMessage;
 import org.neo4j.internal.kernel.api.security.LoginContext;
 import org.neo4j.kernel.api.net.TrackedNetworkConnection;
 import org.neo4j.packstream.io.PackstreamBuf;
@@ -97,56 +101,62 @@ public interface Connection extends TrackedNetworkConnection, TransactionOwner {
     }
 
     /**
-     * Retrieves the underlying network channel for this connection.
+     * Retrieves the ByteBuf allocator used by this connection.
      *
-     * @return a network channel.
+     * @return a buffer allocator.
      */
-    Channel channel();
+    ByteBufAllocator allocator();
+
+    /**
+     * Modifies the channel pipeline from within a safe context.
+     *
+     * @param modifier a modification function.
+     */
+    void modifyPipeline(BiConsumer<Channel, ChannelPipeline> modifier);
+
+    /**
+     * Modifies the channel pipeline from within a safe context.
+     *
+     * @param modifier a modification function.
+     */
+    default void modifyPipeline(Consumer<ChannelPipeline> modifier) {
+        this.modifyPipeline((ch, pipeline) -> modifier.accept(pipeline));
+    }
 
     /**
      * Shorthand for {@link Channel#write(Object)}
      *
      * @see Channel#write(Object)
      */
-    default ChannelFuture write(Object msg) {
-        return this.channel().write(msg);
-    }
+    ChannelFuture write(Object msg);
 
     /**
      * Shorthand for {@link Channel#write(Object, ChannelPromise)}
      *
      * @see Channel#write(Object, ChannelPromise)
      */
-    default ChannelFuture write(Object msg, ChannelPromise promise) {
-        return this.channel().write(msg, promise);
-    }
+    ChannelFuture write(Object msg, ChannelPromise promise);
 
     /**
      * Shorthand for {@link Channel#writeAndFlush(Object)}
      *
      * @see Channel#writeAndFlush(Object)
      */
-    default ChannelFuture writeAndFlush(Object msg) {
-        return this.channel().writeAndFlush(msg);
-    }
+    ChannelFuture writeAndFlush(Object msg);
 
     /**
      * Shorthand for {@link Channel#writeAndFlush(Object, ChannelPromise)}
      *
      * @see Channel#writeAndFlush(Object, ChannelPromise)
      */
-    default ChannelFuture writeAndFlush(Object msg, ChannelPromise promise) {
-        return this.channel().writeAndFlush(msg, promise);
-    }
+    ChannelFuture writeAndFlush(Object msg, ChannelPromise promise);
 
     /**
      * Shorthand for {@link Channel#flush()}
      *
      * @see Channel#flush()
      */
-    default void flush() {
-        this.channel().flush();
-    }
+    void flush();
 
     /**
      * Registers a new listener with this connection.
@@ -189,7 +199,7 @@ public interface Connection extends TrackedNetworkConnection, TransactionOwner {
      *
      * @return a set of capabilities or an empty list of none haven't been selected (yet).
      */
-    Set<ProtocolCapability> selectedCapabilities();
+    Set<ProtocolCapability> selectedProtocolCapabilities();
 
     /**
      * Evaluates whether this connection has selected a given protocol capability.
@@ -197,7 +207,7 @@ public interface Connection extends TrackedNetworkConnection, TransactionOwner {
      * @param capability a capability to evaluate.
      * @return true if the given capability has been selected, false otherwise.
      */
-    boolean hasSelectedCapability(ProtocolCapability capability);
+    boolean hasSelectedProtocolCapability(ProtocolCapability capability);
 
     /**
      * Selects a protocol revision for use with this connection.
@@ -216,7 +226,7 @@ public interface Connection extends TrackedNetworkConnection, TransactionOwner {
      * @param buf a buffer.
      * @return a packstream value reader.
      */
-    PackstreamValueReader<Connection> valueReader(PackstreamBuf buf);
+    PackstreamValueReader valueReader(PackstreamBuf buf);
 
     /**
      * Creates a writer context around a given target buffer.
@@ -353,6 +363,18 @@ public interface Connection extends TrackedNetworkConnection, TransactionOwner {
      * @return true if reset to a valid state, false otherwise.
      */
     boolean reset();
+
+    /**
+     * Sets the real client address when the connection is made through a proxy
+     * that uses PROXY protocol (HAProxy v1/v2).
+     * <p />
+     * This method should be called by the proxy protocol handler after successfully decoding
+     * the PROXY protocol header. The addresses will be used for authentication, logging,
+     * and connection tracking instead of the proxy's address.
+     *
+     * @param realClientAddress the actual client address from the proxy protocol header
+     */
+    void setProxyProtocolInfo(SocketAddress realClientAddress);
 
     /**
      * Evaluates whether this connection is currently considered active (e.g. has not been marked for closure or

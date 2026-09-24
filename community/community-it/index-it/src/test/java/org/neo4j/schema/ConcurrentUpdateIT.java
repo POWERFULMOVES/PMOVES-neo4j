@@ -45,6 +45,7 @@ import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
 import org.neo4j.values.storable.RandomValues;
+import org.neo4j.values.storable.RandomValuesUtils;
 
 @TestDirectoryExtension
 class ConcurrentUpdateIT {
@@ -56,7 +57,10 @@ class ConcurrentUpdateIT {
         DatabaseManagementService managementService = new TestDatabaseManagementServiceBuilder(dir.homePath()).build();
         GraphDatabaseAPI database = (GraphDatabaseAPI) managementService.database(DEFAULT_DATABASE_NAME);
         try {
-            RandomValues randomValues = RandomValues.create();
+            RandomValues randomValues =
+                    RandomValues.create(RandomValuesUtils.selectStorageEngineDependentConfigurationBuilder(database)
+                            .maxVectorNumBytes(RandomValues.MAX_NUM_BYTES_IN_INDEX_KEY)
+                            .build());
             int counter = 1;
             for (int j = 0; j < 100; j++) {
                 try (Transaction transaction = database.beginTx()) {
@@ -70,32 +74,33 @@ class ConcurrentUpdateIT {
             }
 
             int populatorCount = 5;
-            ExecutorService executor = Executors.newFixedThreadPool(populatorCount);
-            CountDownLatch startSignal = new CountDownLatch(1);
-            AtomicBoolean endSignal = new AtomicBoolean();
-            for (int i = 0; i < populatorCount; i++) {
-                executor.submit(new Populator(database, counter, startSignal, endSignal));
-            }
-
-            try {
-                try (Transaction transaction = database.beginTx()) {
-                    transaction
-                            .schema()
-                            .indexFor(Label.label("label10"))
-                            .on("property")
-                            .create();
-                    transaction.commit();
+            try (ExecutorService executor = Executors.newFixedThreadPool(populatorCount)) {
+                CountDownLatch startSignal = new CountDownLatch(1);
+                AtomicBoolean endSignal = new AtomicBoolean();
+                for (int i = 0; i < populatorCount; i++) {
+                    executor.submit(new Populator(database, counter, startSignal, endSignal));
                 }
-                startSignal.countDown();
 
-                try (Transaction transaction = database.beginTx()) {
-                    transaction.schema().awaitIndexesOnline(populatorCount, TimeUnit.MINUTES);
-                    transaction.commit();
+                try {
+                    try (Transaction transaction = database.beginTx()) {
+                        transaction
+                                .schema()
+                                .indexFor(Label.label("label10"))
+                                .on("property")
+                                .create();
+                        transaction.commit();
+                    }
+                    startSignal.countDown();
+
+                    try (Transaction transaction = database.beginTx()) {
+                        transaction.schema().awaitIndexesOnline(populatorCount, TimeUnit.MINUTES);
+                        transaction.commit();
+                    }
+                } finally {
+                    endSignal.set(true);
+                    executor.shutdown();
+                    // Basically we don't care to await their completion because they've done their job
                 }
-            } finally {
-                endSignal.set(true);
-                executor.shutdown();
-                // Basically we don't care to await their completion because they've done their job
             }
         } finally {
             DatabaseLayout databaseLayout = database.databaseLayout();
@@ -124,7 +129,10 @@ class ConcurrentUpdateIT {
 
         @Override
         public void run() {
-            RandomValues randomValues = RandomValues.create();
+            RandomValues randomValues = RandomValues.create(
+                    RandomValuesUtils.selectStorageEngineDependentConfigurationBuilder(databaseService)
+                            .maxVectorNumBytes(RandomValues.MAX_NUM_BYTES_IN_INDEX_KEY)
+                            .build());
             awaitLatch(startSignal);
             while (!endSignal.get()) {
                 try (Transaction transaction = databaseService.beginTx()) {

@@ -40,16 +40,17 @@ import org.junit.jupiter.api.Test;
 import org.neo4j.internal.kernel.api.exceptions.schema.MalformedSchemaRuleException;
 import org.neo4j.internal.recordstorage.RandomSchema;
 import org.neo4j.internal.schema.ConstraintDescriptor;
-import org.neo4j.internal.schema.FulltextSchemaDescriptor;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexProviderDescriptor;
 import org.neo4j.internal.schema.LabelSchemaDescriptor;
 import org.neo4j.internal.schema.RelationTypeSchemaDescriptor;
 import org.neo4j.internal.schema.SchemaDescriptors;
 import org.neo4j.internal.schema.SchemaRule;
+import org.neo4j.internal.schema.SemanticSearchSchemaDescriptor;
 import org.neo4j.internal.schema.constraints.ConstraintDescriptorFactory;
 import org.neo4j.internal.schema.constraints.PropertyTypeSet;
 import org.neo4j.internal.schema.constraints.SchemaValueType;
+import org.neo4j.internal.schema.constraints.VectorType;
 import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.Values;
 
@@ -58,10 +59,10 @@ class SchemaStoreMapificationTest {
 
     private final LabelSchemaDescriptor labelSchema = SchemaDescriptors.forLabel(1, 2, 3);
     private final RelationTypeSchemaDescriptor relTypeSchema = SchemaDescriptors.forRelType(1, 2, 3);
-    private final FulltextSchemaDescriptor fulltextNodeSchema =
-            SchemaDescriptors.fulltext(NODE, new int[] {1, 2}, new int[] {1, 2});
-    private final FulltextSchemaDescriptor fulltextRelSchema =
-            SchemaDescriptors.fulltext(RELATIONSHIP, new int[] {1, 2}, new int[] {1, 2});
+    private final SemanticSearchSchemaDescriptor fulltextNodeSchema =
+            SchemaDescriptors.forSemanticSearch(NODE, new int[] {1, 2}, new int[] {1, 2});
+    private final SemanticSearchSchemaDescriptor fulltextRelSchema =
+            SchemaDescriptors.forSemanticSearch(RELATIONSHIP, new int[] {1, 2}, new int[] {1, 2});
     private final IndexProviderDescriptor tree = new IndexProviderDescriptor("range", "1.0");
     private final IndexProviderDescriptor fts = new IndexProviderDescriptor("fulltext", "1.0");
     private final IndexDescriptor labelIndex =
@@ -119,13 +120,22 @@ class SchemaStoreMapificationTest {
             .withId(1);
     private final ConstraintDescriptor nodeTypeConstraintSingleScalarType = ConstraintDescriptorFactory.typeForSchema(
                     labelSchema, PropertyTypeSet.of(SchemaValueType.BOOLEAN), false)
-            .withName("nodeTypeConstrainSingleScalarType")
+            .withName("nodeTypeConstraintSingleScalarType")
             .withId(1);
     private final ConstraintDescriptor relTypeConstraintSeveralTypes = ConstraintDescriptorFactory.typeForSchema(
                     relTypeSchema,
                     PropertyTypeSet.of(SchemaValueType.BOOLEAN, SchemaValueType.LOCAL_DATETIME, SchemaValueType.FLOAT),
                     false)
             .withName("relTypeConstrainSeveralTypes")
+            .withId(1);
+
+    private final ConstraintDescriptor labelTypeConstraintWithVector = ConstraintDescriptorFactory.typeForSchema(
+                    labelSchema, PropertyTypeSet.of(SchemaValueType.BOOLEAN, VectorType.int8Vector(7)), false)
+            .withName("labelTypeConstrainWithVector")
+            .withId(1);
+    private final ConstraintDescriptor relTypeConstraintWithVector = ConstraintDescriptorFactory.typeForSchema(
+                    relTypeSchema, PropertyTypeSet.of(SchemaValueType.BOOLEAN, VectorType.int8Vector(7)), false)
+            .withName("relTypeConstrainWithVector")
             .withId(1);
 
     @RepeatedTest(500)
@@ -501,5 +511,41 @@ class SchemaStoreMapificationTest {
         mapified.put("__org.neo4j.SchemaRule.propertyType", Values.stringArray("BOOLEAN", "LOCAL_DATETIME", "FLOAT"));
 
         assertThat(unmapifySchemaRule(1, mapified)).isEqualTo(relTypeConstraintSeveralTypes);
+    }
+
+    @Test
+    void propTypeLabelTypeConstraintDeterministicUnmapificationWithVector() throws Exception {
+        Map<String, Value> mapified = new HashMap<>();
+
+        mapified.put("__org.neo4j.SchemaRule.schemaEntityType", Values.stringValue("NODE"));
+        mapified.put("__org.neo4j.SchemaRule.name", Values.stringValue("labelTypeConstrainWithVector"));
+        mapified.put("__org.neo4j.SchemaRule.schemaPropertySchemaType", Values.stringValue("COMPLETE_ALL_TOKENS"));
+        mapified.put("__org.neo4j.SchemaRule.schemaPropertyIds", Values.intArray(new int[] {2, 3}));
+        mapified.put("__org.neo4j.SchemaRule.schemaRuleType", Values.stringValue("CONSTRAINT"));
+        mapified.put("__org.neo4j.SchemaRule.constraintRuleType", Values.stringValue("PROPERTY_TYPE"));
+        mapified.put("__org.neo4j.SchemaRule.schemaEntityIds", Values.intArray(new int[] {1}));
+        mapified.put(
+                "__org.neo4j.SchemaRule.propertyType",
+                Values.stringArray("BOOLEAN", "VECTOR[coordinate=INTEGER8, dimensions=7]"));
+
+        assertThat(unmapifySchemaRule(1, mapified)).isEqualTo(labelTypeConstraintWithVector);
+    }
+
+    @Test
+    void propTypeRelTypeConstraintDeterministicUnmapificationWithVector() throws Exception {
+        Map<String, Value> mapified = new HashMap<>();
+
+        mapified.put("__org.neo4j.SchemaRule.schemaEntityType", Values.stringValue("RELATIONSHIP"));
+        mapified.put("__org.neo4j.SchemaRule.name", Values.stringValue("relTypeConstrainWithVector"));
+        mapified.put("__org.neo4j.SchemaRule.schemaPropertySchemaType", Values.stringValue("COMPLETE_ALL_TOKENS"));
+        mapified.put("__org.neo4j.SchemaRule.schemaPropertyIds", Values.intArray(new int[] {2, 3}));
+        mapified.put("__org.neo4j.SchemaRule.schemaRuleType", Values.stringValue("CONSTRAINT"));
+        mapified.put("__org.neo4j.SchemaRule.constraintRuleType", Values.stringValue("PROPERTY_TYPE"));
+        mapified.put("__org.neo4j.SchemaRule.schemaEntityIds", Values.intArray(new int[] {1}));
+        mapified.put(
+                "__org.neo4j.SchemaRule.propertyType",
+                Values.stringArray("BOOLEAN", "VECTOR[coordinate=INTEGER8, dimensions=7]"));
+
+        assertThat(unmapifySchemaRule(1, mapified)).isEqualTo(relTypeConstraintWithVector);
     }
 }

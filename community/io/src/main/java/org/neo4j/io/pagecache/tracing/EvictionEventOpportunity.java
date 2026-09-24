@@ -19,6 +19,8 @@
  */
 package org.neo4j.io.pagecache.tracing;
 
+import org.neo4j.io.pagecache.tracing.async.AsyncEvictionEvent;
+
 /**
  * Interface for any event that in turn presents the opportunity to evict a page.
  */
@@ -27,4 +29,9 @@ public interface EvictionEventOpportunity {
      * Begin an eviction event.
      */
     EvictionEvent beginEviction(long cachePageId);
+
+    /**
+     * Begin asynchronous page eviction
+     */
+    AsyncEvictionEvent beginAsyncEviction(long cachePageId);
 }

@@ -32,6 +32,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Supplier;
 import org.neo4j.batchimport.api.Configuration;
@@ -78,6 +79,7 @@ public class DataImporter {
         private final LongAdder nodes = new LongAdder();
         private final LongAdder relationships = new LongAdder();
         private final LongAdder properties = new LongAdder();
+        private volatile boolean hasExternallyChosenNodeIds;
 
         public void nodesImported(long nodes) {
             this.nodes.add(nodes);
@@ -113,6 +115,14 @@ public class DataImporter {
 
         public long propertiesImported() {
             return this.properties.sum();
+        }
+
+        public void noteExternallyChosenNodeIds() {
+            hasExternallyChosenNodeIds = true;
+        }
+
+        public boolean hasExternallyChosenNodeIds() {
+            return hasExternallyChosenNodeIds;
         }
 
         @Override
@@ -182,10 +192,21 @@ public class DataImporter {
             Monitor monitor,
             CursorContextFactory contextFactory,
             MemoryTracker memoryTracker,
-            Supplier<SchemaMonitor> schemaMonitors)
+            SchemaMonitors schemaMonitors)
             throws IOException {
-        Supplier<EntityImporter> importers = () -> new NodeImporter(
-                stores, idMapper, monitor, badCollector, contextFactory, memoryTracker, schemaMonitors.get());
+        AtomicInteger nextWorkerId = new AtomicInteger();
+        Supplier<EntityImporter> importers = () -> {
+            int workerId = nextWorkerId.getAndIncrement();
+            return new NodeImporter(
+                    workerId,
+                    stores,
+                    idMapper,
+                    monitor,
+                    badCollector,
+                    contextFactory,
+                    memoryTracker,
+                    schemaMonitors.newMonitor(workerId));
+        };
         importData(
                 NODE_IMPORT_NAME,
                 configuration,
@@ -207,20 +228,25 @@ public class DataImporter {
             boolean validateRelationshipData,
             CursorContextFactory contextFactory,
             MemoryTracker memoryTracker,
-            Supplier<SchemaMonitor> schemaMonitors)
+            SchemaMonitors schemaMonitors)
             throws IOException {
         DataStatistics typeDistribution = new DataStatistics(monitor, new DataStatistics.RelationshipTypeCount[0]);
-        Supplier<EntityImporter> importers = () -> new RelationshipImporter(
-                stores,
-                idMapper,
-                typeDistribution,
-                monitor,
-                badCollector,
-                validateRelationshipData,
-                stores.usesDoubleRelationshipRecordUnits(),
-                contextFactory,
-                memoryTracker,
-                schemaMonitors.get());
+        AtomicInteger nextWorkerId = new AtomicInteger();
+        Supplier<EntityImporter> importers = () -> {
+            int workerId = nextWorkerId.getAndIncrement();
+            return new RelationshipImporter(
+                    workerId,
+                    stores,
+                    idMapper,
+                    typeDistribution,
+                    monitor,
+                    badCollector,
+                    validateRelationshipData,
+                    stores.usesDoubleRelationshipRecordUnits(),
+                    contextFactory,
+                    memoryTracker,
+                    schemaMonitors.newMonitor(workerId));
+        };
         importData(
                 RELATIONSHIP_IMPORT_NAME,
                 configuration,

@@ -23,7 +23,7 @@ import org.neo4j.cypher.internal.ast.UsingIndexHint
 import org.neo4j.cypher.internal.compiler.planner.logical.LogicalPlanningContext
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.EntityIndexSeekPlanProvider.mergeQueryExpressionsToSingleOne
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.EntityIndexSeekPlanProvider.predicatesForIndexSeek
-import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.NodeIndexLeafPlanner.NodeIndexMatch
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.leafplanner.index.NodeIndexLeafPlanner.NodeIndexMatch
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.LabelToken
 import org.neo4j.cypher.internal.expressions.LogicalVariable
@@ -71,12 +71,12 @@ abstract class AbstractNodeIndexSeekPlanProvider extends NodeIndexPlanProvider {
         queryGraph
       )
 
-    if (predicateSet.propertyPredicates.forall(_.isExists)) {
+    if (predicateSet.propertyPredicates.forall(_.indexCompatiblePredicate.isExists)) {
       None
     } else {
 
       val queryExpression: QueryExpression[Expression] =
-        mergeQueryExpressionsToSingleOne(predicateSet.propertyPredicates)
+        mergeQueryExpressionsToSingleOne(predicateSet.propertyPredicates.map(_.indexCompatiblePredicate))
 
       val properties = predicateSet.indexedProperties(context)
 

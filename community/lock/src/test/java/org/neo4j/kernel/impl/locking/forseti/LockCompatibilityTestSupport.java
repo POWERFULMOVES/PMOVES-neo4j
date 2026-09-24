@@ -19,20 +19,22 @@
  */
 package org.neo4j.kernel.impl.locking.forseti;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.LongAdder;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.neo4j.configuration.Config;
 import org.neo4j.kernel.impl.api.LeaseService.NoLeaseClient;
 import org.neo4j.kernel.impl.locking.LockManager;
+import org.neo4j.kernel.impl.locking.LockMonitor;
 import org.neo4j.lock.LockTracer;
 import org.neo4j.lock.ResourceType;
 import org.neo4j.memory.EmptyMemoryTracker;
@@ -60,6 +62,7 @@ public abstract class LockCompatibilityTestSupport {
 
     protected final LockingCompatibilityTest suite;
 
+    protected CompatibilityLockMonitor lockMonitor;
     protected LockManager locks;
     protected LockManager.Client clientA;
     protected LockManager.Client clientB;
@@ -73,7 +76,8 @@ public abstract class LockCompatibilityTestSupport {
 
     @BeforeEach
     public void before() {
-        locks = suite.createLockManager(Config.defaults(), Clocks.nanoClock());
+        lockMonitor = new CompatibilityLockMonitor();
+        locks = suite.createLockManager(Config.defaults(), lockMonitor, Clocks.nanoClock());
         clientA = locks.newClient();
         clientB = locks.newClient();
         clientC = locks.newClient();
@@ -117,7 +121,9 @@ public abstract class LockCompatibilityTestSupport {
             } catch (InterruptedException e) {
                 throw new IllegalStateException(e);
             }
-            assertFalse(otherThreadLock.isDone(), "Should not have acquired lock.");
+            assertThat(otherThreadLock.isDone())
+                    .as("Should not have acquired lock.")
+                    .isFalse();
             return otherThreadLock;
         }
 
@@ -163,11 +169,26 @@ public abstract class LockCompatibilityTestSupport {
     }
 
     static void assertNotWaiting(Future<Void> lock) {
-        assertDoesNotThrow(() -> lock.get(5, TimeUnit.SECONDS), "Waiting for lock timed out!");
+        assertThatCode(() -> lock.get(5, TimeUnit.SECONDS))
+                .withFailMessage("Waiting for lock timed out!")
+                .doesNotThrowAnyException();
     }
 
     void assertWaiting(LockManager.Client client, Future<Void> lock) {
-        assertThrows(TimeoutException.class, () -> lock.get(10, TimeUnit.MILLISECONDS));
-        assertDoesNotThrow(() -> clientToThreadMap.get(client).untilWaiting());
+        assertThatExceptionOfType(TimeoutException.class).isThrownBy(() -> lock.get(10, TimeUnit.MILLISECONDS));
+        assertThatCode(() -> clientToThreadMap.get(client).untilWaiting()).doesNotThrowAnyException();
+    }
+
+    static class CompatibilityLockMonitor implements LockMonitor {
+        private final LongAdder deadlockCount = new LongAdder();
+
+        public long deadlockCount() {
+            return deadlockCount.longValue();
+        }
+
+        @Override
+        public void deadlockDetected() {
+            deadlockCount.increment();
+        }
     }
 }

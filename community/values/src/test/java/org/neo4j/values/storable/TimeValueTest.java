@@ -27,7 +27,9 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.neo4j.values.storable.TimeValue.parse;
+import static org.neo4j.values.storable.TimeValue.parsePattern;
 import static org.neo4j.values.storable.TimeValue.time;
+import static org.neo4j.values.storable.Values.stringValue;
 import static org.neo4j.values.utils.AnyValueTestUtil.assertEqual;
 import static org.neo4j.values.utils.AnyValueTestUtil.assertNotEqual;
 
@@ -205,6 +207,33 @@ class TimeValueTest {
         TimeValue value2 = time(value1.temporal());
 
         assertEquals(0, value1.unsafeCompareTo(value2));
+    }
+
+    @Test
+    void shouldRoundTripTimeWithSubMinuteOffset() {
+        TimeValue original = time(0, 0, 0, 0, ZoneOffset.ofHoursMinutesSeconds(0, 1, 30));
+
+        TimeValue reparsed = parse(original.prettyPrint(), inUTC);
+        assertEqual(original, reparsed);
+    }
+
+    @Test
+    void shouldParsePatternWithLiteral() {
+        assertEquals(time(14, 30, 0, 0, UTC), parsePattern(stringValue("14:30"), stringValue("HH:mm"), inUTC));
+        assertEquals(
+                time(14, 30, 0, 0, UTC), parsePattern(stringValue("14:30 CEST"), stringValue("HH:mm 'CEST'"), inUTC));
+    }
+
+    @Test
+    void shouldNotParsePatternWhenLiteralDoesNotMatchInput() {
+        assertThrows(
+                TemporalParseException.class, () -> parsePattern(stringValue("14.30"), stringValue("HH:mm"), inUTC));
+        assertThrows(
+                TemporalParseException.class,
+                () -> parsePattern(stringValue("14:30 UTC"), stringValue("HH:mm 'CEST'"), inUTC));
+        assertThrows(
+                TemporalParseException.class,
+                () -> parsePattern(stringValue("14:30"), stringValue("HH:mm 'CEST'"), inUTC));
     }
 
     private static OffsetTime write(TimeValue value) {

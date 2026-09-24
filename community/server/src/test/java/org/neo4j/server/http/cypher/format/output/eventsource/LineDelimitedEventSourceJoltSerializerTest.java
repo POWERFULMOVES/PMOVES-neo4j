@@ -116,7 +116,8 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
 
         // then
         String result = output.toString(UTF_8);
-        assertEquals("{\"info\":{\"commit\":\"commit/uri/1\"}}\n", result);
+        assertEquals(
+                "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "],\"commit\":\"commit/uri/1\"}}\n", result);
     }
 
     @Test
@@ -128,7 +129,10 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
 
         // then
         String result = output.toString(UTF_8);
-        assertEquals("{\"info\":{\"commit\":\"commit/uri/1\",\"lastBookmarks\":[\"I AM BOOKMARK!\"]}}\n", result);
+        assertEquals(
+                "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE
+                        + "],\"commit\":\"commit/uri/1\",\"lastBookmarks\":[\"I AM BOOKMARK!\"]}}\n",
+                result);
     }
 
     @Test
@@ -139,7 +143,8 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
 
         // then
         String result = output.toString(UTF_8);
-        assertEquals("{\"info\":{\"commit\":\"commit/uri/1\"}}\n", result);
+        assertEquals(
+                "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "],\"commit\":\"commit/uri/1\"}}\n", result);
     }
 
     @Test
@@ -163,7 +168,7 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
                 "{\"header\":{\"fields\":[\"column1\",\"column2\"]}}\n"
                         + "{\"data\":[{\"U\":\"value1\"},{\"U\":\"value2\"}]}\n"
                         + "{\"summary\":{}}\n"
-                        + "{\"info\":{\"commit\":\"commit/uri/1\"}}\n",
+                        + "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "],\"commit\":\"commit/uri/1\"}}\n",
                 result);
     }
 
@@ -186,7 +191,7 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
                 "{\"header\":{\"fields\":[\"column1\",\"column2\"]}}\n"
                         + "{\"data\":[{\"U\":\"value1\"},{\"U\":\"value2\"}]}\n"
                         + "{\"summary\":{}}\n"
-                        + "{\"info\":{}}\n",
+                        + "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "]}}\n",
                 result);
     }
 
@@ -211,7 +216,7 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
                         + "{\"data\":[{\"U\":\"value1\"},{\"U\":\"value2\"}]}\n"
                         + "{\"summary\":{}}\n"
                         + "{\"error\":{\"errors\":[{\"code\":{\"U\":\"Neo.ClientError.Request.InvalidFormat\"},\"message\":{\"U\":\"cause1\"}}]}}\n"
-                        + "{\"info\":{\"commit\":\"commit/uri/1\"}}\n",
+                        + "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "],\"commit\":\"commit/uri/1\"}}\n",
                 result);
     }
 
@@ -236,7 +241,7 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
                         + "{\"data\":[{\"U\":\"value1\"},{\"U\":\"value2\"}]}\n"
                         + "{\"summary\":{}}\n"
                         + "{\"error\":{\"errors\":[{\"code\":{\"U\":\"Neo.ClientError.Request.InvalidFormat\"},\"message\":{\"U\":\"cause1\"}}]}}\n"
-                        + "{\"info\":{}}\n",
+                        + "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "]}}\n",
                 result);
     }
 
@@ -251,7 +256,7 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
         String result = output.toString(UTF_8);
         assertEquals(
                 "{\"error\":{\"errors\":[{\"code\":{\"U\":\"Neo.ClientError.Request.InvalidFormat\"},\"message\":{\"U\":\"cause1\"}}]}}\n"
-                        + "{\"info\":{\"commit\":\"commit/uri/1\"}}\n",
+                        + "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "],\"commit\":\"commit/uri/1\"}}\n",
                 result);
     }
 
@@ -265,7 +270,7 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
         String result = output.toString(UTF_8);
         assertEquals(
                 "{\"error\":{\"errors\":[{\"code\":{\"U\":\"Neo.ClientError.Request.InvalidFormat\"},\"message\":{\"U\":\"cause1\"}}]}}\n"
-                        + "{\"info\":{}}\n",
+                        + "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "]}}\n",
                 result);
     }
 
@@ -277,7 +282,7 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
 
         // then
         String result = output.toString(UTF_8);
-        assertEquals("{\"info\":{}}\n", result);
+        assertEquals("{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "]}}\n", result);
     }
 
     @Test
@@ -305,7 +310,7 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
                         + "{\"data\":[{\"U\":\"value1\"},{\"U\":\"value2\"}]}\n"
                         + "{\"data\":[{\"U\":\"value3\"},{\"U\":\"value4\"}]}\n"
                         + "{\"summary\":{}}\n"
-                        + "{\"info\":{}}\n",
+                        + "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "]}}\n",
                 result);
     }
 
@@ -338,7 +343,7 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
                         + "{\"header\":{\"fields\":[\"column3\",\"column4\"]}}\n"
                         + "{\"data\":[{\"U\":\"value3\"},{\"U\":\"value4\"}]}\n"
                         + "{\"summary\":{}}\n"
-                        + "{\"info\":{}}\n",
+                        + "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "]}}\n",
                 result);
     }
 
@@ -368,7 +373,7 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
                         + "{\"data\":[{\"()\":[1,[],{\"a\":{\"Z\":\"12\"},\"b\":{\"?\":\"true\"},\"c\":[1,0,1,2],\"d\":{\"#\":\"01000102\"},"
                         + "\"e\":[{\"U\":\"a\"},{\"U\":\"b\"},{\"U\":\"ääö\"}]}]}]}\n"
                         + "{\"summary\":{}}\n"
-                        + "{\"info\":{}}\n",
+                        + "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "]}}\n",
                 result);
     }
 
@@ -405,19 +410,18 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
         });
 
         int numberOfRequests = 10;
-        ExecutorService executor = Executors.newCachedThreadPool();
+        try (ExecutorService executor = Executors.newCachedThreadPool()) {
 
-        List<Future<String>> calledRequests = executor.invokeAll(IntStream.range(0, numberOfRequests)
-                .boxed()
-                .map(callableProvider)
-                .collect(Collectors.toList()));
-        try {
+            List<Future<String>> calledRequests = executor.invokeAll(IntStream.range(0, numberOfRequests)
+                    .boxed()
+                    .map(callableProvider)
+                    .collect(Collectors.toList()));
             int i = 0;
             for (Future<String> request : calledRequests) {
                 var expectedResult =
                         "{\"header\":{\"fields\":[\"node\"]}}\n" + "{\"data\":[{\"()\":[1,[],{\"i\":{\"Z\":\""
                                 + i + "\"}}]}]}\n" + "{\"summary\":{}}\n"
-                                + "{\"info\":{}}\n";
+                                + "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "]}}\n";
                 try {
                     var result = request.get();
                     assertEquals(expectedResult, result);
@@ -426,8 +430,6 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
                 }
                 ++i;
             }
-        } finally {
-            executor.shutdown();
         }
     }
 
@@ -455,7 +457,7 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
                         + "{\"->\":[1,1,\"FRAZZLE\",2,{\"baz\":{\"U\":\"quux\"}}]},"
                         + "{\"()\":[2,[],{\"bar\":{\"?\":\"false\"}}]}]}}}]}\n"
                         + "{\"summary\":{}}\n"
-                        + "{\"info\":{}}\n",
+                        + "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "]}}\n",
                 result);
     }
 
@@ -483,7 +485,7 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
                         + "{\"->\":[1,1,\"RELATED\",2,{\"key2\":{\"U\":\"value2\"}}]},"
                         + "{\"()\":[2,[],{\"key3\":{\"U\":\"value3\"}}]}]}]}\n"
                         + "{\"summary\":{}}\n"
-                        + "{\"info\":{}}\n",
+                        + "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "]}}\n",
                 result);
     }
 
@@ -512,7 +514,7 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
                         + "{\"data\":[{\"@\":\"SRID=4979;POINT Z (12.3 45.6 78.9)\"}]}\n"
                         + "{\"data\":[{\"@\":\"SRID=9157;POINT Z (123.0 456.0 789.0)\"}]}\n"
                         + "{\"summary\":{}}\n"
-                        + "{\"info\":{}}\n",
+                        + "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "]}}\n",
                 result);
     }
 
@@ -549,7 +551,7 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
                         + "{\"data\":[{\"T\":\"13:02:10.00000001\"}]}\n"
                         + "{\"data\":[{\"T\":\"PT12H\"}]}\n"
                         + "{\"summary\":{}}\n"
-                        + "{\"info\":{}}\n",
+                        + "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "]}}\n",
                 result);
     }
 
@@ -579,7 +581,7 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
                         + "{\"data\":[{\"U\":\"value1\"},{\"U\":\"value2\"}]}\n"
                         + "{\"data\":[]}\n"
                         + "{\"error\":{\"errors\":[{\"code\":{\"U\":\"Neo.DatabaseError.Statement.ExecutionFailed\"},\"message\":{\"U\":\"Stuff went wrong!\"}}]}}\n"
-                        + "{\"info\":{}}\n",
+                        + "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "]}}\n",
                 result);
     }
 
@@ -748,7 +750,7 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
                         + "processing. While occasionally intended, it may often be possible to reformulate the query "
                         + "that avoids the use of this cross product, perhaps by adding a relationship between the "
                         + "different parts or by using OPTIONAL MATCH (a)\","
-                        + "\"position\":{\"offset\":1,\"line\":2,\"column\":3}}],"
+                        + "\"position\":{\"offset\":1,\"line\":2,\"column\":3}}," + DEPRECATION_NOTICE + "],"
                         + "\"commit\":\"commit/uri/1\"}}\n",
                 result);
     }
@@ -773,7 +775,7 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
                 "{\"header\":{\"fields\":[\"column1\",\"column2\"]}}\n"
                         + "{\"data\":[{\"U\":\"value1\"},{\"U\":\"value2\"}]}\n"
                         + "{\"summary\":{}}\n"
-                        + "{\"info\":{\"commit\":\"commit/uri/1\"}}\n",
+                        + "{\"info\":{\"notifications\":[" + DEPRECATION_NOTICE + "],\"commit\":\"commit/uri/1\"}}\n",
                 result);
     }
 
@@ -804,12 +806,8 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
                 "{\"header\":{\"fields\":[\"column1\",\"column2\"]}}\n"
                         + "{\"data\":[{\"U\":\"value1\"},{\"U\":\"value2\"}]}\n"
                         + "{\"summary\":{}}\n"
-                        + "{\"info\":{\"notifications\":[{\"code\":\"Neo.ClientNotification.Request.DeprecatedFormat\","
-                        + "\"severity\":\"WARNING\",\"title\":\"The client made a request for a format which has "
-                        + "been deprecated.\","
-                        + "\"description\":\"The requested format has been deprecated. ('application/vnd.neo4j.jolt' "
-                        + "and 'application/vnd.neo4j.jolt-v1' have been deprecated and will be removed in a future version. "
-                        + "Please use 'application/vnd.neo4j.jolt-v2'.)\"}],\"commit\":\"commit/uri/1\"}}\n",
+                        + "{\"info\":{\"notifications\":[" + FORMAT_DEPRECATION_NOTICE + "," + DEPRECATION_NOTICE + "],"
+                        + "\"commit\":\"commit/uri/1\"}}\n",
                 result);
     }
 
@@ -844,7 +842,7 @@ public class LineDelimitedEventSourceJoltSerializerTest extends AbstractEventSou
                         + "product between all those parts. This may produce a large amount of data and slow down query "
                         + "processing. While occasionally intended, it may often be possible to reformulate the query "
                         + "that avoids the use of this cross product, perhaps by adding a relationship between the "
-                        + "different parts or by using OPTIONAL MATCH (a)\"}],"
+                        + "different parts or by using OPTIONAL MATCH (a)\"}," + DEPRECATION_NOTICE + "],"
                         + "\"commit\":\"commit/uri/1\"}}\n",
                 result);
     }

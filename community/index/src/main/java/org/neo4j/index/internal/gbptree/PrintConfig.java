@@ -31,6 +31,7 @@ public final class PrintConfig {
     private boolean printFreelist;
     private boolean printOffload;
     private boolean printHistory;
+    private boolean visitDataLayer = true;
 
     private PrintConfig() {
         printStream = System.out;
@@ -84,6 +85,21 @@ public final class PrintConfig {
         return this;
     }
 
+    public PrintConfig printAll() {
+        this.printValues = true;
+        this.printPosition = true;
+        this.printState = true;
+        this.printHeader = true;
+        this.printFreelist = true;
+        this.printOffload = true;
+        return this;
+    }
+
+    public PrintConfig visitDataLayer(boolean visitDataLayer) {
+        this.visitDataLayer = visitDataLayer;
+        return this;
+    }
+
     PrintStream getPrintStream() {
         return printStream;
     }
@@ -114,5 +130,9 @@ public final class PrintConfig {
 
     boolean getPrintHistory() {
         return printHistory;
+    }
+
+    public boolean getVisitDataLayer() {
+        return visitDataLayer;
     }
 }

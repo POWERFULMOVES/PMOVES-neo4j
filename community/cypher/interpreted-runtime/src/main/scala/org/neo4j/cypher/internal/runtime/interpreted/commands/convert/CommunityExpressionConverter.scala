@@ -20,6 +20,7 @@
 package org.neo4j.cypher.internal.runtime.interpreted.commands.convert
 
 import org.neo4j.cypher.internal
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ast.ExistsExpression
 import org.neo4j.cypher.internal.ast.GraphDirectReference
 import org.neo4j.cypher.internal.ast.GraphFunctionReference
@@ -29,6 +30,7 @@ import org.neo4j.cypher.internal.expressions.CachedHasProperty
 import org.neo4j.cypher.internal.expressions.DesugaredMapProjection
 import org.neo4j.cypher.internal.expressions.ElementIdToLongId
 import org.neo4j.cypher.internal.expressions.Expression
+import org.neo4j.cypher.internal.expressions.IsRepeatAcyclic
 import org.neo4j.cypher.internal.expressions.IsRepeatTrailUnique
 import org.neo4j.cypher.internal.expressions.LogicalProperty
 import org.neo4j.cypher.internal.expressions.LogicalVariable
@@ -45,12 +47,23 @@ import org.neo4j.cypher.internal.expressions.functions.Atan
 import org.neo4j.cypher.internal.expressions.functions.Atan2
 import org.neo4j.cypher.internal.expressions.functions.Avg
 import org.neo4j.cypher.internal.expressions.functions.BTrim
+import org.neo4j.cypher.internal.expressions.functions.Cardinality
 import org.neo4j.cypher.internal.expressions.functions.Ceil
 import org.neo4j.cypher.internal.expressions.functions.CharacterLength
 import org.neo4j.cypher.internal.expressions.functions.Coalesce
+import org.neo4j.cypher.internal.expressions.functions.CollDistinct
+import org.neo4j.cypher.internal.expressions.functions.CollFlatten
+import org.neo4j.cypher.internal.expressions.functions.CollIndexOf
+import org.neo4j.cypher.internal.expressions.functions.CollInsert
+import org.neo4j.cypher.internal.expressions.functions.CollMax
+import org.neo4j.cypher.internal.expressions.functions.CollMin
+import org.neo4j.cypher.internal.expressions.functions.CollRemove
+import org.neo4j.cypher.internal.expressions.functions.CollSort
 import org.neo4j.cypher.internal.expressions.functions.Collect
 import org.neo4j.cypher.internal.expressions.functions.Cos
+import org.neo4j.cypher.internal.expressions.functions.Cosh
 import org.neo4j.cypher.internal.expressions.functions.Cot
+import org.neo4j.cypher.internal.expressions.functions.Coth
 import org.neo4j.cypher.internal.expressions.functions.Count
 import org.neo4j.cypher.internal.expressions.functions.Degrees
 import org.neo4j.cypher.internal.expressions.functions.Distance
@@ -60,6 +73,7 @@ import org.neo4j.cypher.internal.expressions.functions.Exists
 import org.neo4j.cypher.internal.expressions.functions.Exp
 import org.neo4j.cypher.internal.expressions.functions.File
 import org.neo4j.cypher.internal.expressions.functions.Floor
+import org.neo4j.cypher.internal.expressions.functions.Format
 import org.neo4j.cypher.internal.expressions.functions.Function
 import org.neo4j.cypher.internal.expressions.functions.GraphByElementId
 import org.neo4j.cypher.internal.expressions.functions.GraphByName
@@ -97,16 +111,21 @@ import org.neo4j.cypher.internal.expressions.functions.Right
 import org.neo4j.cypher.internal.expressions.functions.Round
 import org.neo4j.cypher.internal.expressions.functions.Sign
 import org.neo4j.cypher.internal.expressions.functions.Sin
+import org.neo4j.cypher.internal.expressions.functions.Sinh
 import org.neo4j.cypher.internal.expressions.functions.Size
 import org.neo4j.cypher.internal.expressions.functions.Split
 import org.neo4j.cypher.internal.expressions.functions.Sqrt
 import org.neo4j.cypher.internal.expressions.functions.StartNode
 import org.neo4j.cypher.internal.expressions.functions.StdDev
 import org.neo4j.cypher.internal.expressions.functions.StdDevP
+import org.neo4j.cypher.internal.expressions.functions.StringIndexOf
+import org.neo4j.cypher.internal.expressions.functions.StringJoin
+import org.neo4j.cypher.internal.expressions.functions.StringRegexReplace
 import org.neo4j.cypher.internal.expressions.functions.Substring
 import org.neo4j.cypher.internal.expressions.functions.Sum
 import org.neo4j.cypher.internal.expressions.functions.Tail
 import org.neo4j.cypher.internal.expressions.functions.Tan
+import org.neo4j.cypher.internal.expressions.functions.Tanh
 import org.neo4j.cypher.internal.expressions.functions.ToBoolean
 import org.neo4j.cypher.internal.expressions.functions.ToBooleanList
 import org.neo4j.cypher.internal.expressions.functions.ToBooleanOrNull
@@ -123,7 +142,13 @@ import org.neo4j.cypher.internal.expressions.functions.ToStringOrNull
 import org.neo4j.cypher.internal.expressions.functions.ToUpper
 import org.neo4j.cypher.internal.expressions.functions.Trim
 import org.neo4j.cypher.internal.expressions.functions.Type
+import org.neo4j.cypher.internal.expressions.functions.UUIDConstructor
+import org.neo4j.cypher.internal.expressions.functions.UUIDLeastSignificantBits
+import org.neo4j.cypher.internal.expressions.functions.UUIDMostSignificantBits
 import org.neo4j.cypher.internal.expressions.functions.ValueType
+import org.neo4j.cypher.internal.expressions.functions.VectorDimensionCount
+import org.neo4j.cypher.internal.expressions.functions.VectorDistance
+import org.neo4j.cypher.internal.expressions.functions.VectorNorm
 import org.neo4j.cypher.internal.expressions.functions.VectorSimilarityCosine
 import org.neo4j.cypher.internal.expressions.functions.VectorSimilarityEuclidean
 import org.neo4j.cypher.internal.expressions.functions.WithinBBox
@@ -136,6 +161,7 @@ import org.neo4j.cypher.internal.logical.plans.PointDistanceSeekRangeWrapper
 import org.neo4j.cypher.internal.logical.plans.PrefixSeekRangeWrapper
 import org.neo4j.cypher.internal.planner.spi.ReadTokenContext
 import org.neo4j.cypher.internal.runtime.CypherRuntimeConfiguration
+import org.neo4j.cypher.internal.runtime.QueryIndexRegistrator
 import org.neo4j.cypher.internal.runtime.SelectivityTrackerRegistrator
 import org.neo4j.cypher.internal.runtime.ast.DefaultValueLiteral
 import org.neo4j.cypher.internal.runtime.ast.ExpressionVariable
@@ -150,8 +176,14 @@ import org.neo4j.cypher.internal.runtime.interpreted.commands
 import org.neo4j.cypher.internal.runtime.interpreted.commands.convert.PatternConverters.ShortestPathsConverter
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.ConstantGraphReference
+import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Float32VectorValueConstructorFunction
+import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Float64VectorValueConstructorFunction
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.IdExpressionGraphReference
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.InequalitySeekRangeExpression
+import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Int16VectorValueConstructorFunction
+import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Int32VectorValueConstructorFunction
+import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Int64VectorValueConstructorFunction
+import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Int8VectorValueConstructorFunction
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.NameExpressionGraphReference
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.PointBoundingBoxSeekRangeExpression
 import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.PointDistanceSeekRangeExpression
@@ -165,9 +197,15 @@ import org.neo4j.cypher.internal.runtime.interpreted.pipes
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.LazyLabel
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.LazyPropertyKey
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
-import org.neo4j.cypher.internal.util.NonEmptyList
 import org.neo4j.cypher.internal.util.attribution.Id
+import org.neo4j.cypher.internal.util.symbols.Float32Type
+import org.neo4j.cypher.internal.util.symbols.FloatType
+import org.neo4j.cypher.internal.util.symbols.Integer16Type
+import org.neo4j.cypher.internal.util.symbols.Integer32Type
+import org.neo4j.cypher.internal.util.symbols.Integer8Type
+import org.neo4j.cypher.internal.util.symbols.IntegerType
 import org.neo4j.exceptions.InternalException
+import org.neo4j.graphdb.schema.IndexType
 import org.neo4j.kernel.api.impl.schema.vector.VectorSimilarity
 import org.neo4j.kernel.impl.util.ValueUtils
 import org.neo4j.values.storable.Values
@@ -179,7 +217,9 @@ case class CommunityExpressionConverter(
   tokenContext: ReadTokenContext,
   anonymousVariableNameGenerator: AnonymousVariableNameGenerator,
   selectivityTrackerRegistrator: SelectivityTrackerRegistrator,
-  runtimeConfig: CypherRuntimeConfiguration
+  runtimeConfig: CypherRuntimeConfiguration,
+  cypherVersion: CypherVersion,
+  indexRegistrator: QueryIndexRegistrator
 ) extends ExpressionConverter {
 
   override def toCommandProjection(
@@ -219,17 +259,17 @@ case class CommunityExpressionConverter(
       case e: internal.expressions.Variable               => variable(e)
       case e: ExpressionVariable                          => commands.expressions.ExpressionVariable.of(e)
       case e: internal.expressions.Or =>
-        predicates.Ors(NonEmptyList(self.toCommandPredicate(id, e.lhs), self.toCommandPredicate(id, e.rhs)))
+        predicates.Ors(Array(self.toCommandPredicate(id, e.lhs), self.toCommandPredicate(id, e.rhs)))
       case e: internal.expressions.Xor =>
         predicates.Xor(self.toCommandPredicate(id, e.lhs), self.toCommandPredicate(id, e.rhs))
       case e: internal.expressions.And =>
-        predicates.Ands(self.toCommandPredicate(id, e.lhs), self.toCommandPredicate(id, e.rhs))
+        predicates.Ands(Array(self.toCommandPredicate(id, e.lhs), self.toCommandPredicate(id, e.rhs)))
       case e: internal.expressions.Ands =>
-        predicates.Ands(NonEmptyList.from(e.exprs.map(self.toCommandPredicate(id, _))))
+        predicates.Ands.fromPredicates(e.exprs.map(self.toCommandPredicate(id, _)).toSeq)
       case e: internal.expressions.AndsReorderable =>
         val trackerIndex = selectivityTrackerRegistrator.register()
         predicates.AndsWithSelectivityTracking(e.exprs.toVector.map(self.toCommandPredicate(id, _)), trackerIndex)
-      case e: internal.expressions.Ors => predicates.Ors(NonEmptyList.from(e.exprs.map(self.toCommandPredicate(id, _))))
+      case e: internal.expressions.Ors => predicates.Ors(e.exprs.map(self.toCommandPredicate(id, _)).toArray)
       case e: internal.expressions.Not => predicates.Not(self.toCommandPredicate(id, e.rhs))
       case e: internal.expressions.Equals =>
         predicates.Equals(self.toCommandExpression(id, e.lhs), self.toCommandExpression(id, e.rhs))
@@ -250,16 +290,27 @@ case class CommunityExpressionConverter(
       case e: internal.ast.IsTyped =>
         predicates.IsTyped(self.toCommandExpression(id, e.lhs), e.typeName)
       case _: internal.ast.IsNotTyped =>
-        throw new InternalException("`IsNotTyped` should have been rewritten away")
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          "`IsNotTyped` should have been rewritten away"
+        )
       case e: internal.ast.IsNormalized =>
         predicates.IsNormalized(self.toCommandExpression(id, e.lhs), e.normalForm)
       case _: internal.ast.IsNotNormalized =>
-        throw new InternalException("`IsNotNormalized` should have been rewritten away")
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          "`IsNotNormalized` should have been rewritten away"
+        )
       case e: internal.expressions.InequalityExpression => inequalityExpression(id, e, self)
       case e: internal.expressions.Add =>
         commands.expressions.Add(self.toCommandExpression(id, e.lhs), self.toCommandExpression(id, e.rhs))
       case e: internal.expressions.Concatenate =>
         commands.expressions.Concatenate(self.toCommandExpression(id, e.lhs), self.toCommandExpression(id, e.rhs))
+      case e: internal.expressions.StringInterpolation =>
+        commands.expressions.StringInterpolation(
+          e.stringParts.map(expr => self.toCommandExpression(id, expr)),
+          e.expressions.map(expr => self.toCommandExpression(id, expr))
+        )
       case e: internal.expressions.UnaryAdd => self.toCommandExpression(id, e.rhs)
       case e: internal.expressions.Subtract => commands.expressions
           .Subtract(self.toCommandExpression(id, e.lhs), self.toCommandExpression(id, e.rhs))
@@ -274,26 +325,47 @@ case class CommunityExpressionConverter(
       case e: internal.expressions.Pow =>
         commands.expressions.Pow(self.toCommandExpression(id, e.lhs), self.toCommandExpression(id, e.rhs))
       case e: internal.expressions.FunctionInvocation => toCommandExpression(id, e.function, e, self)
-      case _: internal.expressions.CountStar          => commands.expressions.CountStar()
-      case e: internal.expressions.LogicalProperty    => toCommandProperty(id, e, self)
-      case ParameterFromSlot(offset, name, _)         => commands.expressions.ParameterFromSlot(offset, name)
-      case e: internal.expressions.CaseExpression     => caseExpression(id, e, self)
+      case e: internal.ast.VectorValueConstructor =>
+        val vectorExpression = self.toCommandExpression(id, e.vectorCandidate)
+        val dimensionExpression = self.toCommandExpression(id, e.dimension)
+        e.typeName match {
+          case _: Integer8Type =>
+            Int8VectorValueConstructorFunction(vectorExpression, dimensionExpression)
+          case _: Integer16Type =>
+            Int16VectorValueConstructorFunction(vectorExpression, dimensionExpression)
+          case _: Integer32Type =>
+            Int32VectorValueConstructorFunction(vectorExpression, dimensionExpression)
+          case _: IntegerType =>
+            Int64VectorValueConstructorFunction(vectorExpression, dimensionExpression)
+          case _: Float32Type =>
+            Float32VectorValueConstructorFunction(vectorExpression, dimensionExpression)
+          case _: FloatType =>
+            Float64VectorValueConstructorFunction(vectorExpression, dimensionExpression)
+          case x => throw InternalException.internalError(getClass.getSimpleName, s"Unexpected vector type: $x")
+        }
+      case _: internal.expressions.CountStar       => commands.expressions.CountStar()
+      case e: internal.expressions.LogicalProperty => toCommandProperty(id, e, self)
+      case ParameterFromSlot(offset, name, _)      => commands.expressions.ParameterFromSlot(offset, name)
+      case e: internal.expressions.CaseExpression  => caseExpression(id, e, self)
       case e: internal.expressions.ShortestPathExpression =>
         commands.expressions
           .ShortestPathExpression(
             e.pattern.asLegacyPatterns(id, None, self, anonymousVariableNameGenerator).head,
+            disallowSameNode = runtimeConfig.errorIfShortestPathHasCommonNodesAtRuntime,
             operatorId = id
           )
-      case e: internal.expressions.HasLabelsOrTypes   => hasLabelsOrTypes(id, e, self)
-      case e: internal.expressions.HasALabelOrType    => hasALabelOrType(id, e, self)
-      case e: internal.expressions.HasALabel          => hasALabel(id, e, self)
-      case e: internal.expressions.HasLabels          => hasLabels(id, e, self)
-      case e: internal.expressions.HasDynamicLabels   => hasDynamicLabels(id, e, self)
-      case e: internal.expressions.HasAnyLabel        => hasAnyLabel(id, e, self)
-      case e: internal.expressions.HasAnyDynamicLabel => hasAnyDynamicLabel(id, e, self)
-      case e: internal.expressions.HasTypes           => hasTypes(id, e, self)
-      case e: internal.expressions.HasDynamicType     => hasDynamicType(id, e, self)
-      case e: internal.expressions.HasAnyDynamicType  => hasAnyDynamicType(id, e, self)
+      case e: internal.expressions.HasLabelsOrTypes           => hasLabelsOrTypes(id, e, self)
+      case e: internal.expressions.HasALabelOrType            => hasALabelOrType(id, e, self)
+      case e: internal.expressions.HasALabel                  => hasALabel(id, e, self)
+      case e: internal.expressions.HasLabels                  => hasLabels(id, e, self)
+      case e: internal.expressions.HasDynamicLabels           => hasDynamicLabels(id, e, self)
+      case e: internal.expressions.HasAnyLabel                => hasAnyLabel(id, e, self)
+      case e: internal.expressions.HasAnyDynamicLabel         => hasAnyDynamicLabel(id, e, self)
+      case e: internal.expressions.HasAnyDynamicLabelsOrTypes => hasAnyDynamicLabelsOrTypes(id, e, self)
+      case e: internal.expressions.HasDynamicLabelsOrTypes    => hasDynamicLabelsOrTypes(id, e, self)
+      case e: internal.expressions.HasTypes                   => hasTypes(id, e, self)
+      case e: internal.expressions.HasDynamicType             => hasDynamicType(id, e, self)
+      case e: internal.expressions.HasAnyDynamicType          => hasAnyDynamicType(id, e, self)
 
       case e: internal.expressions.ListLiteral =>
         commands.expressions.ListLiteral(toCommandExpression(id, e.expressions, self): _*)
@@ -307,7 +379,9 @@ case class CommunityExpressionConverter(
       case e: internal.expressions.ContainerIndex => commands.expressions
           .ContainerIndex(self.toCommandExpression(id, e.expr), self.toCommandExpression(id, e.idx))
 
-      case e: internal.expressions.ListComprehension => listComprehension(id, e, self)
+      case e: internal.expressions.ListComprehension       => listComprehension(id, e, self)
+      case e: internal.expressions.MapComprehension        => mapComprehension(id, e, self)
+      case e: internal.expressions.MapEntriesComprehension => mapEntriesComprehension(id, e, self)
       case e: internal.expressions.AllIterablePredicate =>
         val ev = ExpressionVariable.cast(e.variable)
         commands.AllInList(
@@ -431,7 +505,7 @@ case class CommunityExpressionConverter(
           .AndedPropertyComparablePredicates(
             variable(e.variable),
             toCommandProperty(id, e.property, self),
-            e.inequalities.map(e => inequalityExpression(id, e, self))
+            e.inequalities.map(e => inequalityExpression(id, e, self)).toIndexedSeq.toArray
           )
       case e: DesugaredMapProjection => commands.expressions
           .DesugaredMapProjection(
@@ -458,19 +532,46 @@ case class CommunityExpressionConverter(
           commands.expressions.UserFunctionInvocation(id, signature, callArgumentCommands.toArray)
 
       case _: internal.expressions.MapProjection =>
-        throw new InternalException("`MapProjection` should have been rewritten away")
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          "`MapProjection` should have been rewritten away"
+        )
       case _: internal.expressions.PatternComprehension =>
-        throw new InternalException("`PatternComprehension` should have been rewritten away")
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          "`PatternComprehension` should have been rewritten away"
+        )
       case _: internal.expressions.PatternExpression =>
-        throw new InternalException("`PatternExpression` should have been rewritten away")
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          "`PatternExpression` should have been rewritten away"
+        )
       case _: NestedPlanExpression =>
-        throw new InternalException("`NestedPlanExpression` should have been rewritten away")
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          "`NestedPlanExpression` should have been rewritten away"
+        )
       case _: internal.expressions.Parameter =>
-        throw new InternalException("`Parameter` should have been rewritten away")
-      case _: ExistsExpression      => throw new InternalException("`ExistsExpression` should have been rewritten away")
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          "`Parameter` should have been rewritten away"
+        )
+      case _: ExistsExpression => throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          "`ExistsExpression` should have been rewritten away"
+        )
       case CoerceToPredicate(inner) => predicates.CoercedPredicate(self.toCommandExpression(id, inner))
       case e: internal.expressions.CollectAll =>
         commands.expressions.CollectAll(self.toCommandExpression(id, e.arguments.head))
+      case e: internal.expressions.CollectDistinct =>
+        commands.expressions.CollectDistinct(self.toCommandExpression(id, e.arguments.head), e.isOrdered)
+      case e: internal.expressions.CollectDistinctIds =>
+        commands.expressions.CollectDistinctIds(self.toCommandExpression(id, e.arguments.head))
+      case e: internal.expressions.CompileEntityFilter =>
+        commands.expressions.CompileEntityFilter(
+          self.toCommandExpression(id, e.arguments.head),
+          indexRegistrator.registerNamedQueryIndex(e.indexName, IndexType.VECTOR, Seq.empty, Seq.empty)
+        )
       case e: DefaultValueLiteral => commands.expressions.Literal(e.value)
       case e: RuntimeConstant =>
         commands.expressions.RuntimeConstant(
@@ -487,15 +588,18 @@ case class CommunityExpressionConverter(
         commands.expressions.ElementIdToRelationshipIdFunction(self.toCommandExpression(id, rhs))
       case ElementIdToLongId(RELATIONSHIP_TYPE, ElementIdToLongId.Mode.Many, rhs) =>
         commands.expressions.ElementIdListToRelationshipIdListFunction(self.toCommandExpression(id, rhs))
-      case _: IsRepeatTrailUnique                    => predicates.True()
-      case _: NullCheckAssert                        => commands.expressions.Literal(NO_VALUE)
-      case _: NonCompilable                          => commands.expressions.Literal(NO_VALUE)
-      case GraphDirectReference(catalogName)         => ConstantGraphReference(catalogName)
-      case GraphFunctionReference(GraphByName(name)) => NameExpressionGraphReference(self.toCommandExpression(id, name))
-      case GraphFunctionReference(GraphByElementId(elementId)) =>
+      case _: IsRepeatTrailUnique            => predicates.True()
+      case _: IsRepeatAcyclic                => predicates.True() // TODO: This correct?
+      case _: NullCheckAssert                => commands.expressions.Literal(NO_VALUE)
+      case _: NonCompilable                  => commands.expressions.Literal(NO_VALUE)
+      case GraphDirectReference(catalogName) => ConstantGraphReference(catalogName)
+      case GraphFunctionReference(GraphByName(name), parseStringGraphReferences) =>
+        NameExpressionGraphReference(self.toCommandExpression(id, name), parseStringGraphReferences)
+      case GraphFunctionReference(GraphByElementId(elementId), _) =>
         IdExpressionGraphReference(self.toCommandExpression(id, elementId))
-      case TraversalEndpoint(v, _) => variable(v)
-      case _                       => null
+      case TraversalEndpoint(v, _)                   => variable(v)
+      case _: internal.expressions.ObfuscatedLiteral => commands.expressions.Null()
+      case _                                         => null
     }
 
     Option(result)
@@ -532,6 +636,18 @@ case class CommunityExpressionConverter(
       case CharacterLength =>
         commands.expressions.CharacterLengthFunction(self.toCommandExpression(id, invocation.arguments.head))
       case Coalesce => commands.expressions.CoalesceFunction(toCommandExpression(id, invocation.arguments, self): _*)
+      case CollDistinct => commands.expressions.CollDistinctFunction(
+          self.toCommandExpression(id, invocation.arguments.head)
+        )
+      case CollRemove => commands.expressions.CollRemoveFunction(
+          self.toCommandExpression(id, invocation.arguments.head),
+          self.toCommandExpression(id, invocation.arguments(1))
+        )
+      case CollInsert => commands.expressions.CollInsertFunction(
+          self.toCommandExpression(id, invocation.arguments.head),
+          self.toCommandExpression(id, invocation.arguments(1)),
+          self.toCommandExpression(id, invocation.arguments(2))
+        )
       case Collect =>
         val inner = self.toCommandExpression(id, invocation.arguments.head)
         val command = commands.expressions.Collect(inner)
@@ -539,8 +655,11 @@ case class CommunityExpressionConverter(
           commands.expressions.Distinct(command, inner, invocation.isOrdered)
         else
           command
-      case Cos => commands.expressions.CosFunction(self.toCommandExpression(id, invocation.arguments.head))
-      case Cot => commands.expressions.CotFunction(self.toCommandExpression(id, invocation.arguments.head))
+
+      case Cos  => commands.expressions.CosFunction(self.toCommandExpression(id, invocation.arguments.head))
+      case Cosh => commands.expressions.CoshFunction(self.toCommandExpression(id, invocation.arguments.head))
+      case Cot  => commands.expressions.CotFunction(self.toCommandExpression(id, invocation.arguments.head))
+      case Coth => commands.expressions.CothFunction(self.toCommandExpression(id, invocation.arguments.head))
       case Count =>
         val inner = self.toCommandExpression(id, invocation.arguments.head)
         val command = commands.expressions.Count(inner)
@@ -554,21 +673,33 @@ case class CommunityExpressionConverter(
           .RelationshipEndPoints(self.toCommandExpression(id, invocation.arguments.head), start = false)
       case Exists =>
         invocation.arguments.head match {
-          case expression: internal.expressions.PatternExpression =>
-            self.toCommandPredicate(id, expression)
-          case expression: pipes.NestedPipeCollectExpression =>
-            self.toCommandPredicate(id, expression)
+          case patternExpression: internal.expressions.PatternExpression =>
+            self.toCommandPredicate(id, patternExpression)
+          case nestedExpression: pipes.NestedPipeCollectExpression =>
+            self.toCommandPredicate(id, nestedExpression)
           case _: NestedPlanExpression =>
-            throw new InternalException("should have been rewritten away")
+            throw InternalException.internalError(this.getClass.getSimpleName, "should have been rewritten away")
+          case x =>
+            throw InternalException.internalError(
+              this.getClass.getSimpleName,
+              s"unexpected Exists argument ${x.getClass.getSimpleName}"
+            )
         }
-      case Exp      => commands.expressions.ExpFunction(self.toCommandExpression(id, invocation.arguments.head))
-      case File     => commands.expressions.File()
-      case Floor    => commands.expressions.FloorFunction(self.toCommandExpression(id, invocation.arguments.head))
+      case Exp   => commands.expressions.ExpFunction(self.toCommandExpression(id, invocation.arguments.head))
+      case File  => commands.expressions.File()
+      case Floor => commands.expressions.FloorFunction(self.toCommandExpression(id, invocation.arguments.head))
+      case Format => if (invocation.arguments.size == 2) {
+          commands.expressions.FormatFunction(
+            self.toCommandExpression(id, invocation.arguments.head),
+            Some(self.toCommandExpression(id, invocation.arguments(1)))
+          )
+        } else {
+          commands.expressions.FormatFunction(self.toCommandExpression(id, invocation.arguments.head), None)
+        }
       case Haversin => commands.expressions.HaversinFunction(self.toCommandExpression(id, invocation.arguments.head))
       case Head =>
-        commands.expressions.ContainerIndex(
-          self.toCommandExpression(id, invocation.arguments.head),
-          commands.expressions.Literal(intValue(0))
+        commands.expressions.Head(
+          self.toCommandExpression(id, invocation.arguments.head)
         )
       case functions.Id => commands.expressions.IdFunction(self.toCommandExpression(id, invocation.arguments.head))
       case IsNaN        => commands.expressions.IsNaNFunction(self.toCommandExpression(id, invocation.arguments.head))
@@ -577,16 +708,17 @@ case class CommunityExpressionConverter(
       case Keys   => commands.expressions.KeysFunction(self.toCommandExpression(id, invocation.arguments.head))
       case Labels => commands.expressions.LabelsFunction(self.toCommandExpression(id, invocation.arguments.head))
       case Last =>
-        commands.expressions.ContainerIndex(
-          self.toCommandExpression(id, invocation.arguments.head),
-          commands.expressions.Literal(intValue(-1))
+        commands.expressions.Last(
+          self.toCommandExpression(id, invocation.arguments.head)
         )
       case Left =>
         commands.expressions.LeftFunction(
           self.toCommandExpression(id, invocation.arguments.head),
           self.toCommandExpression(id, invocation.arguments(1))
         )
-      case Length     => commands.expressions.LengthFunction(self.toCommandExpression(id, invocation.arguments.head))
+      case Length => commands.expressions.LengthFunction(self.toCommandExpression(id, invocation.arguments.head))
+      case Cardinality =>
+        commands.expressions.CardinalityFunction(self.toCommandExpression(id, invocation.arguments.head))
       case IsEmpty    => commands.expressions.IsEmptyFunction(self.toCommandExpression(id, invocation.arguments.head))
       case Linenumber => commands.expressions.Linenumber()
       case Log        => commands.expressions.LogFunction(self.toCommandExpression(id, invocation.arguments.head))
@@ -675,12 +807,22 @@ case class CommunityExpressionConverter(
         )
       case Relationships =>
         commands.expressions.RelationshipFunction(self.toCommandExpression(id, invocation.arguments.head))
-      case Replace =>
-        commands.expressions.ReplaceFunction(
-          self.toCommandExpression(id, invocation.arguments.head),
-          self.toCommandExpression(id, invocation.arguments(1)),
-          self.toCommandExpression(id, invocation.arguments(2))
-        )
+      case Replace => if (invocation.arguments.size == 3) {
+          commands.expressions.ReplaceFunction(
+            self.toCommandExpression(id, invocation.arguments.head),
+            self.toCommandExpression(id, invocation.arguments(1)),
+            self.toCommandExpression(id, invocation.arguments(2)),
+            None
+          )
+        } else {
+          commands.expressions.ReplaceFunction(
+            self.toCommandExpression(id, invocation.arguments.head),
+            self.toCommandExpression(id, invocation.arguments(1)),
+            self.toCommandExpression(id, invocation.arguments(2)),
+            Some(self.toCommandExpression(id, invocation.arguments(3)))
+          )
+
+        }
       case Reverse => commands.expressions.ReverseFunction(self.toCommandExpression(id, invocation.arguments.head))
       case Right =>
         commands.expressions.RightFunction(
@@ -707,12 +849,45 @@ case class CommunityExpressionConverter(
         )
       case Sign => commands.expressions.SignFunction(self.toCommandExpression(id, invocation.arguments.head))
       case Sin  => commands.expressions.SinFunction(self.toCommandExpression(id, invocation.arguments.head))
-      case Size => commands.expressions.SizeFunction(self.toCommandExpression(id, invocation.arguments.head))
+      case Sinh => commands.expressions.SinhFunction(self.toCommandExpression(id, invocation.arguments.head))
+      case Size =>
+        cypherVersion match {
+          case CypherVersion.Cypher5 =>
+            commands.expressions.SizeFunctionCypher5(self.toCommandExpression(id, invocation.arguments.head))
+          case CypherVersion.Cypher25 =>
+            commands.expressions.SizeFunctionCypher25(self.toCommandExpression(id, invocation.arguments.head))
+        }
       case Split =>
         commands.expressions.SplitFunction(
           self.toCommandExpression(id, invocation.arguments.head),
           self.toCommandExpression(id, invocation.arguments(1))
         )
+      case StringIndexOf =>
+        commands.expressions.StringIndexOfFunction(
+          self.toCommandExpression(id, invocation.arguments.head),
+          self.toCommandExpression(id, invocation.arguments(1))
+        )
+      case StringJoin =>
+        commands.expressions.StringJoinFunction(
+          self.toCommandExpression(id, invocation.arguments.head),
+          self.toCommandExpression(id, invocation.arguments(1))
+        )
+      case StringRegexReplace =>
+        val regexExpr = self.toCommandExpression(id, invocation.arguments(1))
+        regexExpr match {
+          case lit: commands.expressions.Literal =>
+            commands.expressions.LiteralStringRegexReplaceFunction(
+              self.toCommandExpression(id, invocation.arguments.head),
+              lit,
+              self.toCommandExpression(id, invocation.arguments(2))
+            )
+          case _ =>
+            commands.expressions.StringRegexReplaceFunction(
+              self.toCommandExpression(id, invocation.arguments.head),
+              regexExpr,
+              self.toCommandExpression(id, invocation.arguments(2))
+            )
+        }
       case Sqrt => commands.expressions.SqrtFunction(self.toCommandExpression(id, invocation.arguments.head))
       case StartNode => commands.expressions
           .RelationshipEndPoints(self.toCommandExpression(id, invocation.arguments.head), start = true)
@@ -744,12 +919,11 @@ case class CommunityExpressionConverter(
         else
           command
       case Tail =>
-        commands.expressions.ListSlice(
-          self.toCommandExpression(id, invocation.arguments.head),
-          Some(commands.expressions.Literal(intValue(1))),
-          None
+        commands.expressions.Tail(
+          self.toCommandExpression(id, invocation.arguments.head)
         )
       case Tan       => commands.expressions.TanFunction(self.toCommandExpression(id, invocation.arguments.head))
+      case Tanh      => commands.expressions.TanhFunction(self.toCommandExpression(id, invocation.arguments.head))
       case ToBoolean => commands.expressions.ToBooleanFunction(self.toCommandExpression(id, invocation.arguments.head))
       case ToBooleanList =>
         commands.expressions.ToBooleanListFunction(self.toCommandExpression(id, invocation.arguments.head))
@@ -757,20 +931,47 @@ case class CommunityExpressionConverter(
         commands.expressions.ToBooleanOrNullFunction(self.toCommandExpression(id, invocation.arguments.head))
       case ToFloat => commands.expressions.ToFloatFunction(self.toCommandExpression(id, invocation.arguments.head))
       case ToFloatList =>
-        commands.expressions.ToFloatListFunction(self.toCommandExpression(id, invocation.arguments.head))
+        cypherVersion match {
+          case CypherVersion.Cypher5 =>
+            commands.expressions.ToFloatListFunctionCypher5(self.toCommandExpression(id, invocation.arguments.head))
+          case CypherVersion.Cypher25 =>
+            commands.expressions.ToFloatListFunctionCypher25(self.toCommandExpression(id, invocation.arguments.head))
+        }
       case ToFloatOrNull =>
         commands.expressions.ToFloatOrNullFunction(self.toCommandExpression(id, invocation.arguments.head))
       case ToInteger => commands.expressions.ToIntegerFunction(self.toCommandExpression(id, invocation.arguments.head))
       case ToIntegerList =>
-        commands.expressions.ToIntegerListFunction(self.toCommandExpression(id, invocation.arguments.head))
+        cypherVersion match {
+          case CypherVersion.Cypher5 =>
+            commands.expressions.ToIntegerListFunctionCypher5(self.toCommandExpression(id, invocation.arguments.head))
+          case CypherVersion.Cypher25 =>
+            commands.expressions.ToIntegerListFunctionCypher25(self.toCommandExpression(id, invocation.arguments.head))
+        }
+
       case ToIntegerOrNull =>
         commands.expressions.ToIntegerOrNullFunction(self.toCommandExpression(id, invocation.arguments.head))
-      case ToLower  => commands.expressions.ToLowerFunction(self.toCommandExpression(id, invocation.arguments.head))
-      case ToString => commands.expressions.ToStringFunction(self.toCommandExpression(id, invocation.arguments.head))
+      case ToLower => commands.expressions.ToLowerFunction(self.toCommandExpression(id, invocation.arguments.head))
+      case ToString =>
+        cypherVersion match {
+          case CypherVersion.Cypher5 =>
+            commands.expressions.ToStringFunctionCypher5(self.toCommandExpression(id, invocation.arguments.head))
+          case _ =>
+            commands.expressions.ToStringFunctionCypher25(self.toCommandExpression(id, invocation.arguments.head))
+        }
       case ToStringList =>
-        commands.expressions.ToStringListFunction(self.toCommandExpression(id, invocation.arguments.head))
+        cypherVersion match {
+          case CypherVersion.Cypher5 =>
+            commands.expressions.ToStringListFunctionCypher5(self.toCommandExpression(id, invocation.arguments.head))
+          case _ =>
+            commands.expressions.ToStringListFunctionCypher25(self.toCommandExpression(id, invocation.arguments.head))
+        }
       case ToStringOrNull =>
-        commands.expressions.ToStringOrNullFunction(self.toCommandExpression(id, invocation.arguments.head))
+        cypherVersion match {
+          case CypherVersion.Cypher5 =>
+            commands.expressions.ToStringOrNullFunctionCypher5(self.toCommandExpression(id, invocation.arguments.head))
+          case _ =>
+            commands.expressions.ToStringOrNullFunctionCypher25(self.toCommandExpression(id, invocation.arguments.head))
+        }
       case ToUpper => commands.expressions.ToUpperFunction(self.toCommandExpression(id, invocation.arguments.head))
       case Properties =>
         commands.expressions.PropertiesFunction(self.toCommandExpression(id, invocation.arguments.head))
@@ -787,9 +988,73 @@ case class CommunityExpressionConverter(
             Some(self.toCommandExpression(id, invocation.arguments(1)))
           )
         }
+      case CollFlatten => if (invocation.arguments.size == 1) {
+          commands.expressions.CollFlattenFunction(
+            self.toCommandExpression(id, invocation.arguments.head),
+            None
+          )
+        } else {
+          commands.expressions.CollFlattenFunction(
+            self.toCommandExpression(id, invocation.arguments.head),
+            Some(self.toCommandExpression(id, invocation.arguments(1)))
+          )
+        }
+      case CollSort =>
+        commands.expressions.CollSortFunction(
+          self.toCommandExpression(id, invocation.arguments.head)
+        )
+      case CollIndexOf =>
+        commands.expressions.CollIndexOfFunction(
+          self.toCommandExpression(id, invocation.arguments.head),
+          self.toCommandExpression(id, invocation.arguments(1))
+        )
+      case CollMax =>
+        commands.expressions.CollMaxFunction(
+          self.toCommandExpression(id, invocation.arguments.head)
+        )
+      case CollMin =>
+        commands.expressions.CollMinFunction(
+          self.toCommandExpression(id, invocation.arguments.head)
+        )
       case Type =>
         commands.expressions.RelationshipTypeFunction(self.toCommandExpression(id, invocation.arguments.head))
       case ValueType => commands.expressions.ValueTypeFunction(self.toCommandExpression(id, invocation.arguments.head))
+      case VectorDimensionCount =>
+        commands.expressions.VectorDimensionCountFunction(self.toCommandExpression(id, invocation.arguments.head))
+      case UUIDConstructor => if (invocation.arguments.isEmpty) {
+          commands.expressions.UUIDConstructorFunction(
+            None,
+            None
+          )
+        } else if (invocation.arguments.size == 1) {
+          commands.expressions.UUIDConstructorFunction(
+            Some(self.toCommandExpression(id, invocation.arguments.head))
+          )
+        } else {
+          commands.expressions.UUIDConstructorFunction(
+            Some(self.toCommandExpression(id, invocation.arguments.head)),
+            Some(self.toCommandExpression(id, invocation.arguments(1)))
+          )
+        }
+      case UUIDLeastSignificantBits =>
+        commands.expressions.UUIDLeastSignificantBits(
+          self.toCommandExpression(id, invocation.arguments.head)
+        )
+      case UUIDMostSignificantBits =>
+        commands.expressions.UUIDMostSignificantBits(
+          self.toCommandExpression(id, invocation.arguments.head)
+        )
+      case VectorDistance =>
+        commands.expressions.VectorDistanceFunction(
+          self.toCommandExpression(id, invocation.arguments.head),
+          self.toCommandExpression(id, invocation.arguments(1)),
+          self.toCommandExpression(id, invocation.arguments(2))
+        )
+      case VectorNorm =>
+        commands.expressions.VectorNormFunction(
+          self.toCommandExpression(id, invocation.arguments.head),
+          self.toCommandExpression(id, invocation.arguments(1))
+        )
       case VectorSimilarityEuclidean =>
         val firstArg = self.toCommandExpression(id, invocation.arguments.head)
         val secondArg = self.toCommandExpression(id, invocation.arguments(1))
@@ -798,6 +1063,7 @@ case class CommunityExpressionConverter(
           firstArg,
           secondArg
         )
+
       case VectorSimilarityCosine =>
         val firstArg = self.toCommandExpression(id, invocation.arguments.head)
         val secondArg = self.toCommandExpression(id, invocation.arguments(1))
@@ -806,6 +1072,9 @@ case class CommunityExpressionConverter(
           firstArg,
           secondArg
         )
+
+      case x =>
+        throw InternalException.internalError(getClass.getSimpleName, s"Unexpected function '${x.name}'")
     }
 
   private def toCommandProperty(
@@ -914,7 +1183,7 @@ case class CommunityExpressionConverter(
       l =>
         predicates.HasLabelOrType(self.toCommandExpression(id, e.entityExpression), l.name): Predicate
     }
-    commands.predicates.Ands(preds: _*)
+    commands.predicates.Ands(preds.toArray)
   }
 
   private def hasLabels(id: Id, e: internal.expressions.HasLabels, self: ExpressionConverters): Predicate = {
@@ -925,7 +1194,7 @@ case class CommunityExpressionConverter(
           LazyLabel(l, tokenContext)
         ): Predicate
     }
-    commands.predicates.Ands(preds: _*)
+    commands.predicates.Ands(preds.toArray)
   }
 
   private def hasDynamicLabels(
@@ -936,6 +1205,16 @@ case class CommunityExpressionConverter(
     predicates.HasDynamicLabels(
       self.toCommandExpression(id, e.expression),
       e.labels.map(self.toCommandExpression(id, _))
+    ): Predicate
+
+  private def hasDynamicLabelsOrTypes(
+    id: Id,
+    e: internal.expressions.HasDynamicLabelsOrTypes,
+    self: ExpressionConverters
+  ): Predicate =
+    predicates.HasDynamicLabelsOrTypes(
+      self.toCommandExpression(id, e.entityExpression),
+      e.labelsOrTypes.map(self.toCommandExpression(id, _))
     ): Predicate
 
   private def hasAnyLabel(
@@ -958,6 +1237,16 @@ case class CommunityExpressionConverter(
       e.labels.map(self.toCommandExpression(id, _))
     ): Predicate
 
+  private def hasAnyDynamicLabelsOrTypes(
+    id: Id,
+    e: internal.expressions.HasAnyDynamicLabelsOrTypes,
+    self: ExpressionConverters
+  ): Predicate =
+    predicates.HasAnyDynamicLabelsOrTypes(
+      self.toCommandExpression(id, e.entityExpression),
+      e.labelsOrTypes.map(self.toCommandExpression(id, _))
+    ): Predicate
+
   private def hasTypes(id: Id, e: internal.expressions.HasTypes, self: ExpressionConverters): Predicate = {
     val preds = e.types.map {
       l =>
@@ -966,7 +1255,7 @@ case class CommunityExpressionConverter(
           commands.values.KeyToken.Unresolved(l.name, commands.values.TokenType.RelType)
         ): Predicate
     }
-    commands.predicates.Ands(preds: _*)
+    commands.predicates.Ands(preds.toArray)
   }
 
   private def hasDynamicType(
@@ -1037,6 +1326,55 @@ case class CommunityExpressionConverter(
       case None =>
         filter
     }
+  }
+
+  private def mapComprehension(
+    id: Id,
+    e: internal.expressions.MapComprehension,
+    self: ExpressionConverters
+  ): commands.expressions.Expression = {
+    val ev = ExpressionVariable.cast(e.variable)
+    val filter = e.innerPredicate match {
+      case Some(_: internal.expressions.True) | None =>
+        self.toCommandExpression(id, e.expression)
+      case Some(inner) =>
+        commands.expressions.FilterFunction(
+          self.toCommandExpression(id, e.expression),
+          ev.name,
+          ev.offset,
+          self.toCommandPredicate(id, inner)
+        )
+    }
+    commands.expressions.MapComprehensionFunction(
+      filter,
+      ev.name,
+      ev.offset,
+      self.toCommandExpression(id, e.extractKeyExpression),
+      self.toCommandExpression(id, e.extractValueExpression)
+    )
+  }
+
+  private def mapEntriesComprehension(
+    id: Id,
+    e: internal.expressions.MapEntriesComprehension,
+    self: ExpressionConverters
+  ): commands.expressions.Expression = {
+    val keyEv = ExpressionVariable.cast(e.keyVariable)
+    val valueEv = ExpressionVariable.cast(e.valueVariable)
+    val predicate = e.innerPredicate match {
+      case Some(_: internal.expressions.True) | None => None
+      case Some(inner)                               => Some(self.toCommandPredicate(id, inner))
+    }
+    commands.expressions.MapEntriesComprehensionFunction(
+      self.toCommandExpression(id, e.expression),
+      keyEv.name,
+      keyEv.offset,
+      valueEv.name,
+      valueEv.offset,
+      predicate,
+      self.toCommandExpression(id, e.extractKeyExpression),
+      self.toCommandExpression(id, e.extractValueExpression)
+    )
   }
 
   private def getPropertyKey(propertyKey: PropertyKeyName) = tokenContext.getOptPropertyKeyId(propertyKey.name) match {

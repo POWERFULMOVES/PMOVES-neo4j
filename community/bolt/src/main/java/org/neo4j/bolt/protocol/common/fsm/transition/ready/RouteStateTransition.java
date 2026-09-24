@@ -23,9 +23,10 @@ import org.neo4j.bolt.fsm.Context;
 import org.neo4j.bolt.fsm.error.StateMachineException;
 import org.neo4j.bolt.fsm.error.state.InternalStateTransitionException;
 import org.neo4j.bolt.fsm.state.StateReference;
+import org.neo4j.bolt.protocol.common.fsm.error.CapabilityViolationStateTransitionException;
 import org.neo4j.bolt.protocol.common.fsm.response.ResponseHandler;
 import org.neo4j.bolt.protocol.common.fsm.transition.SimpleImpersonationStateTransition;
-import org.neo4j.bolt.protocol.common.message.request.connection.RouteMessage;
+import org.neo4j.boltmessages.request.connection.RouteMessage;
 import org.neo4j.dbms.routing.RoutingException;
 import org.neo4j.dbms.routing.result.RoutingResultFormat;
 import org.neo4j.values.virtual.MapValue;
@@ -49,12 +50,18 @@ public final class RouteStateTransition extends SimpleImpersonationStateTransiti
     @Override
     public StateReference doProcess(Context ctx, RouteMessage message, ResponseHandler handler)
             throws StateMachineException {
+        if (ctx.connection().connector().localQueryExecutionOnly()) {
+            throw new CapabilityViolationStateTransitionException("Routing is not supported on this connector");
+        }
+
+        boolean isDefaultDatabase = false;
         var databaseName = message.getDatabaseName();
         if (databaseName == null) {
             // TODO: Since the home database may change throughout the lifetime of the
             //       connection, we will need to re-resolve the target database. Ideally we
             //       should always be aware of the target database.
             ctx.connection().resolveDefaultDatabase();
+            isDefaultDatabase = true;
             databaseName = ctx.connection().selectedDefaultDatabase();
         }
 
@@ -64,7 +71,7 @@ public final class RouteStateTransition extends SimpleImpersonationStateTransiti
             var result = ctx.connection()
                     .connector()
                     .routingService()
-                    .route(databaseName, user, message.getRequestContext());
+                    .route(databaseName, user, message.getRequestContext(), isDefaultDatabase);
 
             routingTable = RoutingResultFormat.buildMap(result);
         } catch (RoutingException ex) {

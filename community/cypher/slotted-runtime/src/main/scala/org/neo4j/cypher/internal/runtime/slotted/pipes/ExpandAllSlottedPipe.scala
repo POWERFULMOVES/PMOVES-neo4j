@@ -42,8 +42,8 @@ import org.neo4j.internal.kernel.api.helpers.RelationshipSelections
 case class ExpandAllSlottedPipe(
   source: Pipe,
   fromSlot: Slot,
-  relOffset: Int,
-  toOffset: Int,
+  relOffset: Option[Int],
+  toOffset: Option[Int],
   dir: SemanticDirection,
   types: RelationshipTypes,
   slots: SlotConfiguration
@@ -74,6 +74,7 @@ case class ExpandAllSlottedPipe(
             val read = state.query.transactionalContext.dataRead
             read.singleNode(fromNode, nodeCursor)
             if (!nodeCursor.next()) {
+              relCursor.close()
               ClosingIterator.empty
             } else {
               val selectionCursor = dir match {
@@ -85,12 +86,17 @@ case class ExpandAllSlottedPipe(
                 override protected def createOutputRow(relationship: Long, otherNode: Long): SlottedRow = {
                   val outputRow = SlottedRow(slots)
                   outputRow.copyAllFrom(inputRow)
-                  outputRow.setLongAt(relOffset, relationship)
-                  outputRow.setLongAt(toOffset, otherNode)
+                  relOffset.foreach(outputRow.setLongAt(_, relationship))
+                  toOffset.foreach(outputRow.setLongAt(_, otherNode))
                   outputRow
 
                 }
               }
+            }
+          } catch {
+            case t: Throwable => {
+              relCursor.close()
+              throw t
             }
           } finally {
             nodeCursor.close()

@@ -20,17 +20,18 @@
 package org.neo4j.kernel.impl.api.state;
 
 import static java.util.Collections.emptyList;
-import static org.neo4j.collection.diffset.TrackableDiffSets.newMutableLongDiffSets;
+import static org.neo4j.collection.diffset.TrackableDiffSets.newMutableIntDiffSets;
 import static org.neo4j.kernel.impl.api.state.RelationshipChangesForNode.createRelationshipChangesForNode;
 
+import org.apache.commons.lang3.ArrayUtils;
 import org.eclipse.collections.api.IntIterable;
 import org.eclipse.collections.api.iterator.IntIterator;
 import org.eclipse.collections.api.iterator.LongIterator;
 import org.eclipse.collections.api.set.primitive.MutableIntSet;
 import org.eclipse.collections.impl.factory.primitive.IntSets;
 import org.eclipse.collections.impl.iterator.ImmutableEmptyLongIterator;
-import org.neo4j.collection.diffset.LongDiffSets;
-import org.neo4j.collection.diffset.MutableLongDiffSets;
+import org.neo4j.collection.diffset.IntDiffSets;
+import org.neo4j.collection.diffset.MutableIntDiffSets;
 import org.neo4j.collection.factory.CollectionsFactory;
 import org.neo4j.graphdb.Direction;
 import org.neo4j.kernel.impl.api.state.RelationshipChangesForNode.DiffStrategy;
@@ -56,18 +57,8 @@ class NodeStateImpl extends EntityStateImpl implements NodeState {
         }
 
         @Override
-        public Iterable<StorageProperty> changedProperties() {
-            return emptyList();
-        }
-
-        @Override
         public IntIterable removedProperties() {
             return IntSets.immutable.empty();
-        }
-
-        @Override
-        public Iterable<StorageProperty> addedAndChangedProperties() {
-            return emptyList();
         }
 
         @Override
@@ -76,8 +67,8 @@ class NodeStateImpl extends EntityStateImpl implements NodeState {
         }
 
         @Override
-        public LongDiffSets labelDiffSets() {
-            return LongDiffSets.EMPTY;
+        public IntDiffSets labelDiffSets() {
+            return IntDiffSets.EMPTY;
         }
 
         @Override
@@ -94,6 +85,11 @@ class NodeStateImpl extends EntityStateImpl implements NodeState {
         @Override
         public boolean isPropertyChangedOrRemoved(int propertyKey) {
             return false;
+        }
+
+        @Override
+        public int[] changedOrRemovedPropertyKeys() {
+            return ArrayUtils.EMPTY_INT_ARRAY;
         }
 
         @Override
@@ -138,7 +134,7 @@ class NodeStateImpl extends EntityStateImpl implements NodeState {
     };
     private final boolean addedInThisBatch;
 
-    private MutableLongDiffSets labelDiffSets;
+    private MutableIntDiffSets labelDiffSets;
     private RelationshipChangesForNode relationshipsAdded;
     private RelationshipChangesForNode relationshipsRemoved;
     private RelationshipChangesForNode relationshipsUpdated;
@@ -157,13 +153,13 @@ class NodeStateImpl extends EntityStateImpl implements NodeState {
     }
 
     @Override
-    public LongDiffSets labelDiffSets() {
-        return labelDiffSets == null ? LongDiffSets.EMPTY : labelDiffSets;
+    public IntDiffSets labelDiffSets() {
+        return labelDiffSets == null ? IntDiffSets.EMPTY : labelDiffSets;
     }
 
-    MutableLongDiffSets getOrCreateLabelDiffSets() {
+    MutableIntDiffSets getOrCreateLabelDiffSets() {
         if (labelDiffSets == null) {
-            labelDiffSets = newMutableLongDiffSets(collectionsFactory, memoryTracker);
+            labelDiffSets = newMutableIntDiffSets(collectionsFactory, memoryTracker);
         }
         return labelDiffSets;
     }

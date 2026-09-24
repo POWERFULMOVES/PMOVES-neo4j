@@ -35,9 +35,10 @@ public final class SystemGraphReadOnlyDatabaseLookupFactory implements ReadOnlyD
         Stream<DatabaseId> getDatabaseIds(CommunityTopologyGraphDbmsModel model);
     }
 
-    public static ReadonlyDatabasesProvider DEFAULT_PROVIDER = model -> model.getAllDatabaseAccess().entrySet().stream()
-            .filter(e -> e.getValue() == TopologyGraphDbmsModel.DatabaseAccess.READ_ONLY)
-            .map(e -> e.getKey().databaseId());
+    public static final ReadonlyDatabasesProvider DEFAULT_PROVIDER =
+            model -> model.getAllDatabaseAccess().entrySet().stream()
+                    .filter(e -> e.getValue() == TopologyGraphDbmsModel.DatabaseAccess.READ_ONLY)
+                    .map(e -> e.getKey().databaseId());
 
     private final SystemDatabaseProvider systemDatabaseProvider;
     private final InternalLog log;
@@ -67,9 +68,9 @@ public final class SystemGraphReadOnlyDatabaseLookupFactory implements ReadOnlyD
                     .orElse(previous);
         } catch (Exception e) {
             log.warn(
-                    "Unable to lookup readonly databases from the system database due to error!"
-                            + " Using previous lookup %s.%nUnderlying error: %s",
-                    previous, e.getMessage());
+                    "Unable to lookup readonly databases from the system database due to error! Using previous lookup "
+                            + previous,
+                    e);
         }
 
         this.previousLookup = next;

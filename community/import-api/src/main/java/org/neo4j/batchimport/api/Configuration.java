@@ -21,8 +21,10 @@ package org.neo4j.batchimport.api;
 
 import static org.neo4j.configuration.GraphDatabaseInternalSettings.upgrade_processors;
 import static org.neo4j.configuration.ToolingMemoryCalculations.NO_MONITOR;
+import static org.neo4j.io.ByteUnit.mebiBytes;
 import static org.neo4j.util.FeatureToggles.getInteger;
 
+import java.nio.file.Path;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.ToolingMemoryCalculations;
 import org.neo4j.io.pagecache.ExternallyManagedPageCache;
@@ -33,6 +35,7 @@ import org.neo4j.io.pagecache.PageCache;
  */
 public interface Configuration {
     int DEFAULT_BATCH_SIZE = getInteger(Configuration.class, "DEFAULT_BATCH_SIZE", 10_000);
+    int DEFAULT_ENTITY_BATCH_SIZE = 500;
 
     int DEFAULT_MAX_MEMORY_PERCENT = 90;
 
@@ -41,6 +44,16 @@ public interface Configuration {
      */
     default int batchSize() {
         return DEFAULT_BATCH_SIZE;
+    }
+
+    /**
+     * @return size of batches (in number of entities) to pass around in the internal data processing.
+     * This is different from {@link #batchSize()} mostly in the sens of {@link #batchSize()} being used
+     * on a record level (and in aligned etc. format), whereas this method is used when batching full
+     * entities for processing (and in block format).
+     */
+    default int entityBatchSize() {
+        return DEFAULT_ENTITY_BATCH_SIZE;
     }
 
     /**
@@ -142,7 +155,7 @@ public interface Configuration {
      * @return index related configurations.
      */
     default IndexConfig indexConfig() {
-        return IndexConfig.DEFAULT;
+        return IndexConfig.create();
     }
 
     /**
@@ -151,6 +164,15 @@ public interface Configuration {
      */
     default boolean defragmentInternalStores() {
         return true;
+    }
+
+    /**
+     * In incremental import when identifying relationships, if multiple relationships are found
+     * then if {@code true} then all matching relationships should be updated, otherwise if {@code false}
+     * then if there are multiple matching relationships report it instead.
+     */
+    default boolean updateAllMatchingRelationships() {
+        return false;
     }
 
     /**
@@ -169,6 +191,68 @@ public interface Configuration {
      */
     default ExternallyManagedPageCache providedPageCache() {
         return null;
+    }
+
+    default Path tempDirectory(Path databaseDirectory) {
+        return databaseDirectory.resolve("temp");
+    }
+
+    /**
+     * Helps calculation of memory consumption for index population. This value is an indication of number of
+     * importers operating concurrently within the same import, each potentially having its own set of indexes to build.
+     */
+    default int indexPopulationBufferCountAmplification() {
+        return 1;
+    }
+
+    /**
+     * Enables performance monitoring instrumentation, will be a NO-OP if none of {@code
+     * instrumentationCaptureJFRs()} {@code instrumentationCaptureThreadDumps} are set to true
+     */
+    default boolean enableInstrumentation() {
+        return true;
+    }
+
+    /**
+     * Enables JFR captures when {@code ImportPerformanceInstrumentation} notices significant performance loss
+     * Setting is ignored if {@code enableInstrumentation} is {@code false}
+     */
+    default boolean instrumentationCaptureJFRs() {
+        return true;
+    }
+
+    /**
+     * Enables Thread dump captures when {@code ImportPerformanceInstrumentation} notices significant performance loss.
+     * Setting is ignored if {@code enableInstrumentation} is {@code false}
+     */
+    default boolean instrumentationCaptureThreadDumps() {
+        return false;
+    }
+
+    /**
+     * Enables JFR capture for the full duration of the import
+     */
+    default boolean captureProfile() {
+        return false;
+    }
+
+    /**
+     * If not null, provides an overridden path to put the JFRs generated from {@link #captureProfile()};
+     */
+    default Path captureProfileResultPath() {
+        return null;
+    }
+
+    /**
+     * Directory for capturing any context information for this specific import, or {@code null} if this import has
+     * no such directory.
+     */
+    default Path contextDirectory() {
+        return null;
+    }
+
+    default int intermediaryBufferSize() {
+        return (int) mebiBytes(10);
     }
 
     Configuration DEFAULT = new Configuration() {};
@@ -219,6 +303,11 @@ public interface Configuration {
         }
 
         @Override
+        public int entityBatchSize() {
+            return defaults.entityBatchSize();
+        }
+
+        @Override
         public int maxNumberOfWorkerThreads() {
             Integer upgradeProcessors = config.get(upgrade_processors);
             if (upgradeProcessors == 0) {
@@ -258,6 +347,11 @@ public interface Configuration {
         }
 
         @Override
+        public boolean updateAllMatchingRelationships() {
+            return defaults.updateAllMatchingRelationships();
+        }
+
+        @Override
         public ExternallyManagedPageCache providedPageCache() {
             return defaults.providedPageCache();
         }
@@ -265,6 +359,61 @@ public interface Configuration {
         @Override
         public IndexConfig indexConfig() {
             return defaults.indexConfig();
+        }
+
+        @Override
+        public Path tempDirectory(Path databaseDirectory) {
+            return defaults.tempDirectory(databaseDirectory);
+        }
+
+        @Override
+        public int maxQueueSize() {
+            return defaults.maxQueueSize();
+        }
+
+        @Override
+        public boolean strictNodeCheck() {
+            return defaults.strictNodeCheck();
+        }
+
+        @Override
+        public int indexPopulationBufferCountAmplification() {
+            return defaults.indexPopulationBufferCountAmplification();
+        }
+
+        @Override
+        public boolean enableInstrumentation() {
+            return defaults.enableInstrumentation();
+        }
+
+        @Override
+        public boolean instrumentationCaptureJFRs() {
+            return defaults.instrumentationCaptureJFRs();
+        }
+
+        @Override
+        public boolean instrumentationCaptureThreadDumps() {
+            return defaults.instrumentationCaptureThreadDumps();
+        }
+
+        @Override
+        public boolean captureProfile() {
+            return defaults.captureProfile();
+        }
+
+        @Override
+        public Path captureProfileResultPath() {
+            return defaults.captureProfileResultPath();
+        }
+
+        @Override
+        public Path contextDirectory() {
+            return defaults.contextDirectory();
+        }
+
+        @Override
+        public int intermediaryBufferSize() {
+            return defaults.intermediaryBufferSize();
         }
     }
 

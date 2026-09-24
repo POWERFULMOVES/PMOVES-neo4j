@@ -20,7 +20,7 @@ import org.neo4j.cypher.internal.util.InputPosition
 
 case class NothingType()(val position: InputPosition) extends CypherType {
   val parentType: CypherType = this
-  override val toString = "Nothing"
+  override val toClassString = "Nothing"
   override val toCypherTypeString = "NOTHING"
 
   override def sortOrder: Int = CypherTypeOrder.NOTHING.id
@@ -29,20 +29,20 @@ case class NothingType()(val position: InputPosition) extends CypherType {
   override def isNullable: Boolean = false
   override def description: String = toCypherTypeString
 
-  override def withIsNullable(isNullable: Boolean): CypherType = this
+  override def withIsNullable(isNullable: Boolean): CypherType = if (isNullable) NullType()(position) else this
 
   override def isSubtypeOf(otherCypherType: CypherType): Boolean = true
 
   def withPosition(newPosition: InputPosition): CypherType = this.copy()(position = newPosition)
 
   // NOTHING should not be used in general areas of Cypher, intended for use in surface based areas e.g. Type Predicate Expressions
-  override lazy val covariant: TypeSpec =
+  override def covariant: TypeSpec =
     throw new UnsupportedOperationException("NOTHING type is not supported for use in this context")
 
-  override lazy val invariant: TypeSpec =
+  override def invariant: TypeSpec =
     throw new UnsupportedOperationException("NOTHING type is not supported for use in this context")
 
-  override lazy val contravariant: TypeSpec =
+  override def contravariant: TypeSpec =
     throw new UnsupportedOperationException("NOTHING type is not supported for use in this context")
 
   override def leastUpperBound(other: CypherType): CypherType =

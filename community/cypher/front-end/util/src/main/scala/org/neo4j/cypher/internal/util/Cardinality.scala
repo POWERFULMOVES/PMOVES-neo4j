@@ -46,8 +46,10 @@ object Cardinality {
 
   val EMPTY: Cardinality = Cardinality(0)
   val SINGLE: Cardinality = Cardinality(1)
+  val INFINITY: Cardinality = Cardinality(Double.PositiveInfinity)
 
   implicit def lift(amount: Double): Cardinality = Cardinality(amount)
+  implicit def int2Cardinality(amount: Int): Cardinality = Cardinality(amount)
 
   private def noInf(value: Double) = if (value == Double.PositiveInfinity) Double.MaxValue else value
 
@@ -99,7 +101,7 @@ case class Cost(gummyBears: Double) extends Ordered[Cost] {
   def *(other: Multiplier): Cost = gummyBears * other.coefficient
   def +(other: CostPerRow): CostPerRow = other.cost * gummyBears
   def compare(that: Cost): Int = gummyBears.compare(that.gummyBears)
-  def unary_-(): Cost = Cost(-gummyBears)
+  def unary_- : Cost = Cost(-gummyBears)
 }
 
 object Cost {
@@ -136,6 +138,7 @@ object Multiplier {
   val ONE = Multiplier(1.0d)
 
   implicit def lift(amount: Double): Multiplier = Multiplier(amount)
+  implicit def int2Multiplier(amount: Int): Multiplier = Multiplier(amount)
 
   def min(l: Multiplier, r: Multiplier): Multiplier =
     Multiplier(Math.min(l.coefficient, r.coefficient))

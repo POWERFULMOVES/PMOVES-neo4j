@@ -19,19 +19,12 @@
  */
 package org.neo4j.io.layout;
 
-import static org.neo4j.io.layout.DatabaseFile.ID_FILE_SUFFIX;
-
-import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
-import java.util.function.Predicate;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
-import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.fs.FileUtils;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.kernel.database.NormalizedDatabaseName;
 
 /**
@@ -45,7 +38,8 @@ import org.neo4j.kernel.database.NormalizedDatabaseName;
  */
 public class PlainDatabaseLayout implements DatabaseLayout {
     private static final String DATABASE_LOCK_FILENAME = "database_lock";
-    private static final String BACKUP_TOOLS_FOLDER = "tools";
+    private static final String VECTOR_SUB_DIRECTORY = "vector";
+    private static final String BACKUP_TOOLS_DIRECTORY = "tools";
     private static final String QUARANTINE_MARKER_FILENAME = "quarantine_marker";
 
     private final Path databaseDirectory;
@@ -53,7 +47,7 @@ public class PlainDatabaseLayout implements DatabaseLayout {
     private final String databaseName;
 
     protected PlainDatabaseLayout(Neo4jLayout neo4jLayout, String databaseName) {
-        var normalizedName = new NormalizedDatabaseName(databaseName).name();
+        var normalizedName = NormalizedDatabaseName.normalize(databaseName);
         this.neo4jLayout = neo4jLayout;
         this.databaseDirectory =
                 FileUtils.getCanonicalFile(neo4jLayout.databasesDirectory().resolve(normalizedName));
@@ -96,17 +90,27 @@ public class PlainDatabaseLayout implements DatabaseLayout {
     }
 
     @Override
-    public Path backupToolsFolder() {
-        return databaseDirectory().resolve(BACKUP_TOOLS_FOLDER);
+    public Path backupToolsDirectory() {
+        return databaseDirectory().resolve(BACKUP_TOOLS_DIRECTORY);
     }
 
     @Override
-    public Path metadataStore() {
+    public Path vectorStoresDirectory() {
+        return databaseDirectory().resolve(VECTOR_SUB_DIRECTORY);
+    }
+
+    @Override
+    public StoreFile metadataStore() {
         throw new IllegalStateException("Can not get the metadata store for a PlainDatabaseLayout.");
     }
 
     @Override
-    public Path indexStatisticsStore() {
+    public Path segmentsMetadata() {
+        throw new UnsupportedOperationException("Segments metadata is not available on plain layout.");
+    }
+
+    @Override
+    public StoreFile indexStatisticsStore() {
         throw new IllegalStateException("Can not get the metadata store for a PlainDatabaseLayout.");
     }
 
@@ -116,70 +120,34 @@ public class PlainDatabaseLayout implements DatabaseLayout {
     }
 
     @Override
-    public Path pathForStore(CommonDatabaseStores store) {
+    public StoreFile pathForStore(CommonDatabaseStores store) {
         throw new IllegalStateException(
                 "Can not get the path for the %s store from a PlainDatabaseLayout.".formatted(store.name()));
     }
 
     @Override
-    public Set<Path> idFiles() {
-        return databaseFiles()
-                .filter(DatabaseFile::hasIdFile)
-                .flatMap(value -> idFile(value).stream())
-                .collect(Collectors.toUnmodifiableSet());
-    }
-
-    @Override
-    public Set<Path> storeFiles() {
-        return databaseFiles().map(this::file).collect(Collectors.toUnmodifiableSet());
-    }
-
-    /**
-     * @return the store files required to be present for a database to be able to be recovered
-     */
-    @Override
-    public Set<Path> mandatoryStoreFiles() {
-        return databaseFiles()
-                .filter(Predicate.not(this::isRecoverableStore))
-                .map(this::file)
-                .collect(Collectors.toUnmodifiableSet());
-    }
-
-    protected Stream<? extends DatabaseFile> databaseFiles() {
-        throw new IllegalStateException("Can not access the database files from a PlainDatabaseLayout.");
-    }
-
-    @Override
-    public Optional<Path> idFile(DatabaseFile file) {
+    public Optional<StoreFile> idFile(DatabaseFile file) {
         return file.hasIdFile() ? Optional.of(idFile(file.getName())) : Optional.empty();
     }
 
     @Override
-    public Path file(String fileName) {
-        return databaseDirectory.resolve(fileName);
+    public StoreFile file(String name) {
+        return new StoreFile(databaseDirectory.resolve(name));
     }
 
     @Override
-    public Path file(DatabaseFile databaseFile) {
+    public Path path(String name) {
+        return databaseDirectory.resolve(name);
+    }
+
+    @Override
+    public StoreFile file(DatabaseFile databaseFile) {
         return file(databaseFile.getName());
     }
 
     @Override
-    public Stream<Path> allFiles(DatabaseFile databaseFile) {
+    public Stream<StoreFile> allFiles(DatabaseFile databaseFile) {
         return Stream.concat(idFile(databaseFile).stream(), Stream.of(file(databaseFile)));
-    }
-
-    @Override
-    public Path[] listDatabaseFiles(FileSystemAbstraction fs, Predicate<? super Path> filter) {
-        try {
-            return fs.listFiles(databaseDirectory, filter::test);
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
-    }
-
-    protected Path idFile(String name) {
-        return file(idFileName(name));
     }
 
     protected boolean isRecoverableStore(DatabaseFile file) {
@@ -188,8 +156,12 @@ public class PlainDatabaseLayout implements DatabaseLayout {
                         .formatted(file.getName()));
     }
 
-    private static String idFileName(String storeName) {
-        return storeName + ID_FILE_SUFFIX;
+    private StoreFile idFile(String name) {
+        return file(idFileName(name));
+    }
+
+    protected String idFileName(String name) {
+        return name + DatabaseFile.ID_FILE_SUFFIX;
     }
 
     @Override

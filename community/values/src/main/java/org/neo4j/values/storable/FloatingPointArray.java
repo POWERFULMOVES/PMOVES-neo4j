@@ -21,9 +21,11 @@ package org.neo4j.values.storable;
 
 import org.neo4j.hashing.HashFunction;
 
-public abstract class FloatingPointArray extends NumberArray {
+public abstract sealed class FloatingPointArray extends NumberArray permits FloatArray, DoubleArray {
+    @Override
     public abstract float floatValue(int offset);
 
+    @Override
     public abstract double doubleValue(int offset);
 
     @Override
@@ -37,11 +39,6 @@ public abstract class FloatingPointArray extends NumberArray {
     @Override
     public int compareTo(FloatingPointArray other) {
         return NumberValues.compareFloatArrays(this, other);
-    }
-
-    @Override
-    public NumberType numberType() {
-        return NumberType.FLOATING_POINT;
     }
 
     @Override

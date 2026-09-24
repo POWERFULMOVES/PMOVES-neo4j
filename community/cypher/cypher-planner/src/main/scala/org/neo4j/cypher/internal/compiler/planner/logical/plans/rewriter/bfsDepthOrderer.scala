@@ -35,6 +35,8 @@ import org.neo4j.cypher.internal.logical.plans.PartialSort
 import org.neo4j.cypher.internal.logical.plans.PartialTop
 import org.neo4j.cypher.internal.logical.plans.Projection
 import org.neo4j.cypher.internal.logical.plans.PruningVarExpand
+import org.neo4j.cypher.internal.logical.plans.RemoteBatchProperties
+import org.neo4j.cypher.internal.logical.plans.RemoteBatchPropertiesWithFilter
 import org.neo4j.cypher.internal.logical.plans.Selection
 import org.neo4j.cypher.internal.logical.plans.Sort
 import org.neo4j.cypher.internal.logical.plans.Top
@@ -114,7 +116,9 @@ case object bfsDepthOrderer extends Rewriter {
         case _: Selection |
           _: Eager |
           _: Optional |
-          _: CacheProperties =>
+          _: CacheProperties |
+          _: RemoteBatchProperties |
+          _: RemoteBatchPropertiesWithFilter =>
           sortHorizon
 
         case _: Argument |
@@ -122,7 +126,7 @@ case object bfsDepthOrderer extends Rewriter {
           _: UndirectedRelationshipUniqueIndexSeek |
           _: NodeUniqueIndexSeek =>
           sortHorizon.lastCardinalityIncreasingPlan match {
-            case Some(BFSPruningVarExpand(_, _, _, _, _, _, _, Some(depthName), _, _, _)) =>
+            case Some(BFSPruningVarExpand(_, _, _, _, _, _, _, Some(depthName), _, _, _, _)) =>
               recordSortPlanForRewriting(sortHorizon, depthName.name)
             case _ => // do nothing
           }

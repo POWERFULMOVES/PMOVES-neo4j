@@ -31,7 +31,7 @@ import java.nio.file.Path;
 import java.security.PrivateKey;
 import java.security.cert.X509Certificate;
 import java.util.Date;
-import java.util.Map;
+import java.util.EnumSet;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -48,21 +48,27 @@ import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.operator.DigestCalculatorProvider;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.bouncycastle.operator.jcajce.JcaDigestCalculatorProviderBuilder;
+import org.eclipse.jetty.ee8.servlet.ServletContextHandler;
+import org.eclipse.jetty.http.UriCompliance;
+import org.eclipse.jetty.server.Connector;
+import org.eclipse.jetty.server.HttpConfiguration;
+import org.eclipse.jetty.server.HttpConnectionFactory;
 import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.servlet.ServletHandler;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.TestInstance;
+import org.neo4j.bolt.protocol.common.connector.transport.NioConnectorTransport;
 import org.neo4j.bolt.test.annotation.BoltTestExtension;
 import org.neo4j.bolt.test.annotation.connection.transport.IncludeTransport;
 import org.neo4j.bolt.test.annotation.setup.SettingsFunction;
 import org.neo4j.bolt.test.annotation.test.TransportTest;
+import org.neo4j.bolt.test.connection.setup.SettingBuilder;
 import org.neo4j.bolt.testing.client.CertConfiguredSecureSocketConnection;
 import org.neo4j.bolt.testing.client.TransportType;
+import org.neo4j.bolt.testing.messages.BoltWire;
 import org.neo4j.bolt.transport.Neo4jWithSocketExtension;
 import org.neo4j.configuration.connectors.CommonConnectorConfig;
 import org.neo4j.configuration.ssl.SslPolicyConfig;
-import org.neo4j.graphdb.config.Setting;
 import org.neo4j.io.fs.DefaultFileSystemAbstraction;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.pki.PkiUtils;
@@ -117,7 +123,7 @@ class OcspStaplingIT {
                 bouncyCastleProvider);
 
         var certificates = PkiUtils.loadCertificates(fileSystem, rootCertFile);
-        assertThat(certificates.length).isEqualTo(1);
+        assertThat(certificates.length).isOne();
 
         this.certificate = certificates[0];
     }
@@ -139,13 +145,13 @@ class OcspStaplingIT {
     }
 
     @SettingsFunction
-    void customizeSettings(Map<Setting<?>, Object> settings) {
+    void customizeSettings(SettingBuilder settings) {
         var policy = SslPolicyConfig.forScope(BOLT);
-        settings.put(policy.enabled, true);
-        settings.put(policy.public_certificate, endUserCertFile.toAbsolutePath());
-        settings.put(policy.private_key, endUserKeyFile.toAbsolutePath());
 
-        settings.put(CommonConnectorConfig.ocsp_stapling_enabled, true);
+        settings.set(policy.enabled, true)
+                .set(policy.public_certificate, endUserCertFile.toAbsolutePath())
+                .set(policy.private_key, endUserKeyFile.toAbsolutePath())
+                .set(CommonConnectorConfig.ocsp_stapling_enabled, true);
     }
 
     @TransportTest
@@ -153,7 +159,8 @@ class OcspStaplingIT {
     void shouldReturnCertificatesWithStapledOcspResponses(SocketAddress address) throws Exception {
         var inetSocketAddress = (InetSocketAddress) address;
 
-        try (var connection = new CertConfiguredSecureSocketConnection(inetSocketAddress, this.certificate)) {
+        try (var connection = new CertConfiguredSecureSocketConnection(
+                new NioConnectorTransport(), BoltWire.latest(), inetSocketAddress, this.certificate)) {
             connection.connect().sendDefaultProtocolVersion();
 
             var certificatesSeen = connection.getServerCertificatesSeen();
@@ -165,25 +172,40 @@ class OcspStaplingIT {
 
             var ocspResponsesSeen = connection.getSeenOcspResponses();
 
-            assertThat(ocspResponsesSeen).hasSize(2).allSatisfy(response -> assertThat(response.getResponses()[0])
-                    .satisfies(res -> {
-                        // checking all responses come back OK ( null means the certificate hasn't been revoked! )
-                        assertThat(res.getCertStatus()).isNull();
+            assertThat(ocspResponsesSeen)
+                    .hasSize(2)
+                    .allSatisfy(response -> assertThat(response.getResponses()[0])
+                            .satisfies(res -> {
+                                // checking all responses come back OK ( null means the certificate hasn't been revoked!
+                                // )
+                                assertThat(res.getCertStatus()).isNull();
 
-                        // responses match the certificates seen
-                        assertThat(res.getCertID().getSerialNumber()).isIn(certificateSerialNumbersSeen);
-                    }));
+                                // responses match the certificates seen
+                                assertThat(res.getCertID().getSerialNumber()).isIn(certificateSerialNumbersSeen);
+                            }));
         }
     }
 
     private static Server startMockOCSPResponder() throws Exception {
         var jettyServer = new Server(0);
-        var handler = new ServletHandler();
+
+        // We need this prevent issues with the stricter URI matching in Jetty 12
+        for (Connector connector : jettyServer.getConnectors()) {
+            HttpConnectionFactory httpConnectionFactory = connector.getConnectionFactory(HttpConnectionFactory.class);
+            if (httpConnectionFactory != null) {
+                HttpConfiguration httpConfiguration = httpConnectionFactory.getHttpConfiguration();
+                httpConfiguration.setUriCompliance(
+                        UriCompliance.from(EnumSet.of(UriCompliance.Violation.AMBIGUOUS_PATH_SEPARATOR)));
+            }
+        }
+
+        var handler = new ServletContextHandler();
         jettyServer.setHandler(handler);
 
         jettyServer.setDumpBeforeStop(true);
-        handler.addServletWithMapping(EndUserOcspResponderServlet.class, "/endUserCA/*");
-        handler.addServletWithMapping(IntOcspResponderServlet.class, "/intCA/*");
+
+        handler.addServlet(EndUserOcspResponderServlet.class, "/endUserCA/*");
+        handler.addServlet(IntOcspResponderServlet.class, "/intCA/*");
         jettyServer.start();
 
         return jettyServer;

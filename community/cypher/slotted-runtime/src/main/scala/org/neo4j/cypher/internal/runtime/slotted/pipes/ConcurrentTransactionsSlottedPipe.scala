@@ -19,7 +19,7 @@
  */
 package org.neo4j.cypher.internal.runtime.slotted.pipes
 
-import org.neo4j.cypher.internal.ast.SubqueryCall.InTransactionsOnErrorBehaviour
+import org.neo4j.cypher.internal.logical.plans.TransactionalPlan.RecoveryMode
 import org.neo4j.cypher.internal.physicalplanning.LongSlot
 import org.neo4j.cypher.internal.physicalplanning.RefSlot
 import org.neo4j.cypher.internal.physicalplanning.Slot
@@ -32,8 +32,10 @@ import org.neo4j.cypher.internal.runtime.interpreted.commands.expressions.Expres
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.AbstractConcurrentTransactionsPipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.Pipe
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.QueryState
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.TransactionBatch
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.TransactionForeachPipe.toStatusMap
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.TransactionPipeWrapper
+import org.neo4j.cypher.internal.runtime.interpreted.pipes.TransactionRetryPolicy
 import org.neo4j.cypher.internal.runtime.interpreted.pipes.TransactionStatus
 import org.neo4j.cypher.internal.util.attribution.Id
 import org.neo4j.kernel.impl.util.collection.EagerBuffer
@@ -48,9 +50,19 @@ abstract class AbstractConcurrentTransactionsSlottedPipe(
   inner: Pipe,
   batchSize: Expression,
   concurrency: Option[Expression],
-  onErrorBehaviour: InTransactionsOnErrorBehaviour,
-  statusSlot: Option[Slot]
-) extends AbstractConcurrentTransactionsPipe(source, inner, batchSize, concurrency, onErrorBehaviour) {
+  recoveryMode: RecoveryMode,
+  statusSlot: Option[Slot],
+  retryPolicy: TransactionRetryPolicy,
+  disjointBy: Seq[Expression]
+) extends AbstractConcurrentTransactionsPipe(
+      source,
+      inner,
+      batchSize,
+      concurrency,
+      recoveryMode,
+      retryPolicy,
+      disjointBy
+    ) {
 
   private[this] val statusMapper = statusSlot.map(_.offset) match {
     case Some(statusOffset) => (output: runtime.ClosingIterator[CypherRow], status: TransactionStatus) => {
@@ -72,18 +84,22 @@ case class ConcurrentTransactionApplySlottedPipe(
   inner: Pipe,
   batchSize: Expression,
   concurrency: Option[Expression],
-  onErrorBehaviour: InTransactionsOnErrorBehaviour,
+  recoveryMode: RecoveryMode,
   nullableSlots: Set[Slot],
   statusSlot: Option[Slot],
-  argumentSize: SlotConfiguration.Size
+  argumentSize: SlotConfiguration.Size,
+  retryPolicy: TransactionRetryPolicy,
+  disjointBy: Seq[Expression]
 )(val id: Id = Id.INVALID_ID)
     extends AbstractConcurrentTransactionsSlottedPipe(
       source,
       inner,
       batchSize,
       concurrency,
-      onErrorBehaviour,
-      statusSlot
+      recoveryMode,
+      statusSlot,
+      retryPolicy,
+      disjointBy
     ) {
 
   private[this] val nullableLongOffsets =
@@ -104,13 +120,20 @@ case class ConcurrentTransactionApplySlottedPipe(
 
   override protected def createTask(
     innerPipe: TransactionPipeWrapper,
-    batch: EagerBuffer[CypherRow],
+    batch: TransactionBatch,
     memoryTracker: MemoryTracker,
     state: QueryState,
     outputQueue: ArrayBlockingQueue[TaskOutputResult],
     activeTaskCount: AtomicInteger
   ): Runnable = {
-    new ConcurrentTransactionApplyResultsTask(innerPipe, batch, memoryTracker, state, outputQueue, activeTaskCount)
+    new ConcurrentTransactionApplyResultsTask(
+      innerPipe,
+      batch,
+      memoryTracker,
+      state,
+      outputQueue,
+      activeTaskCount
+    )
   }
 }
 
@@ -119,16 +142,20 @@ case class ConcurrentTransactionForeachSlottedPipe(
   inner: Pipe,
   batchSize: Expression,
   concurrency: Option[Expression],
-  onErrorBehaviour: InTransactionsOnErrorBehaviour,
-  statusSlot: Option[Slot]
+  recoveryMode: RecoveryMode,
+  statusSlot: Option[Slot],
+  retryPolicy: TransactionRetryPolicy,
+  disjointBy: Seq[Expression]
 )(val id: Id = Id.INVALID_ID)
     extends AbstractConcurrentTransactionsSlottedPipe(
       source,
       inner,
       batchSize,
       concurrency,
-      onErrorBehaviour,
-      statusSlot
+      recoveryMode,
+      statusSlot,
+      retryPolicy,
+      disjointBy
     ) {
 
   override protected def nullRows(lhs: EagerBuffer[CypherRow], state: QueryState): ClosingIterator[CypherRow] = {
@@ -137,12 +164,19 @@ case class ConcurrentTransactionForeachSlottedPipe(
 
   override protected def createTask(
     innerPipe: TransactionPipeWrapper,
-    batch: EagerBuffer[CypherRow],
+    batch: TransactionBatch,
     memoryTracker: MemoryTracker,
     state: QueryState,
     outputQueue: ArrayBlockingQueue[TaskOutputResult],
     activeTaskCount: AtomicInteger
   ): Runnable = {
-    new ConcurrentTransactionForeachResultsTask(innerPipe, batch, memoryTracker, state, outputQueue, activeTaskCount)
+    new ConcurrentTransactionForeachResultsTask(
+      innerPipe,
+      batch,
+      memoryTracker,
+      state,
+      outputQueue,
+      activeTaskCount
+    )
   }
 }

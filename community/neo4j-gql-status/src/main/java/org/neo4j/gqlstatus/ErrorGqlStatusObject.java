@@ -59,6 +59,16 @@ public interface ErrorGqlStatusObject extends CommonGqlStatusObject {
         return DEFAULT_STATUS_DESCRIPTION;
     }
 
+    default String obfuscatedStatusDescription() {
+        if (gqlStatusObject() instanceof ErrorGqlStatusObjectImplementation e) {
+            return e.obfuscatedStatusDescription();
+        } else {
+            // In practice, gqlStatusObject() will always be an ErrorGqlStatusObjectImplementation,
+            // but fallback to an empty string if it of some reason is not.
+            return "";
+        }
+    }
+
     @Override
     default Map<String, Object> diagnosticRecord() {
         var innerGqlStatusObject = gqlStatusObject();
@@ -78,7 +88,7 @@ public interface ErrorGqlStatusObject extends CommonGqlStatusObject {
     }
 
     default ErrorClassification getClassification() {
-        Object maybeClassification = diagnosticRecord().get("_classification");
+        Object maybeClassification = diagnosticRecord().get(Neo4jDiagnosticRecordProperty.CLASSIFICATION.key());
         if (maybeClassification == null) {
             return ErrorClassification.UNKNOWN;
         } else {

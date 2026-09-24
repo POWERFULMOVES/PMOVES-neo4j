@@ -24,6 +24,7 @@ import static org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector.imme
 import static org.neo4j.io.pagecache.context.FixedVersionContextSupplier.EMPTY_CONTEXT_SUPPLIER;
 import static org.neo4j.memory.EmptyMemoryTracker.INSTANCE;
 
+import java.util.Locale;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -35,8 +36,8 @@ import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.store.record.PropertyBlock;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
@@ -79,7 +80,7 @@ class ShortStringPropertyEncodeTest {
                         NullLogProvider.getInstance(),
                         new CursorContextFactory(pageCacheTracer, EMPTY_CONTEXT_SUPPLIER),
                         false,
-                        LogTailLogVersionsMetadata.EMPTY_LOG_TAIL)
+                        DatabaseCreationOptions.EMPTY_CREATION_OPTIONS)
                 .openNeoStores(StoreType.PROPERTY, StoreType.PROPERTY_ARRAY, StoreType.PROPERTY_STRING);
         allocatorProvider = DynamicAllocatorProviders.nonTransactionalAllocator(neoStores);
         propertyStore = neoStores.getPropertyStore();
@@ -187,8 +188,8 @@ class ShortStringPropertyEncodeTest {
     }
 
     private void assertCanEncodeInBothCasings(String string) {
-        assertCanEncode(string.toLowerCase());
-        assertCanEncode(string.toUpperCase());
+        assertCanEncode(string.toLowerCase(Locale.ROOT));
+        assertCanEncode(string.toUpperCase(Locale.ROOT));
     }
 
     private void assertCanEncode(String string) {
@@ -205,7 +206,8 @@ class ShortStringPropertyEncodeTest {
                 allocatorProvider.allocator(StoreType.PROPERTY_STRING),
                 allocatorProvider.allocator(StoreType.PROPERTY_ARRAY),
                 CursorContext.NULL_CONTEXT,
-                INSTANCE);
+                INSTANCE,
+                "db-format-2000");
         assertEquals(0, block.getValueRecords().size());
         Value readValue = block.getType().value(block, propertyStore, StoreCursors.NULL, EmptyMemoryTracker.INSTANCE);
         assertEquals(expectedValue, readValue);

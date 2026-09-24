@@ -21,7 +21,7 @@ package org.neo4j.kernel.impl.locking.forseti;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.neo4j.kernel.impl.locking.LockMonitor.EMPTY_LOCK_MONITOR;
 import static org.neo4j.test.Race.throwing;
 
 import java.util.ArrayList;
@@ -36,7 +36,6 @@ import org.eclipse.collections.api.factory.Sets;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.kernel.DeadlockDetectedException;
@@ -51,11 +50,11 @@ import org.neo4j.test.OtherThreadExecutor;
 import org.neo4j.test.Race;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.time.Clocks;
 import org.neo4j.util.concurrent.BinaryLatch;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class ForsetiLockManagerTest {
     @Inject
     RandomSupport random;
@@ -66,7 +65,7 @@ class ForsetiLockManagerTest {
     @BeforeEach
     void setUp() {
         config = Config.defaults(GraphDatabaseInternalSettings.lock_manager_verbose_deadlocks, true);
-        manager = new ForsetiLockManager(config, Clocks.nanoClock(), ResourceType.values());
+        manager = new ForsetiLockManager(config, Clocks.nanoClock(), EMPTY_LOCK_MONITOR, ResourceType.values());
     }
 
     @AfterEach
@@ -75,7 +74,7 @@ class ForsetiLockManagerTest {
     }
 
     @Test
-    void testMultipleClientsSameTxId() throws Throwable {
+    void multipleClientsSameTxId() throws Throwable {
         // This tests an issue where using the same transaction id for two concurrently used clients would livelock
         // Having non-unique transaction ids should not happen and be addressed on its own but the LockManager should
         // still not hang
@@ -102,7 +101,7 @@ class ForsetiLockManagerTest {
     }
 
     @Test
-    void testSameThreadMultipleClientCommitDirectDeadlock() {
+    void sameThreadMultipleClientCommitDirectDeadlock() {
         // Given
         try (LockManager.Client client1 = manager.newClient();
                 LockManager.Client client2 = manager.newClient()) {
@@ -121,7 +120,7 @@ class ForsetiLockManagerTest {
     }
 
     @Test
-    void testSameThreadMultipleClientCommitIndirectDeadlock() throws TimeoutException {
+    void sameThreadMultipleClientCommitIndirectDeadlock() throws TimeoutException {
         // Given
         try (OtherThreadExecutor executor1 = new OtherThreadExecutor("test1");
                 OtherThreadExecutor executor2 = new OtherThreadExecutor("test2");
@@ -160,7 +159,7 @@ class ForsetiLockManagerTest {
     @Test
     void lockClientsShouldNotHaveMutatingEqualsAndHashCode() {
         int uniqueClients = 10_000;
-        var allClientsSet = new HashSet<LockManager.Client>(uniqueClients);
+        var allClientsSet = HashSet.<LockManager.Client>newHashSet(uniqueClients);
         var allClientsList = new ArrayList<LockManager.Client>(uniqueClients);
 
         for (int i = 0; i < uniqueClients; i++) {
@@ -175,8 +174,7 @@ class ForsetiLockManagerTest {
                     LeaseService.NoLeaseClient.INSTANCE, random.nextLong(), EmptyMemoryTracker.INSTANCE, config));
         }
 
-        allClientsList.forEach(o -> assertTrue(allClientsSet.remove(o)));
-        assertThat(allClientsSet).isEmpty();
+        assertThat(allClientsList).containsExactlyInAnyOrderElementsOf(allClientsSet);
     }
 
     @Test
@@ -303,10 +301,10 @@ class ForsetiLockManagerTest {
                     .withAll(exclusiveLocks.keySet())
                     .withAll(sharedLocks.keySet())
                     .size();
-            var activeLocks = client.activeLocks();
+            var activeLocks = client.activeLocks(EmptyMemoryTracker.INSTANCE);
 
             assertThat(client.activeLockCount()).isEqualTo(totalLocks);
-            assertThat(activeLocks.size()).isEqualTo(client.activeLockCount());
+            assertThat(activeLocks).hasSize((int) client.activeLockCount());
             activeLocks.forEach(
                     lock -> assertThat(lock.lockType().equals(LockType.EXCLUSIVE) ? exclusiveLocks : sharedLocks)
                             .containsKey(lock.resourceId()));

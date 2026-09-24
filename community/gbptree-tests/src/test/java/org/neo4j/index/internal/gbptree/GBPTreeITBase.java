@@ -28,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 import static org.neo4j.index.internal.gbptree.DataTree.W_SPLIT_KEEP_ALL_LEFT;
 import static org.neo4j.index.internal.gbptree.DataTree.W_SPLIT_KEEP_ALL_RIGHT;
 import static org.neo4j.index.internal.gbptree.GBPTreeTestUtil.consistencyCheckStrict;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 import static org.neo4j.test.utils.PageCacheConfig.config;
 
@@ -43,8 +44,6 @@ import org.eclipse.collections.api.factory.Sets;
 import org.eclipse.collections.api.set.ImmutableSet;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.neo4j.io.fs.FileSystemAbstraction;
@@ -52,17 +51,16 @@ import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.test.extension.pagecache.EphemeralPageCacheExtension;
 import org.neo4j.test.extension.pagecache.PageCacheSupportExtension;
 import org.neo4j.test.extension.testdirectory.EphemeralTestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
 
 @EphemeralTestDirectoryExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
+@EphemeralPageCacheExtension
 abstract class GBPTreeITBase<KEY, VALUE> {
-    @RegisterExtension
-    static PageCacheSupportExtension pageCacheExtension = new PageCacheSupportExtension();
-
     @Inject
     private FileSystemAbstraction fileSystem;
 
@@ -70,12 +68,13 @@ abstract class GBPTreeITBase<KEY, VALUE> {
     private TestDirectory testDirectory;
 
     @Inject
-    private RandomSupport random;
+    protected RandomSupport random;
 
     private int flags;
     protected TestLayout<KEY, VALUE> layout;
-    private GBPTree<KEY, VALUE> index;
+    protected GBPTree<KEY, VALUE> index;
     private PageCache pageCache;
+    protected int payloadSize;
 
     @BeforeEach
     void setUp() {
@@ -84,7 +83,8 @@ abstract class GBPTreeITBase<KEY, VALUE> {
         pageCache = PageCacheSupportExtension.getPageCache(
                 fileSystem, config().withPageSize(pageSize).withAccessChecks(true));
         var openOptions = getOpenOptions();
-        layout = getLayout(random, GBPTreeTestUtil.calculatePayloadSize(pageCache, openOptions));
+        payloadSize = GBPTreeTestUtil.calculatePayloadSize(pageCache, openOptions);
+        layout = getLayout(random, payloadSize);
         index = new GBPTreeBuilder<>(pageCache, fileSystem, testDirectory.file("index"), layout)
                 .with(openOptions)
                 .build();
@@ -96,7 +96,7 @@ abstract class GBPTreeITBase<KEY, VALUE> {
         pageCache.close();
     }
 
-    private Writer<KEY, VALUE> createWriter(GBPTree<KEY, VALUE> index, WriterFactory factory) throws IOException {
+    protected Writer<KEY, VALUE> createWriter(GBPTree<KEY, VALUE> index, WriterFactory factory) throws IOException {
         return factory.create(index, flags);
     }
 
@@ -161,7 +161,12 @@ abstract class GBPTreeITBase<KEY, VALUE> {
                 }
             }
 
-            index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+            index.checkpoint(
+                    Header.CARRY_OVER_PREVIOUS_HEADER,
+                    FileFlushEvent.NULL,
+                    EMPTY_ASYNC_BLOCK_ACCESSOR,
+                    NULL_CONTEXT,
+                    true);
             randomlyModifyIndex(index, data, random.random(), (double) round / totalNumberOfRounds, writerFactory);
         }
 
@@ -230,7 +235,7 @@ abstract class GBPTreeITBase<KEY, VALUE> {
         try (Seeker<KEY, VALUE> seek = index.seek(from, to, NULL_CONTEXT)) {
             assertFalse(seek.next());
         }
-        index.checkpoint(FileFlushEvent.NULL, NULL_CONTEXT);
+        index.checkpoint(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
     }
 
     private void randomlyModifyIndex(
@@ -286,15 +291,15 @@ abstract class GBPTreeITBase<KEY, VALUE> {
         return value(random.nextInt(1_000));
     }
 
-    private VALUE value(long seed) {
+    protected VALUE value(long seed) {
         return layout.value(seed);
     }
 
-    private KEY key(long seed) {
+    protected KEY key(long seed) {
         return layout.key(seed);
     }
 
-    private void assertEqualsValue(VALUE expected, VALUE actual) {
+    protected void assertEqualsValue(VALUE expected, VALUE actual) {
         assertEquals(
                 0,
                 layout.compareValue(expected, actual),

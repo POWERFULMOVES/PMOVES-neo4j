@@ -38,7 +38,7 @@ abstract class TransactionBoundReadTokenContext(transactionalContext: QueryTrans
   def getPropertyKeyId(propertyKeyName: String): Int = {
     val propertyId: Int = transactionalContext.tokenRead.propertyKey(propertyKeyName)
     if (propertyId == TokenConstants.NO_TOKEN)
-      throw new PropertyKeyNotFoundException(propertyKeyName, null)
+      throw PropertyKeyNotFoundException.propertyKeyNotFound(propertyKeyName, null)
     propertyId
   }
 
@@ -47,7 +47,7 @@ abstract class TransactionBoundReadTokenContext(transactionalContext: QueryTrans
   def getLabelId(labelName: String): Int = {
     val labelId: Int = transactionalContext.tokenRead.nodeLabel(labelName)
     if (labelId == TokenConstants.NO_TOKEN)
-      throw new LabelNotFoundKernelException(labelId, null)
+      throw LabelNotFoundKernelException.labelNotFound(labelId, null)
     labelId
   }
 
@@ -68,7 +68,7 @@ abstract class TransactionBoundReadTokenContext(transactionalContext: QueryTrans
   def getRelTypeId(relType: String): Int = {
     val relTypeId: Int = transactionalContext.tokenRead.relationshipType(relType)
     if (relTypeId == TokenConstants.NO_TOKEN)
-      throw new RelationshipTypeNotFoundException(relType, null)
+      throw RelationshipTypeNotFoundException.relationshipTypeNotFound(relType, null)
     relTypeId
   }
 

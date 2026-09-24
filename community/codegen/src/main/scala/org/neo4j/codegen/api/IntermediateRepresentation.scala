@@ -408,6 +408,27 @@ case class Loop(test: IntermediateRepresentation, body: IntermediateRepresentati
 }
 
 /**
+ * {{{
+ *   switch(test) {
+ *     case start:
+ *       ops[0];
+ *       break;
+ *     case start +1:
+ *       ops[1];
+ *       break:
+ *      ...
+ *   }
+ * }}}
+ * @param test the expression to switch on, must evaluate to an int
+ * @param ops the list of operations to perform at each case
+ * @param start the starting index
+ */
+case class TableSwitch(test: IntermediateRepresentation, ops: Seq[IntermediateRepresentation], start: Int)
+    extends IntermediateRepresentation {
+  override def typeReference: TypeReference = TypeReference.VOID
+}
+
+/**
  * Break out of a labeled loop.
  *
  * {{{
@@ -572,7 +593,7 @@ case class OneTime(inner: IntermediateRepresentation)(private var used: Boolean)
  * A mutable block that can be updated at a later point, but only before its operations are first read.
  */
 case class PlaceHolder(
-  private var originalOps: collection.Seq[IntermediateRepresentation],
+  private val originalOps: collection.Seq[IntermediateRepresentation],
   private var prependOps: collection.Seq[IntermediateRepresentation] = Seq.empty[IntermediateRepresentation],
   private var appendOps: collection.Seq[IntermediateRepresentation] = Seq.empty[IntermediateRepresentation]
 ) extends IntermediateRepresentation {
@@ -862,7 +883,7 @@ object IntermediateRepresentation {
     InstanceField(typeRef(typ), name)(Some(() => initializer))
 
   def lazyField[TYPE](name: String, initializer: () => IntermediateRepresentation)(implicit
-  typ: Manifest[TYPE]): InstanceField =
+    typ: Manifest[TYPE]): InstanceField =
     InstanceField(typeRef(typ), name)(Some(initializer))
 
   def staticConstant[TYPE](name: String, value: AnyRef)(implicit typ: Manifest[TYPE]): StaticField =
@@ -1080,6 +1101,143 @@ object IntermediateRepresentation {
         typeRef(in9),
         typeRef(in10),
         typeRef(in11)
+      )
+    )
+
+  def method[OWNER, OUT, IN1, IN2, IN3, IN4, IN5, IN6, IN7, IN8, IN9, IN10, IN11, IN12](name: String)(
+    implicit owner: Manifest[OWNER],
+    out: Manifest[OUT],
+    in1: Manifest[IN1],
+    in2: Manifest[IN2],
+    in3: Manifest[IN3],
+    in4: Manifest[IN4],
+    in5: Manifest[IN5],
+    in6: Manifest[IN6],
+    in7: Manifest[IN7],
+    in8: Manifest[IN8],
+    in9: Manifest[IN9],
+    in10: Manifest[IN10],
+    in11: Manifest[IN11],
+    in12: Manifest[IN12]
+  ): Method =
+    Method(
+      typeRef(owner),
+      typeRef(out),
+      name,
+      Seq(
+        typeRef(in1),
+        typeRef(in2),
+        typeRef(in3),
+        typeRef(in4),
+        typeRef(in5),
+        typeRef(in6),
+        typeRef(in7),
+        typeRef(in8),
+        typeRef(in9),
+        typeRef(in10),
+        typeRef(in11),
+        typeRef(in12)
+      )
+    )
+
+  def method[OWNER, OUT, IN1, IN2, IN3, IN4, IN5, IN6, IN7, IN8, IN9, IN10, IN11, IN12, IN13](name: String)(
+    implicit owner: Manifest[OWNER],
+    out: Manifest[OUT],
+    in1: Manifest[IN1],
+    in2: Manifest[IN2],
+    in3: Manifest[IN3],
+    in4: Manifest[IN4],
+    in5: Manifest[IN5],
+    in6: Manifest[IN6],
+    in7: Manifest[IN7],
+    in8: Manifest[IN8],
+    in9: Manifest[IN9],
+    in10: Manifest[IN10],
+    in11: Manifest[IN11],
+    in12: Manifest[IN12],
+    in13: Manifest[IN13]
+  ): Method =
+    Method(
+      typeRef(owner),
+      typeRef(out),
+      name,
+      Seq(
+        typeRef(in1),
+        typeRef(in2),
+        typeRef(in3),
+        typeRef(in4),
+        typeRef(in5),
+        typeRef(in6),
+        typeRef(in7),
+        typeRef(in8),
+        typeRef(in9),
+        typeRef(in10),
+        typeRef(in11),
+        typeRef(in12),
+        typeRef(in13)
+      )
+    )
+
+  def method[
+    OWNER,
+    OUT,
+    IN1,
+    IN2,
+    IN3,
+    IN4,
+    IN5,
+    IN6,
+    IN7,
+    IN8,
+    IN9,
+    IN10,
+    IN11,
+    IN12,
+    IN13,
+    IN14,
+    IN15,
+    IN16
+  ](name: String)(
+    implicit owner: Manifest[OWNER],
+    out: Manifest[OUT],
+    in1: Manifest[IN1],
+    in2: Manifest[IN2],
+    in3: Manifest[IN3],
+    in4: Manifest[IN4],
+    in5: Manifest[IN5],
+    in6: Manifest[IN6],
+    in7: Manifest[IN7],
+    in8: Manifest[IN8],
+    in9: Manifest[IN9],
+    in10: Manifest[IN10],
+    in11: Manifest[IN11],
+    in12: Manifest[IN12],
+    in13: Manifest[IN13],
+    in14: Manifest[IN14],
+    in15: Manifest[IN15],
+    in16: Manifest[IN16]
+  ): Method =
+    Method(
+      typeRef(owner),
+      typeRef(out),
+      name,
+      Seq(
+        typeRef(in1),
+        typeRef(in2),
+        typeRef(in3),
+        typeRef(in4),
+        typeRef(in5),
+        typeRef(in6),
+        typeRef(in7),
+        typeRef(in8),
+        typeRef(in9),
+        typeRef(in10),
+        typeRef(in11),
+        typeRef(in12),
+        typeRef(in13),
+        typeRef(in14),
+        typeRef(in15),
+        typeRef(in16)
       )
     )
 
@@ -1509,9 +1667,6 @@ object IntermediateRepresentation {
 
   def loadField(field: Field): IntermediateRepresentation = LoadField(None, field)
 
-  def loadField(owner: IntermediateRepresentation, field: Field): IntermediateRepresentation =
-    LoadField(Some(owner), field)
-
   def setField(field: Field, value: IntermediateRepresentation): IntermediateRepresentation =
     SetField(None, field, value)
 
@@ -1661,6 +1816,20 @@ object IntermediateRepresentation {
     else Block(reducedOps)
   }
 
+  // similar to the above but nested Blocks are flattened
+  def flattenBlock(ops: IntermediateRepresentation*): IntermediateRepresentation = {
+    def flatten(ops: Iterator[IntermediateRepresentation]): Iterator[IntermediateRepresentation] =
+      ops.flatMap {
+        case Block(ops) => flatten(ops.iterator)
+        case op         => Iterator(op)
+      }
+
+    val reducedOps = flatten(ops.iterator).filter(_ != Noop).toSeq
+    if (reducedOps.isEmpty) noop()
+    else if (reducedOps.length == 1) reducedOps.head
+    else Block(reducedOps)
+  }
+
   def block(ops: collection.Seq[IntermediateRepresentation]): IntermediateRepresentation = {
     if (ops.isEmpty) noop()
     else if (ops.length == 1) ops.head
@@ -1694,6 +1863,9 @@ object IntermediateRepresentation {
     labelName: String,
     test: IntermediateRepresentation
   )(body: IntermediateRepresentation): IntermediateRepresentation = Loop(simplifyPredicates(test), body, labelName)
+
+  def tableSwitch(test: IntermediateRepresentation, ops: Seq[IntermediateRepresentation], start: Int = 0): TableSwitch =
+    TableSwitch(test, ops, start)
 
   def break(labelName: String): IntermediateRepresentation = Break(labelName)
 
@@ -1745,7 +1917,7 @@ object IntermediateRepresentation {
   def returns(value: IntermediateRepresentation): IntermediateRepresentation = Returns(value)
 
   def tryCatch[E](name: String)(ops: IntermediateRepresentation)(onError: IntermediateRepresentation)(implicit
-  typ: Manifest[E]): TryCatch =
+    typ: Manifest[E]): TryCatch =
     TryCatch(ops, onError, typeRef(typ), name)
 
   def tryCatchIfNecessary[E](name: String)(ops: IntermediateRepresentation)(

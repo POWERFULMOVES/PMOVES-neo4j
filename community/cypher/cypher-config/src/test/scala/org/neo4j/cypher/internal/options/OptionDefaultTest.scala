@@ -28,8 +28,8 @@ class OptionDefaultTest extends CypherFunSuite {
 
   implicit val defaultInt: OptionDefault[Int] = OptionDefault.create(123)
   implicit val defaultString: OptionDefault[String] = OptionDefault.create("foo")
-  implicit val defaultInner: OptionDefault[MyInner] = OptionDefault.derive[MyInner]
-  implicit val defaultOuter: OptionDefault[MyOuter] = OptionDefault.derive[MyOuter]
+  implicit val defaultInner: OptionDefault[MyInner] = OptionDefault.derived[MyInner]
+  implicit val defaultOuter: OptionDefault[MyOuter] = OptionDefault.derived[MyOuter]
 
   test("Can create default value for any case class") {
     defaultOuter.default shouldEqual MyOuter(MyInner("foo", "foo"), 123)

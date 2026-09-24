@@ -31,7 +31,6 @@ import org.neo4j.cypher.internal.expressions.UnPositionedVariable
 import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.expressions.VariableGrouping
 import org.neo4j.cypher.internal.expressions.functions
-import org.neo4j.cypher.internal.frontend.phases.Namespacer
 import org.neo4j.cypher.internal.ir.ast.ForAllRepetitions
 import org.neo4j.cypher.internal.logical.plans.Apply
 import org.neo4j.cypher.internal.logical.plans.Argument
@@ -98,7 +97,8 @@ case class ForAllRepetitionsPredicateRewriter(
           far.variableGroupings.collectFirst {
             case VariableGrouping(`singletonDependency`, group) =>
               // outside of QPPs, singletons are out of scope. Therefore, we have to replace them with fresh variables.
-              val newName = Namespacer.genName(anonymousVariableNameGenerator, singletonDependency.name)
+              val newName =
+                AnonymousVariableNameGenerator.genName(anonymousVariableNameGenerator, singletonDependency.name)
               val newSingleton = UnPositionedVariable.varFor(newName)
               singletonDependency -> VariableGrouping(newSingleton, group)(pos)
           }
@@ -138,10 +138,10 @@ case class ForAllRepetitionsPredicateRewriter(
     AllIterablePredicate(
       iterVar,
       functions.Range.asInvocation(
-        SignedDecimalIntegerLiteral("0")(pos),
+        SignedDecimalIntegerLiteral("0")(pos.zeroLength),
         Subtract(
           functions.Size(far.groupVariableAnchor.copyId)(pos),
-          SignedDecimalIntegerLiteral("1")(pos)
+          SignedDecimalIntegerLiteral("1")(pos.zeroLength)
         )(pos)
       )(pos),
       Some(rewrittenPredicate)

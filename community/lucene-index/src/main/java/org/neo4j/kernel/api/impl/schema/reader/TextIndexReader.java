@@ -19,31 +19,23 @@
  */
 package org.neo4j.kernel.api.impl.schema.reader;
 
-import static org.neo4j.kernel.api.impl.schema.TextDocumentStructure.NODE_ID_KEY;
+import static org.neo4j.kernel.api.impl.index.lucene.LuceneDocumentsFactory.ENTITY_ID_KEY;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import org.apache.lucene.search.BooleanClause;
-import org.apache.lucene.search.BooleanQuery;
-import org.apache.lucene.search.Query;
-import org.apache.lucene.search.TermQuery;
-import org.apache.lucene.search.TotalHitCountCollector;
-import org.neo4j.internal.kernel.api.IndexQueryConstraints;
 import org.neo4j.internal.kernel.api.PropertyIndexQuery;
-import org.neo4j.internal.kernel.api.PropertyIndexQuery.ExactPredicate;
-import org.neo4j.internal.kernel.api.PropertyIndexQuery.StringContainsPredicate;
-import org.neo4j.internal.kernel.api.PropertyIndexQuery.StringPrefixPredicate;
-import org.neo4j.internal.kernel.api.PropertyIndexQuery.StringSuffixPredicate;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.kernel.api.impl.index.SearcherReference;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneIndexSearcher;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneQueryContext;
 import org.neo4j.kernel.api.impl.schema.AbstractTextIndexReader;
+import org.neo4j.kernel.api.impl.schema.LuceneQueryFactory;
 import org.neo4j.kernel.api.impl.schema.TaskCoordinator;
-import org.neo4j.kernel.api.impl.schema.TextDocumentStructure;
-import org.neo4j.kernel.api.impl.schema.sampler.LuceneIndexSampler;
 import org.neo4j.kernel.api.index.IndexSampler;
 import org.neo4j.kernel.impl.api.index.IndexSamplingConfig;
 import org.neo4j.kernel.impl.index.schema.IndexUsageTracking;
+import org.neo4j.logging.LogProvider;
 import org.neo4j.values.storable.Value;
 
 /**
@@ -60,41 +52,21 @@ public class TextIndexReader extends AbstractTextIndexReader {
             IndexDescriptor descriptor,
             IndexSamplingConfig samplingConfig,
             TaskCoordinator taskCoordinator,
-            IndexUsageTracking usageTracker) {
-        super(descriptor, searcherReference, usageTracker);
+            IndexUsageTracking usageTracker,
+            LogProvider logProvider) {
+        super(descriptor, searcherReference, usageTracker, LuceneQueryFactory.TextQueryFactory.INSTANCE, logProvider);
         this.samplingConfig = samplingConfig;
         this.taskCoordinator = taskCoordinator;
     }
 
     @Override
     public IndexSampler createSampler() {
-        return new LuceneIndexSampler(getIndexSearcher(), taskCoordinator, samplingConfig);
-    }
-
-    @Override
-    protected Query toLuceneQuery(PropertyIndexQuery predicate, IndexQueryConstraints constraints) {
-        return switch (predicate.type()) {
-            case ALL_ENTRIES -> TextDocumentStructure.newScanQuery();
-            case EXACT -> TextDocumentStructure.newSeekQuery(((ExactPredicate) predicate).value());
-            case STRING_PREFIX -> {
-                final var spp = (StringPrefixPredicate) predicate;
-                yield CypherStringQueryFactory.stringPrefix(spp.prefix().stringValue());
-            }
-            case STRING_CONTAINS -> {
-                final var scp = (StringContainsPredicate) predicate;
-                yield CypherStringQueryFactory.stringContains(scp.contains().stringValue());
-            }
-            case STRING_SUFFIX -> {
-                final var ssp = (StringSuffixPredicate) predicate;
-                yield CypherStringQueryFactory.stringSuffix(ssp.suffix().stringValue());
-            }
-            default -> throw invalidQuery(IllegalArgumentException::new, predicate);
-        };
+        return getIndexSearcher().newIndexSampler(taskCoordinator, samplingConfig);
     }
 
     @Override
     protected String entityIdFieldKey() {
-        return NODE_ID_KEY;
+        return ENTITY_ID_KEY;
     }
 
     @Override
@@ -105,16 +77,14 @@ public class TextIndexReader extends AbstractTextIndexReader {
     @Override
     public long countIndexedEntities(
             long entityId, CursorContext cursorContext, int[] propertyKeyIds, Value... propertyValues) {
-        final var entityIdQuery = new TermQuery(TextDocumentStructure.newTermForChangeOrRemove(entityId));
-        final var valueQuery = TextDocumentStructure.newSeekQuery(propertyValues);
-        final var entityIdAndValueQuery = new BooleanQuery.Builder();
-        entityIdAndValueQuery.add(entityIdQuery, BooleanClause.Occur.MUST);
-        entityIdAndValueQuery.add(valueQuery, BooleanClause.Occur.MUST);
+        LuceneIndexSearcher luceneIndexSearcher = getIndexSearcher();
+        LuceneQueryContext queryContext = luceneIndexSearcher.newQueryContext();
+        queryContext.addMustTerm(ENTITY_ID_KEY, String.valueOf(entityId));
+        queryContext.addMustSeek(propertyValues);
+
         try {
-            final var collector = new TotalHitCountCollector();
-            getIndexSearcher().search(entityIdAndValueQuery.build(), collector);
+            return luceneIndexSearcher.count(queryContext);
             // A <label,propertyKeyId,nodeId> tuple should only match at most a single propertyValue
-            return collector.getTotalHits();
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }

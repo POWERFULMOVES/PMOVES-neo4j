@@ -69,7 +69,6 @@ import org.neo4j.kernel.impl.store.RelationshipStore;
 import org.neo4j.kernel.impl.store.record.NodeRecord;
 import org.neo4j.kernel.impl.store.record.RecordLoad;
 import org.neo4j.kernel.impl.store.record.RelationshipRecord;
-import org.neo4j.kernel.impl.transaction.log.files.LogFilesBuilder;
 import org.neo4j.kernel.lifecycle.Lifespan;
 import org.neo4j.logging.NullLog;
 import org.neo4j.memory.EmptyMemoryTracker;
@@ -80,6 +79,7 @@ import org.neo4j.test.extension.Neo4jLayoutExtension;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
 import org.neo4j.test.utils.TestDirectory;
 import org.neo4j.time.Clocks;
+import org.neo4j.wal.files.LogFilesBuilder;
 
 @TestDirectoryExtension
 @Neo4jLayoutExtension
@@ -167,8 +167,9 @@ public class ConsistencyCheckServiceIntegrationTest {
     @Test
     void shouldFailOnDatabaseInNeedOfRecovery() throws IOException {
         nonRecoveredDatabase();
-        var e = assertThrows(ConsistencyCheckIncompleteException.class, () -> consistencyCheckService()
-                .runFullConsistencyCheck());
+        var e = assertThrows(
+                ConsistencyCheckIncompleteException.class,
+                () -> consistencyCheckService().runFullConsistencyCheck());
         assertThat(e.getCause().getMessage())
                 .contains("Active logical log detected, this might be a source of inconsistencies.");
     }
@@ -281,13 +282,11 @@ public class ConsistencyCheckServiceIntegrationTest {
     void shouldSkipNonExistentIndexStatisticsStore() throws Exception {
         // given
         fixture.close();
-        testDirectory
-                .getFileSystem()
-                .deleteFile(RecordDatabaseLayout.convert(databaseLayout).indexStatisticsStore());
+        RecordDatabaseLayout.convert(databaseLayout).indexStatisticsStore().delete(fs);
 
         // when
         var result = new ConsistencyCheckService(fixture.databaseLayout())
-                .with(testDirectory.getFileSystem())
+                .with(fs)
                 .with(Config.defaults(settings()))
                 .runFullConsistencyCheck();
 
@@ -324,10 +323,10 @@ public class ConsistencyCheckServiceIntegrationTest {
         fixture.apply(tx -> tx.schema().awaitIndexesOnline(2, TimeUnit.MINUTES));
     }
 
-    private static Path findFile(DatabaseLayout databaseLayout, String targetFile) {
-        Path file = databaseLayout.file(targetFile);
+    private static Path findFile(DatabaseLayout databaseLayout, String fielName) {
+        Path file = databaseLayout.file(fielName).baseSegment();
         if (Files.notExists(file)) {
-            fail("Could not find file " + targetFile);
+            fail("Could not find file " + fielName);
         }
         return file;
     }

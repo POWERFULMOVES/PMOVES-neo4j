@@ -25,6 +25,8 @@ import org.neo4j.cypher.internal.runtime.spec.Edition
 import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 
+object SelectOrSemiApplyTestBase
+
 abstract class SelectOrSemiApplyTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
@@ -538,6 +540,37 @@ abstract class SelectOrSemiApplyTestBase[CONTEXT <: RuntimeContext](
     // then
     val runtimeResult = execute(logicalQuery, runtime)
     runtimeResult should beColumns("prop").withRows((0 until 20).map(Array[Any](_)))
+  }
+
+  test("should not drop rows when predicate is mixed and RHS has multi-row scan with sort") {
+    // Regression test for RUN-997: pipelined runtime drops the last FALSE-predicate row when
+    // selectOrSemiApply has a mixed predicate and the RHS contains a pipeline-breaking sort
+    // above a multi-row scan. The sort causes the RHS to accumulate rows per argument before
+    // outputting, and the last argument's result is lost.
+    givenGraph {
+      lollipopGraph()
+    }
+
+    // given - 6 input rows with mixed predicate results
+    val inputRows = (0 until 6).map { i =>
+      Array[Any](i.toLong)
+    }
+
+    // predicate "x < 2" is TRUE for x=0,1 and FALSE for x=2,3,4,5
+    // For FALSE rows, the RHS (sort + allNodeScan) produces rows -> semi-apply should pass them
+    // For TRUE rows, the predicate passes directly
+    // All 6 rows should appear in the result
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("x")
+      .selectOrSemiApply("x < 2")
+      .|.sort("a ASC")
+      .|.allNodeScan("a", "x")
+      .input(variables = Seq("x"))
+      .build()
+
+    // then - all rows should be output
+    val runtimeResult = execute(logicalQuery, runtime, inputValues(inputRows: _*))
+    runtimeResult should beColumns("x").withRows(inputRows)
   }
 
   test("limit after selectOrSemiApply on the RHS of apply") {
@@ -1081,5 +1114,57 @@ trait OrderedSelectOrSemiApplyTestBase[CONTEXT <: RuntimeContext] {
     // then
     val runtimeResult = execute(logicalQuery, runtime, inputValues(inputRows: _*))
     runtimeResult should beColumns("x").withRows(singleColumn(inputRows.map(_(0))))
+  }
+
+  test("should schedule nested selectOrSemiApply correctly") {
+    val query = new LogicalQueryBuilder(this)
+      .produceResults("a")
+      .apply()
+      .|.selectOrSemiApply("false").withLeveragedOrder()
+      .|.|.selectOrSemiApply("b = 4").withLeveragedOrder()
+      .|.|.|.argument()
+      .|.|.unwind("[3, 4] as b")
+      .|.|.argument()
+      .|.argument()
+      .unwind("[1, 2] as a")
+      .argument()
+      .build()
+
+    val runtimeResult = execute(query, runtime)
+
+    // then
+    runtimeResult should beColumns("a").withRows(singleColumn(Seq(1L, 2L)))
+  }
+
+  test("should not output prematurely because of accidental upstream back-pressure") {
+    // This is a regression test for a bug that caused it to fail with morsel reuse
+
+    // given
+    val nRows = 10
+    val inputRows = (0 until nRows).map { i =>
+      Array[Any](i.toLong)
+    }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("x")
+      .apply()
+      .|.distinct("x AS x")
+      .|.union()
+      .|.|.selectOrSemiApply("x = 8 AND j = 1").withLeveragedOrder()
+      .|.|.|.filter("j = 2")
+      .|.|.|.argument("x")
+      .|.|.unwind("[1,2,3,4,5] AS j")
+      .|.|.selectOrSemiApply("x = 5").withLeveragedOrder()
+      .|.|.|.argument("x")
+      .|.|.argument()
+      .|.argument()
+      .input(variables = Seq("x"))
+      .withMorselSize(4)
+      .build()
+
+    // then
+    val runtimeResult = execute(logicalQuery, runtime, inputValues(inputRows: _*))
+    runtimeResult should beColumns("x").withRows((0 until nRows).map { i => Array[Any](i.toLong) })
   }
 }

@@ -42,8 +42,8 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.dbms.api.DatabaseManagementService;
 import org.neo4j.graphdb.GraphDatabaseService;
 import org.neo4j.graphdb.Label;
@@ -57,10 +57,10 @@ import org.neo4j.graphdb.event.TransactionEventListener;
 import org.neo4j.graphdb.event.TransactionEventListenerAdapter;
 import org.neo4j.internal.helpers.collection.Iterables;
 import org.neo4j.internal.kernel.api.security.AbstractSecurityLog;
-import org.neo4j.internal.kernel.api.security.AccessMode;
 import org.neo4j.internal.kernel.api.security.AuthSubject;
 import org.neo4j.internal.kernel.api.security.LoginContext;
 import org.neo4j.internal.kernel.api.security.SecurityContext;
+import org.neo4j.internal.kernel.api.security.StaticAccessMode;
 import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.api.security.AnonymousContext;
 import org.neo4j.kernel.database.PrivilegeDatabaseReference;
@@ -68,13 +68,15 @@ import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.ImpermanentDbmsExtension;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
+import org.neo4j.test.extension.SkipOnSpd;
 import org.neo4j.util.concurrent.BinaryLatch;
+import org.neo4j.values.storable.RandomValuesUtils;
 
 /**
  * Test for randomly creating data and verifying transaction data seen in transaction event handlers.
  */
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 @ImpermanentDbmsExtension
 class TransactionEventsIT {
     @Inject
@@ -85,6 +87,12 @@ class TransactionEventsIT {
 
     @Inject
     private RandomSupport random;
+
+    @BeforeEach
+    void setup() {
+        random.withConfiguration(RandomValuesUtils.selectStorageEngineDependentConfiguration(db))
+                .reset();
+    }
 
     @Test
     void createAdditionalDataInTransactionOnBeforeCommit() {
@@ -102,6 +110,9 @@ class TransactionEventsIT {
         }
     }
 
+    @SkipOnSpd(
+            reason = "SPD doesn't quite get existing property values when changing properties, "
+                    + "and so the tx state and by extension tx event listeners won't get the 'prev' values")
     @Test
     void shouldSeeExpectedTransactionData() {
         // GIVEN
@@ -204,8 +215,11 @@ class TransactionEventsIT {
         LoginContext loginContext = new LoginContext(subject, EMBEDDED_CONNECTION) {
             @Override
             public SecurityContext authorize(
-                    IdLookup idLookup, PrivilegeDatabaseReference dbName, AbstractSecurityLog securityLog) {
-                return new SecurityContext(subject, AccessMode.Static.WRITE, EMBEDDED_CONNECTION, dbName.name());
+                    IdLookup idLookup,
+                    PrivilegeDatabaseReference dbName,
+                    AbstractSecurityLog securityLog,
+                    long timeOfEvaluationMillis) {
+                return new SecurityContext(subject, StaticAccessMode.WRITE, EMBEDDED_CONNECTION, dbName.name());
             }
         };
         Map<String, Object> metadata = genericMap("username", "joe");
@@ -229,8 +243,7 @@ class TransactionEventsIT {
 
     @Test
     void registerUnregisterWithConcurrentTransactions() throws Exception {
-        ExecutorService executor = Executors.newFixedThreadPool(2);
-        try {
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
             AtomicInteger runningCounter = new AtomicInteger();
             AtomicInteger doneCounter = new AtomicInteger();
             BinaryLatch startLatch = new BinaryLatch();
@@ -239,9 +252,9 @@ class TransactionEventsIT {
             for (int i = 0; i < handlers.length; i++) {
                 handlers[i] = new CountingTransactionEventListener();
             }
-            long relNodeId;
+            String relNodeId;
             try (Transaction tx = db.beginTx()) {
-                relNodeId = tx.createNode().getId();
+                relNodeId = tx.createNode().getElementId();
                 tx.commit();
             }
             Future<?> nodeCreator = executor.submit(() -> {
@@ -266,7 +279,7 @@ class TransactionEventsIT {
                     startLatch.await();
                     for (int i = 0; i < 1_000; i++) {
                         try (Transaction tx = db.beginTx()) {
-                            Node relNode = tx.getNodeById(relNodeId);
+                            Node relNode = tx.getNodeByElementId(relNodeId);
                             relNode.createRelationshipTo(relNode, relationshipType);
                             if (ThreadLocalRandom.current().nextBoolean()) {
                                 tx.commit();
@@ -299,8 +312,6 @@ class TransactionEventsIT {
             for (CountingTransactionEventListener handler : handlers) {
                 assertEquals(0, handler.get());
             }
-        } finally {
-            executor.shutdown();
         }
     }
 

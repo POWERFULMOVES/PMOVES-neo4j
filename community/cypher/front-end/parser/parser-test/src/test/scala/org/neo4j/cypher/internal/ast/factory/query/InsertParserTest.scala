@@ -16,9 +16,11 @@
  */
 package org.neo4j.cypher.internal.ast.factory.query
 
+import org.neo4j.cypher.internal.ast.Clause
 import org.neo4j.cypher.internal.ast.Statement
 import org.neo4j.cypher.internal.ast.Statements
-import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5JavaCc
+import org.neo4j.cypher.internal.ast.test.util.AstParsing.Cypher5
+import org.neo4j.cypher.internal.ast.test.util.AstParsing.ParserInTest
 import org.neo4j.cypher.internal.ast.test.util.AstParsingTestBase
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.NodePattern
@@ -369,6 +371,48 @@ class InsertParserTest extends AstParsingTestBase {
     }
   }
 
+  // use label name reserved keywords
+  for {
+    labelNameReserved <- Seq(
+      "NOT",
+      "NULL",
+      "TYPED",
+      "NORMALIZED",
+      "NFC",
+      "NFD",
+      "NFKC",
+      "NFKD"
+    )
+  } yield {
+    test(
+      s"INSERT (n:$labelNameReserved)-[r IS $labelNameReserved]->()-[s:$labelNameReserved]->(m IS $labelNameReserved)"
+    ) {
+      parsesTo[Clause](
+        insert(
+          relationshipChain(
+            nodePat(
+              Some("n"),
+              Some(labelLeaf(labelNameReserved))
+            ),
+            relPat(
+              Some("r"),
+              Some(labelRelTypeLeaf(labelNameReserved, containsIs = true))
+            ),
+            nodePat(),
+            relPat(
+              Some("s"),
+              Some(labelRelTypeLeaf(labelNameReserved))
+            ),
+            nodePat(
+              Some("m"),
+              Some(labelLeaf(labelNameReserved, containsIs = true))
+            )
+          )
+        )
+      )
+    }
+  }
+
   // More advanced patterns
 
   test("INSERT ()-[:R]->(IS B)-[:S {prop:'s'}]->({prop: 42})<-[r IS T]-(n:A)") {
@@ -470,157 +514,141 @@ class InsertParserTest extends AstParsingTestBase {
   // The following cases will fail parsing for both CREATE and INSERT
 
   test("INSERT (:A n)") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'n'")
-      case _ => _.withSyntaxError(
-          """Invalid input 'n': expected '&', ')', ':' or '{' (line 1, column 12 (offset: 11))
-            |"INSERT (:A n)"
-            |            ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'n': expected '&', ')', ':' or '{' (line 1, column 12 (offset: 11))
+        |"INSERT (:A n)"
+        |            ^""".stripMargin
+    )
   }
 
   test("INSERT ({prop:42} :A)") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input ':'")
-      case _ => _.withSyntaxError(
-          """Invalid input ':': expected ')' (line 1, column 19 (offset: 18))
-            |"INSERT ({prop:42} :A)"
-            |                   ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input ':': expected ')' (line 1, column 19 (offset: 18))
+        |"INSERT ({prop:42} :A)"
+        |                   ^""".stripMargin
+    )
   }
 
   test("INSERT ()-()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '-'")
-      case _ => _.withSyntaxError(
-          """Invalid input '(': expected '[' (line 1, column 11 (offset: 10))
-            |"INSERT ()-()"
-            |           ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '(': expected '[' (line 1, column 11 (offset: 10))
+        |"INSERT ()-()"
+        |           ^""".stripMargin
+    )
   }
 
   test("INSERT ()->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '-'")
-      case _ => _.withSyntaxError(
-          """Invalid input '>': expected '[' (line 1, column 11 (offset: 10))
-            |"INSERT ()->()"
-            |           ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '>': expected '[' (line 1, column 11 (offset: 10))
+        |"INSERT ()->()"
+        |           ^""".stripMargin
+    )
   }
 
   test("INSERT ()[]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '['")
-      case _ => _.withSyntaxError(
+    parseIn[Statements] {
+      case Cypher5 => _.withSyntaxError(
           """Invalid input '[': expected 'FOREACH', ',', '-', '<', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 10 (offset: 9))
+            |"INSERT ()[]->()"
+            |          ^""".stripMargin
+        )
+      case _ => _.withSyntaxError(
+          """Invalid input '[': expected 'FOREACH', ',', '-', '<', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 10 (offset: 9))
             |"INSERT ()[]->()"
             |          ^""".stripMargin
         )
     }
   }
 
+  def expectedAfterLeftParen(version: ParserInTest): String = version match {
+    case Cypher5 => "a variable name, ')', ':', 'IS' or '{'"
+    case _       => "a variable name, ')', ':', 'IS', 'WHERE' or '{'"
+  }
+
+  def expectedAfterLeftBracket(version: ParserInTest): String = version match {
+    case Cypher5 => "a variable name, ':' or 'IS'"
+    case _       => "a variable name, ':', 'IS' or 'WHERE'"
+  }
+
   test("INSERT ()-[]>()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input ']'")
-      case _ => _.withSyntaxError(
-          """Invalid input ']': expected a variable name, ':' or 'IS' (line 1, column 12 (offset: 11))
-            |"INSERT ()-[]>()"
-            |            ^""".stripMargin
+    parsesIn[Statements] {
+      version =>
+        _.withSyntaxError(
+          s"""Invalid input ']': expected ${expectedAfterLeftBracket(version)} (line 1, column 12 (offset: 11))
+             |"INSERT ()-[]>()"
+             |            ^""".stripMargin
         )
     }
   }
 
   test("INSERT ()-]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '-'")
-      case _ => _.withSyntaxError(
-          """Invalid input ']': expected '[' (line 1, column 11 (offset: 10))
-            |"INSERT ()-]->()"
-            |           ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input ']': expected '[' (line 1, column 11 (offset: 10))
+        |"INSERT ()-]->()"
+        |           ^""".stripMargin
+    )
   }
 
   test("INSERT ()-[->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '-'")
-      case _ => _.withSyntaxError(
-          """Invalid input '-': expected a variable name, ':' or 'IS' (line 1, column 12 (offset: 11))
-            |"INSERT ()-[->()"
-            |            ^""".stripMargin
+    parsesIn[Statements] {
+      version =>
+        _.withSyntaxError(
+          s"""Invalid input '-': expected ${expectedAfterLeftBracket(version)} (line 1, column 12 (offset: 11))
+             |"INSERT ()-[->()"
+             |            ^""".stripMargin
         )
     }
   }
 
   test("INSERT ()-[{prop:42} :R]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '{'")
-      case _ => _.withSyntaxError(
-          """Invalid input '{': expected a variable name, ':' or 'IS' (line 1, column 12 (offset: 11))
-            |"INSERT ()-[{prop:42} :R]->()"
-            |            ^""".stripMargin
+    parsesIn[Statements] {
+      version =>
+        _.withSyntaxError(
+          s"""Invalid input '{': expected ${expectedAfterLeftBracket(version)} (line 1, column 12 (offset: 11))
+             |"INSERT ()-[{prop:42} :R]->()"
+             |            ^""".stripMargin
         )
     }
   }
 
   test("INSERT ()-[:R r]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'r'")
-      case _ => _.withSyntaxError(
-          """Invalid input 'r': expected ']' or '{' (line 1, column 15 (offset: 14))
-            |"INSERT ()-[:R r]->()"
-            |               ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'r': expected ']' or '{' (line 1, column 15 (offset: 14))
+        |"INSERT ()-[:R r]->()"
+        |               ^""".stripMargin
+    )
   }
 
   test("INSERT ALL PATHS (n)-[:R]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'ALL'")
-      case _ => _.withSyntaxError(
-          """Invalid input 'PATHS': expected '=' (line 1, column 12 (offset: 11))
-            |"INSERT ALL PATHS (n)-[:R]->()"
-            |            ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'PATHS': expected '=' (line 1, column 12 (offset: 11))
+        |"INSERT ALL PATHS (n)-[:R]->()"
+        |            ^""".stripMargin
+    )
   }
 
   test("INSERT ANY SHORTEST PATHS p = (n)-[:R]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'ANY'")
-      case _ => _.withSyntaxError(
-          """Invalid input 'SHORTEST': expected '=' (line 1, column 12 (offset: 11))
-            |"INSERT ANY SHORTEST PATHS p = (n)-[:R]->()"
-            |            ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'SHORTEST': expected '=' (line 1, column 12 (offset: 11))
+        |"INSERT ANY SHORTEST PATHS p = (n)-[:R]->()"
+        |            ^""".stripMargin
+    )
   }
 
   test("INSERT SHORTEST 2 PATH (n)-[:R]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'SHORTEST'")
-      case _ => _.withSyntaxError(
-          """Invalid input '2': expected '=' (line 1, column 17 (offset: 16))
-            |"INSERT SHORTEST 2 PATH (n)-[:R]->()"
-            |                 ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '2': expected '=' (line 1, column 17 (offset: 16))
+        |"INSERT SHORTEST 2 PATH (n)-[:R]->()"
+        |                 ^""".stripMargin
+    )
   }
 
   test("INSERT SHORTEST 2 GROUPS (n)-[:R]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'SHORTEST'")
-      case _ => _.withSyntaxError(
-          """Invalid input '2': expected '=' (line 1, column 17 (offset: 16))
-            |"INSERT SHORTEST 2 GROUPS (n)-[:R]->()"
-            |                 ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '2': expected '=' (line 1, column 17 (offset: 16))
+        |"INSERT SHORTEST 2 GROUPS (n)-[:R]->()"
+        |                 ^""".stripMargin
+    )
   }
 
   // The following cases will parse but fail in semantic checking for both CREATE and INSERT.
@@ -651,544 +679,456 @@ class InsertParserTest extends AstParsingTestBase {
   // For INSERT, they fail in parsing.
 
   test("INSERT (n:A|B)") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '|'")
-      case _ => _.withSyntaxError(
-          """Invalid input '|': expected '&', ')', ':' or '{' (line 1, column 12 (offset: 11))
-            |"INSERT (n:A|B)"
-            |            ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '|': expected '&', ')', ':' or '{' (line 1, column 12 (offset: 11))
+        |"INSERT (n:A|B)"
+        |            ^""".stripMargin
+    )
   }
 
   test("INSERT (n:A|:B)") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '|'")
-      case _ => _.withSyntaxError(
-          """Invalid input '|': expected '&', ')', ':' or '{' (line 1, column 12 (offset: 11))
-            |"INSERT (n:A|:B)"
-            |            ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '|': expected '&', ')', ':' or '{' (line 1, column 12 (offset: 11))
+        |"INSERT (n:A|:B)"
+        |            ^""".stripMargin
+    )
   }
 
   test("INSERT (n IS A|B)") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '|'")
-      case _ => _.withSyntaxError(
-          """Invalid input '|': expected '&', ')', ':' or '{' (line 1, column 15 (offset: 14))
-            |"INSERT (n IS A|B)"
-            |               ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '|': expected '&', ')', ':' or '{' (line 1, column 15 (offset: 14))
+        |"INSERT (n IS A|B)"
+        |               ^""".stripMargin
+    )
   }
 
   test("INSERT (n IS A:B)") {
-    failsParsing[Statements].withMessageStart("Colon `:` conjunction is not allowed in INSERT")
+    failsParsing[Statements].withMessageStart(
+      """Colon `:` conjunction is not allowed in INSERT. Use `CREATE` or conjunction with ampersand `&` instead. (line 1, column 15 (offset: 14))
+        |"INSERT (n IS A:B)"
+        |               ^""".stripMargin
+    )
   }
 
   test("INSERT (n IS !(A&B))") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'IS'")
-      case _ => _.withSyntaxError(
-          """Invalid input '!': expected an identifier (line 1, column 14 (offset: 13))
-            |"INSERT (n IS !(A&B))"
-            |              ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '!': expected an identifier (line 1, column 14 (offset: 13))
+        |"INSERT (n IS !(A&B))"
+        |              ^""".stripMargin
+    )
   }
 
   test("INSERT (IS %)") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '%'")
-      case _ => _.withSyntaxError(
-          """Invalid input '%': expected an identifier, ')', ':', 'IS' or '{' (line 1, column 12 (offset: 11))
-            |"INSERT (IS %)"
-            |            ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '%': expected an identifier, ')', ':', 'IS' or '{' (line 1, column 12 (offset: 11))
+        |"INSERT (IS %)"
+        |            ^""".stripMargin
+    )
   }
 
   test("INSERT (WHERE true)") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'true'")
-      case _ => _.withSyntaxError(
+    parsesIn[Statement] {
+      case Cypher5 => _.withSyntaxError(
           """Invalid input 'true': expected ')', ':', 'IS' or '{' (line 1, column 15 (offset: 14))
             |"INSERT (WHERE true)"
             |               ^""".stripMargin
+        )
+      case _ => _.toAst(
+          singleQuery(
+            insert(
+              pattern = nodePat(
+                name = None,
+                labelExpression = None,
+                properties = None,
+                predicates = Some(trueLiteral)
+              )
+            )
+          )
         )
     }
   }
 
   test("INSERT (n WHERE n.prop = 1)") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'WHERE'")
-      case _ => _.withSyntaxError(
-          """Invalid input 'WHERE': expected ')', ':', 'IS' or '{' (line 1, column 11 (offset: 10))
-            |"INSERT (n WHERE n.prop = 1)"
-            |           ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'WHERE': expected ')', ':', 'IS' or '{' (line 1, column 11 (offset: 10))
+        |"INSERT (n WHERE n.prop = 1)"
+        |           ^""".stripMargin
+    )
   }
 
   test("INSERT ({prop:2} WHERE true)") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'WHERE'")
-      case _ => _.withSyntaxError(
-          """Invalid input 'WHERE': expected ')' (line 1, column 18 (offset: 17))
-            |"INSERT ({prop:2} WHERE true)"
-            |                  ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'WHERE': expected ')' (line 1, column 18 (offset: 17))
+        |"INSERT ({prop:2} WHERE true)"
+        |                  ^""".stripMargin
+    )
   }
 
   test("INSERT (n {prop:2} WHERE n.prop = 1)") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'WHERE'")
-      case _ => _.withSyntaxError(
-          """Invalid input 'WHERE': expected ')' (line 1, column 20 (offset: 19))
-            |"INSERT (n {prop:2} WHERE n.prop = 1)"
-            |                    ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'WHERE': expected ')' (line 1, column 20 (offset: 19))
+        |"INSERT (n {prop:2} WHERE n.prop = 1)"
+        |                    ^""".stripMargin
+    )
   }
 
   test("INSERT (:A WHERE true)") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'WHERE'")
-      case _ => _.withSyntaxError(
-          """Invalid input 'WHERE': expected '&', ')', ':' or '{' (line 1, column 12 (offset: 11))
-            |"INSERT (:A WHERE true)"
-            |            ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'WHERE': expected '&', ')', ':' or '{' (line 1, column 12 (offset: 11))
+        |"INSERT (:A WHERE true)"
+        |            ^""".stripMargin
+    )
   }
 
   test("INSERT (n:A WHERE true)") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'WHERE'")
-      case _ => _.withSyntaxError(
-          """Invalid input 'WHERE': expected '&', ')', ':' or '{' (line 1, column 13 (offset: 12))
-            |"INSERT (n:A WHERE true)"
-            |             ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'WHERE': expected '&', ')', ':' or '{' (line 1, column 13 (offset: 12))
+        |"INSERT (n:A WHERE true)"
+        |             ^""".stripMargin
+    )
   }
 
   test("INSERT (:A {prop: 2} WHERE true)") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'WHERE'")
-      case _ => _.withSyntaxError(
-          """Invalid input 'WHERE': expected ')' (line 1, column 22 (offset: 21))
-            |"INSERT (:A {prop: 2} WHERE true)"
-            |                      ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'WHERE': expected ')' (line 1, column 22 (offset: 21))
+        |"INSERT (:A {prop: 2} WHERE true)"
+        |                      ^""".stripMargin
+    )
   }
 
   test("INSERT (n:A {prop: 2} WHERE n.prop > 42)") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'WHERE'")
-      case _ => _.withSyntaxError(
-          """Invalid input 'WHERE': expected ')' (line 1, column 23 (offset: 22))
-            |"INSERT (n:A {prop: 2} WHERE n.prop > 42)"
-            |                       ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'WHERE': expected ')' (line 1, column 23 (offset: 22))
+        |"INSERT (n:A {prop: 2} WHERE n.prop > 42)"
+        |                       ^""".stripMargin
+    )
   }
 
   test("INSERT ()--()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '-'")
-      case _ => _.withSyntaxError(
-          """Invalid input '-': expected '[' (line 1, column 11 (offset: 10))
-            |"INSERT ()--()"
-            |           ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '-': expected '[' (line 1, column 11 (offset: 10))
+        |"INSERT ()--()"
+        |           ^""".stripMargin
+    )
   }
 
   test("INSERT ()-->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '-'")
-      case _ => _.withSyntaxError(
-          """Invalid input '-': expected '[' (line 1, column 11 (offset: 10))
-            |"INSERT ()-->()"
-            |           ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '-': expected '[' (line 1, column 11 (offset: 10))
+        |"INSERT ()-->()"
+        |           ^""".stripMargin
+    )
   }
 
   test("INSERT ()<--()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '-'")
-      case _ => _.withSyntaxError(
-          """Invalid input '-': expected '[' (line 1, column 12 (offset: 11))
-            |"INSERT ()<--()"
-            |            ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '-': expected '[' (line 1, column 12 (offset: 11))
+        |"INSERT ()<--()"
+        |            ^""".stripMargin
+    )
   }
 
   test("INSERT ()<-->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '-'")
-      case _ => _.withSyntaxError(
-          """Invalid input '-': expected '[' (line 1, column 12 (offset: 11))
-            |"INSERT ()<-->()"
-            |            ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '-': expected '[' (line 1, column 12 (offset: 11))
+        |"INSERT ()<-->()"
+        |            ^""".stripMargin
+    )
   }
 
   test("INSERT ()-[:Rel1|Rel2]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '|'")
-      case _ => _.withSyntaxError(
-          """Invalid input '|': expected ']' or '{' (line 1, column 17 (offset: 16))
-            |"INSERT ()-[:Rel1|Rel2]->()"
-            |                 ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '|': expected ']' or '{' (line 1, column 17 (offset: 16))
+        |"INSERT ()-[:Rel1|Rel2]->()"
+        |                 ^""".stripMargin
+    )
   }
 
   test("INSERT ()-[:Rel1&Rel2]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '&'")
-      case _ => _.withSyntaxError(
-          """Invalid input '&': expected ']' or '{' (line 1, column 17 (offset: 16))
-            |"INSERT ()-[:Rel1&Rel2]->()"
-            |                 ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '&': expected ']' or '{' (line 1, column 17 (offset: 16))
+        |"INSERT ()-[:Rel1&Rel2]->()"
+        |                 ^""".stripMargin
+    )
   }
 
   test("INSERT ()-[:!Rel]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '!'")
-      case _ => _.withSyntaxError(
-          """Invalid input '!': expected an identifier (line 1, column 13 (offset: 12))
-            |"INSERT ()-[:!Rel]->()"
-            |             ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '!': expected an identifier (line 1, column 13 (offset: 12))
+        |"INSERT ()-[:!Rel]->()"
+        |             ^""".stripMargin
+    )
   }
 
   test("INSERT ()-[]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input ']'")
-      case _ => _.withSyntaxError(
-          """Invalid input ']': expected a variable name, ':' or 'IS' (line 1, column 12 (offset: 11))
-            |"INSERT ()-[]->()"
-            |            ^""".stripMargin
+    parsesIn[Statements] {
+      version =>
+        _.withSyntaxError(
+          s"""Invalid input ']': expected ${expectedAfterLeftBracket(version)} (line 1, column 12 (offset: 11))
+             |"INSERT ()-[]->()"
+             |            ^""".stripMargin
         )
     }
   }
 
   test("INSERT ()-[r]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'r'")
-      case _ => _.withSyntaxError(
-          """Invalid input ']': expected ':' or 'IS' (line 1, column 13 (offset: 12))
-            |"INSERT ()-[r]->()"
-            |             ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input ']': expected ':' or 'IS' (line 1, column 13 (offset: 12))
+        |"INSERT ()-[r]->()"
+        |             ^""".stripMargin
+    )
   }
 
   test("INSERT ()-[{prop: 2}]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '{'")
-      case _ => _.withSyntaxError(
-          """Invalid input '{': expected a variable name, ':' or 'IS' (line 1, column 12 (offset: 11))
-            |"INSERT ()-[{prop: 2}]->()"
-            |            ^""".stripMargin
+    parsesIn[Statements] {
+      version =>
+        _.withSyntaxError(
+          s"""Invalid input '{': expected ${expectedAfterLeftBracket(version)} (line 1, column 12 (offset: 11))
+             |"INSERT ()-[{prop: 2}]->()"
+             |            ^""".stripMargin
         )
     }
   }
 
   test("INSERT ()-[*1..3]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '*'")
-      case _ => _.withSyntaxError(
-          """Invalid input '*': expected a variable name, ':' or 'IS' (line 1, column 12 (offset: 11))
-            |"INSERT ()-[*1..3]->()"
-            |            ^""".stripMargin
+    parsesIn[Statements] {
+      version =>
+        _.withSyntaxError(
+          s"""Invalid input '*': expected ${expectedAfterLeftBracket(version)} (line 1, column 12 (offset: 11))
+             |"INSERT ()-[*1..3]->()"
+             |            ^""".stripMargin
         )
     }
   }
 
   test("INSERT ()-[WHERE true]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'WHERE'")
-      case _ => _.withSyntaxError(
+    parsesIn[Statement] {
+      case Cypher5 => _.withSyntaxError(
           """Invalid input 'true': expected ':' or 'IS' (line 1, column 18 (offset: 17))
             |"INSERT ()-[WHERE true]->()"
             |                  ^""".stripMargin
+        )
+      case _ => _.toAst(
+          singleQuery(
+            insert(
+              relationshipChain(
+                nodePat(),
+                relPat(
+                  name = None,
+                  labelExpression = None,
+                  properties = None,
+                  predicates = Some(trueLiteral)
+                ),
+                nodePat()
+              )
+            )
+          )
         )
     }
   }
 
   test("INSERT ()<-[r {prop: 2}]-()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'r'")
-      case _ => _.withSyntaxError(
-          """Invalid input '{': expected ':' or 'IS' (line 1, column 15 (offset: 14))
-            |"INSERT ()<-[r {prop: 2}]-()"
-            |               ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '{': expected ':' or 'IS' (line 1, column 15 (offset: 14))
+        |"INSERT ()<-[r {prop: 2}]-()"
+        |               ^""".stripMargin
+    )
   }
 
   test("INSERT ()<-[r *1..3]-()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'r'")
-      case _ => _.withSyntaxError(
-          """Invalid input '*': expected ':' or 'IS' (line 1, column 15 (offset: 14))
-            |"INSERT ()<-[r *1..3]-()"
-            |               ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '*': expected ':' or 'IS' (line 1, column 15 (offset: 14))
+        |"INSERT ()<-[r *1..3]-()"
+        |               ^""".stripMargin
+    )
   }
 
   test("INSERT ()-[r WHERE true]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'r'")
-      case _ => _.withSyntaxError(
-          """Invalid input 'WHERE': expected ':' or 'IS' (line 1, column 14 (offset: 13))
-            |"INSERT ()-[r WHERE true]->()"
-            |              ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'WHERE': expected ':' or 'IS' (line 1, column 14 (offset: 13))
+        |"INSERT ()-[r WHERE true]->()"
+        |              ^""".stripMargin
+    )
   }
 
   test("INSERT ()<-[*1..3 {prop:2} ]-()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '*'")
-      case _ => _.withSyntaxError(
-          """Invalid input '*': expected a variable name, ':' or 'IS' (line 1, column 13 (offset: 12))
-            |"INSERT ()<-[*1..3 {prop:2} ]-()"
-            |             ^""".stripMargin
+    parsesIn[Statements] {
+      version =>
+        _.withSyntaxError(
+          s"""Invalid input '*': expected ${expectedAfterLeftBracket(version)} (line 1, column 13 (offset: 12))
+             |"INSERT ()<-[*1..3 {prop:2} ]-()"
+             |             ^""".stripMargin
         )
     }
   }
 
   test("INSERT ()<-[{prop:2} WHERE true]-()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '{'")
-      case _ => _.withSyntaxError(
-          """Invalid input '{': expected a variable name, ':' or 'IS' (line 1, column 13 (offset: 12))
-            |"INSERT ()<-[{prop:2} WHERE true]-()"
-            |             ^""".stripMargin
+    parsesIn[Statements] {
+      version =>
+        _.withSyntaxError(
+          s"""Invalid input '{': expected ${expectedAfterLeftBracket(version)} (line 1, column 13 (offset: 12))
+             |"INSERT ()<-[{prop:2} WHERE true]-()"
+             |             ^""".stripMargin
         )
     }
   }
 
   test("INSERT ()<-[*1..3 WHERE true]-()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '*'")
-      case _ => _.withSyntaxError(
-          """Invalid input '*': expected a variable name, ':' or 'IS' (line 1, column 13 (offset: 12))
-            |"INSERT ()<-[*1..3 WHERE true]-()"
-            |             ^""".stripMargin
+    parsesIn[Statements] {
+      version =>
+        _.withSyntaxError(
+          s"""Invalid input '*': expected ${expectedAfterLeftBracket(version)} (line 1, column 13 (offset: 12))
+             |"INSERT ()<-[*1..3 WHERE true]-()"
+             |             ^""".stripMargin
         )
     }
   }
 
   test("INSERT ()-[r *1..3 {prop:2}]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'r'")
-      case _ => _.withSyntaxError(
-          """Invalid input '*': expected ':' or 'IS' (line 1, column 14 (offset: 13))
-            |"INSERT ()-[r *1..3 {prop:2}]->()"
-            |              ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '*': expected ':' or 'IS' (line 1, column 14 (offset: 13))
+        |"INSERT ()-[r *1..3 {prop:2}]->()"
+        |              ^""".stripMargin
+    )
   }
 
   test("INSERT ()-[r {prop:2} WHERE true]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'r'")
-      case _ => _.withSyntaxError(
-          """Invalid input '{': expected ':' or 'IS' (line 1, column 14 (offset: 13))
-            |"INSERT ()-[r {prop:2} WHERE true]->()"
-            |              ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '{': expected ':' or 'IS' (line 1, column 14 (offset: 13))
+        |"INSERT ()-[r {prop:2} WHERE true]->()"
+        |              ^""".stripMargin
+    )
   }
 
   test("INSERT ()-[r *1..3 WHERE true]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'r'")
-      case _ => _.withSyntaxError(
-          """Invalid input '*': expected ':' or 'IS' (line 1, column 14 (offset: 13))
-            |"INSERT ()-[r *1..3 WHERE true]->()"
-            |              ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '*': expected ':' or 'IS' (line 1, column 14 (offset: 13))
+        |"INSERT ()-[r *1..3 WHERE true]->()"
+        |              ^""".stripMargin
+    )
   }
 
   test("INSERT ()-[r *1..3 {prop:2} WHERE true]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'r'")
-      case _ => _.withSyntaxError(
-          """Invalid input '*': expected ':' or 'IS' (line 1, column 14 (offset: 13))
-            |"INSERT ()-[r *1..3 {prop:2} WHERE true]->()"
-            |              ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '*': expected ':' or 'IS' (line 1, column 14 (offset: 13))
+        |"INSERT ()-[r *1..3 {prop:2} WHERE true]->()"
+        |              ^""".stripMargin
+    )
   }
 
   test("INSERT ()-[:R *1..3]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '*'")
-      case _ => _.withSyntaxError(
-          """Invalid input '*': expected ']' or '{' (line 1, column 15 (offset: 14))
-            |"INSERT ()-[:R *1..3]->()"
-            |               ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '*': expected ']' or '{' (line 1, column 15 (offset: 14))
+        |"INSERT ()-[:R *1..3]->()"
+        |               ^""".stripMargin
+    )
   }
 
   test("INSERT ()-[:R WHERE true]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'WHERE'")
-      case _ => _.withSyntaxError(
-          """Invalid input 'WHERE': expected ']' or '{' (line 1, column 15 (offset: 14))
-            |"INSERT ()-[:R WHERE true]->()"
-            |               ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'WHERE': expected ']' or '{' (line 1, column 15 (offset: 14))
+        |"INSERT ()-[:R WHERE true]->()"
+        |               ^""".stripMargin
+    )
   }
 
   test("INSERT ()<-[r :R *1..3]-()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '*'")
-      case _ => _.withSyntaxError(
-          """Invalid input '*': expected ']' or '{' (line 1, column 18 (offset: 17))
-            |"INSERT ()<-[r :R *1..3]-()"
-            |                  ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '*': expected ']' or '{' (line 1, column 18 (offset: 17))
+        |"INSERT ()<-[r :R *1..3]-()"
+        |                  ^""".stripMargin
+    )
   }
 
   test("INSERT ()-[r :R WHERE true]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'WHERE'")
-      case _ => _.withSyntaxError(
-          """Invalid input 'WHERE': expected ']' or '{' (line 1, column 17 (offset: 16))
-            |"INSERT ()-[r :R WHERE true]->()"
-            |                 ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'WHERE': expected ']' or '{' (line 1, column 17 (offset: 16))
+        |"INSERT ()-[r :R WHERE true]->()"
+        |                 ^""".stripMargin
+    )
   }
 
   test("INSERT ()<-[:R *1..3 {prop:2} ]-()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '*'")
-      case _ => _.withSyntaxError(
-          """Invalid input '*': expected ']' or '{' (line 1, column 16 (offset: 15))
-            |"INSERT ()<-[:R *1..3 {prop:2} ]-()"
-            |                ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '*': expected ']' or '{' (line 1, column 16 (offset: 15))
+        |"INSERT ()<-[:R *1..3 {prop:2} ]-()"
+        |                ^""".stripMargin
+    )
   }
 
   test("INSERT ()<-[:R {prop:2} WHERE true]-()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'WHERE'")
-      case _ => _.withSyntaxError(
-          """Invalid input 'WHERE': expected ']' (line 1, column 25 (offset: 24))
-            |"INSERT ()<-[:R {prop:2} WHERE true]-()"
-            |                         ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'WHERE': expected ']' (line 1, column 25 (offset: 24))
+        |"INSERT ()<-[:R {prop:2} WHERE true]-()"
+        |                         ^""".stripMargin
+    )
   }
 
   test("INSERT ()<-[:R *1..3 WHERE true]-()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '*'")
-      case _ => _.withSyntaxError(
-          """Invalid input '*': expected ']' or '{' (line 1, column 16 (offset: 15))
-            |"INSERT ()<-[:R *1..3 WHERE true]-()"
-            |                ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '*': expected ']' or '{' (line 1, column 16 (offset: 15))
+        |"INSERT ()<-[:R *1..3 WHERE true]-()"
+        |                ^""".stripMargin
+    )
   }
 
   test("INSERT ()-[r :R *1..3 {prop:2}]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '*'")
-      case _ => _.withSyntaxError(
-          """Invalid input '*': expected ']' or '{' (line 1, column 17 (offset: 16))
-            |"INSERT ()-[r :R *1..3 {prop:2}]->()"
-            |                 ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '*': expected ']' or '{' (line 1, column 17 (offset: 16))
+        |"INSERT ()-[r :R *1..3 {prop:2}]->()"
+        |                 ^""".stripMargin
+    )
   }
 
   test("INSERT ()-[r :R {prop:2} WHERE true]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'WHERE'")
-      case _ => _.withSyntaxError(
-          """Invalid input 'WHERE': expected ']' (line 1, column 26 (offset: 25))
-            |"INSERT ()-[r :R {prop:2} WHERE true]->()"
-            |                          ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'WHERE': expected ']' (line 1, column 26 (offset: 25))
+        |"INSERT ()-[r :R {prop:2} WHERE true]->()"
+        |                          ^""".stripMargin
+    )
   }
 
   test("INSERT ()-[r :R *1..3 WHERE true]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '*'")
-      case _ => _.withSyntaxError(
-          """Invalid input '*': expected ']' or '{' (line 1, column 17 (offset: 16))
-            |"INSERT ()-[r :R *1..3 WHERE true]->()"
-            |                 ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '*': expected ']' or '{' (line 1, column 17 (offset: 16))
+        |"INSERT ()-[r :R *1..3 WHERE true]->()"
+        |                 ^""".stripMargin
+    )
   }
 
   test("INSERT ()-[r :R *1..3 {prop:2} WHERE true]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '*'")
-      case _ => _.withSyntaxError(
-          """Invalid input '*': expected ']' or '{' (line 1, column 17 (offset: 16))
-            |"INSERT ()-[r :R *1..3 {prop:2} WHERE true]->()"
-            |                 ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '*': expected ']' or '{' (line 1, column 17 (offset: 16))
+        |"INSERT ()-[r :R *1..3 {prop:2} WHERE true]->()"
+        |                 ^""".stripMargin
+    )
   }
 
   test("INSERT shortestPath((a)-[r]->(b))") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'shortestPath'")
-      // Not very helpful :(
-      case _ => _.withSyntaxError(
-          """Invalid input '(': expected '=' (line 1, column 20 (offset: 19))
-            |"INSERT shortestPath((a)-[r]->(b))"
-            |                    ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '(': expected '=' (line 1, column 20 (offset: 19))
+        |"INSERT shortestPath((a)-[r]->(b))"
+        |                    ^""".stripMargin
+    )
   }
 
   test("INSERT allShortestPaths((a)-[r]->(b))") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'allShortestPaths'")
-      // Not very helpful :(
-      case _ => _.withSyntaxError(
-          """Invalid input '(': expected '=' (line 1, column 24 (offset: 23))
-            |"INSERT allShortestPaths((a)-[r]->(b))"
-            |                        ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '(': expected '=' (line 1, column 24 (offset: 23))
+        |"INSERT allShortestPaths((a)-[r]->(b))"
+        |                        ^""".stripMargin
+    )
   }
 
   test("INSERT (a)-[:R]->(b)(a)") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '('")
-      case _ => _.withSyntaxError(
+    parseIn[Statements] {
+      case Cypher5 => _.withSyntaxError(
           """Invalid input '(': expected 'FOREACH', ',', '-', '<', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FINISH', 'INSERT', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 21 (offset: 20))
+            |"INSERT (a)-[:R]->(b)(a)"
+            |                     ^""".stripMargin
+        )
+      case _ => _.withSyntaxError(
+          """Invalid input '(': expected 'FOREACH', ',', '-', '<', 'ORDER BY', 'CALL', 'CREATE', 'LOAD CSV', 'DELETE', 'DETACH', 'FILTER', 'FINISH', 'FOR', 'INSERT', 'LET', 'LIMIT', 'MATCH', 'MERGE', 'NODETACH', 'OFFSET', 'OPTIONAL', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'UNION', 'UNWIND', 'USE', 'WITH' or <EOF> (line 1, column 21 (offset: 20))
             |"INSERT (a)-[:R]->(b)(a)"
             |                     ^""".stripMargin
         )
@@ -1196,23 +1136,23 @@ class InsertParserTest extends AstParsingTestBase {
   }
 
   test("INSERT ((n)-[r]->(m))*") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '('")
-      case _ => _.withSyntaxError(
-          """Invalid input '(': expected a variable name, ')', ':', 'IS' or '{' (line 1, column 9 (offset: 8))
-            |"INSERT ((n)-[r]->(m))*"
-            |         ^""".stripMargin
+    parsesIn[Statements] {
+      version =>
+        _.withSyntaxError(
+          s"""Invalid input '(': expected ${expectedAfterLeftParen(version)} (line 1, column 9 (offset: 8))
+             |"INSERT ((n)-[r]->(m))*"
+             |         ^""".stripMargin
         )
     }
   }
 
   test("INSERT ((a)-->(b) WHERE a.prop > b.prop)") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '('")
-      case _ => _.withSyntaxError(
-          """Invalid input '(': expected a variable name, ')', ':', 'IS' or '{' (line 1, column 9 (offset: 8))
-            |"INSERT ((a)-->(b) WHERE a.prop > b.prop)"
-            |         ^""".stripMargin
+    parsesIn[Statements] {
+      version =>
+        _.withSyntaxError(
+          s"""Invalid input '(': expected ${expectedAfterLeftParen(version)} (line 1, column 9 (offset: 8))
+             |"INSERT ((a)-->(b) WHERE a.prop > b.prop)"
+             |         ^""".stripMargin
         )
     }
   }
@@ -1221,86 +1161,74 @@ class InsertParserTest extends AstParsingTestBase {
   // For INSERT, they fail in parsing.
 
   test("INSERT (:(A&B))") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input ':'")
-      case _ => _.withSyntaxError(
-          """Invalid input '(': expected an identifier (line 1, column 10 (offset: 9))
-            |"INSERT (:(A&B))"
-            |          ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '(': expected an identifier (line 1, column 10 (offset: 9))
+        |"INSERT (:(A&B))"
+        |          ^""".stripMargin
+    )
   }
 
   test("INSERT (IS (A&B)&C)") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '('")
-      case _ => _.withSyntaxError(
-          """Invalid input '(': expected an identifier, ')', ':', 'IS' or '{' (line 1, column 12 (offset: 11))
-            |"INSERT (IS (A&B)&C)"
-            |            ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '(': expected an identifier, ')', ':', 'IS' or '{' (line 1, column 12 (offset: 11))
+        |"INSERT (IS (A&B)&C)"
+        |            ^""".stripMargin
+    )
   }
 
   test("INSERT (IS $(A))") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '$'")
-      case _ => _.withSyntaxError(
-          """Invalid input '$': expected an identifier, ')', ':', 'IS' or '{' (line 1, column 12 (offset: 11))
-            |"INSERT (IS $(A))"
-            |            ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '$': expected an identifier, ')', ':', 'IS' or '{' (line 1, column 12 (offset: 11))
+        |"INSERT (IS $(A))"
+        |            ^""".stripMargin
+    )
   }
 
   test("INSERT (:$(A))") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input ':'")
-      case _ => _.withSyntaxError(
-          """Invalid input '$': expected an identifier (line 1, column 10 (offset: 9))
-            |"INSERT (:$(A))"
-            |          ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '$': expected an identifier (line 1, column 10 (offset: 9))
+        |"INSERT (:$(A))"
+        |          ^""".stripMargin
+    )
   }
 
   test("INSERT ()-[IS $(A)]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '$'")
-      case _ => _.withSyntaxError(
-          """Invalid input '$': expected an identifier, ':' or 'IS' (line 1, column 15 (offset: 14))
-            |"INSERT ()-[IS $(A)]->()"
-            |               ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '$': expected an identifier, ':' or 'IS' (line 1, column 15 (offset: 14))
+        |"INSERT ()-[IS $(A)]->()"
+        |               ^""".stripMargin
+    )
   }
 
   test("INSERT ()-[:$(A)]->()") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input '$'")
-      case _ => _.withSyntaxError(
-          """Invalid input '$': expected an identifier (line 1, column 13 (offset: 12))
-            |"INSERT ()-[:$(A)]->()"
-            |             ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input '$': expected an identifier (line 1, column 13 (offset: 12))
+        |"INSERT ()-[:$(A)]->()"
+        |             ^""".stripMargin
+    )
   }
 
   test("INSERT (:A:B)") {
     failsParsing[Statements].withMessageStart(
-      "Colon `:` conjunction is not allowed in INSERT. Use `CREATE` or conjunction with ampersand `&` instead. (line 1, column 11 (offset: 10))"
+      """Colon `:` conjunction is not allowed in INSERT. Use `CREATE` or conjunction with ampersand `&` instead. (line 1, column 11 (offset: 10))
+        |"INSERT (:A:B)"
+        |           ^""".stripMargin
     )
   }
 
   test("INSERT (n:A&B:C)") {
     failsParsing[Statements].withMessageStart(
-      "Colon `:` conjunction is not allowed in INSERT. Use `CREATE` or conjunction with ampersand `&` instead. (line 1, column 14 (offset: 13))"
+      """Colon `:` conjunction is not allowed in INSERT. Use `CREATE` or conjunction with ampersand `&` instead. (line 1, column 14 (offset: 13))
+        |"INSERT (n:A&B:C)"
+        |              ^""".stripMargin
     )
   }
 
   test("INSERT (n:A)-[:R]->(:B:C)") {
     failsParsing[Statements].withMessageStart(
-      "Colon `:` conjunction is not allowed in INSERT. Use `CREATE` or conjunction with ampersand `&` instead. (line 1, column 23 (offset: 22))"
+      """Colon `:` conjunction is not allowed in INSERT. Use `CREATE` or conjunction with ampersand `&` instead. (line 1, column 23 (offset: 22))
+        |"INSERT (n:A)-[:R]->(:B:C)"
+        |                       ^""".stripMargin
     )
   }
 
@@ -1319,83 +1247,58 @@ class InsertParserTest extends AstParsingTestBase {
   // INSERT should not work as a synonym to CREATE for DDL
 
   test("INSERT USER foo SET PASSWORD 'password'") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'USER'")
-      case _ => _.withSyntaxError(
-          """Invalid input 'foo': expected '=' (line 1, column 13 (offset: 12))
-            |"INSERT USER foo SET PASSWORD 'password'"
-            |             ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'foo': expected '=' (line 1, column 13 (offset: 12))
+        |"INSERT USER foo SET PASSWORD 'password'"
+        |             ^""".stripMargin
+    )
   }
 
   test("INSERT ROLE role") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'ROLE'")
-      case _ => _.withSyntaxError(
-          """Invalid input 'role': expected '=' (line 1, column 13 (offset: 12))
-            |"INSERT ROLE role"
-            |             ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'role': expected '=' (line 1, column 13 (offset: 12))
+        |"INSERT ROLE role"
+        |             ^""".stripMargin
+    )
   }
 
   test("INSERT DATABASE foo") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'DATABASE'")
-      case _ => _.withSyntaxError(
-          """Invalid input 'foo': expected '=' (line 1, column 17 (offset: 16))
-            |"INSERT DATABASE foo"
-            |                 ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'foo': expected '=' (line 1, column 17 (offset: 16))
+        |"INSERT DATABASE foo"
+        |                 ^""".stripMargin
+    )
   }
 
   test("INSERT COMPOSITE DATABASE name") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'COMPOSITE'")
-      // Not very helpful
-      case _ => _.withSyntaxError(
-          """Invalid input 'DATABASE': expected '=' (line 1, column 18 (offset: 17))
-            |"INSERT COMPOSITE DATABASE name"
-            |                  ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'DATABASE': expected '=' (line 1, column 18 (offset: 17))
+        |"INSERT COMPOSITE DATABASE name"
+        |                  ^""".stripMargin
+    )
   }
 
   test("INSERT ALIAS alias FOR DATABASE foo") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'ALIAS'")
-      // Not very helpful
-      case _ => _.withSyntaxError(
-          """Invalid input 'alias': expected '=' (line 1, column 14 (offset: 13))
-            |"INSERT ALIAS alias FOR DATABASE foo"
-            |              ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'alias': expected '=' (line 1, column 14 (offset: 13))
+        |"INSERT ALIAS alias FOR DATABASE foo"
+        |              ^""".stripMargin
+    )
   }
 
   test("INSERT INDEX FOR (n:Label) ON n.prop") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'INDEX'")
-      // Not very helpful
-      case _ => _.withSyntaxError(
-          """Invalid input 'FOR': expected '=' (line 1, column 14 (offset: 13))
-            |"INSERT INDEX FOR (n:Label) ON n.prop"
-            |              ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withSyntaxError(
+      """Invalid input 'FOR': expected '=' (line 1, column 14 (offset: 13))
+        |"INSERT INDEX FOR (n:Label) ON n.prop"
+        |              ^""".stripMargin
+    )
   }
 
   test("INSERT CONSTRAINT FOR (n:Label) REQUIRE n.prop IS NOT NULL") {
-    failsParsing[Statements].in {
-      case Cypher5JavaCc => _.withMessageStart("Invalid input 'CONSTRAINT'")
-      // Not very helpful :(
-      case _ => _.withMessage(
-          """Invalid input 'FOR': expected '=' (line 1, column 19 (offset: 18))
-            |"INSERT CONSTRAINT FOR (n:Label) REQUIRE n.prop IS NOT NULL"
-            |                   ^""".stripMargin
-        )
-    }
+    failsParsing[Statements].withMessage(
+      """Invalid input 'FOR': expected '=' (line 1, column 19 (offset: 18))
+        |"INSERT CONSTRAINT FOR (n:Label) REQUIRE n.prop IS NOT NULL"
+        |                   ^""".stripMargin
+    )
   }
 }

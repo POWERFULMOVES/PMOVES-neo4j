@@ -36,6 +36,7 @@ import org.neo4j.internal.helpers.collection.BoundedIterable;
 import org.neo4j.internal.helpers.progress.ProgressListener;
 import org.neo4j.internal.helpers.progress.ProgressMonitorFactory;
 import org.neo4j.io.IOUtils;
+import org.neo4j.io.async.AsyncBlockAccessor;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
@@ -74,11 +75,17 @@ public interface IndexAccessor extends Closeable, ConsistencyCheckable, MinimalI
      * rotating the logical log. After completion of this call there cannot be any essential state that
      * hasn't been forced to disk.
      *
-     * @param flushEvent file flush event
-     * @param cursorContext underlying page cursor context
+     * @param flushEvent         file flush event
+     * @param asyncBlockAccessor async block accessor of current checkpoint
+     * @param cursorContext      underlying page cursor context
      * @throws UncheckedIOException if there was a problem forcing the state to persistent storage.
      */
-    void force(FileFlushEvent flushEvent, CursorContext cursorContext);
+    void force(FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext);
+
+    default long compact(
+            FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext) {
+        return 0;
+    }
 
     /**
      * Refreshes this index, so that {@link #newValueReader(IndexUsageTracking) readers} created after completion of this call
@@ -179,6 +186,19 @@ public interface IndexAccessor extends Closeable, ConsistencyCheckable, MinimalI
     }
 
     /**
+     * Returns an {@link IndexEntriesReader} over the data in this index between {@code from} (inclusive)
+     * and {@code to} (exclusive)
+     * @param from the values (an array since the index may be a composite index) to read from (inclusive).
+     * @param to the values (an array since the index may be a composite index) to read to (exclusive).
+     * @param cursorContext underlying page cursor context.
+     * @return an {@link IndexEntriesReader} that can be used to iterate over the index entries that are found
+     * between {@code from} and {@code to}.
+     */
+    default IndexEntriesReader newAllEntriesValueReader(Value[] from, Value[] to, CursorContext cursorContext) {
+        throw new UnsupportedOperationException();
+    }
+
+    /**
      * Validates the {@link Value value tuple} before transaction determines that it can commit.
      */
     default void validateBeforeCommit(long entityId, Value[] tuple) {
@@ -223,7 +243,6 @@ public interface IndexAccessor extends Closeable, ConsistencyCheckable, MinimalI
      * @param other other index to validate contents from.
      * @param valueUniqueness whether to include the values into uniqueness checks.
      * @param conflictHandler handling violations between these indexes.
-     * @param entityFilter filter for which entities to include in the validation.
      * @param threads number of threads to use for this validation.
      * @param jobScheduler to run the jobs for this validation.
      */
@@ -231,9 +250,28 @@ public interface IndexAccessor extends Closeable, ConsistencyCheckable, MinimalI
             IndexAccessor other,
             boolean valueUniqueness,
             IndexEntryConflictHandler conflictHandler,
-            LongPredicate entityFilter,
             int threads,
             JobScheduler jobScheduler);
+
+    /**
+     * Validates this index, as if it was one shard out of many where all shards collectively makes up the
+     * entire index. This method validates uniqueness across all these shards. Any violations will be reported
+     * via the {@code conflictHandler}.
+     *
+     * @param otherShards the other shards to include in the validation.
+     * @param valueUniqueness whether to include the values into uniqueness checks.
+     * @param conflictHandler handling violations between these indexes.
+     * @param threads number of threads to use for this validation.
+     * @param jobScheduler to run the jobs for this validation.
+     */
+    default void validateShards(
+            Iterable<IndexAccessor> otherShards,
+            boolean valueUniqueness,
+            ShardedIndexEntryConflictHandler conflictHandler,
+            int threads,
+            JobScheduler jobScheduler) {
+        throw new UnsupportedOperationException();
+    }
 
     default void maintenance() {}
 
@@ -247,7 +285,8 @@ public interface IndexAccessor extends Closeable, ConsistencyCheckable, MinimalI
         }
 
         @Override
-        public void force(FileFlushEvent flushEvent, CursorContext cursorContext) {}
+        public void force(
+                FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext) {}
 
         @Override
         public void refresh() {}
@@ -312,15 +351,13 @@ public interface IndexAccessor extends Closeable, ConsistencyCheckable, MinimalI
                 LongPredicate entityFilter,
                 int threads,
                 JobScheduler jobScheduler,
-                ProgressListener progress)
-                throws IndexEntryConflictException {}
+                ProgressListener progress) {}
 
         @Override
         public void validate(
                 IndexAccessor other,
                 boolean valueUniqueness,
                 IndexEntryConflictHandler conflictHandler,
-                LongPredicate entityFilter,
                 int threads,
                 JobScheduler jobScheduler) {}
     }
@@ -343,8 +380,9 @@ public interface IndexAccessor extends Closeable, ConsistencyCheckable, MinimalI
         }
 
         @Override
-        public void force(FileFlushEvent flushEvent, CursorContext cursorContext) {
-            delegate.force(flushEvent, cursorContext);
+        public void force(
+                FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext) {
+            delegate.force(flushEvent, asyncBlockAccessor, cursorContext);
         }
 
         @Override
@@ -444,15 +482,33 @@ public interface IndexAccessor extends Closeable, ConsistencyCheckable, MinimalI
                 IndexAccessor other,
                 boolean valueUniqueness,
                 IndexEntryConflictHandler conflictHandler,
-                LongPredicate entityFilter,
                 int threads,
                 JobScheduler jobScheduler) {
-            delegate.validate(other, valueUniqueness, conflictHandler, entityFilter, threads, jobScheduler);
+            delegate.validate(other, valueUniqueness, conflictHandler, threads, jobScheduler);
+        }
+
+        @Override
+        public void validateShards(
+                Iterable<IndexAccessor> otherShards,
+                boolean valueUniqueness,
+                ShardedIndexEntryConflictHandler conflictHandler,
+                int threads,
+                JobScheduler jobScheduler) {
+            delegate.validateShards(otherShards, valueUniqueness, conflictHandler, threads, jobScheduler);
         }
 
         @Override
         public void maintenance() {
             delegate.maintenance();
         }
+    }
+
+    interface ShardedIndexEntryConflictHandler {
+        void indexEntryConflict(
+                long firstEntityId,
+                IndexAccessor firstShard,
+                long otherEntityId,
+                IndexAccessor otherShard,
+                Value[] values);
     }
 }

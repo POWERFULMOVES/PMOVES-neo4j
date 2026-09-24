@@ -21,7 +21,9 @@ package org.neo4j.internal.kernel.api.security;
 
 import static org.neo4j.internal.helpers.Strings.escape;
 
+import java.util.Map;
 import java.util.regex.Pattern;
+import org.neo4j.gqlstatus.GqlStatus;
 import org.neo4j.internal.kernel.api.connectioninfo.ClientConnectionInfo;
 import org.neo4j.logging.InternalLog;
 import org.neo4j.logging.log4j.Neo4jMapMessage;
@@ -34,109 +36,198 @@ public abstract class AbstractSecurityLog {
     }
 
     public void debug(String message) {
-        inner.debug(new SecurityLogLine(message));
+        if (inner.isDebugEnabled()) {
+            inner.debug(new SecurityLogLine(message));
+        }
     }
 
-    public void debug(SecurityContext context, String message) {
-        AuthSubject subject = context.subject();
-        inner.debug(new SecurityLogLine(
-                context.connectionInfo(),
-                context.database(),
-                subject.executingUser(),
-                message,
-                subject.authenticatedUser()));
+    public void debug(String format, Object... args) {
+        if (inner.isDebugEnabled()) {
+            inner.debug(new SecurityLogLine(format, args));
+        }
+    }
+
+    public void debug(ContextInfo context, String message) {
+        if (inner.isDebugEnabled()) {
+            inner.debug(new SecurityLogLine(context, message, null));
+        }
+    }
+
+    public void debug(ContextInfo context, String format, Object... args) {
+        if (inner.isDebugEnabled()) {
+            inner.debug(new SecurityLogLine(context, format, args, null));
+        }
     }
 
     public void info(String message) {
-        inner.info(new SecurityLogLine(message));
+        if (inner.isInfoEnabled()) {
+            inner.info(new SecurityLogLine(message));
+        }
     }
 
-    public void info(LoginContext context, String message) {
-        AuthSubject subject = context.subject();
-        inner.info(new SecurityLogLine(
-                context.connectionInfo(), null, subject.executingUser(), message, subject.authenticatedUser()));
+    public void info(String format, Object... args) {
+        if (inner.isInfoEnabled()) {
+            inner.info(new SecurityLogLine(format, args));
+        }
     }
 
-    public void info(SecurityContext context, String message) {
-        AuthSubject subject = context.subject();
-        inner.info(new SecurityLogLine(
-                context.connectionInfo(),
-                context.database(),
-                subject.executingUser(),
-                message,
-                subject.authenticatedUser()));
+    public void info(ContextInfo context, String message) {
+        if (inner.isInfoEnabled()) {
+            inner.info(new SecurityLogLine(context, message, null));
+        }
+    }
+
+    public void info(ContextInfo context, String format, Object... args) {
+        if (inner.isInfoEnabled()) {
+            inner.info(new SecurityLogLine(context, format, args, null));
+        }
     }
 
     public void warn(String message) {
-        inner.warn(new SecurityLogLine(message));
+        if (inner.isWarnEnabled()) {
+            inner.warn(new SecurityLogLine(message));
+        }
     }
 
-    public void warn(SecurityContext context, String message) {
-        AuthSubject subject = context.subject();
-        inner.warn(new SecurityLogLine(
-                context.connectionInfo(),
-                context.database(),
-                subject.executingUser(),
-                message,
-                subject.authenticatedUser()));
+    public void warn(String format, Object... args) {
+        if (inner.isWarnEnabled()) {
+            inner.warn(new SecurityLogLine(format, args));
+        }
+    }
+
+    public void warn(ContextInfo context, String message) {
+        if (inner.isWarnEnabled()) {
+            inner.warn(new SecurityLogLine(context, message, null));
+        }
+    }
+
+    public void warn(ContextInfo context, String format, Object... args) {
+        if (inner.isWarnEnabled()) {
+            inner.warn(new SecurityLogLine(context, format, args, null));
+        }
     }
 
     public void error(String message) {
-        inner.error(new SecurityLogLine(message));
+        if (inner.isErrorEnabled()) {
+            inner.error(new SecurityLogLine(message));
+        }
     }
 
-    public void error(ClientConnectionInfo connectionInfo, String message) {
-        inner.error(new SecurityLogLine(connectionInfo, null, null, message, null));
+    public void error(String format, Object... args) {
+        if (inner.isErrorEnabled()) {
+            inner.error(new SecurityLogLine(format, args));
+        }
     }
 
-    public void error(LoginContext context, String message) {
-        AuthSubject subject = context.subject();
-        inner.error(new SecurityLogLine(
-                context.connectionInfo(), null, subject.executingUser(), message, subject.authenticatedUser()));
+    public void error(String message, GqlStatus gqlStatus) {
+        if (inner.isErrorEnabled()) {
+            inner.error(new SecurityLogLine(null, null, null, null, message, null, gqlStatus));
+        }
     }
 
-    public void error(LoginContext context, String database, String message) {
-        AuthSubject subject = context.subject();
-        inner.error(new SecurityLogLine(
-                context.connectionInfo(), database, subject.executingUser(), message, subject.authenticatedUser()));
+    public void error(ContextInfo context, String message) {
+        error(context, message, (GqlStatus) null);
     }
 
-    public void error(SecurityContext context, String message) {
-        AuthSubject subject = context.subject();
-        inner.error(new SecurityLogLine(
-                context.connectionInfo(),
-                context.database(),
-                subject.executingUser(),
-                message,
-                subject.authenticatedUser()));
+    public void error(ContextInfo context, String format, Object... args) {
+        if (inner.isErrorEnabled()) {
+            inner.error(new SecurityLogLine(context, format, args, null));
+        }
+    }
+
+    public void error(ContextInfo context, String message, GqlStatus gqlStatus) {
+        if (inner.isErrorEnabled()) {
+            inner.error(new SecurityLogLine(context, message, gqlStatus));
+        }
     }
 
     public boolean isDebugEnabled() {
         return inner.isDebugEnabled();
     }
 
+    public boolean isInfoEnabled() {
+        return inner.isInfoEnabled();
+    }
+
+    public boolean isWarnEnabled() {
+        return inner.isWarnEnabled();
+    }
+
+    public boolean isErrorEnabled() {
+        return inner.isErrorEnabled();
+    }
+
+    public record ContextInfo(
+            ClientConnectionInfo connectionInfo, String database, String authenticatedUser, String executingUser) {
+        public static ContextInfo from(ClientConnectionInfo connectionInfo) {
+            return new ContextInfo(connectionInfo, null, null, null);
+        }
+
+        public static ContextInfo from(LoginContext context) {
+            return from(context, null);
+        }
+
+        public static ContextInfo from(LoginContext context, String database) {
+            return new ContextInfo(
+                    context.connectionInfo(),
+                    database,
+                    context.subject().authenticatedUser(),
+                    context.subject().executingUser());
+        }
+
+        public static ContextInfo from(SecurityContext context) {
+            return new ContextInfo(
+                    context.connectionInfo(),
+                    context.database(),
+                    context.subject().authenticatedUser(),
+                    context.subject().executingUser());
+        }
+    }
+
     static class SecurityLogLine extends Neo4jMapMessage {
         private final String executingUser;
         private final String message;
         private final String authenticatedUser;
+        private final GqlStatus gqlStatus;
         private static final Pattern NEWLINE_PATTERN = Pattern.compile("\\R+");
 
         SecurityLogLine(String message) {
-            this(null, null, null, message, null);
+            this(null, null, null, null, message, null, null);
         }
 
-        SecurityLogLine(
+        SecurityLogLine(String format, Object[] args) {
+            this(null, null, null, null, format, args, null);
+        }
+
+        SecurityLogLine(ContextInfo contextInfo, String message, GqlStatus gqlStatus) {
+            this(contextInfo, message, null, gqlStatus);
+        }
+
+        SecurityLogLine(ContextInfo contextInfo, String format, Object[] args, GqlStatus gqlStatus) {
+            this(
+                    contextInfo.connectionInfo,
+                    contextInfo.database,
+                    contextInfo.executingUser,
+                    contextInfo.authenticatedUser,
+                    format,
+                    args,
+                    gqlStatus);
+        }
+
+        private SecurityLogLine(
                 ClientConnectionInfo connectionInfo,
                 String database,
                 String executingUser,
-                String message,
-                String authenticatedUser) {
+                String authenticatedUser,
+                String format,
+                Object[] args,
+                GqlStatus gqlStatus) {
             super(7);
             String sourceString = connectionInfo != null ? connectionInfo.asConnectionDetails() : "";
             this.executingUser = executingUser;
-            // clean message of newlines
-            this.message = NEWLINE_PATTERN.matcher(message).replaceAll(" ");
+            this.message = NEWLINE_PATTERN.matcher(formatMessage(format, args)).replaceAll(" ");
             this.authenticatedUser = authenticatedUser;
+            this.gqlStatus = gqlStatus;
 
             with("type", "security");
             with("source", sourceString);
@@ -149,7 +240,14 @@ public abstract class AbstractSecurityLog {
             if (authenticatedUser != null && !authenticatedUser.isEmpty()) {
                 with("authenticatedUser", authenticatedUser);
             }
+            if (gqlStatus != null) {
+                with("errorInfo", Map.of("GQLSTATUS", gqlStatus.gqlStatusString()));
+            }
             with("message", this.message);
+        }
+
+        private String formatMessage(String format, Object[] args) {
+            return args == null || args.length == 0 ? format : String.format(format, args);
         }
 
         @Override
@@ -160,6 +258,9 @@ public abstract class AbstractSecurityLog {
                 } else {
                     sb.append(String.format("[%s:%s]: ", escape(authenticatedUser), escape(executingUser)));
                 }
+            }
+            if (gqlStatus != null) {
+                sb.append(String.format("Exception thrown, %s: ", gqlStatus.gqlStatusString()));
             }
             sb.append(message);
         }

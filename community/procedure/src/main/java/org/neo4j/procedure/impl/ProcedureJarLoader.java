@@ -27,16 +27,17 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.function.Predicate;
+import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.exceptions.KernelException;
 import org.neo4j.io.IOUtils;
 import org.neo4j.kernel.api.procedure.CallableProcedure;
 import org.neo4j.kernel.api.procedure.CallableUserAggregationFunction;
 import org.neo4j.kernel.api.procedure.CallableUserFunction;
 import org.neo4j.logging.InternalLog;
-import org.neo4j.procedure.impl.NamingRestrictions.IllegalNamingException;
 import org.neo4j.string.Globbing;
 
 /**
@@ -49,14 +50,20 @@ class ProcedureJarLoader implements AutoCloseable {
     private final InternalLog log;
 
     private final boolean reloadProceduresFromDisk;
+    private final GraphDatabaseInternalSettings.ProcedureClassPreloading preload;
 
     private final Set<Closeable> closeables =
             Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
 
-    ProcedureJarLoader(ProcedureCompiler compiler, InternalLog log, boolean reloadProceduresFromDisk) {
+    ProcedureJarLoader(
+            ProcedureCompiler compiler,
+            InternalLog log,
+            boolean reloadProceduresFromDisk,
+            GraphDatabaseInternalSettings.ProcedureClassPreloading preload) {
         this.compiler = compiler;
         this.log = log;
         this.reloadProceduresFromDisk = reloadProceduresFromDisk;
+        this.preload = preload;
     }
 
     Callables loadProceduresFromDir(Path root) throws IOException, KernelException {
@@ -74,7 +81,7 @@ class ProcedureJarLoader implements AutoCloseable {
             return Callables.empty();
         }
 
-        var result = ProcedureClassLoader.setup(jarFiles, log, reloadProceduresFromDisk);
+        var result = ProcedureClassLoader.setup(jarFiles, log, reloadProceduresFromDisk, preload);
 
         // On Windows, it is not possible to modify files when they are used by a process.
         // To support our test infrastructure, we want to ensure that we properly close
@@ -85,23 +92,17 @@ class ProcedureJarLoader implements AutoCloseable {
 
         Callables out = new Callables();
         for (var entry : result.loadedClasses()) {
-            try {
-                final var procedures = compiler.compileProcedure(entry.cls(), false, loader, methodNameFilter);
-                final var functions = compiler.compileFunction(entry.cls(), false, loader, methodNameFilter);
-                final var aggregations = compiler.compileAggregationFunction(entry.cls(), loader, methodNameFilter);
+            final var procedures =
+                    compiler.compileProcedure(entry.cls(), false, loader, methodNameFilter, Optional.of(entry.jar()));
+            final var functions =
+                    compiler.compileFunction(entry.cls(), false, loader, methodNameFilter, Optional.of(entry.jar()));
+            final var aggregations = compiler.compileAggregationFunction(
+                    entry.cls(), loader, methodNameFilter, Optional.of(entry.jar()));
 
-                // Add after compilation, to not taint `target` with a partial success.
-                out.addAllProcedures(procedures);
-                out.addAllFunctions(functions);
-                out.addAllAggregationFunctions(aggregations);
-            } catch (IllegalNamingException exc) {
-                log.error(
-                        "Failed to load procedures from class %s in %s/%s: %s",
-                        entry.cls().getSimpleName(),
-                        entry.jar().getParent().getFileName(),
-                        entry.jar().getFileName(),
-                        exc.getMessage());
-            }
+            // Add after compilation, to not taint `target` with a partial success.
+            out.addAllProcedures(procedures);
+            out.addAllFunctions(functions);
+            out.addAllAggregationFunctions(aggregations);
         }
         return out;
     }

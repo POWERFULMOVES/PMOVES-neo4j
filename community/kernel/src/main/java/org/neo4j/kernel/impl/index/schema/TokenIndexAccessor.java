@@ -21,7 +21,6 @@ package org.neo4j.kernel.impl.index.schema;
 
 import static org.neo4j.index.internal.gbptree.DataTree.W_BATCHED_SINGLE_THREADED;
 import static org.neo4j.internal.helpers.collection.Iterators.asResourceIterator;
-import static org.neo4j.internal.helpers.collection.Iterators.iterator;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -33,12 +32,15 @@ import org.eclipse.collections.api.block.function.primitive.LongToLongFunction;
 import org.eclipse.collections.api.set.ImmutableSet;
 import org.neo4j.common.EntityType;
 import org.neo4j.graphdb.ResourceIterator;
+import org.neo4j.index.internal.gbptree.DataTree;
 import org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector;
 import org.neo4j.index.internal.gbptree.Seeker;
 import org.neo4j.internal.helpers.collection.BoundedIterable;
 import org.neo4j.internal.helpers.progress.ProgressListener;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.StorageEngineIndexingBehaviour;
+import org.neo4j.io.async.AsyncBlockAccessor;
+import org.neo4j.io.pagecache.PageCacheOpenOptions;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.kernel.api.index.IndexAccessor;
@@ -52,6 +54,7 @@ import org.neo4j.scheduler.JobScheduler;
 public class TokenIndexAccessor extends TokenIndex implements IndexAccessor {
     private final EntityType entityType;
     private final NativeIndexHeaderWriter headerWriter = new NativeIndexHeaderWriter(ONLINE);
+    private final int extraWriterParallelFlags;
 
     public TokenIndexAccessor(
             DatabaseIndexContext databaseIndexContext,
@@ -62,8 +65,9 @@ public class TokenIndexAccessor extends TokenIndex implements IndexAccessor {
             boolean readOnly,
             StorageEngineIndexingBehaviour indexingBehaviour) {
         super(databaseIndexContext, indexFiles, descriptor, openOptions, readOnly, indexingBehaviour);
-
-        entityType = descriptor.schema().entityType();
+        this.entityType = descriptor.schema().entityType();
+        this.extraWriterParallelFlags =
+                openOptions.contains(PageCacheOpenOptions.MULTI_VERSIONED) ? DataTree.W_ESCALATING_COORDINATION : 0;
         instantiateTree(recoveryCleanupWorkCollector);
         instantiateUpdater();
     }
@@ -75,10 +79,11 @@ public class TokenIndexAccessor extends TokenIndex implements IndexAccessor {
         try {
             if (parallel) {
                 TokenIndexUpdater parallelUpdater = new TokenIndexUpdater(1_000, idLayout);
-                return parallelUpdater.initialize(index.writer(cursorContext), true);
-            } else {
-                return singleUpdater.initialize(index.writer(W_BATCHED_SINGLE_THREADED, cursorContext), false);
+                return parallelUpdater.initialize(
+                        context -> index.writer(extraWriterParallelFlags, context), true, cursorContext);
             }
+            return singleUpdater.initialize(
+                    context -> index.writer(W_BATCHED_SINGLE_THREADED, context), false, cursorContext);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
@@ -102,15 +107,14 @@ public class TokenIndexAccessor extends TokenIndex implements IndexAccessor {
             IndexAccessor other,
             boolean valueUniqueness,
             IndexEntryConflictHandler conflictHandler,
-            LongPredicate entityFilter,
             int threads,
             JobScheduler jobScheduler) {
         throw new UnsupportedOperationException();
     }
 
     @Override
-    public void force(FileFlushEvent flushEvent, CursorContext cursorContext) {
-        index.checkpoint(headerWriter, flushEvent, cursorContext);
+    public void force(FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext) {
+        index.checkpoint(headerWriter, flushEvent, asyncBlockAccessor, cursorContext);
     }
 
     @Override
@@ -153,7 +157,7 @@ public class TokenIndexAccessor extends TokenIndex implements IndexAccessor {
     }
 
     private int findHighestTokenId(CursorContext cursorContext) {
-        try (var cursor = index.seek(
+        try (Seeker<TokenScanKey, TokenScanValue> cursor = index.seek(
                 new TokenScanKey(Integer.MAX_VALUE, Long.MAX_VALUE), new TokenScanKey(0, -1), cursorContext)) {
             if (cursor.next()) {
                 return cursor.key().tokenId;
@@ -174,7 +178,7 @@ public class TokenIndexAccessor extends TokenIndex implements IndexAccessor {
 
     @Override
     public ResourceIterator<Path> snapshotFiles() {
-        return asResourceIterator(iterator(indexFiles.getStoreFile()));
+        return asResourceIterator(indexFiles.getStoreFile().allSegments(fs));
     }
 
     @Override

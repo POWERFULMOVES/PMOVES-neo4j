@@ -23,6 +23,8 @@ import static java.util.Collections.emptyMap;
 import static org.neo4j.kernel.api.exceptions.Status.Transaction.Terminated;
 import static org.neo4j.kernel.impl.coreapi.DefaultTransactionExceptionMapper.mapStatusException;
 
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -42,7 +44,8 @@ import org.neo4j.graphdb.RelationshipType;
 import org.neo4j.graphdb.ResourceIterable;
 import org.neo4j.graphdb.ResourceIterator;
 import org.neo4j.graphdb.Result;
-import org.neo4j.graphdb.TransactionTerminatedException;
+import org.neo4j.graphdb.TransactionFailureHelper;
+import org.neo4j.graphdb.TransactionTerminatedHelper;
 import org.neo4j.graphdb.schema.Schema;
 import org.neo4j.graphdb.traversal.BidirectionalTraversalDescription;
 import org.neo4j.graphdb.traversal.TraversalDescription;
@@ -52,7 +55,7 @@ import org.neo4j.internal.kernel.api.CursorFactory;
 import org.neo4j.internal.kernel.api.NodeCursor;
 import org.neo4j.internal.kernel.api.QueryContext;
 import org.neo4j.internal.kernel.api.Read;
-import org.neo4j.internal.kernel.api.RelationshipDataAccessor;
+import org.neo4j.internal.kernel.api.RelationshipCursor;
 import org.neo4j.internal.kernel.api.RelationshipScanCursor;
 import org.neo4j.internal.kernel.api.SchemaRead;
 import org.neo4j.internal.kernel.api.TokenRead;
@@ -74,7 +77,6 @@ import org.neo4j.kernel.impl.api.CloseableResourceManager;
 import org.neo4j.kernel.impl.core.NodeEntity;
 import org.neo4j.kernel.impl.core.RelationshipEntity;
 import org.neo4j.kernel.impl.coreapi.internal.CursorIterator;
-import org.neo4j.kernel.impl.coreapi.schema.SchemaImpl;
 import org.neo4j.kernel.impl.query.QueryExecutionConfiguration;
 import org.neo4j.kernel.impl.query.QueryExecutionEngine;
 import org.neo4j.kernel.impl.query.QueryExecutionKernelException;
@@ -83,9 +85,14 @@ import org.neo4j.kernel.impl.query.TransactionalContextFactory;
 import org.neo4j.kernel.impl.traversal.BidirectionalTraversalDescriptionImpl;
 import org.neo4j.kernel.impl.traversal.MonoDirectionalTraversalDescription;
 import org.neo4j.kernel.impl.util.ValueUtils;
+import org.neo4j.logging.Log;
+import org.neo4j.logging.LogProvider;
+import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.MemoryTracker;
+import org.neo4j.monitoring.ExceptionHandlerService;
 import org.neo4j.token.TokenHolders;
 import org.neo4j.token.api.TokenNotFoundException;
+import org.neo4j.util.VisibleForTesting;
 import org.neo4j.values.ElementIdMapper;
 import org.neo4j.values.virtual.MapValue;
 
@@ -100,6 +107,9 @@ public class TransactionImpl extends DataLookup implements InternalTransaction {
     private final Consumer<Status> terminationCallback;
     private final TransactionExceptionMapper exceptionMapper;
     private final ElementIdMapper elementIdMapper;
+    private final List<String> bookmarks;
+    private final Log log;
+    private final ExceptionHandlerService exceptionHandlerService;
     /**
      * Tracker of resources in use by the Core API.
      * <p>
@@ -118,6 +128,7 @@ public class TransactionImpl extends DataLookup implements InternalTransaction {
     private KernelTransaction transaction;
     private boolean closed;
 
+    @VisibleForTesting
     public TransactionImpl(
             TokenHolders tokenHolders,
             TransactionalContextFactory contextFactory,
@@ -135,7 +146,10 @@ public class TransactionImpl extends DataLookup implements InternalTransaction {
                 null,
                 null,
                 elementIdMapper,
-                null);
+                null,
+                Collections.emptyList(),
+                NullLogProvider.getInstance(),
+                new ExceptionHandlerService(NullLogProvider.getInstance()));
     }
 
     public TransactionImpl(
@@ -148,7 +162,10 @@ public class TransactionImpl extends DataLookup implements InternalTransaction {
             Consumer<Status> terminationCallback,
             TransactionExceptionMapper exceptionMapper,
             ElementIdMapper elementIdMapper,
-            RoutingInfo routingInfo) {
+            RoutingInfo routingInfo,
+            List<String> bookmarks,
+            LogProvider logProvider,
+            ExceptionHandlerService exceptionHandlerService) {
         this.tokenHolders = tokenHolders;
         this.contextFactory = contextFactory;
         this.availabilityGuard = availabilityGuard;
@@ -158,6 +175,9 @@ public class TransactionImpl extends DataLookup implements InternalTransaction {
         this.exceptionMapper = exceptionMapper;
         this.elementIdMapper = elementIdMapper;
         this.routingInfo = routingInfo;
+        this.bookmarks = bookmarks;
+        this.log = logProvider.getLog(getClass());
+        this.exceptionHandlerService = exceptionHandlerService;
         setTransaction(transaction);
     }
 
@@ -177,8 +197,13 @@ public class TransactionImpl extends DataLookup implements InternalTransaction {
     }
 
     @Override
-    public void commit(KernelTransaction.KernelTransactionMonitor kernelTransactionMonitor) {
-        safeTerminalOperation(transaction -> transaction.commit(kernelTransactionMonitor));
+    public void commit(KernelTransaction.Monitor monitor) {
+        safeTerminalOperation(transaction -> transaction.commit(monitor));
+    }
+
+    @Override
+    public ExceptionHandlerService exceptionHandlerService() {
+        return exceptionHandlerService;
     }
 
     @Override
@@ -214,7 +239,8 @@ public class TransactionImpl extends DataLookup implements InternalTransaction {
         } catch (TokenCapacityExceededKernelException e) {
             throw new ConstraintViolationException(e.getMessage(), e);
         } catch (KernelException e) {
-            throw mapStatusException("Unknown error trying to create label token", e.status(), e);
+            throw mapStatusException(
+                    "Unknown error trying to create label token", e.status(), e, exceptionHandlerService());
         }
 
         try {
@@ -246,7 +272,7 @@ public class TransactionImpl extends DataLookup implements InternalTransaction {
             availabilityGuard.assertDatabaseAvailable();
             return executionEngine.executeQuery(query, parameters, context, false);
         } catch (UnavailableException ue) {
-            throw new org.neo4j.graphdb.TransactionFailureException(ue.getMessage(), ue, ue.status());
+            throw TransactionFailureHelper.wrapError(ue);
         } catch (QueryExecutionKernelException e) {
             throw e.asUserException();
         }
@@ -324,7 +350,8 @@ public class TransactionImpl extends DataLookup implements InternalTransaction {
     private void safeTerminalOperation(TransactionalOperation operation) {
         if (closed) {
             assert transaction == null : "Closed but still have reference to kernel transaction";
-            throw exceptionMapper.mapException(new NotInTransactionException("The transaction has been closed."));
+            throw exceptionMapper.mapException(
+                    new NotInTransactionException("The transaction has been closed."), log, exceptionHandlerService());
         }
         Exception exception = null;
         try {
@@ -345,7 +372,7 @@ public class TransactionImpl extends DataLookup implements InternalTransaction {
             transaction = null;
         }
         if (exception != null) {
-            throw exceptionMapper.mapException(exception);
+            throw exceptionMapper.mapException(exception, log, exceptionHandlerService());
         }
     }
 
@@ -392,6 +419,11 @@ public class TransactionImpl extends DataLookup implements InternalTransaction {
     }
 
     @Override
+    public List<String> bookmarks() {
+        return bookmarks;
+    }
+
+    @Override
     public KernelTransaction.Revertable overrideWith(SecurityContext context) {
         return kernelTransaction().overrideWith(context);
     }
@@ -423,7 +455,7 @@ public class TransactionImpl extends DataLookup implements InternalTransaction {
     }
 
     @Override
-    public Relationship newRelationshipEntity(RelationshipDataAccessor cursor) {
+    public Relationship newRelationshipEntity(RelationshipCursor cursor) {
         return new RelationshipEntity(this, cursor);
     }
 
@@ -465,7 +497,7 @@ public class TransactionImpl extends DataLookup implements InternalTransaction {
 
     @Override
     public Schema schema() {
-        return new SchemaImpl(kernelTransaction());
+        return kernelTransaction().schema();
     }
 
     @Override
@@ -500,7 +532,7 @@ public class TransactionImpl extends DataLookup implements InternalTransaction {
         }
         if (transaction.isTerminated()) {
             Status terminationReason = transaction.getReasonIfTerminated().orElse(Status.Transaction.Terminated);
-            throw new TransactionTerminatedException(terminationReason);
+            throw TransactionTerminatedHelper.transactionTerminated(terminationReason);
         }
     }
 
@@ -546,10 +578,8 @@ public class TransactionImpl extends DataLookup implements InternalTransaction {
         }
 
         if (internalTransaction.getDatabaseId() != tx.getDatabaseId()) {
-            throw new CypherExecutionException("Can not use an entity from another database. Entity element id: "
-                    + entity.getElementId() + ", entity database: "
-                    + internalTransaction.getDatabaseName() + ", expected database: "
-                    + tx.getDatabaseName() + ".");
+            throw CypherExecutionException.entityFromOtherDb(
+                    entity.getElementId(), internalTransaction.getDatabaseName(), tx.getDatabaseName());
         }
         return entity;
     }

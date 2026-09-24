@@ -28,7 +28,7 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.IdentityHashMap;
 import java.util.Map;
-import org.neo4j.io.pagecache.PageSwapper;
+import org.neo4j.io.pagecache.impl.muninn.swapper.PageSwapper;
 import org.neo4j.io.pagecache.tracing.EvictionEvent;
 import org.neo4j.io.pagecache.tracing.EvictionRunEvent;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
@@ -36,6 +36,8 @@ import org.neo4j.io.pagecache.tracing.FlushEvent;
 import org.neo4j.io.pagecache.tracing.PageReferenceTranslator;
 import org.neo4j.io.pagecache.tracing.PinEvent;
 import org.neo4j.io.pagecache.tracing.PinPageFaultEvent;
+import org.neo4j.io.pagecache.tracing.async.AsyncEvictionEvent;
+import org.neo4j.io.pagecache.tracing.async.SubmitEvent;
 
 /**
  * Container of events for page cache tracers that are used to build linear historical representation of page cache
@@ -111,6 +113,11 @@ class HEvents {
         @Override
         public EvictionEvent beginEviction(long cachePageId) {
             return tracer.add(new EvictionHEvent(tracer, cachePageId));
+        }
+
+        @Override
+        public AsyncEvictionEvent beginAsyncEviction(long cachePageId) {
+            return tracer.add(new AsyncEvictionHEvent(tracer, cachePageId));
         }
 
         @Override
@@ -207,6 +214,11 @@ class HEvents {
                 int pagesToFlush,
                 int mergedPages) {
             return tracer.add(new FlushHEvent(tracer, pageRefs, swapper, pagesToFlush, mergedPages));
+        }
+
+        @Override
+        public SubmitEvent beginAsyncSubmit() {
+            return SubmitEvent.NULL;
         }
 
         @Override
@@ -352,6 +364,12 @@ class HEvents {
         }
 
         @Override
+        public AsyncEvictionEvent beginAsyncEviction(long cachePageId) {
+            pageEvictedByFaulter = true;
+            return tracer.add(new AsyncEvictionHEvent(tracer, cachePageId));
+        }
+
+        @Override
         void printBody(PrintStream out, String exceptionLinePrefix) {
             out.print(", cachePageId:");
             out.print(cachePageId);
@@ -406,6 +424,25 @@ class HEvents {
         }
     }
 
+    public static class AsyncEvictionHEvent extends EvictionHEvent implements AsyncEvictionEvent {
+
+        AsyncEvictionHEvent(LinearHistoryTracer linearHistoryTracer, long cachePageId) {
+            super(linearHistoryTracer, cachePageId);
+        }
+
+        @Override
+        public void setException(Exception exception) {}
+
+        @Override
+        public SubmitEvent beginAsyncSubmit(
+                long pageRef, PageSwapper swapper, PageReferenceTranslator pageReferenceTranslator) {
+            return SubmitEvent.NULL;
+        }
+
+        @Override
+        public void evicted() {}
+    }
+
     public abstract static class HEvent {
         static final HEvent end = new HEvent() {
             @Override
@@ -422,7 +459,7 @@ class HEvents {
         HEvent() {
             time = System.nanoTime();
             Thread thread = Thread.currentThread();
-            threadId = thread.getId();
+            threadId = thread.threadId();
             threadName = thread.getName();
             System.identityHashCode(this);
         }

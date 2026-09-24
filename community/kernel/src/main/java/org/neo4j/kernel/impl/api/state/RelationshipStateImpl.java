@@ -21,6 +21,7 @@ package org.neo4j.kernel.impl.api.state;
 
 import static java.util.Collections.emptyList;
 
+import org.apache.commons.lang3.ArrayUtils;
 import org.eclipse.collections.api.IntIterable;
 import org.eclipse.collections.impl.factory.primitive.IntSets;
 import org.neo4j.collection.factory.CollectionsFactory;
@@ -73,18 +74,8 @@ class RelationshipStateImpl extends EntityStateImpl implements RelationshipState
         }
 
         @Override
-        public Iterable<StorageProperty> changedProperties() {
-            return emptyList();
-        }
-
-        @Override
         public IntIterable removedProperties() {
             return IntSets.immutable.empty();
-        }
-
-        @Override
-        public Iterable<StorageProperty> addedAndChangedProperties() {
-            return emptyList();
         }
 
         @Override
@@ -95,6 +86,11 @@ class RelationshipStateImpl extends EntityStateImpl implements RelationshipState
         @Override
         public boolean isPropertyChangedOrRemoved(int propertyKey) {
             return false;
+        }
+
+        @Override
+        public int[] changedOrRemovedPropertyKeys() {
+            return ArrayUtils.EMPTY_INT_ARRAY;
         }
 
         @Override
@@ -181,8 +177,7 @@ class RelationshipStateImpl extends EntityStateImpl implements RelationshipState
     @Override
     public <EX extends Exception> boolean accept(RelationshipVisitorWithProperties<EX> visitor) throws EX {
         if (type != TokenConstants.NO_TOKEN) {
-            visitor.visit(
-                    getId(), type, startNode, endNode, addedProperties(), changedProperties(), removedProperties());
+            visitor.visit(getId(), type, startNode, endNode, addedProperties(), removedProperties());
             return true;
         }
         return false;

@@ -32,6 +32,7 @@ import org.neo4j.cypher.internal.parser.CypherErrorStrategy.DatabaseNameRule
 import org.neo4j.cypher.internal.parser.CypherErrorStrategy.ExpressionRule
 import org.neo4j.cypher.internal.parser.CypherErrorStrategy.GraphPatternRule
 import org.neo4j.cypher.internal.parser.CypherErrorStrategy.IdentifierRule
+import org.neo4j.cypher.internal.parser.CypherErrorStrategy.InterpolatedStringLiteralRule
 import org.neo4j.cypher.internal.parser.CypherErrorStrategy.LabelExpression1Rule
 import org.neo4j.cypher.internal.parser.CypherErrorStrategy.LabelExpressionRule
 import org.neo4j.cypher.internal.parser.CypherErrorStrategy.NodePatternRule
@@ -40,14 +41,21 @@ import org.neo4j.cypher.internal.parser.CypherErrorStrategy.ParameterRule
 import org.neo4j.cypher.internal.parser.CypherErrorStrategy.RelationshipPatternRule
 import org.neo4j.cypher.internal.parser.CypherErrorStrategy.StringLiteralRule
 import org.neo4j.cypher.internal.parser.CypherErrorStrategy.VariableRule
+import org.neo4j.exceptions.SyntaxException
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectImplementation
+import org.neo4j.gqlstatus.GqlParams
+import org.neo4j.gqlstatus.GqlStatusInfoCodes
 
 import java.util
 
 import scala.annotation.tailrec
 import scala.jdk.CollectionConverters.IterableHasAsScala
 import scala.jdk.CollectionConverters.ListHasAsScala
+import scala.jdk.CollectionConverters.SeqHasAsJava
 import scala.jdk.CollectionConverters.SetHasAsJava
 import scala.math.Ordering.Implicits.seqOrdering
+import scala.util.Success
+import scala.util.Try
 import scala.util.control.NonFatal
 
 /**
@@ -65,33 +73,62 @@ final class CypherErrorStrategy(conf: CypherErrorStrategy.Conf) extends ANTLRErr
     if (!inErrorRecoveryMode(parser)) {
       beginErrorCondition()
       populateException(parser.getContext, e)
-      parser.notifyErrorListeners(e.getOffendingToken, message(parser, e), e)
+      Try(errorDetails(parser, e)) match {
+        case Success((legacyMessage, gql)) =>
+          val exceptionWithGql = new RecognitionExceptionWithGql(e, gql)
+          parser.notifyErrorListeners(e.getOffendingToken, legacyMessage, exceptionWithGql)
+        case _ =>
+          parser.notifyErrorListeners(e.getOffendingToken, e.getMessage, e)
+      }
     }
+  }
+
+  def reportErrorAtEof(parser: Parser): (String, ErrorGqlStatusObjectImplementation.Builder) = {
+    val t = parser.getCurrentToken
+    getCompletedError(t.getText, codeCompletion(parser, t))
   }
 
   private def beginErrorCondition(): Unit = {
     inErrorMode = true
   }
 
-  private def message(parser: Parser, e: RecognitionException): String = {
-    // println("Error at " + e.getCtx.getClass.getSimpleName)
+  private def errorDetails(
+    parser: Parser,
+    e: RecognitionException
+  ): (String, ErrorGqlStatusObjectImplementation.Builder) = {
+//    println("Error at " + e.getCtx.getClass.getSimpleName)
     if (isUnclosedQuote(e.getOffendingToken)) {
-      CypherErrorStrategy.quoteMismatchErrorMessage
+      val legacyMessage = SyntaxException.QUOTE_MISMATCH_ERROR_MESSAGE
+      val gqlCauseBuilder = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42I19)
+      (legacyMessage, gqlCauseBuilder)
     } else if (isUnclosedComment(e.getOffendingToken, parser)) {
-      CypherErrorStrategy.commentMismatchErrorMessage
+      val legacyMessage = CypherErrorStrategy.commentMismatchErrorMessage
+      val gqlCauseBuilder = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42I02)
+      (legacyMessage, gqlCauseBuilder)
     } else {
       val offender = Option(e.getOffendingToken)
         .filter(t => t.getType != Token.EOF && t.getType != Token.EPSILON && t.getType != Token.INVALID_TYPE)
         .flatMap(t => Option(t.getText))
         .map(t => t.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t"))
         .getOrElse("")
-      val expected = codeCompletion(parser, e) match {
-        case Seq(e)          => s": expected $e"
-        case e if e.nonEmpty => e.dropRight(1).mkString(": expected ", ", ", "") + " or " + e.last
-        case _               => ""
-      }
-      s"Invalid input '$offender'$expected"
+      getCompletedError(offender, codeCompletion(parser, e))
     }
+  }
+
+  private def getCompletedError(
+    offender: String,
+    completion: Seq[String]
+  ): (String, ErrorGqlStatusObjectImplementation.Builder) = {
+    val expected = completion match {
+      case Seq(e)          => s": expected $e"
+      case e if e.nonEmpty => e.dropRight(1).mkString(": expected ", ", ", "") + " or " + e.last
+      case _               => ""
+    }
+    val legacyMessage = s"Invalid input '$offender'$expected"
+    val gqlCauseBuilder = ErrorGqlStatusObjectImplementation.from(GqlStatusInfoCodes.STATUS_42I06)
+      .withParam(GqlParams.StringParam.input, offender)
+      .withParam(GqlParams.ListParam.valueList, completion.asJava)
+    (legacyMessage, gqlCauseBuilder)
   }
 
   override def recoverInline(parser: Parser): Token = {
@@ -119,25 +156,48 @@ final class CypherErrorStrategy(conf: CypherErrorStrategy.Conf) extends ANTLRErr
 
   override def reportMatch(recognizer: Parser): Unit = {}
 
-  private def codeCompletion(parser: Parser, e: RecognitionException): Seq[String] = {
+  private def codeCompletion(parser: Parser, e: RecognitionException): Seq[String] =
+    codeCompletion(
+      parser,
+      e.getOffendingToken,
+      e.getCtx.asInstanceOf[ParserRuleContext],
+      vocabulary.tokenDisplayNames(e.getExpectedTokens)
+    )
+
+  private def codeCompletion(parser: Parser, t: Token): Seq[String] =
+    codeCompletion(parser, t, parser.getRuleContext, Seq())
+
+  private def codeCompletion(
+    parser: Parser,
+    t: Token,
+    context: ParserRuleContext,
+    default: Seq[String]
+  ): Seq[String] = {
     try {
       val completion = new CodeCompletionCore(parser, conf.preferredRules.asJava, conf.ignoredTokens)
-      val tokenIndex = e.getOffendingToken.getTokenIndex
-      vocabulary.expected(completion.collectCandidates(tokenIndex, e.getCtx.asInstanceOf[ParserRuleContext]))
+      val tokenIndex = t.getTokenIndex
+      vocabulary.expected(completion.collectCandidates(tokenIndex, context))
     } catch {
-      case NonFatal(_) =>
-        // Hide bugs in code completion and fallback to default antlr expected tokens
-        vocabulary.tokenDisplayNames(e.getExpectedTokens)
+      // Hide bugs in code completion and fallback to default antlr expected tokens
+      case NonFatal(_) => default
     }
   }
 
   private def isUnclosedQuote(offender: Token): Boolean = {
-    offender.getText == "'" || offender.getText == "\""
+    offender != null && (offender.getText == "'" || offender.getText == "\"")
   }
 
   private def isUnclosedComment(offender: Token, recognizer: Parser): Boolean = {
-    (offender.getText == "/" && recognizer.getInputStream.LT(2).getText == "*") ||
-    (offender.getText == "*" && recognizer.getInputStream.LT(-1).getText == "/")
+    val offenderText = if (offender != null) offender.getText else null
+    if (offenderText == "/") {
+      val nextToken = recognizer.getInputStream.LT(2)
+      nextToken != null && nextToken.getText == "*"
+    } else if (offenderText == "*") {
+      val previousToken = recognizer.getInputStream.LT(-1)
+      previousToken != null && previousToken.getText == "/"
+    } else {
+      false
+    }
   }
 
   @tailrec
@@ -158,6 +218,7 @@ object CypherErrorStrategy {
       val preferredGroups = Set[CypherRuleGroup](
         ExpressionRule,
         StringLiteralRule,
+        InterpolatedStringLiteralRule,
         NumberLiteralRule,
         ParameterRule,
         VariableRule,
@@ -179,6 +240,7 @@ object CypherErrorStrategy {
   sealed trait CypherRuleGroup
   case object ExpressionRule extends CypherRuleGroup
   case object StringLiteralRule extends CypherRuleGroup
+  case object InterpolatedStringLiteralRule extends CypherRuleGroup
   case object NumberLiteralRule extends CypherRuleGroup
   case object ParameterRule extends CypherRuleGroup
   case object VariableRule extends CypherRuleGroup
@@ -190,8 +252,6 @@ object CypherErrorStrategy {
   case object NodePatternRule extends CypherRuleGroup
   case object RelationshipPatternRule extends CypherRuleGroup
 
-  val quoteMismatchErrorMessage =
-    "Failed to parse string literal. The query must contain an even number of non-escaped quotes."
   val commentMismatchErrorMessage = "Failed to parse comment. A comment starting on `/*` must have a closing `*/`."
 }
 
@@ -212,11 +272,27 @@ final class CypherErrorVocabulary(conf: CypherErrorStrategy.Conf) extends Vocabu
       .flatMap(e => ruleDisplayName(e.getKey, e.getValue.ruleList.asScala))
       .sorted
 
-    val tokenNames = candidates.tokens.entrySet().asScala.toSeq
-      .map(e => e.getKey +: e.getValue.asScala.toSeq)
-      // Make sure for example 'BTREE INDEX' and 'FULLTEXT INDEX' are next to each other
-      .sortBy(_.reverse.map(t => getDisplayName(t)))
-      .map(displayName)
+    val tokenNames = candidates.tokens.entrySet().asScala.view
+      .map { e =>
+        val ts = e.getKey +: e.getValue.asScala.toSeq
+        val sortKey = {
+          // Make sure for example 'BTREE INDEX' and 'FULLTEXT INDEX' are next to each other,
+          // by reversing the token sequence and sorting on the last token
+          val reverseTs = ts.reverse
+          val toSortOn = if (reverseTs.size > 1) {
+            // Make sure for example 'DEFAULT LANGUAGE CYPHER <an integer value>' doesn't get sorted on '<an integer value>'
+            val shortenedReverseTs = reverseTs.dropWhile(t => getDisplayName(t) != "'" + getSymbolicName(t) + "'")
+
+            // Ensure we don't get an empty list even if all of the tokens fulfill the symbolic name check
+            if (shortenedReverseTs.nonEmpty) shortenedReverseTs else reverseTs
+          } else reverseTs
+          toSortOn.map(t => getDisplayName(t))
+        }
+        ts -> sortKey
+      }
+      .toSeq
+      .sortBy { case (_, sortKey) => sortKey }
+      .map { case (ts, _) => displayName(ts) }
     (ruleNames ++ tokenNames).distinct
   }
 
@@ -225,11 +301,12 @@ final class CypherErrorVocabulary(conf: CypherErrorStrategy.Conf) extends Vocabu
       gs.forall(g => ruleCallStack.exists(r => conf.ruleGroups.get(r).contains(g)))
 
     conf.ruleGroups.get(ruleIndex).collect {
-      case ExpressionRule    => "an expression"
-      case StringLiteralRule => "a string"
-      case NumberLiteralRule => "a number"
-      case ParameterRule     => "a parameter"
-      case VariableRule      => "a variable name"
+      case ExpressionRule                => "an expression"
+      case StringLiteralRule             => "a string"
+      case InterpolatedStringLiteralRule => "an interpolated string"
+      case NumberLiteralRule             => "a number"
+      case ParameterRule                 => "a parameter"
+      case VariableRule                  => "a variable name"
       case IdentifierRule =>
         if (inStack(LabelExpressionRule, RelationshipPatternRule)) "a relationship type name"
         else if (inStack(LabelExpressionRule, NodePatternRule)) "a node label name"
@@ -247,7 +324,12 @@ final class CypherErrorVocabulary(conf: CypherErrorStrategy.Conf) extends Vocabu
   def displayName(tokenTypes: Seq[Integer]): String = {
     if (tokenTypes.forall(t => getDisplayName(t) == "'" + getSymbolicName(t) + "'"))
       tokenTypes.map(t => getSymbolicName(t)).mkString("'", " ", "'")
-    else getDisplayName(tokenTypes.head)
+    else {
+      // Display as long of a token sequence as possible
+      val startTokens = tokenTypes.takeWhile(t => getDisplayName(t) == "'" + getSymbolicName(t) + "'")
+      if (startTokens.nonEmpty) startTokens.map(t => getSymbolicName(t)).mkString("'", " ", "'")
+      else getDisplayName(tokenTypes.head)
+    }
   }
 
   override def getDisplayName(tokenType: Int): String = {

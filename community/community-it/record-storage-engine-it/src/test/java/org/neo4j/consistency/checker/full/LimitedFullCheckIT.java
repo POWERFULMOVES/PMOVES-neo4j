@@ -22,6 +22,7 @@ package org.neo4j.consistency.checker.full;
 import static org.neo4j.consistency.checking.cache.CacheSlots.CACHE_LINE_SIZE_BYTES;
 import static org.neo4j.graphdb.Label.label;
 import static org.neo4j.graphdb.RelationshipType.withName;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.context.CursorContext.NULL_CONTEXT;
 
 import java.io.IOException;
@@ -44,7 +45,7 @@ import org.neo4j.kernel.api.exceptions.index.IndexEntryConflictException;
 import org.neo4j.kernel.api.index.IndexAccessor;
 import org.neo4j.kernel.api.index.IndexUpdater;
 import org.neo4j.kernel.impl.api.index.IndexUpdateMode;
-import org.neo4j.storageengine.api.IndexEntryUpdate;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 
 class LimitedFullCheckIT extends FullCheckIntegrationTest {
     @Override
@@ -73,9 +74,9 @@ class LimitedFullCheckIT extends FullCheckIntegrationTest {
 
                 try (IndexUpdater updater = accessor.newUpdater(IndexUpdateMode.ONLINE, NULL_CONTEXT, false)) {
                     // There is already another node (created in generateInitialData()) that has this value
-                    updater.process(IndexEntryUpdate.add(nodeId, indexDescriptor, values(indexDescriptor)));
+                    updater.process(EagerValueIndexEntryUpdate.add(nodeId, indexDescriptor, values(indexDescriptor)));
                 }
-                accessor.force(FileFlushEvent.NULL, NULL_CONTEXT);
+                accessor.force(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
             }
         }
 
@@ -151,9 +152,10 @@ class LimitedFullCheckIT extends FullCheckIntegrationTest {
                 if (indexDescriptor.schema().entityType() == EntityType.NODE) {
                     idToRemove = nodeToRemoveFromIndex;
                 }
-                updater.process(IndexEntryUpdate.remove(idToRemove, indexDescriptor, values(indexDescriptor)));
+                updater.process(
+                        EagerValueIndexEntryUpdate.remove(idToRemove, indexDescriptor, values(indexDescriptor)));
             }
-            accessor.force(FileFlushEvent.NULL, NULL_CONTEXT);
+            accessor.force(FileFlushEvent.NULL, EMPTY_ASYNC_BLOCK_ACCESSOR, NULL_CONTEXT);
         }
     }
 }

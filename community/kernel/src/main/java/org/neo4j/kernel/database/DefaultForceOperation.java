@@ -22,11 +22,12 @@ package org.neo4j.kernel.database;
 import java.io.IOException;
 import org.neo4j.dbms.database.DatabasePageCache;
 import org.neo4j.dbms.database.DatabasePageCache.FlushGuard;
+import org.neo4j.io.async.AsyncBlockAccessor;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.tracing.DatabaseFlushEvent;
 import org.neo4j.kernel.impl.api.index.IndexingService;
-import org.neo4j.kernel.impl.transaction.log.checkpoint.CheckPointerImpl;
 import org.neo4j.storageengine.api.StorageEngine;
+import org.neo4j.wal.checkpoint.CheckPointerImpl;
 
 public class DefaultForceOperation implements CheckPointerImpl.ForceOperation {
     private final IndexingService indexingService;
@@ -41,10 +42,24 @@ public class DefaultForceOperation implements CheckPointerImpl.ForceOperation {
     }
 
     @Override
-    public void flushAndForce(DatabaseFlushEvent databaseFlushEvent, CursorContext cursorContext) throws IOException {
-        FlushGuard flushGuard = databasePageCache.flushGuard(databaseFlushEvent);
-        indexingService.checkpoint(databaseFlushEvent, cursorContext);
-        storageEngine.checkpoint(databaseFlushEvent, cursorContext);
+    public void flushAndForce(
+            DatabaseFlushEvent databaseFlushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext)
+            throws IOException {
+        FlushGuard flushGuard = databasePageCache.flushGuard(databaseFlushEvent, asyncBlockAccessor);
+        indexingService.checkpoint(databaseFlushEvent, asyncBlockAccessor, cursorContext);
+        storageEngine.checkpoint(databaseFlushEvent, asyncBlockAccessor, cursorContext);
         flushGuard.flushUnflushed();
+    }
+
+    @Override
+    public long compact(
+            DatabaseFlushEvent databaseFlushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext)
+            throws IOException {
+        FlushGuard flushGuard = databasePageCache.flushGuard(databaseFlushEvent, asyncBlockAccessor);
+        long numBytesTrimmed = 0;
+        numBytesTrimmed += indexingService.compact(databaseFlushEvent, asyncBlockAccessor, cursorContext);
+        numBytesTrimmed += storageEngine.compact(databaseFlushEvent, asyncBlockAccessor, cursorContext);
+        flushGuard.flushUnflushed();
+        return numBytesTrimmed;
     }
 }

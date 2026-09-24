@@ -35,7 +35,7 @@ import org.neo4j.graphdb.config.Setting;
 import org.neo4j.io.ByteUnit;
 import org.neo4j.io.layout.Neo4jLayout;
 import org.neo4j.kernel.database.DatabaseId;
-import org.neo4j.logging.NullLogProvider;
+import org.neo4j.logging.AssertableLogProvider;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.Neo4jLayoutExtension;
 import org.neo4j.test.utils.TestDirectory;
@@ -50,14 +50,12 @@ public abstract class SystemDatabaseRunnerAbstractTestBase {
 
     @Test
     void shouldOnlyStartSystemDb() throws Exception {
+        var logProvider = new AssertableLogProvider();
         createDatabase();
 
         var editionFactory = editionModuleFactory();
         try (var systemDatabaseRunner = new SystemDatabaseRunner(
-                testDirectory.getFileSystem(),
-                editionFactory,
-                getConfig(neoLayout.homeDirectory()),
-                NullLogProvider.getInstance())) {
+                testDirectory.getFileSystem(), editionFactory, getConfig(neoLayout.homeDirectory()), logProvider)) {
             assertThat(systemDatabaseRunner.globalModule()).isNull();
             assertThat(systemDatabaseRunner.systemDatabase()).isNull();
 
@@ -77,6 +75,8 @@ public abstract class SystemDatabaseRunnerAbstractTestBase {
             assertThat(systemDatabaseContext.map(DatabaseContext::databaseFacade))
                     .hasValue(systemDatabaseRunner.systemDatabase());
         }
+
+        logChecks(logProvider);
     }
 
     protected Config getConfig(Path homeDirectory) {
@@ -89,6 +89,7 @@ public abstract class SystemDatabaseRunnerAbstractTestBase {
         var dbms = dbmsBuilder(neoLayout.homeDirectory())
                 .setConfig(BoltConnector.enabled, FALSE)
                 .setConfig(GraphDatabaseSettings.pagecache_memory, ByteUnit.mebiBytes(8))
+                .setConfig(GraphDatabaseSettings.logical_log_rotation_threshold, ByteUnit.kibiBytes(256))
                 .setConfig(baseConfig())
                 .build();
         dbms.shutdown();
@@ -99,4 +100,6 @@ public abstract class SystemDatabaseRunnerAbstractTestBase {
     protected abstract SystemDatabaseRunner.EditionModuleFactory editionModuleFactory();
 
     protected abstract Neo4jDatabaseManagementServiceBuilder dbmsBuilder(Path homePath);
+
+    protected void logChecks(AssertableLogProvider logProvider) {}
 }

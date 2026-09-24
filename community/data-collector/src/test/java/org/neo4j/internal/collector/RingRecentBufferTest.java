@@ -20,9 +20,8 @@
 package org.neo4j.internal.collector;
 
 import static java.lang.String.format;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.fail;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -59,7 +58,7 @@ class RingRecentBufferTest {
         }
         buffer.foreach(Assertions::assertNotNull);
 
-        assertEquals(0, buffer.numSilentQueryDrops());
+        assertThat(buffer.numSilentQueryDrops()).isZero();
     }
 
     @Test
@@ -73,7 +72,7 @@ class RingRecentBufferTest {
         buffer.foreach(l -> fail("boom"));
         buffer.clearIf(l -> true);
 
-        assertEquals(0, buffer.numSilentQueryDrops());
+        assertThat(buffer.numSilentQueryDrops()).isZero();
     }
 
     @Test
@@ -89,9 +88,9 @@ class RingRecentBufferTest {
 
         List<Long> retained = new ArrayList<>();
         buffer.foreach(retained::add);
-        assertEquals(2, retained.size());
-        assertEquals(1, retained.get(0));
-        assertEquals(3, retained.get(1));
+        assertThat(retained).hasSize(2);
+        assertThat(retained.get(0)).isOne();
+        assertThat(retained.get(1)).isEqualTo(3);
     }
 
     @Test
@@ -100,9 +99,8 @@ class RingRecentBufferTest {
         int n = 1000;
         int bufferSize = 16;
         RingRecentBuffer<Long> buffer = new RingRecentBuffer<>(bufferSize, q -> {});
-        ExecutorService executor = Executors.newFixedThreadPool(2);
 
-        try {
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
             UniqueElementsConsumer consumer = new UniqueElementsConsumer();
 
             // when
@@ -114,17 +112,17 @@ class RingRecentBufferTest {
             Future<?> consume = executor.submit(stress(n, i -> {
                 consumer.reset();
                 buffer.foreach(consumer);
-                assertTrue(consumer.values.size() <= bufferSize, format("Should see at most %d elements", bufferSize));
+                assertThat(consumer.values.size() <= bufferSize)
+                        .as(format("Should see at most %d elements", bufferSize))
+                        .isTrue();
             }));
 
             // then without illegal transitions or exceptions
             consume.get();
             latch.countDown();
             produce.get();
-        } finally {
-            executor.shutdown();
         }
-        assertEquals(0, buffer.numSilentQueryDrops());
+        assertThat(buffer.numSilentQueryDrops()).isZero();
     }
 
     @Test
@@ -133,9 +131,8 @@ class RingRecentBufferTest {
         int n = 1000000;
         int bufferSize = 16;
         RingRecentBuffer<Long> buffer = new RingRecentBuffer<>(bufferSize, q -> {});
-        ExecutorService executor = Executors.newFixedThreadPool(2);
 
-        try {
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
             // when
             // producer thread
             CountDownLatch latch = new CountDownLatch(1);
@@ -150,10 +147,8 @@ class RingRecentBufferTest {
             consume.get();
             latch.countDown();
             produce.get();
-        } finally {
-            executor.shutdown();
         }
-        assertEquals(0, buffer.numSilentQueryDrops());
+        assertThat(buffer.numSilentQueryDrops()).isZero();
     }
 
     @Test
@@ -162,9 +157,7 @@ class RingRecentBufferTest {
         int n = 1000000;
         int bufferSize = 16;
         RingRecentBuffer<Long> buffer = new RingRecentBuffer<>(bufferSize, q -> {});
-        ExecutorService executor = Executors.newFixedThreadPool(4);
-
-        try {
+        try (ExecutorService executor = Executors.newFixedThreadPool(4)) {
             // when
             // producer threads
             CountDownLatch latch = new CountDownLatch(1);
@@ -183,11 +176,11 @@ class RingRecentBufferTest {
             produce1.get();
             produce2.get();
             produce3.get();
-        } finally {
-            executor.shutdown();
         }
         // on some systems thread scheduling variance actually causes ~100 silent drops in this test
-        assertTrue(buffer.numSilentQueryDrops() < 1000, "only a few silent drops expected");
+        assertThat(buffer.numSilentQueryDrops() < 1000)
+                .as("only a few silent drops expected")
+                .isTrue();
     }
 
     private static Runnable stress(int n, LongConsumer action) {
@@ -216,7 +209,9 @@ class RingRecentBufferTest {
 
         @Override
         public void accept(Long newValue) {
-            assertTrue(values.add(newValue), format("Value %d was seen twice", newValue));
+            assertThat(values.add(newValue))
+                    .as(format("Value %d was seen twice", newValue))
+                    .isTrue();
         }
     }
 }

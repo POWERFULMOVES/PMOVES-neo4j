@@ -33,7 +33,9 @@ public interface IndexQuery {
     enum IndexQueryType {
         TOKEN_LOOKUP,
         ALL_ENTRIES,
+        ALL,
         EXISTS,
+        NOT_EXISTS,
         EXACT,
         RANGE,
         BOUNDING_BOX,
@@ -41,6 +43,8 @@ public interface IndexQuery {
         STRING_SUFFIX,
         STRING_CONTAINS,
         FULLTEXT_SEARCH,
-        NEAREST_NEIGHBORS
+        NEAREST_NEIGHBORS,
+        ENTITY_FILTER,
+        IN_SET
     }
 }

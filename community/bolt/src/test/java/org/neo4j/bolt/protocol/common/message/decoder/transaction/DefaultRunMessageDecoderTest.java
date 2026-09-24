@@ -20,17 +20,18 @@
 package org.neo4j.bolt.protocol.common.message.decoder.transaction;
 
 import java.time.Duration;
-import java.util.List;
+import java.util.Set;
 import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
-import org.neo4j.bolt.protocol.common.message.AccessMode;
-import org.neo4j.bolt.protocol.common.message.notifications.SelectiveNotificationsConfig;
 import org.neo4j.bolt.testing.assertions.MapValueAssertions;
 import org.neo4j.bolt.testing.mock.ConnectionMockFactory;
+import org.neo4j.boltmessages.AccessMode;
+import org.neo4j.boltmessages.notifications.SelectiveNotificationsConfig;
+import org.neo4j.kernel.impl.query.NotificationConfiguration;
 import org.neo4j.packstream.error.reader.PackstreamReaderException;
 import org.neo4j.packstream.io.PackstreamBuf;
-import org.neo4j.packstream.io.value.PackstreamValueReader;
+import org.neo4j.packstream.io.value.AbstractPackstreamValueReader;
 import org.neo4j.packstream.struct.StructHeader;
 import org.neo4j.values.storable.Values;
 import org.neo4j.values.virtual.ListValueBuilder;
@@ -53,7 +54,7 @@ public class DefaultRunMessageDecoderTest extends AbstractRunMessageDecoderTest<
     @Test
     void shouldReadMessage() throws PackstreamReaderException {
         var buf = PackstreamBuf.allocUnpooled();
-        var reader = Mockito.mock(PackstreamValueReader.class);
+        var reader = Mockito.mock(AbstractPackstreamValueReader.class);
 
         buf.writeString("RETURN $n");
 
@@ -102,13 +103,14 @@ public class DefaultRunMessageDecoderTest extends AbstractRunMessageDecoderTest<
         Assertions.assertThat(msg.databaseName()).isEqualTo("neo4j");
         Assertions.assertThat(msg.impersonatedUser()).isEqualTo("bob");
         Assertions.assertThat(msg.notificationsConfig())
-                .isEqualTo(new SelectiveNotificationsConfig("WARNING", List.of("HINT")));
+                .isEqualTo(new SelectiveNotificationsConfig(
+                        NotificationConfiguration.Severity.WARNING, Set.of(NotificationConfiguration.Category.HINT)));
     }
 
     @Test
     void shouldFallbackToDefaults() throws PackstreamReaderException {
         var buf = PackstreamBuf.allocUnpooled();
-        var reader = Mockito.mock(PackstreamValueReader.class);
+        var reader = Mockito.mock(AbstractPackstreamValueReader.class);
 
         buf.writeString("RETURN $n");
 

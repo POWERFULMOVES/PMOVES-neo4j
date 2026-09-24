@@ -23,14 +23,15 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
-import org.apache.lucene.store.Directory;
 import org.neo4j.function.ThrowingBiConsumer;
 import org.neo4j.graphdb.ResourceIterator;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.kernel.api.IndexFileSnapshotter;
-import org.neo4j.kernel.api.impl.index.backup.WritableIndexSnapshotFileIterator;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneContext;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDirectory;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneDocument;
 import org.neo4j.kernel.api.impl.index.partition.AbstractIndexPartition;
-import org.neo4j.kernel.api.impl.schema.writer.LuceneIndexWriter;
+import org.neo4j.kernel.api.impl.schema.writer.LucenePartitionIndexWriter;
 import org.neo4j.kernel.api.index.ValueIndexReader;
 import org.neo4j.kernel.impl.index.schema.IndexUsageTracking;
 
@@ -49,6 +50,8 @@ public interface DatabaseIndex<READER extends ValueIndexReader> extends IndexFil
      * @throws IOException
      */
     void create() throws IOException;
+
+    LuceneContext luceneContext();
 
     /**
      * Open index with all allocated partitions.
@@ -106,18 +109,17 @@ public interface DatabaseIndex<READER extends ValueIndexReader> extends IndexFil
     void flush() throws IOException;
 
     /**
-     * Creates an iterable over all {@link org.apache.lucene.document.Document document}s in all partitions.
+     * Creates an iterable over all {@link LuceneDocument document}s in all partitions.
      *
      * @return LuceneAllDocumentsReader over all documents
      */
-    LuceneAllDocumentsReader allDocumentsReader();
+    LucenePartitionsAllDocumentsReader allDocumentsReader();
 
     /**
      * Snapshot of all file in all index partitions.
      *
      * @return iterator over all index files.
      * @throws IOException
-     * @see WritableIndexSnapshotFileIterator
      */
     @Override
     ResourceIterator<Path> snapshotFiles() throws IOException;
@@ -135,9 +137,9 @@ public interface DatabaseIndex<READER extends ValueIndexReader> extends IndexFil
      */
     List<AbstractIndexPartition> getPartitions();
 
-    void accessClosedDirectories(ThrowingBiConsumer<Integer, Directory, IOException> visitor) throws IOException;
+    void accessClosedDirectories(ThrowingBiConsumer<Integer, LuceneDirectory, IOException> visitor) throws IOException;
 
-    LuceneIndexWriter getIndexWriter();
+    LucenePartitionIndexWriter getIndexWriter();
 
     READER getIndexReader(IndexUsageTracking usageTracker) throws IOException;
 

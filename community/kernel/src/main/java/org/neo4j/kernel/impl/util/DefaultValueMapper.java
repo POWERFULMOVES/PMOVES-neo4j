@@ -26,11 +26,15 @@ import org.neo4j.kernel.impl.core.NodeEntity;
 import org.neo4j.kernel.impl.core.RelationshipEntity;
 import org.neo4j.kernel.impl.coreapi.InternalTransaction;
 import org.neo4j.values.ValueMapper;
+import org.neo4j.values.virtual.CompositeDatabaseValue;
 import org.neo4j.values.virtual.VirtualNodeValue;
 import org.neo4j.values.virtual.VirtualPathValue;
 import org.neo4j.values.virtual.VirtualRelationshipValue;
 
 public class DefaultValueMapper extends ValueMapper.JavaMapper {
+    private static final String COMPOSITE_UNSUPPORTED_OPERATION_MESSAGE =
+            "Graph access operations are not supported on composite databases.";
+
     private final InternalTransaction transaction;
 
     public DefaultValueMapper(InternalTransaction transaction) {
@@ -39,26 +43,33 @@ public class DefaultValueMapper extends ValueMapper.JavaMapper {
 
     @Override
     public Node mapNode(VirtualNodeValue value) {
-        if (value instanceof NodeEntityWrappingNodeValue) { // this is the back door through which "virtual nodes" slip
-            return ((NodeEntityWrappingNodeValue) value).getEntity();
+        if (value instanceof WrappingEntity<?> wrappingEntity) {
+            // this is the back door through which "virtual nodes" slip
+            return (Node) wrappingEntity.getEntity();
+        }
+        if (value instanceof CompositeDatabaseValue.CompositeGraphDirectNodeValue compositeNode) {
+            return new CompositeMaterializedNode(compositeNode, this, COMPOSITE_UNSUPPORTED_OPERATION_MESSAGE);
         }
         return mapNode(value.id());
     }
 
     @Override
     public Relationship mapRelationship(VirtualRelationshipValue value) {
-        if (value
-                instanceof
-                RelationshipEntityWrappingValue) { // this is the back door through which "virtual relationships" slip
-            return ((RelationshipEntityWrappingValue) value).getEntity();
+        if (value instanceof WrappingEntity<?> wrappingEntity) {
+            // this is the back door through which "virtual relationships" slip
+            return (Relationship) wrappingEntity.getEntity();
+        }
+        if (value instanceof CompositeDatabaseValue.CompositeDirectRelationshipValue compositeRelationship) {
+            return new CompositeMaterializedRelationship(
+                    compositeRelationship, this, COMPOSITE_UNSUPPORTED_OPERATION_MESSAGE);
         }
         return mapRelationship(value.id());
     }
 
     @Override
     public Path mapPath(VirtualPathValue value) {
-        if (value instanceof PathWrappingPathValue) {
-            return ((PathWrappingPathValue) value).path();
+        if (value instanceof WrappingPath wrappedPath) {
+            return wrappedPath.path();
         }
         return new CoreAPIPath(value);
     }

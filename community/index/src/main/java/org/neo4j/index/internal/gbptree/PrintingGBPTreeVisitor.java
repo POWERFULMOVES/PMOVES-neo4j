@@ -33,6 +33,7 @@ public class PrintingGBPTreeVisitor<ROOT_KEY, KEY, VALUE> extends GBPTreeVisitor
     private final boolean printFreelist;
     private final boolean printOffload;
     private final boolean printHistory;
+    private final boolean visitDataLayer;
 
     /**
      * Prints a {@link GBPTree} in human readable form, very useful for debugging.
@@ -48,6 +49,7 @@ public class PrintingGBPTreeVisitor<ROOT_KEY, KEY, VALUE> extends GBPTreeVisitor
         this.printFreelist = printConfig.getPrintFreelist();
         this.printOffload = printConfig.getPrintOffload();
         this.printHistory = printConfig.getPrintHistory();
+        this.visitDataLayer = printConfig.getVisitDataLayer();
     }
 
     @Override
@@ -89,9 +91,27 @@ public class PrintingGBPTreeVisitor<ROOT_KEY, KEY, VALUE> extends GBPTreeVisitor
     @Override
     public void value(ValueHolder<VALUE> value) {
         if (printValues) {
-            out.print("=" + value.value + (value.defined ? "[D]" : "[U]"));
+            out.print("=" + value.value + (value.deleted ? "[D]" : ""));
         }
         out.print(" ");
+    }
+
+    @Override
+    public void rootKey(ROOT_KEY rootKey, boolean isLeaf, long offloadId) {
+        boolean doPrintOffload = printOffload && offloadId != NO_OFFLOAD_ID;
+        out.print(doPrintOffload ? "__" + offloadId + "__" + rootKey : rootKey);
+    }
+
+    @Override
+    public void rootMapping(long id, long generation) {
+        out.print("=" + id + "(gen:" + generation + ") ");
+    }
+
+    @Override
+    public void valueVersion(long version) {
+        if (printValues) {
+            out.print("{" + version + "} ");
+        }
     }
 
     @Override
@@ -116,7 +136,7 @@ public class PrintingGBPTreeVisitor<ROOT_KEY, KEY, VALUE> extends GBPTreeVisitor
     @Override
     public void historicalValue(long version, ValueHolder<VALUE> value) {
         if (printHistory) {
-            out.print(" " + version + ":" + value.value + (value.defined ? "[D]" : "[U]"));
+            out.print(" " + version + ":" + value.value + (value.deleted ? "[D]" : ""));
         }
     }
 
@@ -149,5 +169,10 @@ public class PrintingGBPTreeVisitor<ROOT_KEY, KEY, VALUE> extends GBPTreeVisitor
         if (printFreelist) {
             out.print("[" + generation + "," + pageId + "] ");
         }
+    }
+
+    @Override
+    public boolean visitDataLayer() {
+        return visitDataLayer;
     }
 }

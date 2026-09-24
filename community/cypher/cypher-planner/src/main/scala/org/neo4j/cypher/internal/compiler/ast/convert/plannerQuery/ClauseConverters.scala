@@ -21,6 +21,7 @@ package org.neo4j.cypher.internal.compiler.ast.convert.plannerQuery
 
 import org.neo4j.cypher.internal.ast.AliasedReturnItem
 import org.neo4j.cypher.internal.ast.AscSortItem
+import org.neo4j.cypher.internal.ast.AstHint
 import org.neo4j.cypher.internal.ast.Clause
 import org.neo4j.cypher.internal.ast.CommandClause
 import org.neo4j.cypher.internal.ast.CreateOrInsert
@@ -28,8 +29,10 @@ import org.neo4j.cypher.internal.ast.Delete
 import org.neo4j.cypher.internal.ast.DescSortItem
 import org.neo4j.cypher.internal.ast.Finish
 import org.neo4j.cypher.internal.ast.Foreach
+import org.neo4j.cypher.internal.ast.FreeProjection
 import org.neo4j.cypher.internal.ast.ImportingWithSubqueryCall
 import org.neo4j.cypher.internal.ast.InputDataStream
+import org.neo4j.cypher.internal.ast.IrHint
 import org.neo4j.cypher.internal.ast.LoadCSV
 import org.neo4j.cypher.internal.ast.Match
 import org.neo4j.cypher.internal.ast.Merge
@@ -56,12 +59,14 @@ import org.neo4j.cypher.internal.ast.SubqueryCall
 import org.neo4j.cypher.internal.ast.UnresolvedCall
 import org.neo4j.cypher.internal.ast.Unwind
 import org.neo4j.cypher.internal.ast.UseGraph
+import org.neo4j.cypher.internal.ast.UsingExpandHint
+import org.neo4j.cypher.internal.ast.UsingExpandStepHint
+import org.neo4j.cypher.internal.ast.UsingExpandStepId
 import org.neo4j.cypher.internal.ast.Where
 import org.neo4j.cypher.internal.ast.With
 import org.neo4j.cypher.internal.ast.Yield
 import org.neo4j.cypher.internal.ast.semantics.SemanticTable
 import org.neo4j.cypher.internal.compiler.helpers.AggregationHelper
-import org.neo4j.cypher.internal.compiler.helpers.SeqSupport.RichSeq
 import org.neo4j.cypher.internal.compiler.planner.ProcedureCallProjection
 import org.neo4j.cypher.internal.expressions.ContainerIndex
 import org.neo4j.cypher.internal.expressions.DynamicRelTypeExpression
@@ -80,16 +85,15 @@ import org.neo4j.cypher.internal.expressions.NodePattern
 import org.neo4j.cypher.internal.expressions.Null
 import org.neo4j.cypher.internal.expressions.PathPatternPart
 import org.neo4j.cypher.internal.expressions.PatternElement
-import org.neo4j.cypher.internal.expressions.PatternElement.boundaryNodes
 import org.neo4j.cypher.internal.expressions.PatternPart.SelectiveSelector
-import org.neo4j.cypher.internal.expressions.PatternPartWithSelector
+import org.neo4j.cypher.internal.expressions.PrefixedPatternPart
 import org.neo4j.cypher.internal.expressions.Property
 import org.neo4j.cypher.internal.expressions.PropertyKeyName
 import org.neo4j.cypher.internal.expressions.RelTypeName
 import org.neo4j.cypher.internal.expressions.RelationshipChain
 import org.neo4j.cypher.internal.expressions.RelationshipPattern
 import org.neo4j.cypher.internal.expressions.Variable
-import org.neo4j.cypher.internal.frontend.phases.ResolvedCall
+import org.neo4j.cypher.internal.frontend.phases.ResolvedNonLocalCall
 import org.neo4j.cypher.internal.ir.AggregatingQueryProjection
 import org.neo4j.cypher.internal.ir.CommandProjection
 import org.neo4j.cypher.internal.ir.CreateCommand
@@ -112,6 +116,7 @@ import org.neo4j.cypher.internal.ir.QueryPagination
 import org.neo4j.cypher.internal.ir.QueryProjection
 import org.neo4j.cypher.internal.ir.RegularQueryProjection
 import org.neo4j.cypher.internal.ir.RemoveLabelPattern
+import org.neo4j.cypher.internal.ir.SearchClause
 import org.neo4j.cypher.internal.ir.Selections
 import org.neo4j.cypher.internal.ir.SetDynamicPropertyPattern
 import org.neo4j.cypher.internal.ir.SetLabelPattern
@@ -140,6 +145,9 @@ import org.neo4j.cypher.internal.label_expressions.LabelExpression.Leaf
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.cypher.internal.util.CancellationChecker
 import org.neo4j.cypher.internal.util.Foldable.SkipChildren
+import org.neo4j.cypher.internal.util.SeqSupport.RichSeq
+import org.neo4j.cypher.internal.util.collection.immutable.ListSet
+import org.neo4j.cypher.internal.util.collection.immutable.ListSet.IterableOnceToListSet
 import org.neo4j.cypher.internal.util.symbols.CTNode
 import org.neo4j.cypher.internal.util.symbols.CTRelationship
 import org.neo4j.exceptions.InternalException
@@ -148,7 +156,7 @@ import org.neo4j.exceptions.SyntaxException
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
-object ClauseConverters extends LabelExpressionConversion {
+case class ClauseConverters(statementConverters: StatementConverters) extends LabelExpressionConversion {
 
   /**
    * Adds a clause to a PlannerQueryBuilder
@@ -167,18 +175,18 @@ object ClauseConverters extends LabelExpressionConversion {
     cancellationChecker: CancellationChecker,
     position: QueryProjection.Position
   ): PlannerQueryBuilder = clause match {
-    case _: Finish          => acc
-    case c: Return          => addReturnToLogicalPlanInput(acc, c, position)
-    case c: Match           => addMatchToLogicalPlanInput(acc, c, anonymousVariableNameGenerator)
-    case c: With            => addWithToLogicalPlanInput(acc, c, nextClause)
-    case c: Unwind          => addUnwindToLogicalPlanInput(acc, c)
-    case c: ResolvedCall    => addCallToLogicalPlanInput(acc, c)
-    case c: CreateOrInsert  => addCreateToLogicalPlanInput(acc, c)
-    case c: SetClause       => addSetClauseToLogicalPlanInput(acc, c)
-    case c: Delete          => addDeleteToLogicalPlanInput(acc, c)
-    case c: Remove          => addRemoveToLogicalPlanInput(acc, c)
-    case c: Merge           => addMergeToLogicalPlanInput(acc, c)
-    case c: LoadCSV         => addLoadCSVToLogicalPlanInput(acc, c)
+    case _: Finish               => acc
+    case c: Return               => addReturnToLogicalPlanInput(acc, c, position)
+    case c: Match                => addMatchToLogicalPlanInput(acc, c, anonymousVariableNameGenerator)
+    case c: With                 => addWithToLogicalPlanInput(acc, c, nextClause)
+    case c: Unwind               => addUnwindToLogicalPlanInput(acc, c)
+    case c: ResolvedNonLocalCall => addCallToLogicalPlanInput(acc, c)
+    case c: CreateOrInsert       => addCreateToLogicalPlanInput(acc, c)
+    case c: SetClause            => addSetClauseToLogicalPlanInput(acc, c)
+    case c: Delete               => addDeleteToLogicalPlanInput(acc, c)
+    case c: Remove               => addRemoveToLogicalPlanInput(acc, c)
+    case c: Merge                => addMergeToLogicalPlanInput(acc, c)
+    case c: LoadCSV              => addLoadCSVToLogicalPlanInput(acc, c)
     case c: Foreach         => addForeachToLogicalPlanInput(acc, c, anonymousVariableNameGenerator, cancellationChecker)
     case c: InputDataStream => addInputDataStreamToLogicalPlanInput(acc, c)
     case c: SubqueryCall =>
@@ -189,8 +197,43 @@ object ClauseConverters extends LabelExpressionConversion {
     case _: UseGraph => acc
 
     case x: UnresolvedCall => throw new IllegalArgumentException(s"$x is not expected here")
-    case x => throw new InternalException(s"Received an AST-clause that has no representation the QG: $x")
+    case x => throw InternalException.internalError(
+        this.getClass.getSimpleName,
+        s"Received an AST-clause that has no representation the QG: $x"
+      )
   }
+
+  /**
+   * Translate AST-level `USING EXPAND ...` hints into the atomic IR-level
+   * [[UsingExpandStepHint]]s that live in `QueryGraph.hints`. Every step of a
+   * chained AST hint becomes one IR hint, so that they can be solved individually.
+   * The IR hint's `mustFollow` set signifies what steps need to have been solved before,
+   * so that we can enforce the order of hints.
+   *
+   * Non-expand hints pass through unchanged.
+   */
+  private def expandAstHintsToIrHints(hints: Seq[AstHint]): Seq[IrHint] =
+    hints.flatMap {
+      case UsingExpandHint(steps) =>
+        val stepIds =
+          steps.iterator
+            .map(s => UsingExpandStepId(s.position))
+            .toSeq
+
+        stepIds.zip(steps)
+          .zipWithIndex
+          .map { case ((stepId, step), idx) =>
+            UsingExpandStepHint(
+              from = step.from,
+              to = step.to,
+              via = step.via,
+              mode = step.mode,
+              stepId = stepId,
+              mustFollow = stepIds.take(idx).toSet
+            )
+          }
+      case other: IrHint => Seq(other)
+    }
 
   private def addLoadCSVToLogicalPlanInput(acc: PlannerQueryBuilder, clause: LoadCSV): PlannerQueryBuilder =
     acc.withHorizon(
@@ -198,7 +241,8 @@ object ClauseConverters extends LabelExpressionConversion {
         variable = clause.variable,
         url = clause.urlString,
         format = if (clause.withHeaders) HasHeaders else NoHeaders,
-        clause.fieldTerminator
+        clause.fieldTerminator,
+        importedSymbolsFromLastCallSubquery = acc.importedVariables
       )
     ).withTail(acc.emptySinglePlannerQuery)
 
@@ -227,7 +271,10 @@ object ClauseConverters extends LabelExpressionConversion {
     val aggregationsMap = turnIntoMap(aggregatingItems)
 
     if (projectionMap.values.exists(containsAggregateOutsideOfAggregatingHorizon))
-      throw new InternalException("Grouping keys contains aggregation. AST has not been rewritten?")
+      throw InternalException.internalError(
+        this.getClass.getSimpleName,
+        "Grouping keys contains aggregation. AST has not been rewritten?"
+      )
 
     if (aggregationsMap.nonEmpty)
       AggregatingQueryProjection(
@@ -256,7 +303,7 @@ object ClauseConverters extends LabelExpressionConversion {
     position: QueryProjection.Position
   ): PlannerQueryBuilder =
     clause match {
-      case Return(distinct, ReturnItems(star, items, _), optOrderBy, skip, limit, _, _) if !star =>
+      case Return(distinct, ReturnItems(FreeProjection, items, _), _, optOrderBy, skip, limit, _, _, _) =>
         val queryPagination = QueryPagination().withSkip(skip).withLimit(limit)
 
         val projection =
@@ -274,7 +321,10 @@ object ClauseConverters extends LabelExpressionConversion {
           .withInterestingOrder(requiredOrder)
           .withPropagatedTailInterestingOrder()
       case _ =>
-        throw new InternalException("AST needs to be rewritten before it can be used for planning. Got: " + clause)
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          "AST needs to be rewritten before it can be used for planning. Got: " + clause
+        )
     }
 
   private def findRequiredOrder(horizon: QueryHorizon, optOrderBy: Option[OrderBy]): InterestingOrder = {
@@ -285,7 +335,7 @@ object ClauseConverters extends LabelExpressionConversion {
         val requiredOrderCandidate =
           extractColumnOrderFromOrderBy(sortItems, projections)
         (requiredOrderCandidate, Seq.empty)
-      case AggregatingQueryProjection(groupingExpressions, aggregationExpressions, _, _, _, _) =>
+      case AggregatingQueryProjection(groupingExpressions, aggregationExpressions, _, _, _, _, _) =>
         val requiredOrderCandidate =
           extractColumnOrderFromOrderBy(sortItems, groupingExpressions)
         val interestingCandidates =
@@ -427,7 +477,10 @@ object ClauseConverters extends LabelExpressionConversion {
             commands += create
         }
         ()
-      case _ => throw new InternalException(s"Received an AST-clause that has no representation the QG: $clause")
+      case _ => throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"Received an AST-clause that has no representation the QG: $clause"
+        )
     }
 
     builder.amendQueryGraph(_.addMutatingPatterns(CreatePattern(commands.toSeq)))
@@ -444,7 +497,8 @@ object ClauseConverters extends LabelExpressionConversion {
       val allLabelNames = extractNodeLabelsToCreate(labelExpression)
       val createNode = CreateNode(variable, allLabelNames.staticLabelNames, allLabelNames.dynamicLabelNames, props)
       CreateNodeCommand(createNode, variable)
-    case _ => throw new InternalException("All nodes must be named at this instance")
+    case _ =>
+      throw InternalException.internalError(this.getClass.getSimpleName, "All nodes must be named at this instance")
   }
 
   private def allCreatePatternsInOrderAndDeduped(
@@ -510,12 +564,10 @@ object ClauseConverters extends LabelExpressionConversion {
   }
 
   private def asReturnItems(current: QueryGraph, returnItems: ReturnItems): Seq[AliasedReturnItem] = returnItems match {
-    case ReturnItems(star, items, _) if star =>
+    case ri @ ReturnItems(_, items, _) if ri.includeExisting =>
       (QueryProjection.forVariables(current.allCoveredIds) ++ items).asInstanceOf[Seq[AliasedReturnItem]]
     case ReturnItems(_, items, _) =>
       items.asInstanceOf[Seq[AliasedReturnItem]]
-    case _ =>
-      Seq.empty
   }
 
   private def addMatchToLogicalPlanInput(
@@ -538,8 +590,8 @@ object ClauseConverters extends LabelExpressionConversion {
       // MATCH (a)-[r]-(b) MATCH SHORTEST (()--())+ ()-[r]-() (()--())+
       val previousPatternVars = acc.currentQueryGraph.coveredIdsForPatterns
       val currentStrictInteriorVarsAndDependencies = clause.pattern.patternParts.view.collect {
-        case spp @ PatternPartWithSelector(_: SelectiveSelector, _) =>
-          (spp.allVariables -- boundaryNodes(spp.element)) ++ spp.dependencies
+        case spp @ PrefixedPatternPart(_: SelectiveSelector, _, _) =>
+          spp.strictInteriorVariables ++ spp.dependencies
       }.flatten.toSet
       val hasInteriorOrDependencyReferringToPreviouslyBoundVar =
         previousPatternVars.intersect(currentStrictInteriorVarsAndDependencies).nonEmpty
@@ -580,13 +632,17 @@ object ClauseConverters extends LabelExpressionConversion {
 
     def addHorizon(acc: PlannerQueryBuilder): PlannerQueryBuilder =
       acc
-        .withHorizon(PassthroughAllHorizon())
+        .withHorizon(PassthroughAllHorizon(acc.importedVariables))
         .withTail(acc.emptySinglePlannerQuery)
 
     val selections = asSelections(clause.where)
 
     val (accWithMaybeHorizon, remainingSelections) =
-      if (hasPatternOverlapOnInteriorVars && !clause.optional) {
+      if (acc.currentQueryGraph.containsUpdates) {
+        (addHorizon(acc), selections)
+      } else if (acc.currentQueryGraph.hasOptionalPatterns && !clause.optional) {
+        (addHorizon(acc), selections)
+      } else if (hasPatternOverlapOnInteriorVars && !clause.optional) {
         val boundPatternNodes = acc.currentQueryGraph.patternNodes
         // These are the selections we can safely solve before a horizon
         val (selectionsSolvableBeforeHorizon, otherSelections) =
@@ -595,6 +651,11 @@ object ClauseConverters extends LabelExpressionConversion {
           acc.amendQueryGraph(_.addSelections(selectionsSolvableBeforeHorizon))
         (addHorizon(accWithSelectionsSolvable), otherSelections)
       } else if (hasPatternOverlapOnInteriorVars || isPotentiallyUnsolvable) {
+        (addHorizon(acc), selections)
+      } else if (
+        (clause.search.nonEmpty && acc.currentQueryGraph.removeArguments().nonEmpty)
+        || acc.currentQueryGraph.searchClause.nonEmpty
+      ) {
         (addHorizon(acc), selections)
       } else {
         (acc, selections)
@@ -607,19 +668,26 @@ object ClauseConverters extends LabelExpressionConversion {
           // It's either all or nothing per match clause.
           QueryGraph(
             selections = remainingSelections,
-            hints = clause.hints.toSet
+            hints = expandAstHintsToIrHints(clause.hints).toListSet,
+            searchClause = SearchClause.fromAst(clause.search)
           ).addPathPatterns(pathPatterns)
         )
       }
     } else {
       accWithMaybeHorizon.amendQueryGraph {
         qg =>
+          val maybeSearchClause = SearchClause.fromAst(clause.search)
           qg
-            .addSelections(remainingSelections)
-            .addHints(clause.hints)
+            .addSelections(remainingSelections -- inlinedSearchClausePredicates(maybeSearchClause))
+            .addHints(expandAstHintsToIrHints(clause.hints))
             .addPathPatterns(pathPatterns)
+            .addSearchClause(maybeSearchClause)
       }
     }
+  }
+
+  private def inlinedSearchClausePredicates(maybeSearchClause: Option[SearchClause]): ListSet[Expression] = {
+    maybeSearchClause.fold(ListSet.empty[Expression])(_.inlinedPredicatesSet)
   }
 
   private def addCallSubqueryToLogicalPlanInput(
@@ -636,7 +704,7 @@ object ClauseConverters extends LabelExpressionConversion {
     }
 
     val callSubquery =
-      StatementConverters.convertToNestedPlannerQuery(
+      statementConverters.convertToNestedPlannerQuery(
         subquery,
         acc.semanticTable,
         anonymousVariableNameGenerator,
@@ -651,7 +719,8 @@ object ClauseConverters extends LabelExpressionConversion {
       subquery.isReturning,
       clause.inTransactionsParameters,
       clause.optional,
-      importedVariables = importedVariables
+      importedVariables = importedVariables,
+      importedSymbolsFromLastCallSubquery = acc.importedVariables
     )
   }
 
@@ -660,7 +729,7 @@ object ClauseConverters extends LabelExpressionConversion {
     clause: CommandClause
   ): PlannerQueryBuilder = {
     acc
-      .withHorizon(CommandProjection(clause))
+      .withHorizon(CommandProjection(clause, acc.importedVariables))
       .withTail(acc.emptySinglePlannerQuery)
   }
 
@@ -688,7 +757,7 @@ object ClauseConverters extends LabelExpressionConversion {
   private def toPropertyMap(expr: Option[Expression]): Map[PropertyKeyName, Expression] = expr match {
     case None                       => Map.empty
     case Some(MapExpression(items)) => items.toMap
-    case e                          => throw new InternalException(s"Expected MapExpression, got $e")
+    case e => throw InternalException.internalError(this.getClass.getSimpleName, s"Expected MapExpression, got $e")
   }
 
   private def toPropertySelection(identifier: LogicalVariable, map: Map[PropertyKeyName, Expression]): Seq[Expression] =
@@ -785,9 +854,9 @@ object ClauseConverters extends LabelExpressionConversion {
           .addMutatingPatterns(mergePattern)
 
         builder
-          .withHorizon(PassthroughAllHorizon())
+          .withHorizon(PassthroughAllHorizon(builder.importedVariables))
           .withTail(builder.emptySinglePlannerQuery.withQueryGraph(queryGraph = queryGraph))
-          .withHorizon(PassthroughAllHorizon())
+          .withHorizon(PassthroughAllHorizon(builder.importedVariables))
           .withTail(builder.emptySinglePlannerQuery)
 
       // MERGE (n)-[r: R]->(m) / MERGE (n)-[r: $('R')]->(m)
@@ -795,7 +864,7 @@ object ClauseConverters extends LabelExpressionConversion {
         val (nodes, rels) =
           allCreatePatternsInOrderAndDeduped(pattern, clause.name).foldRight((
             Seq.empty[CreateNodeCommand],
-            Seq.empty[CreateRelCommand],
+            Seq.empty[CreateRelCommand]
           )) { case (e, (ns, rs)) =>
             e match {
               case n: CreateNodeCommand => (n +: ns, rs)
@@ -872,12 +941,15 @@ object ClauseConverters extends LabelExpressionConversion {
             onMatch
           ))
 
-        builder.withHorizon(PassthroughAllHorizon())
+        builder.withHorizon(PassthroughAllHorizon(builder.importedVariables))
           .withTail(builder.emptySinglePlannerQuery.withQueryGraph(queryGraph = queryGraph))
-          .withHorizon(PassthroughAllHorizon())
+          .withHorizon(PassthroughAllHorizon(builder.importedVariables))
           .withTail(builder.emptySinglePlannerQuery)
 
-      case x => throw new InternalException(s"Received an AST-clause that has no representation the QG: $x")
+      case x => throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"Received an AST-clause that has no representation the QG: $x"
+        )
     }
   }
 
@@ -911,8 +983,11 @@ object ClauseConverters extends LabelExpressionConversion {
     def returnItemsOK(ri: ReturnItems): Boolean = {
       ri.items.forall {
         case item: AliasedReturnItem =>
-          !containsAggregateOutsideOfAggregatingHorizon(item.expression) && item.expression == item.variable
-        case _ => throw new InternalException("This should have been rewritten to an AliasedReturnItem.")
+          item.expression == item.variable
+        case _ => throw InternalException.internalError(
+            this.getClass.getSimpleName,
+            "This should have been rewritten to an AliasedReturnItem."
+          )
       }
     }
 
@@ -925,7 +1000,7 @@ object ClauseConverters extends LabelExpressionConversion {
 
       Handles: ... WITH * [WHERE <predicate>] ...
        */
-      case With(false, ri, None, None, None, where, _)
+      case With(false, ri, _, None, None, None, where, _)
         if optionalMatchesOK(where)
           && noUpdates
           && returnItemsOK(ri)
@@ -940,7 +1015,7 @@ object ClauseConverters extends LabelExpressionConversion {
 
       Handles all other WITH clauses
        */
-      case With(distinct, projection, orderBy, skip, limit, where, _) =>
+      case With(distinct, projection, _, orderBy, skip, limit, where, _) =>
         val selections = asSelections(where)
         val returnItems = asReturnItems(builder.currentQueryGraph, projection)
 
@@ -963,9 +1038,6 @@ object ClauseConverters extends LabelExpressionConversion {
           .withInterestingOrder(requiredOrder)
           .withPropagatedTailInterestingOrder()
           .withTail(builder.emptySinglePlannerQuery)
-
-      case _ =>
-        throw new InternalException("AST needs to be rewritten before it can be used for planning. Got: " + clause)
     }
   }
 
@@ -973,13 +1045,17 @@ object ClauseConverters extends LabelExpressionConversion {
     builder.withHorizon(
       UnwindProjection(
         variable = clause.variable,
-        exp = clause.expression
+        exp = clause.expression,
+        importedSymbolsFromLastCallSubquery = builder.importedVariables
       )
     ).withTail(builder.emptySinglePlannerQuery)
 
-  private def addCallToLogicalPlanInput(builder: PlannerQueryBuilder, call: ResolvedCall): PlannerQueryBuilder = {
+  private def addCallToLogicalPlanInput(
+    builder: PlannerQueryBuilder,
+    call: ResolvedNonLocalCall
+  ): PlannerQueryBuilder = {
     builder
-      .withHorizon(ProcedureCallProjection(call))
+      .withHorizon(ProcedureCallProjection(call, builder.importedVariables))
       .withTail(builder.emptySinglePlannerQuery)
   }
 
@@ -992,12 +1068,12 @@ object ClauseConverters extends LabelExpressionConversion {
     val availableBeforeForeach = builder.currentlyAvailableVariables
     val availableToInnerClauses = availableBeforeForeach + clause.variable
 
-    val innerBuilder = StatementConverters.addClausesToPlannerQueryBuilder(
+    val innerBuilder = statementConverters.addClausesToPlannerQueryBuilder(
       clause.updates,
-      new PlannerQueryBuilder(builder.emptySinglePlannerQuery, builder.semanticTable, builder.importedVariables)
+      builder.copy(q = builder.emptySinglePlannerQuery)
         // First, set all available symbols as arguments. Will be fixed a little further down.
         .amendQueryGraph(_.withArgumentIds(availableToInnerClauses))
-        .withHorizon(PassthroughAllHorizon()),
+        .withHorizon(PassthroughAllHorizon(builder.importedVariables)),
       anonymousVariableNameGenerator,
       cancellationChecker,
       position = QueryProjection.Position.Intermediate
@@ -1026,9 +1102,10 @@ object ClauseConverters extends LabelExpressionConversion {
     // Since foreach can contain reads (via inner merge) we put it in its own separate planner query
     // to maintain the strict ordering of reads followed by writes within a single planner query
     builder
-      .withHorizon(PassthroughAllHorizon())
+      .withHorizon(PassthroughAllHorizon(builder.importedVariables))
       .withTail(builder.emptySinglePlannerQuery.withQueryGraph(queryGraph = foreachGraph))
-      .withHorizon(PassthroughAllHorizon()) // NOTE: We do not expose anything from foreach itself
+      // We do not expose anything from foreach itself
+      .withHorizon(PassthroughAllHorizon(builder.importedVariables))
       .withTail(builder.emptySinglePlannerQuery)
   }
 
@@ -1042,30 +1119,33 @@ object ClauseConverters extends LabelExpressionConversion {
       case (builder, RemovePropertyItem(Property(variable: Variable, propertyKey)))
         if acc.semanticTable.typeFor(variable).is(CTNode) =>
         builder.amendQueryGraph(_.addMutatingPatterns(
-          SetNodePropertyPattern(variable, propertyKey, Null()(propertyKey.position))
+          SetNodePropertyPattern(variable, propertyKey, Null()(propertyKey.position.zeroLength))
         ))
 
       // REMOVE rel.prop
       case (builder, RemovePropertyItem(Property(variable: Variable, propertyKey)))
         if acc.semanticTable.typeFor(variable).is(CTRelationship) =>
         builder.amendQueryGraph(_.addMutatingPatterns(
-          SetRelationshipPropertyPattern(variable, propertyKey, Null()(propertyKey.position))
+          SetRelationshipPropertyPattern(variable, propertyKey, Null()(propertyKey.position.zeroLength))
         ))
 
       // REMOVE rel.prop when unknown whether node or rel
       case (builder, RemovePropertyItem(Property(variable, propertyKey))) =>
         builder.amendQueryGraph(_.addMutatingPatterns(
-          SetPropertyPattern(variable, propertyKey, Null()(propertyKey.position))
+          SetPropertyPattern(variable, propertyKey, Null()(propertyKey.position.zeroLength))
         ))
 
       // REMOVE rel[<expr>]
       case (builder, RemoveDynamicPropertyItem(ContainerIndex(entity, prop))) =>
         builder.amendQueryGraph(_.addMutatingPatterns(
-          SetDynamicPropertyPattern(entity, prop, Null()(prop.position))
+          SetDynamicPropertyPattern(entity, prop, Null()(prop.position.zeroLength))
         ))
 
       case (_, other) =>
-        throw new InternalException(s"REMOVE $other not supported in cost planner yet")
+        throw InternalException.internalError(
+          this.getClass.getSimpleName,
+          s"REMOVE $other not supported in cost planner yet"
+        )
     }
   }
 

@@ -19,36 +19,45 @@
  */
 package org.neo4j.kernel.impl.transaction;
 
-import static org.neo4j.kernel.impl.transaction.log.EmptyLogTailMetadata.EMPTY_APPEND_BATCH_INFO;
+import static org.neo4j.io.fs.ReadableChannel.BASE_TERM;
+import static org.neo4j.wal.EmptyLogTailMetadata.EMPTY_APPEND_BATCH_INFO;
 
 import java.io.IOException;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.atomic.AtomicLong;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.TransactionIdSnapshot;
 import org.neo4j.kernel.KernelVersion;
-import org.neo4j.kernel.impl.transaction.log.AppendBatchInfo;
-import org.neo4j.kernel.impl.transaction.log.LogPosition;
 import org.neo4j.storageengine.api.ClosedBatchMetadata;
 import org.neo4j.storageengine.api.ClosedTransactionMetadata;
 import org.neo4j.storageengine.api.ExternalStoreId;
+import org.neo4j.storageengine.api.LogMetadataProvider;
 import org.neo4j.storageengine.api.MetadataProvider;
 import org.neo4j.storageengine.api.OpenTransactionMetadata;
 import org.neo4j.storageengine.api.StoreId;
 import org.neo4j.storageengine.api.TransactionId;
+import org.neo4j.storageengine.api.TransactionIdStore;
 import org.neo4j.storageengine.util.HighestAppendBatch;
+import org.neo4j.test.LatestVersions;
+import org.neo4j.util.concurrent.OutOfOrderSequence;
+import org.neo4j.wal.AppendBatchInfo;
+import org.neo4j.wal.LogPosition;
+import org.neo4j.wal.entry.LogFormat;
 
-public class SimpleMetaDataProvider implements MetadataProvider {
+public class SimpleMetaDataProvider implements MetadataProvider, LogMetadataProvider {
     private final SimpleTransactionIdStore transactionIdStore;
     private final SimpleLogVersionRepository logVersionRepository;
     private final ExternalStoreId externalStoreId = new ExternalStoreId(UUID.randomUUID());
-    private final AtomicLong appendIndex = new AtomicLong();
     private final HighestAppendBatch appendBatchInfo = new HighestAppendBatch(EMPTY_APPEND_BATCH_INFO);
+    private final SimpleAppendIndexProvider appendIndexProvider;
+    private volatile long lowestAvailableCommittedTransactionId = TransactionIdStore.UNKNOWN_TX_ID;
+    private volatile KernelVersion kernelVersion = LatestVersions.LATEST_KERNEL_VERSION;
+    private volatile LogFormat logFormat = LatestVersions.LATEST_LOG_FORMAT;
 
     public SimpleMetaDataProvider() {
         transactionIdStore = new SimpleTransactionIdStore();
         logVersionRepository = new SimpleLogVersionRepository();
+        appendIndexProvider = new SimpleAppendIndexProvider();
     }
 
     @Override
@@ -122,8 +131,8 @@ public class SimpleMetaDataProvider implements MetadataProvider {
     }
 
     @Override
-    public long getLastClosedTransactionId() {
-        return transactionIdStore.getLastClosedTransactionId();
+    public long getHighestGapFreeClosedTransactionId() {
+        return transactionIdStore.getHighestGapFreeClosedTransactionId();
     }
 
     @Override
@@ -132,13 +141,48 @@ public class SimpleMetaDataProvider implements MetadataProvider {
     }
 
     @Override
-    public ClosedTransactionMetadata getLastClosedTransaction() {
-        return transactionIdStore.getLastClosedTransaction();
+    public ClosedTransactionMetadata getHighestGapFreeClosedTransaction() {
+        return transactionIdStore.getHighestGapFreeClosedTransaction();
     }
 
     @Override
     public ClosedBatchMetadata getLastClosedBatch() {
         return transactionIdStore.getLastClosedBatch();
+    }
+
+    @Override
+    public void setLastCommittedAndClosedTransactionId(
+            long transactionId,
+            long lastClosedTxId,
+            long[] notClosedTransactions,
+            long transactionAppendIndex,
+            KernelVersion kernelVersion,
+            int checksum,
+            long commitTimestamp,
+            long consensusIndex,
+            long byteOffset,
+            long logVersion,
+            long appendIndex,
+            long lastClosedBatchConsensusIndex,
+            OpenTransactionMetadata earliestOpenTransactionMetadata,
+            OutOfOrderSequence.NumberWithMeta lastClosedTxIdInfo) {
+        transactionIdStore.setLastCommittedAndClosedTransactionId(
+                transactionId,
+                lastClosedTxId,
+                notClosedTransactions,
+                transactionAppendIndex,
+                kernelVersion,
+                checksum,
+                commitTimestamp,
+                consensusIndex,
+                byteOffset,
+                logVersion,
+                appendIndex,
+                lastClosedBatchConsensusIndex,
+                earliestOpenTransactionMetadata,
+                lastClosedTxIdInfo);
+        appendIndexProvider.setAppendIndex(appendIndex);
+        this.appendBatchInfo.set(appendIndex, LogPosition.UNSPECIFIED, lastClosedBatchConsensusIndex);
     }
 
     @Override
@@ -151,7 +195,8 @@ public class SimpleMetaDataProvider implements MetadataProvider {
             long consensusIndex,
             long byteOffset,
             long logVersion,
-            long appendIndex) {
+            long appendIndex,
+            long lastClosedBatchConsensusIndex) {
         transactionIdStore.setLastCommittedAndClosedTransactionId(
                 transactionId,
                 transactionAppendIndex,
@@ -161,9 +206,10 @@ public class SimpleMetaDataProvider implements MetadataProvider {
                 consensusIndex,
                 byteOffset,
                 logVersion,
-                appendIndex);
-        this.appendIndex.set(appendIndex);
-        this.appendBatchInfo.set(appendIndex, LogPosition.UNSPECIFIED);
+                appendIndex,
+                lastClosedBatchConsensusIndex);
+        appendIndexProvider.setAppendIndex(appendIndex);
+        this.appendBatchInfo.set(appendIndex, LogPosition.UNSPECIFIED, lastClosedBatchConsensusIndex);
     }
 
     @Override
@@ -194,9 +240,10 @@ public class SimpleMetaDataProvider implements MetadataProvider {
             boolean firstBatch,
             boolean lastBatch,
             KernelVersion kernelVersion,
-            LogPosition logPositionAfter) {
+            LogPosition logPositionAfter,
+            long consensusIndex) {
         transactionIdStore.batchClosed(
-                transactionId, appendIndex, firstBatch, lastBatch, kernelVersion, logPositionAfter);
+                transactionId, appendIndex, firstBatch, lastBatch, kernelVersion, logPositionAfter, consensusIndex);
     }
 
     @Override
@@ -227,8 +274,9 @@ public class SimpleMetaDataProvider implements MetadataProvider {
             boolean firstBatch,
             boolean lastBatch,
             LogPosition logPositionBefore,
-            LogPosition logPositionAfter) {
-        appendBatchInfo.offer(appendIndex, logPositionAfter);
+            LogPosition logPositionAfter,
+            long consensusIndex) {
+        appendBatchInfo.offer(appendIndex, logPositionAfter, consensusIndex);
     }
 
     @Override
@@ -263,11 +311,51 @@ public class SimpleMetaDataProvider implements MetadataProvider {
 
     @Override
     public long nextAppendIndex() {
-        return appendIndex.incrementAndGet();
+        return appendIndexProvider.nextAppendIndex();
     }
 
     @Override
     public long getLastAppendIndex() {
-        return appendIndex.getAcquire();
+        return appendIndexProvider.getLastAppendIndex();
+    }
+
+    @Override
+    public void setLowestAvailableCommittedTransactionId(long transactionId) {
+        this.lowestAvailableCommittedTransactionId = transactionId;
+    }
+
+    @Override
+    public long getLowestAvailableCommittedTransactionId() {
+        return lowestAvailableCommittedTransactionId;
+    }
+
+    @Override
+    public void setKernelVersion(KernelVersion kernelVersion) {
+        this.kernelVersion = kernelVersion;
+    }
+
+    @Override
+    public KernelVersion kernelVersion() {
+        return kernelVersion;
+    }
+
+    @Override
+    public void setCurrentLogFormat(LogFormat logFormat) {
+        this.logFormat = logFormat;
+    }
+
+    @Override
+    public LogFormat getCurrentLogFormat() {
+        return logFormat;
+    }
+
+    @Override
+    public long getCurrentTerm() {
+        return BASE_TERM;
+    }
+
+    @Override
+    public void setCurrentTerm(long term) {
+        throw new IllegalStateException("Not supported");
     }
 }

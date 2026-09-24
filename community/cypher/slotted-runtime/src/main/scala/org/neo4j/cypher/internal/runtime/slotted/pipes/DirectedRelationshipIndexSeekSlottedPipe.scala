@@ -22,7 +22,6 @@ package org.neo4j.cypher.internal.runtime.slotted.pipes
 import org.neo4j.cypher.internal.expressions.RelationshipTypeToken
 import org.neo4j.cypher.internal.logical.plans.IndexOrder
 import org.neo4j.cypher.internal.logical.plans.QueryExpression
-import org.neo4j.cypher.internal.physicalplanning.SlotConfiguration
 import org.neo4j.cypher.internal.physicalplanning.SlottedIndexedProperty
 import org.neo4j.cypher.internal.runtime.ClosingIterator
 import org.neo4j.cypher.internal.runtime.CypherRow
@@ -34,21 +33,19 @@ import org.neo4j.cypher.internal.runtime.interpreted.pipes.QueryState
 import org.neo4j.cypher.internal.util.attribution.Id
 
 case class DirectedRelationshipIndexSeekSlottedPipe(
-  ident: String,
-  startNode: String,
-  endNode: String,
+  offset: Option[Int],
+  startNode: Option[Int],
+  endNode: Option[Int],
   relType: RelationshipTypeToken,
   properties: IndexedSeq[SlottedIndexedProperty],
   queryIndexId: Int,
   valueExpr: QueryExpression[Expression],
   indexMode: IndexSeekMode,
   indexOrder: IndexOrder,
-  slots: SlotConfiguration
-)(val id: Id = Id.INVALID_ID) extends Pipe with EntityIndexSeeker with IndexSlottedPipeWithValues {
+  includeChangesFromThisTransaction: Boolean
+)(val id: Id = Id.INVALID_ID) extends Pipe with IndexSlottedPipeWithValues {
 
-  override val offset: Int = slots.longOffset(ident)
-
-  override val propertyIds: Array[Int] = properties.map(_.propertyKeyId).toArray
+  private val propertyIds: Array[Int] = properties.map(_.propertyKeyId).toArray
 
   override val indexPropertyIndices: Array[Int] =
     properties.zipWithIndex.filter(_._1.getValueFromIndex).map(_._2).toArray
@@ -57,14 +54,23 @@ case class DirectedRelationshipIndexSeekSlottedPipe(
     properties.map(_.maybeCachedEntityPropertySlot).collect { case Some(o) => o }.toArray
   private val needsValues: Boolean = indexPropertyIndices.nonEmpty
 
+  private val entityIndexSeeker: EntityIndexSeeker = new EntityIndexSeeker(indexMode, valueExpr, propertyIds)
+
   protected def internalCreateResults(state: QueryState): ClosingIterator[CypherRow] = {
     val index = state.queryIndexes(queryIndexId)
     val context = state.newRowWithArgument(rowFactory)
     new SlottedRelationshipIndexIterator(
       state,
-      slots.longOffset(startNode),
-      slots.longOffset(endNode),
-      relationshipIndexSeek(state, index, needsValues, indexOrder, context)
+      startNode,
+      endNode,
+      entityIndexSeeker.relationshipIndexSeek(
+        state,
+        index,
+        needsValues,
+        indexOrder,
+        context,
+        includeChangesFromThisTransaction
+      )
     )
   }
 }

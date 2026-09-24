@@ -32,7 +32,7 @@ import java.io.PrintStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
-import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -183,7 +183,7 @@ class WindowsBootloaderOs extends BootloaderOsAbstraction {
         // A limitation/bug in prunsrv not parsing ' characters correctly. It is better to throw exception than fail
         // silently like before
         if (s.contains("'")) {
-            var firstIndex = s.indexOf("'");
+            var firstIndex = s.indexOf('\'');
             var context = s.substring(Math.max(firstIndex - 25, 0), Math.min(s.length(), firstIndex + 25));
             throw new CommandFailedException(format(
                     "We are unable to support values that contain single quote marks ('). Single quotes found in value: %s",
@@ -216,13 +216,13 @@ class WindowsBootloaderOs extends BootloaderOsAbstraction {
     }
 
     @Override
-    Optional<Long> getPidIfRunning() {
+    OptionalLong getPidIfRunning() {
         String status = getStatus();
         boolean stopped = StringUtils.isEmpty(status) || status.startsWith("Stopped");
         if (stopped) {
-            return Optional.empty();
+            return OptionalLong.empty();
         }
-        return Optional.of(UNKNOWN_PID);
+        return OptionalLong.of(UNKNOWN_PID);
     }
 
     @Override

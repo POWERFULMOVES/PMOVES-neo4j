@@ -24,7 +24,10 @@ import org.neo4j.cypher.internal.AdministrationCommandRuntime.IdentityConverter
 import org.neo4j.cypher.internal.AdministrationCommandRuntime.checkNamespaceExists
 import org.neo4j.cypher.internal.AdministrationCommandRuntime.getDatabaseNameFields
 import org.neo4j.cypher.internal.AdministrationCommandRuntime.internalKey
+import org.neo4j.cypher.internal.AdministrationCommandRuntime.translateDefaultLanguagePropertyToShowOutput
+import org.neo4j.cypher.internal.AdministrationCommandRuntimeContext
 import org.neo4j.cypher.internal.AdministrationShowCommandUtils
+import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.ExecutionEngine
 import org.neo4j.cypher.internal.ExecutionPlan
 import org.neo4j.cypher.internal.administration.ShowAliasesExecutionPlanner.Alias
@@ -35,21 +38,25 @@ import org.neo4j.cypher.internal.ast.DatabaseName
 import org.neo4j.cypher.internal.ast.NamespacedName
 import org.neo4j.cypher.internal.ast.ParameterName
 import org.neo4j.cypher.internal.ast.Return
+import org.neo4j.cypher.internal.ast.ShowAliases.OIDC_CREDENTIAL_FORWARDING
+import org.neo4j.cypher.internal.ast.ShowAliases.STORED_NATIVE_CREDENTIALS
 import org.neo4j.cypher.internal.ast.Yield
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.procs.ParameterTransformer
 import org.neo4j.cypher.internal.procs.SystemCommandExecutionPlan
-import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.ALIAS_PROPERTIES
-import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.CONNECTS_WITH
-import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DATABASE_NAME
-import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DEFAULT_NAMESPACE
-import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DISPLAY_NAME_PROPERTY
-import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.DRIVER_SETTINGS
-import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.NAMESPACE_PROPERTY
-import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.NAME_PROPERTY
-import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.PROPERTIES
-import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.URL_PROPERTY
-import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.USERNAME_PROPERTY
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.ALIAS_PROPERTIES
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.CONNECTS_WITH
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.DATABASE_NAME
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.DEFAULT_NAMESPACE
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.DISPLAY_NAME_PROPERTY
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.DRIVER_SETTINGS
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.GRAPH_SHARD
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.NAMESPACE_PROPERTY
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.NAME_PROPERTY
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.OIDC_CREDENTIAL_FORWARDING_PROPERTY
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.PROPERTIES
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.REMOTE_USERNAME_PROPERTY
+import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModelConstants.URL_PROPERTY
 import org.neo4j.internal.kernel.api.security.SecurityAuthorizationHandler
 import org.neo4j.internal.kernel.api.security.SecurityContext
 import org.neo4j.kernel.database.DatabaseReference
@@ -76,28 +83,41 @@ case class ShowAliasesExecutionPlanner(
     verbose: Boolean,
     symbols: List[LogicalVariable],
     yields: Option[Yield],
-    returns: Option[Return]
+    returns: Option[Return],
+    context: AdministrationCommandRuntimeContext
   ): ExecutionPlan = {
-    // name | composite | database | location | url | user | driver | properties
+    // name | composite | database | location | url | user | driver | defaultLanguage | properties
     val returnStatement = AdministrationShowCommandUtils.generateReturnClause(symbols, yields, returns, Seq("name"))
-    val verboseColumns = if (verbose) ", driverSettings{.*} as driver, properties{.*} as properties" else ""
-    val (aliasNameFields, aliasPropertyFilter) = filterAliasByName(aliasName)
+    val defaultLanguage = translateDefaultLanguagePropertyToShowOutput("aliasNode")
+    val verboseColumns =
+      if (verbose)
+        s", driverSettings{.*} as driver, properties{.*} as properties, $defaultLanguage as defaultLanguage"
+      else ""
+    val (aliasNameFields, aliasPropertyFilter) = filterAliasByName(aliasName, context.runtimeContext.cypherVersion)
+
+    val aliasNameNodeFilter = context.runtimeContext.cypherVersion match {
+      case CypherVersion.Cypher5 =>
+        s"{$NAME_PROPERTY: alias.name, $NAMESPACE_PROPERTY: alias.namespace}"
+      case _ => s"{$DISPLAY_NAME_PROPERTY: alias.displayName}"
+    }
 
     val query =
       s"""UNWIND $$$aliasTargetParameter AS alias
          |WITH alias $aliasPropertyFilter
-         |MATCH (aliasNode:$DATABASE_NAME{$NAME_PROPERTY: alias.name, $NAMESPACE_PROPERTY: alias.namespace})
+         |MATCH (aliasNode:$DATABASE_NAME&!$GRAPH_SHARD $aliasNameNodeFilter)
          |OPTIONAL MATCH (aliasNode)-[:$CONNECTS_WITH]->(driverSettings:$DRIVER_SETTINGS)
          |OPTIONAL MATCH (aliasNode)-[:$PROPERTIES]->(properties:$ALIAS_PROPERTIES)
-         |WITH alias.$DISPLAY_NAME_PROPERTY as name,
-         |CASE alias.$NAMESPACE_PROPERTY
-         | WHEN '$DEFAULT_NAMESPACE' THEN null
-         | ELSE alias.$NAMESPACE_PROPERTY
-         |END as composite,
+         |WITH alias.displayName as name,
+         |alias.composite as composite,
          |alias.database as database,
          |alias.location as location,
          |aliasNode.$URL_PROPERTY as url,
-         |aliasNode.$USERNAME_PROPERTY as user
+         |CASE
+         |  WHEN aliasNode.$OIDC_CREDENTIAL_FORWARDING_PROPERTY THEN '$OIDC_CREDENTIAL_FORWARDING'
+         |  WHEN aliasNode.$REMOTE_USERNAME_PROPERTY IS NOT NULL THEN '$STORED_NATIVE_CREDENTIALS'
+         |  ELSE null
+         |END as credentials,
+         |aliasNode.$REMOTE_USERNAME_PROPERTY as user
          |$verboseColumns
          |$returnStatement
          |""".stripMargin
@@ -112,11 +132,17 @@ case class ShowAliasesExecutionPlanner(
         ParameterTransformer((_, sc, _) => generateVisibleAliases(sc)).convert(
           aliasNameFields.map(_.nameConverter).getOrElse(IdentityConverter)
         )
-          .validate(aliasNameFields.map(checkNamespaceExists).getOrElse((_, p) => (p, Set.empty)))
+          .validate(aliasNameFields.map(aliasNameFields =>
+            checkNamespaceExists(aliasNameFields, context)(_, _)
+          ).getOrElse((_, p) => (p, Set.empty))),
+      cypherVersion = context.runtimeContext.cypherVersion
     )
   }
 
-  private def filterAliasByName(aliasName: Option[DatabaseName]): (Option[DatabaseNameFields], String) = {
+  private def filterAliasByName(
+    aliasName: Option[DatabaseName],
+    cypherVersion: CypherVersion
+  ): (Option[DatabaseNameFields], String) = {
     val aliasNameFields =
       aliasName.map((name: DatabaseName) =>
         getDatabaseNameFields("aliasName", name)
@@ -124,11 +150,14 @@ case class ShowAliasesExecutionPlanner(
 
     // If we have a literal, we know from the escaping whether this is an alias in a composite or not
     // If it is a parameter, it could be either something that should be escaped, or an alias in a composite (or both)
-    def filter(anf: DatabaseNameFields) = aliasName match {
-      case Some(NamespacedName(_, _)) =>
-        s"""WHERE alias.$NAME_PROPERTY = $$`${anf.nameKey}` AND alias.$NAMESPACE_PROPERTY = $$`${anf.namespaceKey}`"""
-      case Some(ParameterName(_)) => s"WHERE alias.$DISPLAY_NAME_PROPERTY = $$`${anf.displayNameKey}`"
-      case None                   => ""
+    def filter(anf: DatabaseNameFields) = cypherVersion match {
+      case CypherVersion.Cypher5 => aliasName match {
+          case Some(NamespacedName(_, _)) =>
+            s"""WHERE alias.$NAME_PROPERTY = $$`${anf.nameKey}` AND alias.$NAMESPACE_PROPERTY = $$`${anf.namespaceKey}`"""
+          case Some(ParameterName(_)) => s"WHERE alias.$DISPLAY_NAME_PROPERTY = $$`${anf.displayNameKey}`"
+          case None                   => ""
+        }
+      case _ => s"WHERE alias.$DISPLAY_NAME_PROPERTY = $$`${anf.displayNameKey}`"
     }
     val aliasPropertyFilter = aliasNameFields
       .map(anf => filter(anf)).getOrElse("")
@@ -146,7 +175,7 @@ case class ShowAliasesExecutionPlanner(
         ))
       case c: DatabaseReferenceImpl.Composite => c.constituents().asScala.flatMap(referencesToAlias)
       case a: DatabaseReferenceImpl.Internal if !a.isPrimary =>
-        val primary = referenceResolver.getByAlias(a.databaseId().name()).toScala.collect {
+        val primary = referenceResolver.getByAlias(a.namedDatabaseId().name()).toScala.collect {
           case ref if sc.databaseAccessMode().canSeeDatabase(ref) => ref.alias().name()
         }
         Seq(Alias(a.alias().name(), a.namespace().toScala.map(_.name()).getOrElse(DEFAULT_NAMESPACE), primary, LOCAL))
@@ -170,15 +199,19 @@ object ShowAliasesExecutionPlanner {
   private case class Alias(name: String, namespace: String, database: Option[String], location: String) {
     private val displayName = if (namespace == DEFAULT_NAMESPACE) name else s"$namespace.$name"
 
-    def asMapValue: MapValue = VirtualValues.map(
-      Array("name", "namespace", "database", "displayName", "location"),
-      Array(
-        Values.stringValue(name),
-        Values.stringValue(namespace),
-        database.map(Values.stringValue).getOrElse(Values.NO_VALUE),
-        Values.stringValue(displayName),
-        Values.stringValue(location)
+    def asMapValue: MapValue = {
+      val composite = if (namespace == DEFAULT_NAMESPACE) None else Some(namespace)
+      VirtualValues.map(
+        Array("name", "namespace", "composite", "database", "displayName", "location"),
+        Array(
+          Values.stringValue(name),
+          Values.stringValue(namespace),
+          composite.map(Values.stringValue).getOrElse(Values.NO_VALUE),
+          database.map(Values.stringValue).getOrElse(Values.NO_VALUE),
+          Values.stringValue(displayName),
+          Values.stringValue(location)
+        )
       )
-    )
+    }
   }
 }

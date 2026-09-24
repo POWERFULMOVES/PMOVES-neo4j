@@ -19,7 +19,9 @@
  */
 package org.neo4j.cypher
 
-import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
+import org.neo4j.cypher.CypherITTestSuite
+import org.neo4j.cypher.internal.CypherVersion
+import org.neo4j.cypher.internal.options.CypherVersionOption
 import org.neo4j.graphdb.Transaction
 import org.neo4j.internal.kernel.api.security.SecurityContext
 import org.neo4j.kernel.impl.util.ValueUtils
@@ -28,7 +30,7 @@ import org.neo4j.server.security.auth.AuthProcedures
 
 import scala.jdk.CollectionConverters.MapHasAsJava
 
-class CypherQueryObfuscatorIT extends CypherFunSuite {
+class CypherQueryObfuscatorIT extends CypherITTestSuite {
 
   private val obfuscatorFactory = new CypherQueryObfuscatorFactory {
     // required by procedure compiler
@@ -48,25 +50,29 @@ class CypherQueryObfuscatorIT extends CypherFunSuite {
   for (password <- passwords) {
     val literalTests: Seq[(String, String)] = Seq(
       s"CREATE USER test SET PASSWORD '$password'" ->
-        "CREATE USER test SET PASSWORD ******",
+        "CREATE USER ****** SET PASSWORD ******",
       s"CREATE USER test IF NOT EXISTS SET PASSWORD '$password'" ->
-        "CREATE USER test IF NOT EXISTS SET PASSWORD ******",
+        "CREATE USER ****** IF NOT EXISTS SET PASSWORD ******",
       s"CREATE OR REPLACE USER test SET PASSWORD '$password'" ->
-        "CREATE OR REPLACE USER test SET PASSWORD ******",
+        "CREATE OR REPLACE USER ****** SET PASSWORD ******",
       s"CREATE USER test SET PASSWORD '$password' CHANGE REQUIRED" ->
-        "CREATE USER test SET PASSWORD ****** CHANGE REQUIRED",
+        "CREATE USER ****** SET PASSWORD ****** CHANGE REQUIRED",
       s"ALTER USER test SET PASSWORD '$password'" ->
-        "ALTER USER test SET PASSWORD ******",
+        "ALTER USER ****** SET PASSWORD ******",
       s"ALTER USER test SET PASSWORD '$password' CHANGE REQUIRED" ->
-        "ALTER USER test SET PASSWORD ****** CHANGE REQUIRED",
+        "ALTER USER ****** SET PASSWORD ****** CHANGE REQUIRED",
       s"ALTER CURRENT USER SET PASSWORD FROM '$password' TO '$password'" ->
         "ALTER CURRENT USER SET PASSWORD FROM ****** TO ******"
     )
 
-    for ((rawText, obfuscatedText) <- literalTests) {
-      test(s"$rawText [text]") {
-        val ob = obfuscatorFactory.obfuscatorForQuery(rawText)
-        ob.obfuscateText(rawText, 0) should equal(obfuscatedText)
+    for {
+      (rawText, obfuscatedText) <- literalTests
+      version <- CypherVersionOption.values + CypherVersionOption.default
+    } {
+      val renderedVersion = if (version == CypherVersionOption.default) "" else "CYPHER " + version.render + " "
+      test(s"$renderedVersion$rawText [text]") {
+        obfuscatorFactory.obfuscatorForQuery(renderedVersion + rawText, CypherVersion.Legacy.legacyVersion())
+          .fullyObfuscatedQuery(rawText, org.neo4j.values.virtual.MapValue.EMPTY, 0).text() should equal(obfuscatedText)
       }
     }
   }
@@ -81,13 +87,13 @@ class CypherQueryObfuscatorIT extends CypherFunSuite {
   private val parameterTests: Seq[ParameterTest] = Seq(
     ParameterTest(
       "CREATE USER test SET PASSWORD 'password'",
-      "CREATE USER test SET PASSWORD ******",
+      "CREATE USER ****** SET PASSWORD ******",
       Map.empty,
       Map.empty
     ),
     ParameterTest(
       "CREATE USER test SET PASSWORD $param",
-      "CREATE USER test SET PASSWORD $param",
+      "CREATE USER ****** SET PASSWORD $param",
       Map("param" -> "test"),
       Map("param" -> "******")
     ),
@@ -111,13 +117,71 @@ class CypherQueryObfuscatorIT extends CypherFunSuite {
     )
   )
 
-  for (ParameterTest(rawText, obfuscatedText, rawParameters, obfuscatedParameters) <- parameterTests) {
-    test(s"$rawText [params]") {
+  for {
+    ParameterTest(rawText, obfuscatedText, rawParameters, obfuscatedParameters) <- parameterTests
+    version <- CypherVersionOption.values
+  } {
+    val renderedVersion = if (version == CypherVersionOption.default) "" else "CYPHER " + version.render + " "
+    test(s"$renderedVersion$rawText [params]") {
       val params = ValueUtils.asMapValue(rawParameters.asJava)
       val expectedParams = ValueUtils.asMapValue(obfuscatedParameters.asJava)
-      val ob = obfuscatorFactory.obfuscatorForQuery(rawText)
-      ob.obfuscateText(rawText, 0) should equal(obfuscatedText)
-      ob.obfuscateParameters(params) should equal(expectedParams)
+      val ob = obfuscatorFactory.obfuscatorForQuery(renderedVersion + rawText, CypherVersion.Legacy.legacyVersion())
+      val result = ob.fullyObfuscatedQuery(rawText, params, 0)
+      result.text() should equal(obfuscatedText)
+      result.parameters() should equal(expectedParams)
     }
+  }
+
+  private val secretCommand = "CREATE USER alice SET PASSWORD 'secretpw'"
+
+  test("sensitive mode redacts the password but keeps ordinary literals visible") {
+    val ob = obfuscatorFactory.obfuscatorForQuery(secretCommand, CypherVersion.Legacy.legacyVersion())
+    val obfuscated = ob.sensitiveObfuscatedQuery(secretCommand, org.neo4j.values.virtual.MapValue.EMPTY, 0).text()
+    obfuscated should not include "secretpw" // password always redacted
+    obfuscated should include("alice") // ordinary literal (username) stays visible when obfuscate_literals is off
+  }
+
+  test("full mode redacts every literal including ordinary ones") {
+    val ob = obfuscatorFactory.obfuscatorForQuery(secretCommand, CypherVersion.Legacy.legacyVersion())
+    val obfuscated = ob.fullyObfuscatedQuery(secretCommand, org.neo4j.values.virtual.MapValue.EMPTY, 0).text()
+    obfuscated should not include "secretpw"
+    obfuscated should not include "alice"
+  }
+
+  test("string interpolation literal segments are redacted while the embedded expressions stay visible") {
+    val rawText = """WITH 1 AS n RETURN s"hello there {n} what is happening {n}" AS x"""
+    val ob = obfuscatorFactory.obfuscatorForQuery("CYPHER 25 " + rawText, CypherVersion.Legacy.legacyVersion())
+    val obfuscated = ob.fullyObfuscatedQuery(rawText, org.neo4j.values.virtual.MapValue.EMPTY, 0).text()
+    obfuscated should equal(
+      """WITH ****** AS n RETURN s"{******}{n}{******}{n}" AS x"""
+    )
+  }
+
+  test("string interpolation literal segments are redacted and all literals within nested expressions as well") {
+    val rawText = """WITH 1 AS n RETURN s"hello there {s'a string inside {1 + 7}'} what is happening {n}" AS x"""
+    val ob = obfuscatorFactory.obfuscatorForQuery("CYPHER 25 " + rawText, CypherVersion.Legacy.legacyVersion())
+    val obfuscated = ob.fullyObfuscatedQuery(rawText, org.neo4j.values.virtual.MapValue.EMPTY, 0).text()
+    obfuscated should equal(
+      """WITH ****** AS n RETURN s"{******}{s'{******}{****** + ******}'}{******}{n}" AS x"""
+    )
+  }
+
+  test("LOAD CSV credential URL is redacted in sensitive mode while ordinary literals stay visible") {
+    val query = "LOAD CSV FROM 'ftp://mark:Password1@localhost/images.txt' AS line RETURN 'visible' AS keep"
+    val ob = obfuscatorFactory.obfuscatorForQuery(query, CypherVersion.Legacy.legacyVersion())
+    val obfuscated = ob.sensitiveObfuscatedQuery(query, org.neo4j.values.virtual.MapValue.EMPTY, 0).text()
+    obfuscated should not include "Password1" // credential url redacted even when obfuscate_literals is off
+    obfuscated should include("'visible'") // ordinary literal stays visible in sensitive mode
+    val fullyObfuscatedText = ob.fullyObfuscatedQuery(query, org.neo4j.values.virtual.MapValue.EMPTY, 0).text()
+    fullyObfuscatedText should not include "Password1"
+    fullyObfuscatedText should not include "'visible'" // ordinary literal redacted in the all-literals view
+  }
+
+  test("structural literals stay visible while a credential URL is redacted in every view") {
+    val query = "LOAD CSV FROM 'ftp://user:password@host/file.csv' AS line FIELDTERMINATOR ';' RETURN line LIMIT 5"
+    val expected = "LOAD CSV FROM ****** AS line FIELDTERMINATOR ';' RETURN line LIMIT 5"
+    val ob = obfuscatorFactory.obfuscatorForQuery(query, CypherVersion.Legacy.legacyVersion())
+    ob.fullyObfuscatedQuery(query, org.neo4j.values.virtual.MapValue.EMPTY, 0).text() should equal(expected)
+    ob.sensitiveObfuscatedQuery(query, org.neo4j.values.virtual.MapValue.EMPTY, 0).text() should equal(expected)
   }
 }

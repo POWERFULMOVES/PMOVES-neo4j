@@ -40,9 +40,10 @@ import org.neo4j.internal.kernel.api.PropertyIndexQuery;
 import org.neo4j.internal.kernel.api.exceptions.schema.IndexNotApplicableKernelException;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.internal.schema.IndexOrder;
+import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.kernel.api.index.IndexProgressor;
 import org.neo4j.kernel.api.index.ValueIndexReader;
-import org.neo4j.storageengine.api.ValueIndexEntryUpdate;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.storageengine.api.schema.SimpleEntityValueClient;
 import org.neo4j.values.storable.RandomValues;
 import org.neo4j.values.storable.Value;
@@ -56,13 +57,12 @@ abstract class GenericNativeIndexAccessorTests<KEY extends NativeIndexKey<KEY>> 
     @Test
     void shouldReturnMatchingEntriesForRangePredicateWithInclusiveStartAndExclusiveEnd() throws Exception {
         // given
-        ValueIndexEntryUpdate<IndexDescriptor>[] updates =
-                someUpdatesSingleTypeNoDuplicates(supportedTypesExcludingNonOrderable());
+        EagerValueIndexEntryUpdate[] updates = someUpdatesSingleTypeNoDuplicates(supportedTypesExcludingNonOrderable());
         processAll(updates);
         ValueCreatorUtil.sort(updates);
 
         // when
-        var reader = accessor.newValueReader(NO_USAGE_TRACKING);
+        ValueIndexReader reader = accessor.newValueReader(NO_USAGE_TRACKING);
         try (NodeValueIterator result = query(
                 reader,
                 ValueCreatorUtil.rangeQuery(valueOf(updates[0]), true, valueOf(updates[updates.length - 1]), false))) {
@@ -73,14 +73,13 @@ abstract class GenericNativeIndexAccessorTests<KEY extends NativeIndexKey<KEY>> 
     @Test
     void shouldReturnMatchingEntriesForRangePredicateWithInclusiveStartAndInclusiveEnd() throws Exception {
         // given
-        ValueIndexEntryUpdate<IndexDescriptor>[] updates =
-                someUpdatesSingleTypeNoDuplicates(supportedTypesExcludingNonOrderable());
+        EagerValueIndexEntryUpdate[] updates = someUpdatesSingleTypeNoDuplicates(supportedTypesExcludingNonOrderable());
 
         processAll(updates);
         ValueCreatorUtil.sort(updates);
 
         // when
-        var reader = accessor.newValueReader(NO_USAGE_TRACKING);
+        ValueIndexReader reader = accessor.newValueReader(NO_USAGE_TRACKING);
         try (NodeValueIterator result = query(
                 reader,
                 ValueCreatorUtil.rangeQuery(valueOf(updates[0]), true, valueOf(updates[updates.length - 1]), true))) {
@@ -91,13 +90,12 @@ abstract class GenericNativeIndexAccessorTests<KEY extends NativeIndexKey<KEY>> 
     @Test
     void shouldReturnMatchingEntriesForRangePredicateWithExclusiveStartAndExclusiveEnd() throws Exception {
         // given
-        ValueIndexEntryUpdate<IndexDescriptor>[] updates =
-                someUpdatesSingleTypeNoDuplicates(supportedTypesExcludingNonOrderable());
+        EagerValueIndexEntryUpdate[] updates = someUpdatesSingleTypeNoDuplicates(supportedTypesExcludingNonOrderable());
         processAll(updates);
         ValueCreatorUtil.sort(updates);
 
         // when
-        var reader = accessor.newValueReader(NO_USAGE_TRACKING);
+        ValueIndexReader reader = accessor.newValueReader(NO_USAGE_TRACKING);
         try (NodeValueIterator result = query(
                 reader,
                 ValueCreatorUtil.rangeQuery(valueOf(updates[0]), false, valueOf(updates[updates.length - 1]), false))) {
@@ -109,13 +107,12 @@ abstract class GenericNativeIndexAccessorTests<KEY extends NativeIndexKey<KEY>> 
     @Test
     void shouldReturnMatchingEntriesForRangePredicateWithExclusiveStartAndInclusiveEnd() throws Exception {
         // given
-        ValueIndexEntryUpdate<IndexDescriptor>[] updates =
-                someUpdatesSingleTypeNoDuplicates(supportedTypesExcludingNonOrderable());
+        EagerValueIndexEntryUpdate[] updates = someUpdatesSingleTypeNoDuplicates(supportedTypesExcludingNonOrderable());
         processAll(updates);
         ValueCreatorUtil.sort(updates);
 
         // when
-        var reader = accessor.newValueReader(NO_USAGE_TRACKING);
+        ValueIndexReader reader = accessor.newValueReader(NO_USAGE_TRACKING);
         try (NodeValueIterator result = query(
                 reader,
                 ValueCreatorUtil.rangeQuery(valueOf(updates[0]), false, valueOf(updates[updates.length - 1]), true))) {
@@ -126,13 +123,12 @@ abstract class GenericNativeIndexAccessorTests<KEY extends NativeIndexKey<KEY>> 
     @Test
     void shouldReturnNoEntriesForRangePredicateOutsideAnyMatch() throws Exception {
         // given
-        ValueIndexEntryUpdate<IndexDescriptor>[] updates =
-                someUpdatesSingleTypeNoDuplicates(supportedTypesExcludingNonOrderable());
+        EagerValueIndexEntryUpdate[] updates = someUpdatesSingleTypeNoDuplicates(supportedTypesExcludingNonOrderable());
         ValueCreatorUtil.sort(updates);
         processAll(updates[0], updates[1], updates[updates.length - 1], updates[updates.length - 2]);
 
         // when
-        var reader = accessor.newValueReader(NO_USAGE_TRACKING);
+        ValueIndexReader reader = accessor.newValueReader(NO_USAGE_TRACKING);
         try (NodeValueIterator result = query(
                 reader,
                 ValueCreatorUtil.rangeQuery(valueOf(updates[2]), true, valueOf(updates[updates.length - 3]), true))) {
@@ -143,14 +139,13 @@ abstract class GenericNativeIndexAccessorTests<KEY extends NativeIndexKey<KEY>> 
     @Test
     void mustHandleNestedQueries() throws Exception {
         // given
-        ValueIndexEntryUpdate<IndexDescriptor>[] updates =
-                someUpdatesSingleTypeNoDuplicates(supportedTypesExcludingNonOrderable());
+        EagerValueIndexEntryUpdate[] updates = someUpdatesSingleTypeNoDuplicates(supportedTypesExcludingNonOrderable());
 
         processAll(updates);
         ValueCreatorUtil.sort(updates);
 
         // when
-        var reader = accessor.newValueReader(NO_USAGE_TRACKING);
+        ValueIndexReader reader = accessor.newValueReader(NO_USAGE_TRACKING);
 
         PropertyIndexQuery outerQuery =
                 ValueCreatorUtil.rangeQuery(valueOf(updates[2]), true, valueOf(updates[3]), true);
@@ -176,14 +171,13 @@ abstract class GenericNativeIndexAccessorTests<KEY extends NativeIndexKey<KEY>> 
     @Test
     void mustHandleMultipleNestedQueries() throws Exception {
         // given
-        ValueIndexEntryUpdate<IndexDescriptor>[] updates =
-                someUpdatesSingleTypeNoDuplicates(supportedTypesExcludingNonOrderable());
+        EagerValueIndexEntryUpdate[] updates = someUpdatesSingleTypeNoDuplicates(supportedTypesExcludingNonOrderable());
 
         processAll(updates);
         ValueCreatorUtil.sort(updates);
 
         // when
-        var reader = accessor.newValueReader(NO_USAGE_TRACKING);
+        ValueIndexReader reader = accessor.newValueReader(NO_USAGE_TRACKING);
 
         PropertyIndexQuery query1 = ValueCreatorUtil.rangeQuery(valueOf(updates[4]), true, valueOf(updates[5]), true);
         PropertyIndexQuery query2 = ValueCreatorUtil.rangeQuery(valueOf(updates[2]), true, valueOf(updates[3]), true);
@@ -221,11 +215,10 @@ abstract class GenericNativeIndexAccessorTests<KEY extends NativeIndexKey<KEY>> 
     @Test
     void shouldNotSeeFilteredEntries() throws Exception {
         // given
-        ValueIndexEntryUpdate<IndexDescriptor>[] updates =
-                someUpdatesSingleTypeNoDuplicates(supportedTypesExcludingNonOrderable());
+        EagerValueIndexEntryUpdate[] updates = someUpdatesSingleTypeNoDuplicates(supportedTypesExcludingNonOrderable());
         processAll(updates);
         ValueCreatorUtil.sort(updates);
-        var reader = accessor.newValueReader(NO_USAGE_TRACKING);
+        ValueIndexReader reader = accessor.newValueReader(NO_USAGE_TRACKING);
 
         // when
         try (NodeValueIterator iter = new NodeValueIterator()) {
@@ -233,7 +226,7 @@ abstract class GenericNativeIndexAccessorTests<KEY extends NativeIndexKey<KEY>> 
             PropertyIndexQuery rangeQuery =
                     ValueCreatorUtil.rangeQuery(valueOf(updates[0]), true, valueOf(updates[2]), true);
             IndexProgressor.EntityValueClient filterClient = filterClient(iter, filter);
-            reader.query(filterClient, NULL_CONTEXT, unconstrained(), rangeQuery);
+            reader.query(filterClient, NULL_CONTEXT, CursorContext.NULL_CONTEXT, unconstrained(), rangeQuery);
 
             // then
             assertTrue(iter.hasNext());
@@ -247,10 +240,10 @@ abstract class GenericNativeIndexAccessorTests<KEY extends NativeIndexKey<KEY>> 
         // given
         int nUpdates = 10000;
         ValueType[] types = supportedTypesExcludingNonOrderable();
-        Iterator<ValueIndexEntryUpdate<IndexDescriptor>> randomUpdateGenerator =
+        Iterator<EagerValueIndexEntryUpdate> randomUpdateGenerator =
                 valueCreatorUtil.randomUpdateGenerator(random, types);
         //noinspection unchecked
-        ValueIndexEntryUpdate<IndexDescriptor>[] someUpdates = new ValueIndexEntryUpdate[nUpdates];
+        EagerValueIndexEntryUpdate[] someUpdates = new EagerValueIndexEntryUpdate[nUpdates];
         for (int i = 0; i < nUpdates; i++) {
             someUpdates[i] = randomUpdateGenerator.next();
         }
@@ -258,7 +251,7 @@ abstract class GenericNativeIndexAccessorTests<KEY extends NativeIndexKey<KEY>> 
         Value[] allValues = ValueCreatorUtil.extractValuesFromUpdates(someUpdates);
 
         // when
-        try (var reader = accessor.newValueReader(NO_USAGE_TRACKING)) {
+        try (ValueIndexReader reader = accessor.newValueReader(NO_USAGE_TRACKING)) {
             PropertyIndexQuery.AllEntriesPredicate supportedQuery = PropertyIndexQuery.allEntries();
 
             expectIndexOrder(allValues, reader, IndexOrder.ASCENDING, supportedQuery);
@@ -270,11 +263,11 @@ abstract class GenericNativeIndexAccessorTests<KEY extends NativeIndexKey<KEY>> 
     @Test
     void shouldReturnAllEntriesForExistsPredicate() throws Exception {
         // given
-        ValueIndexEntryUpdate<IndexDescriptor>[] updates = someUpdatesSingleType();
+        EagerValueIndexEntryUpdate[] updates = someUpdatesSingleType();
         processAll(updates);
 
         // when
-        var reader = accessor.newValueReader(NO_USAGE_TRACKING);
+        ValueIndexReader reader = accessor.newValueReader(NO_USAGE_TRACKING);
         try (NodeValueIterator result = query(reader, PropertyIndexQuery.exists(0))) {
             // then
             assertEntityIdHits(extractEntityIds(updates, alwaysTrue()), result);
@@ -284,7 +277,7 @@ abstract class GenericNativeIndexAccessorTests<KEY extends NativeIndexKey<KEY>> 
     @Test
     void shouldReturnNoEntriesForExistsPredicateForEmptyIndex() throws Exception {
         // when
-        var reader = accessor.newValueReader(NO_USAGE_TRACKING);
+        ValueIndexReader reader = accessor.newValueReader(NO_USAGE_TRACKING);
         long[] actual;
         try (NodeValueIterator result = query(reader, PropertyIndexQuery.exists(0))) {
             // then
@@ -296,14 +289,16 @@ abstract class GenericNativeIndexAccessorTests<KEY extends NativeIndexKey<KEY>> 
     private ValueType[] supportedTypesExcludingNonOrderable() {
         return RandomValues.excluding(valueCreatorUtil.supportedTypes(), type -> switch (type) {
             case STRING, STRING_ARRAY -> true; // exclude strings outside the Basic Multilingual Plane
-            default -> switch (type.valueGroup) {
-                case GEOMETRY, GEOMETRY_ARRAY, DURATION, DURATION_ARRAY -> true; // exclude spacial types and durations
-                default -> false;
-            };
+            default ->
+                switch (type.valueGroup) {
+                    case GEOMETRY, GEOMETRY_ARRAY, DURATION, DURATION_ARRAY ->
+                        true; // exclude spacial types and durations
+                    default -> false;
+                };
         });
     }
 
-    private static long entityIdOf(ValueIndexEntryUpdate<IndexDescriptor> update) {
+    private static long entityIdOf(EagerValueIndexEntryUpdate update) {
         return update.getEntityId();
     }
 
@@ -318,21 +313,26 @@ abstract class GenericNativeIndexAccessorTests<KEY extends NativeIndexKey<KEY>> 
         } else if (supportedOrder == IndexOrder.DESCENDING) {
             Arrays.sort(expectedValues, Values.COMPARATOR.reversed());
         }
-        SimpleEntityValueClient client = new SimpleEntityValueClient();
-        reader.query(client, NULL_CONTEXT, constrained(supportedOrder, true), supportedQuery);
-        int i = 0;
-        while (client.next()) {
-            assertEquals(expectedValues[i++], client.values[0], "values in order");
+        try (SimpleEntityValueClient client = new SimpleEntityValueClient()) {
+            reader.query(
+                    client,
+                    NULL_CONTEXT,
+                    CursorContext.NULL_CONTEXT,
+                    constrained(supportedOrder, true),
+                    supportedQuery);
+            int i = 0;
+            while (client.next()) {
+                assertEquals(expectedValues[i++], client.values[0], "values in order");
+            }
+            assertEquals(i, expectedValues.length, "found all values");
         }
-        assertEquals(i, expectedValues.length, "found all values");
     }
 
-    protected static Value valueOf(ValueIndexEntryUpdate<IndexDescriptor> update) {
+    protected static Value valueOf(EagerValueIndexEntryUpdate update) {
         return update.values()[0];
     }
 
-    private static IndexProgressor.EntityValueClient filterClient(
-            final NodeValueIterator iter, final PropertyIndexQuery filter) {
+    private static IndexProgressor.EntityValueClient filterClient(NodeValueIterator iter, PropertyIndexQuery filter) {
         return new IndexProgressor.EntityValueClient() {
             @Override
             public void initializeQuery(

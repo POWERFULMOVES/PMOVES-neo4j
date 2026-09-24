@@ -23,7 +23,7 @@ import org.neo4j.memory.Measurable;
 import org.neo4j.values.storable.FloatingPointValue;
 import org.neo4j.values.storable.NumberValue;
 import org.neo4j.values.storable.ValueRepresentation;
-import org.neo4j.values.storable.Values;
+import org.neo4j.values.utils.PrettyPrinter;
 
 public abstract class AnyValue implements Measurable {
     // this should be final, but Mockito barfs if it is,
@@ -33,11 +33,17 @@ public abstract class AnyValue implements Measurable {
         return internalEquals(other);
     }
 
-    // In Cypher RETURN null = null; returns null. Therefore, in a binary equals we
-    // sometimes need to return false when matching e.g CASE null WHEN null THEN... shouldn't match on null
-    public boolean equalsWithNoValueCheck(Object other) {
-        if (this == Values.NO_VALUE && other == Values.NO_VALUE) return false;
-        return internalEquals(other);
+    // The two methods below can be merged/reworked when GQLSTATUS is fully adopted,
+    // and we no longer rely on error messages having stable formatting
+
+    public String prettyPrint() {
+        return toString();
+    }
+
+    public String prettify() {
+        var pp = new PrettyPrinter();
+        this.writeTo(pp);
+        return pp.value();
     }
 
     @Override

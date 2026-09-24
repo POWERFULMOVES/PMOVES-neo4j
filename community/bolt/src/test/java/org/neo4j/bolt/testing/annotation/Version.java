@@ -23,7 +23,7 @@ import java.lang.annotation.Documented;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
-import org.neo4j.bolt.negotiation.ProtocolVersion;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 
 /**
  * Defines a range of protocol versions.
@@ -64,6 +64,8 @@ public @interface Version {
      * the protocol negotiation. As such, it will <em>subtract</em> from the {@link #minor()} version component.
      *
      * @return a range of versions.
+     * @deprecated Use the `since` and `until` properties of the desired annotation for improved readability.
      */
+    @Deprecated
     int range() default 0;
 }

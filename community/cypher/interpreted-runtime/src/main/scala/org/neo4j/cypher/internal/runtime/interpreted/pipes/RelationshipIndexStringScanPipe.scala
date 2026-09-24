@@ -32,16 +32,16 @@ import org.neo4j.internal.kernel.api.RelationshipValueIndexCursor
 import org.neo4j.values.storable.TextValue
 
 abstract class AbstractRelationshipIndexStringScanPipe(
-  ident: String,
-  startNode: String,
-  endNode: String,
+  ident: Option[String],
+  startNode: Option[String],
+  endNode: Option[String],
   property: IndexedProperty,
   queryIndexId: Int,
   valueExpr: Expression
 ) extends Pipe with IndexPipeWithValues {
 
   override val indexPropertyIndices: Array[Int] = if (property.shouldGetValue) Array(0) else Array.empty
-  override val indexCachedProperties: Array[CachedProperty] = Array(property.asCachedProperty(ident))
+  override val indexCachedProperties: Array[CachedProperty] = ident.map(property.asCachedProperty).toArray
   protected val needsValues: Boolean = indexPropertyIndices.nonEmpty
 
   override protected def internalCreateResults(state: QueryState): ClosingIterator[CypherRow] = {
@@ -71,8 +71,8 @@ abstract class AbstractRelationshipIndexStringScanPipe(
 
   protected def iterator(
     state: QueryState,
-    startNode: String,
-    endNode: String,
+    startNode: Option[String],
+    endNode: Option[String],
     baseContext: CypherRow,
     cursor: RelationshipValueIndexCursor
   ): IndexIteratorBase[CypherRow]
@@ -83,12 +83,12 @@ trait Directed {
 
   override protected def iterator(
     state: QueryState,
-    startNode: String,
-    endNode: String,
+    startNode: Option[String],
+    endNode: Option[String],
     baseContext: CypherRow,
     cursor: RelationshipValueIndexCursor
   ): IndexIteratorBase[CypherRow] =
-    new RelIndexIterator(state, startNode, endNode, baseContext, cursor)
+    new RelIndexIterator(startNode, endNode, baseContext, cursor)
 }
 
 trait Undirected {
@@ -96,23 +96,24 @@ trait Undirected {
 
   override protected def iterator(
     state: QueryState,
-    startNode: String,
-    endNode: String,
+    startNode: Option[String],
+    endNode: Option[String],
     baseContext: CypherRow,
     cursor: RelationshipValueIndexCursor
   ): IndexIteratorBase[CypherRow] =
-    new UndirectedRelIndexIterator(startNode, endNode, state, baseContext, cursor)
+    new UndirectedRelIndexIterator(startNode, endNode, baseContext, cursor)
 }
 
 case class DirectedRelationshipIndexContainsScanPipe(
-  ident: String,
-  startNode: String,
-  endNode: String,
+  ident: Option[String],
+  startNode: Option[String],
+  endNode: Option[String],
   typeToken: RelationshipTypeToken,
   property: IndexedProperty,
   queryIndexId: Int,
   valueExpr: Expression,
-  indexOrder: IndexOrder
+  indexOrder: IndexOrder,
+  includeChangesFromThisTransaction: Boolean
 )(val id: Id = Id.INVALID_ID)
     extends AbstractRelationshipIndexStringScanPipe(ident, startNode, endNode, property, queryIndexId, valueExpr)
     with Directed {
@@ -122,18 +123,25 @@ case class DirectedRelationshipIndexContainsScanPipe(
     index: IndexReadSession,
     value: TextValue
   ): RelationshipValueIndexCursor =
-    state.query.relationshipIndexSeekByContains(index, needsValues, indexOrder, value)
+    state.query.relationshipIndexSeekByContains(
+      index,
+      needsValues,
+      indexOrder,
+      value,
+      includeChangesFromThisTransaction
+    )
 }
 
 case class UndirectedRelationshipIndexContainsScanPipe(
-  ident: String,
-  startNode: String,
-  endNode: String,
+  ident: Option[String],
+  startNode: Option[String],
+  endNode: Option[String],
   typeToken: RelationshipTypeToken,
   property: IndexedProperty,
   queryIndexId: Int,
   valueExpr: Expression,
-  indexOrder: IndexOrder
+  indexOrder: IndexOrder,
+  includeChangesFromThisTransaction: Boolean
 )(val id: Id = Id.INVALID_ID)
     extends AbstractRelationshipIndexStringScanPipe(ident, startNode, endNode, property, queryIndexId, valueExpr)
     with Undirected {
@@ -143,18 +151,25 @@ case class UndirectedRelationshipIndexContainsScanPipe(
     index: IndexReadSession,
     value: TextValue
   ): RelationshipValueIndexCursor =
-    state.query.relationshipIndexSeekByContains(index, needsValues, indexOrder, value)
+    state.query.relationshipIndexSeekByContains(
+      index,
+      needsValues,
+      indexOrder,
+      value,
+      includeChangesFromThisTransaction
+    )
 }
 
 case class DirectedRelationshipIndexEndsWithScanPipe(
-  ident: String,
-  startNode: String,
-  endNode: String,
+  ident: Option[String],
+  startNode: Option[String],
+  endNode: Option[String],
   typeToken: RelationshipTypeToken,
   property: IndexedProperty,
   queryIndexId: Int,
   valueExpr: Expression,
-  indexOrder: IndexOrder
+  indexOrder: IndexOrder,
+  includeChangesFromThisTransaction: Boolean
 )(val id: Id = Id.INVALID_ID)
     extends AbstractRelationshipIndexStringScanPipe(ident, startNode, endNode, property, queryIndexId, valueExpr)
     with Directed {
@@ -164,18 +179,25 @@ case class DirectedRelationshipIndexEndsWithScanPipe(
     index: IndexReadSession,
     value: TextValue
   ): RelationshipValueIndexCursor =
-    state.query.relationshipIndexSeekByEndsWith(index, needsValues, indexOrder, value)
+    state.query.relationshipIndexSeekByEndsWith(
+      index,
+      needsValues,
+      indexOrder,
+      value,
+      includeChangesFromThisTransaction
+    )
 }
 
 case class UndirectedRelationshipIndexEndsWithScanPipe(
-  ident: String,
-  startNode: String,
-  endNode: String,
+  ident: Option[String],
+  startNode: Option[String],
+  endNode: Option[String],
   typeToken: RelationshipTypeToken,
   property: IndexedProperty,
   queryIndexId: Int,
   valueExpr: Expression,
-  indexOrder: IndexOrder
+  indexOrder: IndexOrder,
+  includeChangesFromThisTransaction: Boolean
 )(val id: Id = Id.INVALID_ID)
     extends AbstractRelationshipIndexStringScanPipe(ident, startNode, endNode, property, queryIndexId, valueExpr)
     with Undirected {
@@ -185,5 +207,11 @@ case class UndirectedRelationshipIndexEndsWithScanPipe(
     index: IndexReadSession,
     value: TextValue
   ): RelationshipValueIndexCursor =
-    state.query.relationshipIndexSeekByEndsWith(index, needsValues, indexOrder, value)
+    state.query.relationshipIndexSeekByEndsWith(
+      index,
+      needsValues,
+      indexOrder,
+      value,
+      includeChangesFromThisTransaction
+    )
 }

@@ -19,8 +19,10 @@
  */
 package org.neo4j.cypher.internal.planner.spi
 
+import org.neo4j.cypher.internal.planner.spi.histogram.Histogram
 import org.neo4j.cypher.internal.util.Cardinality
 import org.neo4j.cypher.internal.util.LabelId
+import org.neo4j.cypher.internal.util.PropertyKeyId
 import org.neo4j.cypher.internal.util.RelTypeId
 import org.neo4j.cypher.internal.util.Selectivity
 
@@ -40,6 +42,7 @@ case class CardinalityByLabelsAndRelationshipType(
 ) extends StatisticsKey
 case class IndexSelectivity(index: IndexDescriptor) extends StatisticsKey
 case class IndexPropertyExistsSelectivity(index: IndexDescriptor) extends StatisticsKey
+case class NamedCount(key: String) extends StatisticsKey
 
 class MutableGraphStatisticsSnapshot(val map: mutable.Map[StatisticsKey, Double] = mutable.Map.empty) {
   def freeze: GraphStatisticsSnapshot = GraphStatisticsSnapshot(map.toMap)
@@ -63,6 +66,8 @@ case class GraphStatisticsSnapshot(statsValues: Map[StatisticsKey, Double] = Map
         instrumented.uniqueValueSelectivity(index)
       case IndexPropertyExistsSelectivity(index) =>
         instrumented.indexPropertyIsNotNullSelectivity(index)
+      case NamedCount(_) =>
+        ()
     }
     snapshot.freeze
   }
@@ -123,4 +128,10 @@ case class InstrumentedGraphStatistics(inner: GraphStatistics, snapshot: Mutable
   override def mostCommonLabelGivenRelationshipType(typ: Int): Seq[Int] = {
     inner.mostCommonLabelGivenRelationshipType(typ)
   }
+
+  override def getHistograms(labels: Set[LabelId], propertyKey: PropertyKeyId): Set[Histogram] =
+    inner.getHistograms(labels, propertyKey)
+
+  override def getHistograms(typeId: RelTypeId, propertyKey: PropertyKeyId): Set[Histogram] =
+    inner.getHistograms(typeId, propertyKey)
 }

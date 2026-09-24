@@ -66,11 +66,11 @@ public final class Exceptions {
      */
     public static void throwIfUnchecked(Throwable exception) {
         Objects.requireNonNull(exception);
-        if (exception instanceof RuntimeException) {
-            throw (RuntimeException) exception;
+        if (exception instanceof RuntimeException re) {
+            throw re;
         }
-        if (exception instanceof Error) {
-            throw (Error) exception;
+        if (exception instanceof Error er) {
+            throw er;
         }
     }
 
@@ -171,10 +171,11 @@ public final class Exceptions {
     }
 
     public static StackTraceElement[] getPartialStackTrace(int from, int to) {
-        return StackWalker.getInstance().walk(s -> s.skip(from)
-                .limit(to - from)
-                .map(StackWalker.StackFrame::toStackTraceElement)
-                .toArray(StackTraceElement[]::new));
+        return StackWalker.getInstance()
+                .walk(s -> s.skip(from)
+                        .limit(to - from)
+                        .map(StackWalker.StackFrame::toStackTraceElement)
+                        .toArray(StackTraceElement[]::new));
     }
 
     public static String stringify(Throwable throwable) {
@@ -196,7 +197,7 @@ public final class Exceptions {
                 .append(" prio=")
                 .append(thread.getPriority())
                 .append(" tid=")
-                .append(thread.getId())
+                .append(thread.threadId())
                 .append(' ')
                 .append(thread.getState().name().toLowerCase(Locale.ROOT))
                 .append('\n');

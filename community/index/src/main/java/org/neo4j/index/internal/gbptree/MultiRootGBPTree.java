@@ -32,6 +32,7 @@ import static org.neo4j.index.internal.gbptree.GenerationSafePointer.FIRST_UNSTA
 import static org.neo4j.index.internal.gbptree.Header.CARRY_OVER_PREVIOUS_HEADER;
 import static org.neo4j.index.internal.gbptree.Header.replace;
 import static org.neo4j.index.internal.gbptree.PointerChecking.checkOutOfBounds;
+import static org.neo4j.io.async.AsyncBlockAccessor.EMPTY_ASYNC_BLOCK_ACCESSOR;
 import static org.neo4j.io.pagecache.PageCacheOpenOptions.MULTI_VERSIONED;
 import static org.neo4j.io.pagecache.PagedFile.PF_SHARED_READ_LOCK;
 import static org.neo4j.io.pagecache.PagedFile.PF_SHARED_WRITE_LOCK;
@@ -39,6 +40,7 @@ import static org.neo4j.io.pagecache.PagedFile.PF_SHARED_WRITE_LOCK;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.BufferOverflowException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.OpenOption;
@@ -53,19 +55,22 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 import org.apache.commons.lang3.mutable.MutableBoolean;
+import org.apache.commons.lang3.mutable.MutableObject;
 import org.apache.commons.lang3.tuple.Pair;
 import org.eclipse.collections.api.set.ImmutableSet;
 import org.neo4j.annotations.documented.ReporterFactory;
 import org.neo4j.common.DependencyResolver;
-import org.neo4j.function.ThrowingAction;
+import org.neo4j.function.ThrowingSupplier;
 import org.neo4j.index.internal.gbptree.GBPTreeConsistencyChecker.ConsistencyCheckState;
 import org.neo4j.index.internal.gbptree.Header.Reader;
 import org.neo4j.index.internal.gbptree.RootLayer.TreeRootsVisitor;
 import org.neo4j.internal.helpers.Exceptions;
 import org.neo4j.internal.helpers.progress.ProgressMonitorFactory;
+import org.neo4j.io.async.AsyncBlockAccessor;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.fs.StoreChannel;
 import org.neo4j.io.memory.NativeScopedBuffer;
+import org.neo4j.io.pagecache.ByteArrayPageCursor;
 import org.neo4j.io.pagecache.CursorException;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.PageCacheOpenOptions;
@@ -74,6 +79,7 @@ import org.neo4j.io.pagecache.PageCursorUtil;
 import org.neo4j.io.pagecache.PagedFile;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
+import org.neo4j.io.pagecache.impl.muninn.StoreFile;
 import org.neo4j.io.pagecache.tracing.FileFlushEvent;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
 import org.neo4j.memory.EmptyMemoryTracker;
@@ -84,8 +90,8 @@ import org.neo4j.util.VisibleForTesting;
  * Additionally internal and leaf nodes on same level are linked both left and right (sibling pointers),
  * this to provide correct reading when concurrently writing to the tree.
  * <p>
- * Generation is incremented on {@link #checkpoint(FileFlushEvent, CursorContext)} check-pointing}.
- * Generation awareness allows for recovery from last {@link #checkpoint(FileFlushEvent, CursorContext)}, provided the same updates
+ * Generation is incremented on {@link #checkpoint(FileFlushEvent, AsyncBlockAccessor, CursorContext)} check-pointing}.
+ * Generation awareness allows for recovery from last {@link #checkpoint(FileFlushEvent, AsyncBlockAccessor, CursorContext)}, provided the same updates
  * will be replayed onto the index since that point in time.
  * <p>
  * Changes to tree nodes are made so that stable nodes (i.e. nodes that have survived at least one checkpoint)
@@ -116,8 +122,8 @@ import org.neo4j.util.VisibleForTesting;
  * {@link GBPTree} is designed to be able to handle non-clean shutdown / crash, but needs external help
  * in order to do so.
  * {@link DataTree#writer(int, CursorContext) Writes} happen to the tree and are made durable and
- * safe on next call to {@link #checkpoint(FileFlushEvent, CursorContext)}. Writes which happens after the last
- * {@link #checkpoint(FileFlushEvent, CursorContext)} are not safe if there's a {@link #close()} or JVM crash in between, i.e:
+ * safe on next call to {@link #checkpoint(FileFlushEvent, AsyncBlockAccessor, CursorContext)}. Writes which happens after the last
+ * {@link #checkpoint(FileFlushEvent, AsyncBlockAccessor, CursorContext)} are not safe if there's a {@link #close()} or JVM crash in between, i.e:
  *
  * <pre>
  * w: write
@@ -156,6 +162,7 @@ import org.neo4j.util.VisibleForTesting;
  */
 public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
     private static final String INDEX_INTERNAL_TAG = "indexInternal";
+    private static final int MAX_NUM_HIGH_PAGES_FOR_COMPACTION = 100_000;
 
     /**
      * For monitoring {@link GBPTree}.
@@ -169,7 +176,7 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
             public void checkpointStarted() {}
 
             @Override
-            public void checkpointCompleted() {}
+            public void checkpointCompleted(CompactionReport compactionReport) {}
 
             @Override
             public void noStoreFile() {}
@@ -219,8 +226,8 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
             }
 
             @Override
-            public void checkpointCompleted() {
-                delegate.checkpointCompleted();
+            public void checkpointCompleted(CompactionReport compactionReport) {
+                delegate.checkpointCompleted(compactionReport);
             }
 
             @Override
@@ -277,22 +284,32 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
             public void treeShrink() {
                 delegate.treeShrink();
             }
+
+            @Override
+            public void treeWriterEscalated(boolean deep) {
+                delegate.treeWriterEscalated(deep);
+            }
+
+            @Override
+            public void treeWriterFlippedToPessimistic() {
+                delegate.treeWriterFlippedToPessimistic();
+            }
         }
 
         /**
-         * Called when a {@link GBPTree#checkpoint(FileFlushEvent, CursorContext)} has started, right after
+         * Called when a {@link MultiRootGBPTree#checkpoint(FileFlushEvent, AsyncBlockAccessor, CursorContext)} has started, right after
          * current writers have been drained. Future writers after this point onwards and until the next call
-         * to {@link #checkpointCompleted()} will do eager flushing of their changes.
+         * to {@link #checkpointCompleted(CompactionReport)} will do eager flushing of their changes.
          */
         void checkpointStarted();
 
         /**
-         * Called when a {@link GBPTree#checkpoint(FileFlushEvent, CursorContext)} has been completed and generation
+         * Called when a {@link MultiRootGBPTree#checkpoint(FileFlushEvent, AsyncBlockAccessor, CursorContext)} has been completed and generation
          * has been bumped, but right before {@link GBPTree#writer(CursorContext)} writers are re-enabled.
          * Writers from this point onwards and until the next call to {@link #checkpointStarted()} will not do
          * eager flushing of their changes.
          */
-        void checkpointCompleted();
+        void checkpointCompleted(CompactionReport compactionReport);
 
         /**
          * Called when the tree was started on no existing store file and so will be created.
@@ -354,6 +371,17 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
          * Report tree shrink, when root becomes empty.
          */
         void treeShrink();
+
+        /**
+         * Report that an optimistic writer absorbed a leaf split at an ancestor by upgrading latches.
+         * deep is true when the absorption happened above the leaf's immediate parent.
+         */
+        default void treeWriterEscalated(boolean deep) {}
+
+        /**
+         * Report that an optimistic writer gave up and flipped to pessimistic mode for the current operation.
+         */
+        default void treeWriterFlippedToPessimistic() {}
     }
 
     /**
@@ -365,11 +393,6 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
      * No-op header reader.
      */
     public static final Header.Reader NO_HEADER_READER = headerData -> {};
-
-    /**
-     * No-op header writer.
-     */
-    public static final Consumer<PageCursor> NO_HEADER_WRITER = pc -> {};
 
     /**
      * Paged file in a {@link PageCache} providing the means of storage.
@@ -393,12 +416,12 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
      * A free-list of released ids. Acquiring new ids involves first trying out the free-list and then,
      * as a fall-back allocate a new id at the end of the store.
      */
-    protected final FreeListIdProvider freeList;
+    protected final FreelistIdProvider freeList;
 
     /**
      * Tells whether there have been made changes (using {@link DataTree#writer(int, CursorContext)}) to this tree
-     * since last call to {@link #checkpoint(FileFlushEvent, CursorContext)}. This variable is set when calling {@link DataTree#writer(int, CursorContext)}
-     * and cleared inside {@link #checkpoint(FileFlushEvent, CursorContext)}.
+     * since last call to {@link #checkpoint(FileFlushEvent, AsyncBlockAccessor, CursorContext)}. This variable is set when calling {@link DataTree#writer(int, CursorContext)}
+     * and cleared inside {@link #checkpoint(FileFlushEvent, AsyncBlockAccessor, CursorContext)}.
      */
     private final AtomicBoolean changesSinceLastCheckpoint = new AtomicBoolean();
 
@@ -426,9 +449,9 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
      * Both stable and unstable generation are unsigned ints, i.e. 32 bits each.
      *
      * <ul>
-     * <li>stable generation, generation which has survived the last {@link #checkpoint(FileFlushEvent, CursorContext)}</li>
+     * <li>stable generation, generation which has survived the last {@link #checkpoint(FileFlushEvent, AsyncBlockAccessor, CursorContext)}</li>
      * <li>unstable generation, current generation under evolution. This generation will be the
-     * {@link Generation#stableGeneration(long)} after the next {@link #checkpoint(FileFlushEvent, CursorContext)}</li>
+     * {@link Generation#stableGeneration(long)} after the next {@link #checkpoint(FileFlushEvent, AsyncBlockAccessor, CursorContext)}</li>
      * </ul>
      */
     private volatile long generation;
@@ -464,7 +487,7 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
     private final PageCacheTracer pageCacheTracer;
 
     /**
-     * Array of {@link OpenOption} which is passed to calls to {@link PageCache#map(Path, int, String, ImmutableSet)}
+     * Array of {@link OpenOption} which is passed to calls to {@link PageCache#map(StoreFile, int, String, ImmutableSet)}
      * at open/create. When initially creating the file an array consisting of {@link StandardOpenOption#CREATE}
      * concatenated with the contents of this array is passed into the map call.
      */
@@ -554,11 +577,11 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
      *
      * @param pageCache                    {@link PageCache} to use to map index file
      * @param fileSystem                   {@link FileSystemAbstraction} which the index file is mapped in
-     * @param indexFile                    {@link Path} containing the actual index
+     * @param storeFile                    {@link StoreFile} containing the actual index
      * @param layout                       {@link Layout} to use in the tree, this must match the existing layout
      *                                     we're just opening the index
      * @param monitor                      {@link Monitor} for monitoring {@link GBPTree}.
-     * @param headerReader                 reads header data, previously written using {@link #checkpoint(Consumer, FileFlushEvent, CursorContext)}
+     * @param headerReader                 reads header data, previously written using {@link #checkpoint(Consumer, FileFlushEvent, AsyncBlockAccessor, CursorContext)}
      *                                     or {@link #close()}
      * @param recoveryCleanupWorkCollector collects recovery cleanup jobs for execution after recovery.
      * @param readOnly whether this tree should be opened in read-only mode. If {@code true} then no generation
@@ -571,10 +594,10 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
     public MultiRootGBPTree(
             PageCache pageCache,
             FileSystemAbstraction fileSystem,
-            Path indexFile,
+            StoreFile storeFile,
             Layout<KEY, VALUE> layout,
             Monitor monitor,
-            Header.Reader headerReader,
+            Reader headerReader,
             RecoveryCleanupWorkCollector recoveryCleanupWorkCollector,
             boolean readOnly,
             ImmutableSet<OpenOption> engineOpenOptions,
@@ -585,9 +608,10 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
             PageCacheTracer pageCacheTracer,
             DependencyResolver dependencyResolver,
             TreeNodeLayoutFactory treeNodeLayoutFactory,
-            StructureWriteLog structureWriteLog)
+            StructureWriteLog structureWriteLog,
+            boolean preserveUnstableGeneration)
             throws MetadataMismatchException {
-        this.indexFile = indexFile;
+        this.indexFile = storeFile.baseSegment();
         this.monitor = monitor;
         this.readOnly = readOnly;
         this.contextFactory = contextFactory;
@@ -598,7 +622,7 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
         this.structureWriteLog = structureWriteLog;
 
         try (var cursorContext = contextFactory.create(INDEX_INTERNAL_TAG)) {
-            var openResult = openOrCreate(fileSystem, pageCache, indexFile, databaseName, openOptions);
+            var openResult = openOrCreate(fileSystem, pageCache, storeFile, databaseName, openOptions);
             boolean created = openResult.created;
             this.pagedFile = openResult.pagedFile;
             closed = false;
@@ -611,8 +635,8 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
             }
 
             this.payloadSize = pagedFile.payloadSize();
-            this.freeList = new FreeListIdProvider(pagedFile.payloadSize());
-            TreeNodeLatchService latchService = new TreeNodeLatchService();
+            this.freeList = new FreelistIdProvider(pagedFile);
+            var latchService = selectLatchService(engineOpenOptions);
             var treeNodeSelector = treeNodeLayoutFactory.createSelector(engineOpenOptions);
             this.rootLayerSupport = new RootLayerSupport(
                     pagedFile,
@@ -637,16 +661,20 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
                 initializeAfterCreation(cursorContext);
                 dirtyOnStartup = false;
                 cleaning = CleanupJob.CLEAN;
+                changesSinceLastCheckpoint.set(true);
             } else {
                 initialize(pagedFile, headerReader, cursorContext);
                 dirtyOnStartup = !clean;
+                if (!preserveUnstableGeneration) {
+                    bumpUnstableGeneration();
+                }
                 if (!readOnly) {
                     clean = false;
-                    bumpUnstableGeneration();
                     try (var flushEvent = pageCacheTracer.beginFileFlush()) {
-                        forceState(flushEvent, cursorContext);
+                        forceState(flushEvent, EMPTY_ASYNC_BLOCK_ACCESSOR, cursorContext);
                     }
                     cleaning = createCleanupJob(recoveryCleanupWorkCollector, dirtyOnStartup);
+                    changesSinceLastCheckpoint.set(dirtyOnStartup);
                 } else {
                     cleaning = CleanupJob.CLEAN;
                 }
@@ -657,6 +685,13 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
         } catch (Throwable e) {
             throw exitConstructor(e);
         }
+    }
+
+    private static TreeNodeLatchService selectLatchService(ImmutableSet<OpenOption> engineOpenOptions) {
+        if (engineOpenOptions.contains(MULTI_VERSIONED)) {
+            return new ParkingLatchService();
+        }
+        return new SpinLatchService();
     }
 
     private RuntimeException exitConstructor(Throwable throwable) {
@@ -688,21 +723,21 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
     private OpenResult openOrCreate(
             FileSystemAbstraction fs,
             PageCache pageCache,
-            Path indexFile,
+            StoreFile indexFile,
             String databaseName,
             ImmutableSet<OpenOption> openOptions)
             throws IOException, TreeFileNotFoundException {
         openOptions = openOptions.newWithoutAll(asList(GBPTreeOpenOptions.values()));
-        if (!fs.fileExists(indexFile)) {
+        if (!indexFile.exists(fs)) {
             if (readOnly) {
                 throw new TreeFileNotFoundException(
                         "Can not create new tree file '" + indexFile + "' in read only mode.");
             }
             monitor.noStoreFile();
             openOptions = openOptions.newWith(CREATE);
-            return new OpenResult(pageCache.map(indexFile, pageCache.pageSize(), databaseName, openOptions), true);
+            return new OpenResult(pageCache.map(indexFile, databaseName, openOptions), true);
         }
-        return new OpenResult(pageCache.map(indexFile, pageCache.pageSize(), databaseName, openOptions), false);
+        return new OpenResult(pageCache.map(indexFile, databaseName, openOptions), false);
     }
 
     /**
@@ -761,13 +796,12 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
 
     private static PagedFile openExistingIndexFile(
             PageCache pageCache,
-            Path indexFile,
+            StoreFile indexFile,
             CursorContext cursorContext,
             String databaseName,
             ImmutableSet<OpenOption> openOptions)
             throws IOException, MetadataMismatchException {
-        PagedFile pagedFile =
-                pageCache.map(indexFile, pageCache.pageSize(), databaseName, treeOpenOptions(openOptions));
+        PagedFile pagedFile = pageCache.map(indexFile, databaseName, treeOpenOptions(openOptions));
         // This index already exists, verify meta data aligns with expectations
 
         MutableBoolean pagedFileOpen = new MutableBoolean(true);
@@ -789,7 +823,7 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
     private void initialize(PagedFile pagedFile, Header.Reader headerReader, CursorContext cursorContext)
             throws IOException {
         var openOptions = this.openOptions;
-        TreeState state = readHeaderFromPagedFiled(pagedFile, headerReader, cursorContext, openOptions);
+        TreeState state = readHeaderFromPagedFile(pagedFile, headerReader, cursorContext, openOptions);
         generation = Generation.generation(state.stableGeneration(), state.unstableGeneration());
         var root = new Root(state.rootId(), state.rootGeneration());
         rootLayer.initialize(root, cursorContext);
@@ -872,7 +906,7 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
      *
      * @param pageCache {@link PageCache} to use to map index file
      * @param indexFile {@link Path} containing the actual index
-     * @param headerReader reads header data, previously written using {@link #checkpoint( Consumer, FileFlushEvent, CursorContext)}
+     * @param headerReader reads header data, previously written using {@link #checkpoint(Consumer, FileFlushEvent, AsyncBlockAccessor, CursorContext)}
      * or {@link #close()}
      * @param databaseName name of the database index file belongs to.
      * @throws IOException On page cache error
@@ -880,7 +914,7 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
      */
     public static void readHeader(
             PageCache pageCache,
-            Path indexFile,
+            StoreFile indexFile,
             Header.Reader headerReader,
             String databaseName,
             CursorContext cursorContext,
@@ -888,7 +922,7 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
             throws IOException, MetadataMismatchException {
         try (PagedFile pagedFile =
                 openExistingIndexFile(pageCache, indexFile, cursorContext, databaseName, openOptions)) {
-            readHeaderFromPagedFiled(pagedFile, headerReader, cursorContext, openOptions);
+            readHeaderFromPagedFile(pagedFile, headerReader, cursorContext, openOptions);
         } catch (Throwable t) {
             // Decorate outgoing exceptions with basic tree information. This is similar to how the constructor
             // appends its information, but the constructor has read more information at that point so this one
@@ -898,7 +932,7 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
         }
     }
 
-    private static TreeState readHeaderFromPagedFiled(
+    private static TreeState readHeaderFromPagedFile(
             PagedFile pagedFile, Reader headerReader, CursorContext cursorContext, ImmutableSet<OpenOption> openOptions)
             throws IOException {
         Pair<TreeState, TreeState> states = loadStatePages(pagedFile, cursorContext);
@@ -936,7 +970,7 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
         Root root = rootLayer.getRoot(cursorContext);
         try (PageCursor cursor = pagedFile.io(pageToOverwrite, PagedFile.PF_SHARED_WRITE_LOCK, cursorContext)) {
             PageCursorUtil.goTo(cursor, "state page", pageToOverwrite);
-            FreeListIdProvider.FreelistMetaData freelistMetaData = freeList.metaData();
+            FreelistIdProvider.FreelistMetaData freelistMetaData = freeList.metaData();
             TreeState.write(
                     cursor,
                     stableGeneration(generation),
@@ -994,7 +1028,7 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
     @VisibleForTesting
     public static void overwriteHeader(
             PageCache pageCache,
-            Path indexFile,
+            StoreFile indexFile,
             Consumer<PageCursor> headerWriter,
             String databaseName,
             CursorContext cursorContext,
@@ -1090,29 +1124,62 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
      * Header writer is expected to leave consumed {@link PageCursor} at end of written header for calculation of
      * header size.
      *
-     * @param headerWriter hook for writing header data, must leave cursor at end of written header.
-     * @param cursorContext underlying page cursor context
+     * @param headerWriter       hook for writing header data, must leave cursor at end of written header.
+     * @param asyncBlockAccessor async block accessor of current checkpoint
+     * @param cursorContext      underlying page cursor context
      * @throws UncheckedIOException on error flushing to storage.
      */
-    public void checkpoint(Consumer<PageCursor> headerWriter, FileFlushEvent flushEvent, CursorContext cursorContext) {
+    public void checkpoint(
+            Consumer<PageCursor> headerWriter,
+            FileFlushEvent flushEvent,
+            AsyncBlockAccessor asyncBlockAccessor,
+            CursorContext cursorContext) {
         try {
-            checkpoint(replace(headerWriter), flushEvent, cursorContext);
+            checkpoint(replace(headerWriter), flushEvent, asyncBlockAccessor, cursorContext, false);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
     }
 
     /**
-     * Performs a {@link #checkpoint( Consumer, FileFlushEvent, CursorContext)}  check point}, keeping any header information
+     * Compacts this tree, together with the backing file as much as possible by moving used pages in the highest
+     * region of the file to a lower region so that the file can be truncated.
+     * Internally, compaction is done incrementally to not hold too much state in memory at any given time,
+     * but also to be able to interleave writers in between these incremental steps.
+     * @param flushEvent for tracing any page flushes.
+     * @param asyncBlockAccessor async block accessor of compaction event.
+     * @param cursorContext underlying page cursor context
+     */
+    public long compact(FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext) {
+        try {
+            CompactionReport compactionReport;
+            long numTrimmedBytes = 0;
+            do {
+                compactionReport =
+                        checkpoint(CARRY_OVER_PREVIOUS_HEADER, flushEvent, asyncBlockAccessor, cursorContext, true);
+                if (compactionReport.numTrimmedPages() > 0) {
+                    numTrimmedBytes += compactionReport.numTrimmedPages() * pagedFile.pageSize();
+                }
+            } while (compactionReport.madeChanges() || compactionReport.shrunkFile());
+            return numTrimmedBytes;
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /**
+     * Performs a {@link #checkpoint(Consumer, FileFlushEvent, AsyncBlockAccessor, CursorContext)}  check point}, keeping any header information
      * written in previous check point.
      *
-     * @param cursorContext underlying page cursor context
+     * @param asyncBlockAccessor async block accessor of current checkpoint
+     * @param cursorContext      underlying page cursor context
      * @throws UncheckedIOException on error flushing to storage.
-     * @see #checkpoint( Header.Writer, FileFlushEvent, CursorContext)
+     * @see #checkpoint(Header.Writer, FileFlushEvent, AsyncBlockAccessor, CursorContext, boolean)
      */
-    public void checkpoint(FileFlushEvent flushEvent, CursorContext cursorContext) {
+    public void checkpoint(
+            FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext) {
         try {
-            checkpoint(CARRY_OVER_PREVIOUS_HEADER, flushEvent, cursorContext);
+            checkpoint(CARRY_OVER_PREVIOUS_HEADER, flushEvent, asyncBlockAccessor, cursorContext, false);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
@@ -1124,7 +1191,7 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
      * <pre>
      * |-WW--W-WWWW│-│WFWWFFFWFWWFWWWF│-│WWW-W--WW-WWW--| time
      *             └┬┴────────┬───────┴┬┘
-     *              │         │        └ #3 block and drain writers, bump generation, force, unblock writers
+     *              │         │        └ #3 block and drain writers, force (data pages), bump generation, force (state page), unblock writers
      *              │         └ #2 flush all file pages cooperatively with writers
      *              └ #1 block and drain writers (and block new ones), set writers-must-flush flag, unblock writers
      * </pre>
@@ -1132,14 +1199,31 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
      * The two sections where writers are blocked are both very short:
      * <ul>
      *     <li>#1 flips a boolean</li>
-     *     <li>#3 writes and flushes a maximum of 3-or-so pages (one state page and potentially two freelist pages</li>
+     *     <li>#3 writes and flushes a handful of pages (one state page and potentially two freelist pages).
+     *     If {@code doCompaction==true} then potentially a lot more pages will be dirtied and flushed additionally.</li>
      * </ul>
-     * During #2 (when the file is flushed) writers are unblocked and will eagerly flush their changes as they write.
+     * During #2 (when the file is flushed), writers are unblocked and will eagerly flush their changes as they write.
+     *
+     * If {@code doCompaction==true} also tries to compact the tree to some extent.
+     * This compaction is designed to run boxed by some upper ceiling of page count, as to run fairly quickly.
+     * To compact a tree that has a large number of free pages the compaction may need to be run multiple times.
+     * Compaction takes advantage of the internal locks so that no writers or checkpoints can be made at the same time.
+     * This compaction may result in moving internal pages or even forcing successors for some tree node pages
+     * to be created (for tree nodes that are at the very end of the file).
      */
-    private synchronized void checkpoint(
-            Header.Writer headerWriter, FileFlushEvent flushEvent, CursorContext cursorContext) throws IOException {
+    synchronized CompactionReport checkpoint(
+            Header.Writer headerWriter,
+            FileFlushEvent flushEvent,
+            AsyncBlockAccessor asyncBlockAccessor,
+            CursorContext cursorContext,
+            boolean doCompaction)
+            throws IOException {
         if (readOnly) {
-            return;
+            return CompactionReport.EMPTY;
+        }
+
+        if (!changesSinceLastCheckpoint.get() && !headerDataChanged(headerWriter, cursorContext) && !doCompaction) {
+            return CompactionReport.EMPTY;
         }
 
         awaitCleaner();
@@ -1151,34 +1235,56 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
 
             // Do the file-global flush together with the flushing by any potential concurrent writer
             monitor.checkpointStarted();
-            pagedFile.flushAndForce(flushEvent);
+            pagedFile.flush(flushEvent, asyncBlockAccessor);
 
             // Drain writers, bump generation and do the final forcing of the file.
             // New writers after this section don't need to eagerly flush anymore.
-            withCheckpointAndWriterLock(() -> {
+            return withCheckpointAndWriterLock(() -> {
                 // Eager flush is optimistic and may fail. There is a chance a few pages are still dirty at this point.
                 writersMustEagerlyFlush = false;
                 long generation = this.generation;
                 long stableGeneration = stableGeneration(generation);
                 long unstableGeneration = unstableGeneration(generation);
+
                 freeList.flush(
                         stableGeneration, unstableGeneration, bind(pagedFile, PF_SHARED_WRITE_LOCK, cursorContext));
 
-                // Force any potential pages flushed from writers after completion of the above flushAndForce
-                // so that there's no chance that the state page change below can make it to disk before
-                // the state page. Only force is needed, but there's no method only doing force, although
-                // the flush part is really fast if there are no dirty pages.
+                // Force any potential pages flushed from writers after completion of the above flush.
+                // This will prevent any risk of state page w/ the generation bump change below making
+                // it to disk before any data page from this to-be-stable generation.
+                // Only force is needed, but there's no method only doing force,
+                // although the flush part is really fast if there are no dirty pages.
                 structureWriteLog.checkpoint(stableGeneration, unstableGeneration, unstableGeneration + 1);
-                pagedFile.flushAndForce(flushEvent);
+                pagedFile.flushAndForce(flushEvent, asyncBlockAccessor);
 
                 // Increment generation, i.e. stable becomes current unstable and unstable increments by one
                 // and write the tree state (rootId, lastId, generation a.s.o.) to state page.
                 this.generation = Generation.generation(unstableGeneration, unstableGeneration + 1);
                 writeState(pagedFile, headerWriter, cursorContext);
-                pagedFile.flushAndForce(flushEvent);
+                pagedFile.flushAndForce(flushEvent, asyncBlockAccessor);
 
-                monitor.checkpointCompleted();
+                // Checkpoint is now logically complete. This is a good time to do some compaction.
+                stableGeneration = stableGeneration(this.generation);
+                unstableGeneration = unstableGeneration(this.generation);
+                CompactionReport compactionReport = doCompaction
+                        ? rootLayer.runCompaction(
+                                MAX_NUM_HIGH_PAGES_FOR_COMPACTION, stableGeneration, unstableGeneration, cursorContext)
+                        : CompactionReport.EMPTY;
+                if (compactionReport.madeChanges()) {
+                    // If compaction ended up moving things around to allow the backing file to shrink then
+                    // we need to do another bump of the generation and flush.
+                    freeList.flush(
+                            stableGeneration, unstableGeneration, bind(pagedFile, PF_SHARED_WRITE_LOCK, cursorContext));
+                    pagedFile.flushAndForce(flushEvent, asyncBlockAccessor);
+                    this.generation = Generation.generation(unstableGeneration, unstableGeneration + 1);
+                    writeState(pagedFile, headerWriter, cursorContext);
+                    pagedFile.flushAndForce(flushEvent, asyncBlockAccessor);
+                    rootLayer.postCompaction(compactionReport);
+                }
+
+                monitor.checkpointCompleted(compactionReport);
                 changesSinceLastCheckpoint.set(false);
+                return compactionReport;
             });
         } finally {
             // Safeguard, let's never leave this method with eager flushing for writers enabled.
@@ -1187,9 +1293,34 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
     }
 
     /**
+     * In the case of making a checkpoint where no changes have happened since the last checkpoint,
+     * this additional check is made which also check if the would-be additional header data would write
+     * data that has changed from the previous checkpoint. Checkpoint is only skipped if the header data
+     * is also unchanged.
+     */
+    private boolean headerDataChanged(Header.Writer headerWriter, CursorContext cursorContext) throws IOException {
+        if (headerWriter == CARRY_OVER_PREVIOUS_HEADER) {
+            return false;
+        }
+
+        MutableObject<ByteBuffer> prevHeader = new MutableObject<>();
+        try {
+            readHeaderFromPagedFile(pagedFile, (Reader) prevHeader::setValue, cursorContext, openOptions);
+            ByteBuffer toBuffer =
+                    ByteBuffer.allocate(prevHeader.get().remaining()).order(getEndianness(openOptions));
+            headerWriter.write(null, 0, new ByteArrayPageCursor(toBuffer));
+            toBuffer.flip();
+            return !toBuffer.equals(prevHeader.get());
+        } catch (BufferOverflowException | UnexpectedTreeStatesException e) {
+            // this header data definitely has/needs changed
+            return true;
+        }
+    }
+
+    /**
      * Closes this tree and its associated resources.
      * <p>
-     * NOTE: No {@link #checkpoint(FileFlushEvent flushEvent, CursorContext)} checkpoint} is performed.
+     * NOTE: No {@link #checkpoint(FileFlushEvent, AsyncBlockAccessor, CursorContext)} checkpoint} is performed.
      * @throws IOException on error closing resources.
      */
     @Override
@@ -1201,39 +1332,42 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
                 return;
             }
             withCheckpointAndWriterLock(() -> {
+                if (closed) {
+                    return null;
+                }
+                AsyncBlockAccessor asyncBlockAccessor = EMPTY_ASYNC_BLOCK_ACCESSOR;
                 try {
-                    if (closed) {
-                        return;
-                    }
                     try (var flushEvent = pageCacheTracer.beginFileFlush()) {
-                        maybeForceCleanState(flushEvent, cursorContext);
+                        maybeForceCleanState(flushEvent, asyncBlockAccessor, cursorContext);
                     }
-                    doClose();
                 } catch (IOException ioe) {
                     try {
                         if (!pagedFile.isDeleteOnClose()) {
                             try (var flushEvent = pageCacheTracer.beginFileFlush()) {
-                                pagedFile.flushAndForce(flushEvent);
+                                pagedFile.flushAndForce(flushEvent, asyncBlockAccessor);
                             }
                         }
                         try (var flushEvent = pageCacheTracer.beginFileFlush()) {
-                            maybeForceCleanState(flushEvent, cursorContext);
+                            maybeForceCleanState(flushEvent, asyncBlockAccessor, cursorContext);
                         }
                         doClose();
                     } catch (IOException e) {
                         ioe.addSuppressed(e);
                         throw ioe;
                     }
+                } finally {
+                    doClose();
                 }
+                return null;
             });
         }
     }
 
-    private void withCheckpointAndWriterLock(ThrowingAction<IOException> task) throws IOException {
+    private <T> T withCheckpointAndWriterLock(ThrowingSupplier<T, IOException> task) throws IOException {
         checkpointLock.writeLock().lock();
         writerLock.writeLock().lock();
         try {
-            task.apply();
+            return task.get();
         } finally {
             writerLock.writeLock().unlock();
             checkpointLock.writeLock().unlock();
@@ -1259,19 +1393,29 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
         pagedFile.setDeleteOnClose(deleteOnClose);
     }
 
-    private void maybeForceCleanState(FileFlushEvent flushEvent, CursorContext cursorContext) throws IOException {
+    private void maybeForceCleanState(
+            FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext)
+            throws IOException {
         if (cleaning != null && !changesSinceLastCheckpoint.get() && !cleaning.needed()) {
             clean = true;
             if (!pagedFile.isDeleteOnClose()) {
-                forceState(flushEvent, cursorContext);
+                forceState(flushEvent, asyncBlockAccessor, cursorContext);
             }
         }
     }
 
     private void doClose() {
+        if (closed) {
+            return;
+        }
         try (pagedFile;
-                structureWriteLog) {}
-        closed = true;
+                structureWriteLog) {
+            if (rootLayer != null) {
+                rootLayer.clearCache();
+            }
+        } finally {
+            closed = true;
+        }
     }
 
     /**
@@ -1283,7 +1427,9 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
         generation = generation(stableGeneration(generation), unstableGeneration(generation) + 1);
     }
 
-    private void forceState(FileFlushEvent flushEvent, CursorContext cursorContext) throws IOException {
+    private void forceState(
+            FileFlushEvent flushEvent, AsyncBlockAccessor asyncBlockAccessor, CursorContext cursorContext)
+            throws IOException {
         if (changesSinceLastCheckpoint.get()) {
             throw new IllegalStateException("It seems that this method has been called in the wrong state. "
                     + "It's expected that this is called after opening this tree, but before any changes "
@@ -1291,7 +1437,7 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
         }
 
         writeState(pagedFile, CARRY_OVER_PREVIOUS_HEADER, cursorContext);
-        pagedFile.flushAndForce(flushEvent);
+        pagedFile.flushAndForce(flushEvent, asyncBlockAccessor);
     }
 
     /**
@@ -1365,11 +1511,6 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
         rootLayer.unsafe(unsafe, dataTree, cursorContext);
     }
 
-    @VisibleForTesting
-    public int leafMaxKeyCount() {
-        return rootLayer.leafNodeMaxKeys();
-    }
-
     @Override
     public String toString() {
         long generation = this.generation;
@@ -1409,6 +1550,15 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
 
     public void visitAllRoots(CursorContext cursorContext, TreeRootsVisitor<ROOT_KEY> visitor) throws IOException {
         rootLayer.visitAllDataTreeRoots(cursorContext, visitor);
+    }
+
+    public void visitRoots(
+            CursorContext cursorContext,
+            TreeRootsVisitor<ROOT_KEY> visitor,
+            ROOT_KEY fromInclusiveKey,
+            ROOT_KEY toExclusiveKey)
+            throws IOException {
+        rootLayer.visitDataTreeRoots(cursorContext, visitor, fromInclusiveKey, toExclusiveKey);
     }
 
     @VisibleForTesting
@@ -1464,12 +1614,6 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
         return openOptions.newWithout(MULTI_VERSIONED);
     }
 
-    protected static <KEY, VALUE> OffloadStoreImpl<KEY, VALUE> buildOffload(
-            Layout<KEY, VALUE> layout, IdProvider idProvider, PagedFile pagedFile, int pageSize) {
-        OffloadIdValidator idValidator = id -> id >= IdSpace.MIN_TREE_NODE_ID && id <= pagedFile.getLastPageId();
-        return new OffloadStoreImpl<>(layout, idProvider, pagedFile::io, idValidator, pageSize);
-    }
-
     private static void verifyPayloadSize(PagedFile pagedFile, CursorContext cursorContext) throws IOException {
         if (pagedFile.getLastPageId() >= IdSpace.META_PAGE_ID) {
             var metaPayloadSize =
@@ -1480,6 +1624,11 @@ public class MultiRootGBPTree<ROOT_KEY, KEY, VALUE> implements Closeable {
                         pagedFile.payloadSize(), metaPayloadSize));
             }
         }
+    }
+
+    @VisibleForTesting
+    public void clearCache() {
+        rootLayer.clearCache();
     }
 
     private record OpenResult(PagedFile pagedFile, boolean created) {}

@@ -20,9 +20,10 @@
 package org.neo4j.fabric.transaction;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
-import org.neo4j.bolt.protocol.common.message.AccessMode;
-import org.neo4j.bolt.protocol.common.message.request.connection.RoutingContext;
+import org.neo4j.boltmessages.AccessMode;
+import org.neo4j.boltmessages.request.connection.RoutingContext;
 import org.neo4j.internal.kernel.api.connectioninfo.ClientConnectionInfo;
 import org.neo4j.internal.kernel.api.security.LoginContext;
 import org.neo4j.kernel.database.DatabaseReference;
@@ -35,6 +36,7 @@ public class FabricTransactionInfo extends StatementLifecycleTransactionInfo {
     private final Duration txTimeout;
     private final RoutingContext routingContext;
     private final QueryExecutionConfiguration queryExecutionConfiguration;
+    private final List<String> bookmarks;
 
     public FabricTransactionInfo(
             AccessMode accessMode,
@@ -45,20 +47,23 @@ public class FabricTransactionInfo extends StatementLifecycleTransactionInfo {
             Duration txTimeout,
             Map<String, Object> txMetadata,
             RoutingContext routingContext,
-            QueryExecutionConfiguration queryExecutionConfiguration) {
-        super(loginContext, clientConnectionInfo, txMetadata);
+            QueryExecutionConfiguration queryExecutionConfiguration,
+            List<String> bookmarks) {
+        super(loginContext, clientConnectionInfo, txMetadata, sessionDatabaseReference);
         this.accessMode = accessMode;
         this.sessionDatabaseReference = sessionDatabaseReference;
         this.implicitTransaction = implicitTransaction;
         this.txTimeout = txTimeout;
         this.routingContext = routingContext;
         this.queryExecutionConfiguration = queryExecutionConfiguration;
+        this.bookmarks = bookmarks;
     }
 
     public AccessMode getAccessMode() {
         return accessMode;
     }
 
+    @Override
     public DatabaseReference getSessionDatabaseReference() {
         return sessionDatabaseReference;
     }
@@ -81,5 +86,9 @@ public class FabricTransactionInfo extends StatementLifecycleTransactionInfo {
 
     public QueryExecutionConfiguration getQueryExecutionConfiguration() {
         return queryExecutionConfiguration;
+    }
+
+    public List<String> getBookmarks() {
+        return bookmarks;
     }
 }

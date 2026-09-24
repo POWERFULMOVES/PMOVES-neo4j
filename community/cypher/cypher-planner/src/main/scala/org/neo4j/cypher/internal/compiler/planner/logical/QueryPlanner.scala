@@ -19,8 +19,6 @@
  */
 package org.neo4j.cypher.internal.compiler.planner.logical
 
-import org.neo4j.configuration.GraphDatabaseInternalSettings.RemoteBatchPropertiesImplementation
-import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
 import org.neo4j.cypher.internal.ast.semantics.SemanticTable
 import org.neo4j.cypher.internal.compiler.helpers.PropertyAccessHelper.PropertyAccess
 import org.neo4j.cypher.internal.compiler.phases.AttributeFullyAssigned
@@ -31,22 +29,27 @@ import org.neo4j.cypher.internal.compiler.planner.ResolveTokens
 import org.neo4j.cypher.internal.compiler.planner.logical.LogicalPlanningContext.Settings
 import org.neo4j.cypher.internal.compiler.planner.logical.LogicalPlanningContext.StaticComponents
 import org.neo4j.cypher.internal.compiler.planner.logical.Metrics.QueryGraphSolverInput
+import org.neo4j.cypher.internal.compiler.planner.logical.cardinality.assumeIndependence.LabelInferenceStrategy
+import org.neo4j.cypher.internal.compiler.planner.logical.idp.IDPLogger
+import org.neo4j.cypher.internal.compiler.planner.logical.schema.GraphSchemaOptimizations
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.CostComparisonListener
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.LogicalPlanProducer
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.VerifyBestPlan
+import org.neo4j.cypher.internal.compiler.planner.logical.steps.projection.MaybeReportedProjections
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.frontend.phases.CompilationPhaseTracer.CompilationPhase.LOGICAL_PLANNING
 import org.neo4j.cypher.internal.frontend.phases.CopyQuantifiedPathPatternPredicatesToJuxtaposedNodes
 import org.neo4j.cypher.internal.frontend.phases.Phase
+import org.neo4j.cypher.internal.frontend.phases.SchemaInferenceUsageMetricKey
 import org.neo4j.cypher.internal.frontend.phases.Transformer
+import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerConfig
 import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerFactory
 import org.neo4j.cypher.internal.ir.PlannerQuery
 import org.neo4j.cypher.internal.ir.SinglePlannerQuery
 import org.neo4j.cypher.internal.ir.UnionQuery
+import org.neo4j.cypher.internal.ir.ast.ExistsIRExpression
 import org.neo4j.cypher.internal.ir.ast.IRExpression
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
-import org.neo4j.cypher.internal.options.CypherEagerAnalyzerOption
-import org.neo4j.cypher.internal.planner.spi.DatabaseMode.SHARDED
 import org.neo4j.cypher.internal.planner.spi.GraphStatistics
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.Cardinalities
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.ProvidedOrders
@@ -65,24 +68,45 @@ case object QueryPlanner
   override def process(from: LogicalPlanState, context: PlannerContext): LogicalPlanState = {
     val logicalPlanningContext = getLogicalPlanningContext(from, context)
 
+    // Update the schema inference usage metrics
+    val maybeLabelInferenceMetricKey = context.labelInferenceStrategy match {
+      case _: LabelInferenceStrategy.NoInference.type        => Some(SchemaInferenceUsageMetricKey.OFF)
+      case _: LabelInferenceStrategy.InferOnlyIfNoOtherLabel => Some(SchemaInferenceUsageMetricKey.MOST_SELECTIVE_LABEL)
+      case _                                                 => None
+    }
+    maybeLabelInferenceMetricKey.foreach(context.internalUsageStats.incrementSchemaInferenceUsageCount)
+
     // Not using from.returnColumns, since they are the original ones given by the user,
     // whereas the one in the statement might have been rewritten and contain the variables
     // that will actually be available to ProduceResults
     val produceResultColumns = from.statement().returnColumns
-    val logicalPlan = plan(from.query, logicalPlanningContext, produceResultColumns)
 
-    from.copy(
-      maybeLogicalPlan = Some(logicalPlan),
-      maybeSemanticTable = Some(logicalPlanningContext.semanticTable),
-      maybeRemoteBatchPropertiesImplementation =
-        Some(remoteBatchPropertiesImplementation(from.query, context))
-    )
+    val logicalPlan =
+      try {
+        plan(from.query, logicalPlanningContext, produceResultColumns)
+      } finally {
+        if (context.debugOptions.printIDPLog) {
+          logicalPlanningContext.staticComponents.idpLogger.result().foreach(println)
+        }
+      }
+
+    from.copy(maybeSemanticTable = Some(logicalPlanningContext.semanticTable), maybeLogicalPlan = Some(logicalPlan))
   }
 
   def getLogicalPlanningContext(from: LogicalPlanState, context: PlannerContext): LogicalPlanningContext = {
     val planningAttributes = from.planningAttributes
     val logicalPlanProducer =
       LogicalPlanProducer(context.metrics.cardinality, planningAttributes, context.logicalPlanIdGen)
+
+    // Graph schema optimizations (GSO) are not enabled
+    // - for write queries (see test "Should not use schema optimizations in write queries")
+    // - when the transaction state has changed (see test "Should not use schema optimizations when transaction state has changed")
+    // Constraints can be violated temporarily within a query, which could lead to wrong results when GSO are
+    // enabled for write queries or when the transaction state is not empty
+    val enableGraphSchemaOptimizations =
+      context.config.planningGraphSchemaOptimizationsEnabled() &&
+        from.query.readOnly &&
+        !context.planContext.txStateHasChanges()
 
     val staticComponents = StaticComponents(
       planContext = context.planContext,
@@ -97,7 +121,12 @@ case object QueryPlanner
       semanticTable = from.semanticTable(),
       costComparisonListener = CostComparisonListener.givenDebugOptions(context.debugOptions, context.log),
       readOnly = from.query.readOnly,
-      labelInferenceStrategy = context.labelInferenceStrategy
+      labelInferenceStrategy = context.labelInferenceStrategy,
+      expressionEvaluator = context.expressionEvaluator,
+      idpLogger = IDPLogger.givenDebugOptions(context.debugOptions),
+      graphSchemaOptimizations =
+        GraphSchemaOptimizations.fromConfig(enableGraphSchemaOptimizations, context.planContext),
+      planningStepsLogger = PlanningStepsLogger.givenDebugOptions(context.debugOptions)
     )
 
     val settings = Settings(
@@ -111,25 +140,21 @@ case object QueryPlanner
       legacyCsvQuoteEscaping = context.config.legacyCsvQuoteEscaping(),
       csvBufferSize = context.config.csvBufferSize(),
       planningIntersectionScansEnabled = context.config.planningIntersectionScansEnabled(),
-      eagerAnalyzer = from.maybeEagerAnalyzerOption.getOrElse(context.eagerAnalyzer),
       statefulShortestPlanningRewriteQuantifiersAbove =
         context.config.statefulShortestPlanningRewriteQuantifiersAbove(),
       planVarExpandInto = context.planVarExpandInto,
-      remoteBatchPropertiesStrategy = RemoteBatchingStrategy.fromConfig(from.query, context),
-      cachePropertiesForEntitiesWithFilter = context.config.cachePropertiesForEntitiesWithFilter()
+      remoteBatchPropertiesStrategy = RemoteBatchingStrategy.fromConfig(context),
+      shardOperatorPushdownStrategy =
+        ShardOperatorPushdownStrategy.fromConfig(from.query, context),
+      dynamicLabelScansEnabled = context.config.dynamicLabelScansEnabled(),
+      dynamicLabelIndexUseEnabled = context.config.dynamicLabelIndexUseEnabled(),
+      existsWithImplicitLimitEnabled = context.config.existsWithImplicitLimitEnabled(),
+      selectorCandidatesMaximum = context.config.selectorCandidatesMaximum(),
+      planningMergeJoinEnabled = context.config.planningMergeJoinEnabled()
     )
 
     LogicalPlanningContext(staticComponents, settings)
   }
-
-  private def remoteBatchPropertiesImplementation(
-    query: PlannerQuery,
-    context: PlannerContext
-  ): RemoteBatchPropertiesImplementation =
-    if (query.readOnly && context.planContext.databaseMode == SHARDED)
-      context.config.remoteBatchPropertiesImplementation()
-    else
-      RemoteBatchPropertiesImplementation.SKIP_REMOTE_BATCHING
 
   private def getMetricsFrom(context: PlannerContext) =
     if (context.debugOptions.inverseCostEnabled) {
@@ -175,7 +200,6 @@ case object QueryPlanner
   override def preConditions: Set[StepSequencer.Condition] = Set(
     // This works on the IR
     CompilationContains[PlannerQuery](),
-    CompilationContains[CypherEagerAnalyzerOption](),
     OptionalMatchRemover.completed,
     GetDegreeRewriterStep.completed,
     UnfulfillableQueryRewriter.completed,
@@ -184,7 +208,8 @@ case object QueryPlanner
     ResolveTokens.completed,
     CopyQuantifiedPathPatternPredicatesToJuxtaposedNodes.completed,
     InlineRelationshipTypePredicates.completed,
-    StatefulShortestPlanningHintsInserter.completed
+    StatefulShortestPlanningHintsInserter.completed,
+    LimitBeforeCountRewriter.completed
   )
 
   override def postConditions: Set[StepSequencer.Condition] = Set(
@@ -196,10 +221,8 @@ case object QueryPlanner
 
   override def invalidatedConditions: Set[StepSequencer.Condition] = Set.empty
 
-  override def getTransformer(
-    pushdownPropertyReads: Boolean,
-    semanticFeatures: Seq[SemanticFeature]
-  ): Transformer[PlannerContext, LogicalPlanState, LogicalPlanState] = this
+  override def getTransformer(planPipelineConfig: PlanPipelineTransformerConfig)
+    : Transformer[PlannerContext, LogicalPlanState, LogicalPlanState] = this
 
 }
 
@@ -242,7 +265,7 @@ case object plannerQueryPlanner {
           context.staticComponents.logicalPlanProducer.planRegularProjection(
             rhsPlan,
             projectionsForRhs,
-            None,
+            MaybeReportedProjections.empty,
             context
           )
 
@@ -278,15 +301,14 @@ case object plannerQueryPlanner {
    * Plan a subquery from an IRExpression with the given context.
    */
   def planSubquery(subqueryExpression: IRExpression, context: LogicalPlanningContext): LogicalPlan = {
-    plan(
-      subqueryExpression.query,
-      context.withModifiedPlannerState(_.forSubquery(
-        subqueryExpression.computedScopeDependencies.getOrElse(Set.empty)
-      ))
-    )
+    context.staticComponents.idpLogger.markScope("planSubquery") {
+      plan(
+        subqueryExpression.query,
+        context.withModifiedPlannerState(_.forSubquery(
+          subqueryExpression.computedScopeDependencies.getOrElse(Set.empty),
+          isExistsSubquery = subqueryExpression.isInstanceOf[ExistsIRExpression]
+        ))
+      )
+    }
   }
-}
-
-trait SingleQueryPlanner {
-  def plan(in: SinglePlannerQuery, context: LogicalPlanningContext): LogicalPlan
 }

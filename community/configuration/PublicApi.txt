@@ -17,6 +17,18 @@ org.neo4j.configuration.GraphDatabaseSettings.CypherPlanner::COST org.neo4j.conf
 org.neo4j.configuration.GraphDatabaseSettings.CypherPlanner::DEFAULT org.neo4j.configuration.GraphDatabaseSettings.CypherPlanner public static final
 org.neo4j.configuration.GraphDatabaseSettings.CypherPlanner::valueOf(java.lang.String) org.neo4j.configuration.GraphDatabaseSettings.CypherPlanner public static
 org.neo4j.configuration.GraphDatabaseSettings.CypherPlanner::values() org.neo4j.configuration.GraphDatabaseSettings.CypherPlanner[] public static
+org.neo4j.configuration.GraphDatabaseSettings.CypherTransactionsBatchStrategy public static final enum extends java.lang.Enum<org.neo4j.configuration.GraphDatabaseSettings.CypherTransactionsBatchStrategy>
+org.neo4j.configuration.GraphDatabaseSettings.CypherTransactionsBatchStrategy::AUTO org.neo4j.configuration.GraphDatabaseSettings.CypherTransactionsBatchStrategy public static final
+org.neo4j.configuration.GraphDatabaseSettings.CypherTransactionsBatchStrategy::DEFAULT org.neo4j.configuration.GraphDatabaseSettings.CypherTransactionsBatchStrategy public static final
+org.neo4j.configuration.GraphDatabaseSettings.CypherTransactionsBatchStrategy::NONE org.neo4j.configuration.GraphDatabaseSettings.CypherTransactionsBatchStrategy public static final
+org.neo4j.configuration.GraphDatabaseSettings.CypherTransactionsBatchStrategy::valueOf(java.lang.String) org.neo4j.configuration.GraphDatabaseSettings.CypherTransactionsBatchStrategy public static
+org.neo4j.configuration.GraphDatabaseSettings.CypherTransactionsBatchStrategy::values() org.neo4j.configuration.GraphDatabaseSettings.CypherTransactionsBatchStrategy[] public static
+org.neo4j.configuration.GraphDatabaseSettings.CypherVersion public static final enum extends java.lang.Enum<org.neo4j.configuration.GraphDatabaseSettings.CypherVersion>
+org.neo4j.configuration.GraphDatabaseSettings.CypherVersion::Cypher25 org.neo4j.configuration.GraphDatabaseSettings.CypherVersion public static final
+org.neo4j.configuration.GraphDatabaseSettings.CypherVersion::Cypher5 org.neo4j.configuration.GraphDatabaseSettings.CypherVersion public static final
+org.neo4j.configuration.GraphDatabaseSettings.CypherVersion::toString() java.lang.String public
+org.neo4j.configuration.GraphDatabaseSettings.CypherVersion::valueOf(java.lang.String) org.neo4j.configuration.GraphDatabaseSettings.CypherVersion public static
+org.neo4j.configuration.GraphDatabaseSettings.CypherVersion::values() org.neo4j.configuration.GraphDatabaseSettings.CypherVersion[] public static
 org.neo4j.configuration.GraphDatabaseSettings.InferSchemaPartsStrategy public static final enum extends java.lang.Enum<org.neo4j.configuration.GraphDatabaseSettings.InferSchemaPartsStrategy>
 org.neo4j.configuration.GraphDatabaseSettings.InferSchemaPartsStrategy::MOST_SELECTIVE_LABEL org.neo4j.configuration.GraphDatabaseSettings.InferSchemaPartsStrategy public static final
 org.neo4j.configuration.GraphDatabaseSettings.InferSchemaPartsStrategy::OFF org.neo4j.configuration.GraphDatabaseSettings.InferSchemaPartsStrategy public static final
@@ -33,17 +45,18 @@ org.neo4j.configuration.GraphDatabaseSettings.RoutingMode::CLIENT org.neo4j.conf
 org.neo4j.configuration.GraphDatabaseSettings.RoutingMode::SERVER org.neo4j.configuration.GraphDatabaseSettings.RoutingMode public static final
 org.neo4j.configuration.GraphDatabaseSettings.RoutingMode::valueOf(java.lang.String) org.neo4j.configuration.GraphDatabaseSettings.RoutingMode public static
 org.neo4j.configuration.GraphDatabaseSettings.RoutingMode::values() org.neo4j.configuration.GraphDatabaseSettings.RoutingMode[] public static
-org.neo4j.configuration.GraphDatabaseSettings.TransactionStateMemoryAllocation public static final enum extends java.lang.Enum<org.neo4j.configuration.GraphDatabaseSettings.TransactionStateMemoryAllocation>
-org.neo4j.configuration.GraphDatabaseSettings.TransactionStateMemoryAllocation::OFF_HEAP org.neo4j.configuration.GraphDatabaseSettings.TransactionStateMemoryAllocation public static final
-org.neo4j.configuration.GraphDatabaseSettings.TransactionStateMemoryAllocation::ON_HEAP org.neo4j.configuration.GraphDatabaseSettings.TransactionStateMemoryAllocation public static final
-org.neo4j.configuration.GraphDatabaseSettings.TransactionStateMemoryAllocation::valueOf(java.lang.String) org.neo4j.configuration.GraphDatabaseSettings.TransactionStateMemoryAllocation public static
-org.neo4j.configuration.GraphDatabaseSettings.TransactionStateMemoryAllocation::values() org.neo4j.configuration.GraphDatabaseSettings.TransactionStateMemoryAllocation[] public static
 org.neo4j.configuration.GraphDatabaseSettings.TransactionTracingLevel public static final enum extends java.lang.Enum<org.neo4j.configuration.GraphDatabaseSettings.TransactionTracingLevel>
 org.neo4j.configuration.GraphDatabaseSettings.TransactionTracingLevel::ALL org.neo4j.configuration.GraphDatabaseSettings.TransactionTracingLevel public static final
 org.neo4j.configuration.GraphDatabaseSettings.TransactionTracingLevel::DISABLED org.neo4j.configuration.GraphDatabaseSettings.TransactionTracingLevel public static final
 org.neo4j.configuration.GraphDatabaseSettings.TransactionTracingLevel::SAMPLE org.neo4j.configuration.GraphDatabaseSettings.TransactionTracingLevel public static final
 org.neo4j.configuration.GraphDatabaseSettings.TransactionTracingLevel::valueOf(java.lang.String) org.neo4j.configuration.GraphDatabaseSettings.TransactionTracingLevel public static
 org.neo4j.configuration.GraphDatabaseSettings.TransactionTracingLevel::values() org.neo4j.configuration.GraphDatabaseSettings.TransactionTracingLevel[] public static
+org.neo4j.configuration.GraphDatabaseSettings.WarmupOrder public static final enum extends java.lang.Enum<org.neo4j.configuration.GraphDatabaseSettings.WarmupOrder>
+org.neo4j.configuration.GraphDatabaseSettings.WarmupOrder::ALPHABETIC org.neo4j.configuration.GraphDatabaseSettings.WarmupOrder public static final
+org.neo4j.configuration.GraphDatabaseSettings.WarmupOrder::NONE org.neo4j.configuration.GraphDatabaseSettings.WarmupOrder public static final
+org.neo4j.configuration.GraphDatabaseSettings.WarmupOrder::PRIORITY org.neo4j.configuration.GraphDatabaseSettings.WarmupOrder public static final
+org.neo4j.configuration.GraphDatabaseSettings.WarmupOrder::valueOf(java.lang.String) org.neo4j.configuration.GraphDatabaseSettings.WarmupOrder public static
+org.neo4j.configuration.GraphDatabaseSettings.WarmupOrder::values() org.neo4j.configuration.GraphDatabaseSettings.WarmupOrder[] public static
 org.neo4j.configuration.GraphDatabaseSettings::DATA_DIRECTORY_SETTING_NAME java.lang.String public static final = server.directories.data
 org.neo4j.configuration.GraphDatabaseSettings::DEFAULT_BLOCK_SIZE int public static final = 128
 org.neo4j.configuration.GraphDatabaseSettings::DEFAULT_DATABASES_ROOT_DIR_NAME java.lang.String public static final = databases
@@ -54,6 +67,7 @@ org.neo4j.configuration.GraphDatabaseSettings::DEFAULT_LABEL_BLOCK_SIZE int publ
 org.neo4j.configuration.GraphDatabaseSettings::DEFAULT_LICENSES_DIR_NAME java.lang.String public static final = licenses
 org.neo4j.configuration.GraphDatabaseSettings::DEFAULT_ROUTING_CONNECTOR_PORT int public static final = 7688
 org.neo4j.configuration.GraphDatabaseSettings::DEFAULT_SCRIPT_FOLDER java.lang.String public static final = scripts
+org.neo4j.configuration.GraphDatabaseSettings::DEFAULT_SEEDS_DIR_NAME java.lang.String public static final = seeds
 org.neo4j.configuration.GraphDatabaseSettings::DEFAULT_TX_LOGS_ROOT_DIR_NAME java.lang.String public static final = transactions
 org.neo4j.configuration.GraphDatabaseSettings::GraphDatabaseSettings() void public
 org.neo4j.configuration.GraphDatabaseSettings::MINIMAL_BLOCK_SIZE int public static final = 16
@@ -72,9 +86,13 @@ org.neo4j.configuration.GraphDatabaseSettings::check_point_interval_tx org.neo4j
 org.neo4j.configuration.GraphDatabaseSettings::check_point_interval_volume org.neo4j.graphdb.config.Setting<java.lang.Long> public static final
 org.neo4j.configuration.GraphDatabaseSettings::check_point_iops_limit org.neo4j.graphdb.config.Setting<java.lang.Integer> public static final
 org.neo4j.configuration.GraphDatabaseSettings::check_point_policy org.neo4j.graphdb.config.Setting<org.neo4j.configuration.GraphDatabaseSettings.CheckpointPolicy> public static final
+org.neo4j.configuration.GraphDatabaseSettings::check_point_throughput_limit org.neo4j.graphdb.config.Setting<java.lang.Long> public static final
 org.neo4j.configuration.GraphDatabaseSettings::client_side_router_enforce_for_domains org.neo4j.graphdb.config.Setting<java.util.Set<java.lang.String>> public static final
+org.neo4j.configuration.GraphDatabaseSettings::configuration_directory org.neo4j.graphdb.config.Setting<java.nio.file.Path> public static final
 org.neo4j.configuration.GraphDatabaseSettings::csv_buffer_size org.neo4j.graphdb.config.Setting<java.lang.Long> public static final
 org.neo4j.configuration.GraphDatabaseSettings::csv_legacy_quote_escaping org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
+org.neo4j.configuration.GraphDatabaseSettings::cypher_default_subquery_transaction_batch_strategy org.neo4j.graphdb.config.Setting<org.neo4j.configuration.GraphDatabaseSettings.CypherTransactionsBatchStrategy> public static final
+org.neo4j.configuration.GraphDatabaseSettings::cypher_default_subquery_transaction_retry_timeout org.neo4j.graphdb.config.Setting<java.time.Duration> public static final
 org.neo4j.configuration.GraphDatabaseSettings::cypher_hints_error org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
 org.neo4j.configuration.GraphDatabaseSettings::cypher_infer_schema_parts_strategy org.neo4j.graphdb.config.Setting<org.neo4j.configuration.GraphDatabaseSettings.InferSchemaPartsStrategy> public static final
 org.neo4j.configuration.GraphDatabaseSettings::cypher_lenient_create_relationship org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
@@ -89,6 +107,7 @@ org.neo4j.configuration.GraphDatabaseSettings::db_temporal_timezone org.neo4j.gr
 org.neo4j.configuration.GraphDatabaseSettings::db_timezone org.neo4j.graphdb.config.Setting<org.neo4j.logging.LogTimeZone> public static final
 org.neo4j.configuration.GraphDatabaseSettings::debug_log_enabled org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
 org.neo4j.configuration.GraphDatabaseSettings::default_advertised_address org.neo4j.graphdb.config.Setting<org.neo4j.configuration.helpers.SocketAddress> public static final
+org.neo4j.configuration.GraphDatabaseSettings::default_language org.neo4j.graphdb.config.Setting<org.neo4j.configuration.GraphDatabaseSettings.CypherVersion> public static final
 org.neo4j.configuration.GraphDatabaseSettings::default_listen_address org.neo4j.graphdb.config.Setting<org.neo4j.configuration.helpers.SocketAddress> public static final
 org.neo4j.configuration.GraphDatabaseSettings::dense_node_threshold org.neo4j.graphdb.config.Setting<java.lang.Integer> public static final
 org.neo4j.configuration.GraphDatabaseSettings::deprecated_query_cache_size org.neo4j.graphdb.config.Setting<java.lang.Integer> public static final
@@ -105,9 +124,9 @@ org.neo4j.configuration.GraphDatabaseSettings::licenses_directory org.neo4j.grap
 org.neo4j.configuration.GraphDatabaseSettings::load_csv_file_url_root org.neo4j.graphdb.config.Setting<java.nio.file.Path> public static final
 org.neo4j.configuration.GraphDatabaseSettings::lock_acquisition_timeout org.neo4j.graphdb.config.Setting<java.time.Duration> public static final
 org.neo4j.configuration.GraphDatabaseSettings::log_queries org.neo4j.graphdb.config.Setting<org.neo4j.configuration.GraphDatabaseSettings.LogQueryLevel> public static final
-org.neo4j.configuration.GraphDatabaseSettings::log_queries_annotation_data_as_json org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
 org.neo4j.configuration.GraphDatabaseSettings::log_queries_annotation_data_format org.neo4j.graphdb.config.Setting<org.neo4j.configuration.GraphDatabaseSettings.AnnotationDataFormat> public static final
 org.neo4j.configuration.GraphDatabaseSettings::log_queries_early_raw_logging_enabled org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
+org.neo4j.configuration.GraphDatabaseSettings::log_queries_obfuscate_errors org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
 org.neo4j.configuration.GraphDatabaseSettings::log_queries_obfuscate_literals org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
 org.neo4j.configuration.GraphDatabaseSettings::log_queries_parameter_logging_enabled org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
 org.neo4j.configuration.GraphDatabaseSettings::log_queries_query_plan org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
@@ -122,12 +141,14 @@ org.neo4j.configuration.GraphDatabaseSettings::memory_transaction_database_max_s
 org.neo4j.configuration.GraphDatabaseSettings::memory_transaction_global_max_size org.neo4j.graphdb.config.Setting<java.lang.Long> public static final
 org.neo4j.configuration.GraphDatabaseSettings::memory_transaction_max_size org.neo4j.graphdb.config.Setting<java.lang.Long> public static final
 org.neo4j.configuration.GraphDatabaseSettings::neo4j_home org.neo4j.graphdb.config.Setting<java.nio.file.Path> public static final
+org.neo4j.configuration.GraphDatabaseSettings::pagecache_async_io org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
 org.neo4j.configuration.GraphDatabaseSettings::pagecache_buffered_flush_enabled org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
 org.neo4j.configuration.GraphDatabaseSettings::pagecache_direct_io org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
 org.neo4j.configuration.GraphDatabaseSettings::pagecache_flush_buffer_size_in_pages org.neo4j.graphdb.config.Setting<java.lang.Integer> public static final
 org.neo4j.configuration.GraphDatabaseSettings::pagecache_memory org.neo4j.graphdb.config.Setting<java.lang.Long> public static final
 org.neo4j.configuration.GraphDatabaseSettings::pagecache_scan_prefetch org.neo4j.graphdb.config.Setting<java.lang.Integer> public static final
 org.neo4j.configuration.GraphDatabaseSettings::pagecache_warmup_enabled org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
+org.neo4j.configuration.GraphDatabaseSettings::pagecache_warmup_order org.neo4j.graphdb.config.Setting<org.neo4j.configuration.GraphDatabaseSettings.WarmupOrder> public static final
 org.neo4j.configuration.GraphDatabaseSettings::pagecache_warmup_prefetch org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
 org.neo4j.configuration.GraphDatabaseSettings::pagecache_warmup_prefetch_allowlist org.neo4j.graphdb.config.Setting<java.lang.String> public static final
 org.neo4j.configuration.GraphDatabaseSettings::pagecache_warmup_profiling_interval org.neo4j.graphdb.config.Setting<java.time.Duration> public static final
@@ -152,8 +173,10 @@ org.neo4j.configuration.GraphDatabaseSettings::routing_enabled org.neo4j.graphdb
 org.neo4j.configuration.GraphDatabaseSettings::routing_listen_address org.neo4j.graphdb.config.Setting<org.neo4j.configuration.helpers.SocketAddress> public static final
 org.neo4j.configuration.GraphDatabaseSettings::routing_ttl org.neo4j.graphdb.config.Setting<java.time.Duration> public static final
 org.neo4j.configuration.GraphDatabaseSettings::script_root_path org.neo4j.graphdb.config.Setting<java.nio.file.Path> public static final
+org.neo4j.configuration.GraphDatabaseSettings::seeds_path org.neo4j.graphdb.config.Setting<java.nio.file.Path> public static final
 org.neo4j.configuration.GraphDatabaseSettings::server_logging_config_path org.neo4j.graphdb.config.Setting<java.nio.file.Path> public static final
 org.neo4j.configuration.GraphDatabaseSettings::shutdown_transaction_end_timeout org.neo4j.graphdb.config.Setting<java.time.Duration> public static final
+org.neo4j.configuration.GraphDatabaseSettings::split_archive_part_size org.neo4j.graphdb.config.Setting<java.lang.Long> public static final
 org.neo4j.configuration.GraphDatabaseSettings::strict_config_validation org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
 org.neo4j.configuration.GraphDatabaseSettings::track_query_cpu_time org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
 org.neo4j.configuration.GraphDatabaseSettings::transaction_log_buffer_size org.neo4j.graphdb.config.Setting<java.lang.Long> public static final
@@ -162,10 +185,6 @@ org.neo4j.configuration.GraphDatabaseSettings::transaction_monitor_check_interva
 org.neo4j.configuration.GraphDatabaseSettings::transaction_sampling_percentage org.neo4j.graphdb.config.Setting<java.lang.Integer> public static final
 org.neo4j.configuration.GraphDatabaseSettings::transaction_timeout org.neo4j.graphdb.config.Setting<java.time.Duration> public static final
 org.neo4j.configuration.GraphDatabaseSettings::transaction_tracing_level org.neo4j.graphdb.config.Setting<org.neo4j.configuration.GraphDatabaseSettings.TransactionTracingLevel> public static final
-org.neo4j.configuration.GraphDatabaseSettings::tx_state_max_off_heap_memory org.neo4j.graphdb.config.Setting<java.lang.Long> public static final
-org.neo4j.configuration.GraphDatabaseSettings::tx_state_memory_allocation org.neo4j.graphdb.config.Setting<org.neo4j.configuration.GraphDatabaseSettings.TransactionStateMemoryAllocation> public static final
-org.neo4j.configuration.GraphDatabaseSettings::tx_state_off_heap_block_cache_size org.neo4j.graphdb.config.Setting<java.lang.Integer> public static final
-org.neo4j.configuration.GraphDatabaseSettings::tx_state_off_heap_max_cacheable_block_size org.neo4j.graphdb.config.Setting<java.lang.Long> public static final
 org.neo4j.configuration.GraphDatabaseSettings::udc_enabled org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
 org.neo4j.configuration.GraphDatabaseSettings::user_logging_config_path org.neo4j.graphdb.config.Setting<java.nio.file.Path> public static final
 org.neo4j.configuration.GraphDatabaseSettings::writable_databases org.neo4j.graphdb.config.Setting<java.util.Set<java.lang.String>> public static final
@@ -180,6 +199,14 @@ org.neo4j.configuration.connectors.BoltConnector.EncryptionLevel::OPTIONAL org.n
 org.neo4j.configuration.connectors.BoltConnector.EncryptionLevel::REQUIRED org.neo4j.configuration.connectors.BoltConnector.EncryptionLevel public static final
 org.neo4j.configuration.connectors.BoltConnector.EncryptionLevel::valueOf(java.lang.String) org.neo4j.configuration.connectors.BoltConnector.EncryptionLevel public static
 org.neo4j.configuration.connectors.BoltConnector.EncryptionLevel::values() org.neo4j.configuration.connectors.BoltConnector.EncryptionLevel[] public static
+org.neo4j.configuration.connectors.BoltConnector.FilePermission public static class extends java.lang.Object
+org.neo4j.configuration.connectors.BoltConnector.FilePermission::FilePermission(java.lang.String) void public
+org.neo4j.configuration.connectors.BoltConnector.FilePermission::FilePermission(java.nio.file.attribute.PosixFilePermission...) void public
+org.neo4j.configuration.connectors.BoltConnector.FilePermission::FilePermission(java.util.Set<java.nio.file.attribute.PosixFilePermission>) void public
+org.neo4j.configuration.connectors.BoltConnector.FilePermission::equals(java.lang.Object) boolean public
+org.neo4j.configuration.connectors.BoltConnector.FilePermission::getPosixPermissions() java.util.Set<java.nio.file.attribute.PosixFilePermission> public
+org.neo4j.configuration.connectors.BoltConnector.FilePermission::hashCode() int public
+org.neo4j.configuration.connectors.BoltConnector.FilePermission::toString() java.lang.String public
 org.neo4j.configuration.connectors.BoltConnector.KeepAliveRequestType public static final enum extends java.lang.Enum<org.neo4j.configuration.connectors.BoltConnector.KeepAliveRequestType>
 org.neo4j.configuration.connectors.BoltConnector.KeepAliveRequestType::ALL org.neo4j.configuration.connectors.BoltConnector.KeepAliveRequestType public static final
 org.neo4j.configuration.connectors.BoltConnector.KeepAliveRequestType::OFF org.neo4j.configuration.connectors.BoltConnector.KeepAliveRequestType public static final
@@ -196,7 +223,14 @@ org.neo4j.configuration.connectors.BoltConnector::connection_keep_alive org.neo4
 org.neo4j.configuration.connectors.BoltConnector::connection_keep_alive_probes org.neo4j.graphdb.config.Setting<java.lang.Integer> public static final
 org.neo4j.configuration.connectors.BoltConnector::connection_keep_alive_streaming_scheduling_interval org.neo4j.graphdb.config.Setting<java.time.Duration> public static final
 org.neo4j.configuration.connectors.BoltConnector::connection_keep_alive_type org.neo4j.graphdb.config.Setting<org.neo4j.configuration.connectors.BoltConnector.KeepAliveRequestType> public static final
+org.neo4j.configuration.connectors.BoltConnector::discovery_broadcast_interval org.neo4j.graphdb.config.Setting<java.time.Duration> public static final
+org.neo4j.configuration.connectors.BoltConnector::discovery_broadcast_jitter org.neo4j.graphdb.config.Setting<java.lang.Integer> public static final
+org.neo4j.configuration.connectors.BoltConnector::discovery_listen_port org.neo4j.graphdb.config.Setting<java.lang.Integer> public static final
+org.neo4j.configuration.connectors.BoltConnector::enable_discovery org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
 org.neo4j.configuration.connectors.BoltConnector::enable_error_accounting org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
+org.neo4j.configuration.connectors.BoltConnector::enable_object_messages_local_connector org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
+org.neo4j.configuration.connectors.BoltConnector::enable_unix_socket org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
+org.neo4j.configuration.connectors.BoltConnector::enable_unix_socket_auth org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
 org.neo4j.configuration.connectors.BoltConnector::enabled org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
 org.neo4j.configuration.connectors.BoltConnector::encryption_level org.neo4j.graphdb.config.Setting<org.neo4j.configuration.connectors.BoltConnector.EncryptionLevel> public static final
 org.neo4j.configuration.connectors.BoltConnector::listen_address org.neo4j.graphdb.config.Setting<org.neo4j.configuration.helpers.SocketAddress> public static final
@@ -214,6 +248,13 @@ org.neo4j.configuration.connectors.BoltConnector::traffic_accounting_check_perio
 org.neo4j.configuration.connectors.BoltConnector::traffic_accounting_clear_duration org.neo4j.graphdb.config.Setting<java.time.Duration> public static final
 org.neo4j.configuration.connectors.BoltConnector::traffic_accounting_incoming_threshold_mbps org.neo4j.graphdb.config.Setting<java.lang.Long> public static final
 org.neo4j.configuration.connectors.BoltConnector::traffic_accounting_outgoing_threshold_mbps org.neo4j.graphdb.config.Setting<java.lang.Long> public static final
+org.neo4j.configuration.connectors.BoltConnector::unix_socket_dedicated_thread_pool_keep_alive org.neo4j.graphdb.config.Setting<java.time.Duration> public static final
+org.neo4j.configuration.connectors.BoltConnector::unix_socket_dedicated_thread_pool_max_size org.neo4j.graphdb.config.Setting<java.lang.Integer> public static final
+org.neo4j.configuration.connectors.BoltConnector::unix_socket_dedicated_thread_pool_min_size org.neo4j.graphdb.config.Setting<java.lang.Integer> public static final
+org.neo4j.configuration.connectors.BoltConnector::unix_socket_delete org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
+org.neo4j.configuration.connectors.BoltConnector::unix_socket_path org.neo4j.graphdb.config.Setting<java.nio.file.Path> public static final
+org.neo4j.configuration.connectors.BoltConnector::unix_socket_permission_mask org.neo4j.graphdb.config.Setting<org.neo4j.configuration.connectors.BoltConnector.FilePermission> public static final
+org.neo4j.configuration.connectors.BoltConnector::unix_socket_use_dedicated_thread_pool org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final
 org.neo4j.configuration.connectors.CommonConnectorConfig public class extends java.lang.Object implements org.neo4j.configuration.SettingsDeclaration
 org.neo4j.configuration.connectors.CommonConnectorConfig::CommonConnectorConfig() void public
 org.neo4j.configuration.connectors.CommonConnectorConfig::ocsp_stapling_enabled org.neo4j.graphdb.config.Setting<java.lang.Boolean> public static final

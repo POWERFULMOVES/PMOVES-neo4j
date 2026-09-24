@@ -19,12 +19,15 @@
  */
 package org.neo4j.kernel.api.impl.schema.vector;
 
+import org.neo4j.values.storable.ValueGroup;
+
 class VectorDocumentStructures {
     static VectorDocumentStructure documentStructureFor(VectorIndexVersion version) {
         return switch (version) {
             case UNKNOWN -> null;
             case V1_0 -> V1;
             case V2_0 -> V2;
+            case V3_0, V2026_06, V2026_07, V2026_08 -> V3;
         };
     }
 
@@ -32,8 +35,63 @@ class VectorDocumentStructures {
         static final String VECTOR_VALUE_KEY = "vector";
 
         @Override
-        String vectorValueKeyFor(int dimensions) {
+        public String vectorValueKeyFor(int dimensions) {
             return VECTOR_VALUE_KEY;
+        }
+
+        @Override
+        public String booleanValueKeyFor(int propertyIndex) {
+            throw new UnsupportedOperationException("V1 does not support single stage filtering");
+        }
+
+        @Override
+        public String integralValueKeyFor(int propertyIndex) {
+            throw new UnsupportedOperationException("V1 does not support single stage filtering");
+        }
+
+        @Override
+        public String floatingValueKeyFor(int propertyIndex) {
+            throw new UnsupportedOperationException("V1 does not support single stage filtering");
+        }
+
+        @Override
+        public String textValueKeyFor(int propertyIndex) {
+            throw new UnsupportedOperationException("V1 does not support single stage filtering");
+        }
+
+        @Override
+        public String temporalValueKeyFor(int propertyIndex, ValueGroup group) {
+            throw new UnsupportedOperationException("V1 does not support single stage filtering");
+        }
+
+        @Override
+        public String zoneOffsetValueKeyFor(int propertyIndex, ValueGroup group) {
+            throw new UnsupportedOperationException("V1 does not support single stage filtering");
+        }
+
+        @Override
+        public String zoneIdValueKeyFor(int propertyIndex, ValueGroup group) {
+            throw new UnsupportedOperationException("V1 does not support single stage filtering");
+        }
+
+        @Override
+        public String durationNanosValueKeyFor(int propertyIndex) {
+            throw new UnsupportedOperationException("V1 does not support single stage filtering");
+        }
+
+        @Override
+        public String durationSecondsValueKeyFor(int propertyIndex) {
+            throw new UnsupportedOperationException("V1 does not support single stage filtering");
+        }
+
+        @Override
+        public String durationDaysValueKeyFor(int propertyIndex) {
+            throw new UnsupportedOperationException("V1 does not support single stage filtering");
+        }
+
+        @Override
+        public String durationMonthsValueKeyFor(int propertyIndex) {
+            throw new UnsupportedOperationException("V1 does not support single stage filtering");
         }
     };
 
@@ -41,8 +99,127 @@ class VectorDocumentStructures {
         static final String VECTOR_VALUE_KEY_SUFFIX = "d-vector";
 
         @Override
-        String vectorValueKeyFor(int dimensions) {
+        public String vectorValueKeyFor(int dimensions) {
             return dimensions + VECTOR_VALUE_KEY_SUFFIX;
+        }
+
+        @Override
+        public String booleanValueKeyFor(int propertyIndex) {
+            throw new UnsupportedOperationException("V2 does not support single stage filtering");
+        }
+
+        @Override
+        public String integralValueKeyFor(int propertyIndex) {
+            throw new UnsupportedOperationException("V2 does not support single stage filtering");
+        }
+
+        @Override
+        public String floatingValueKeyFor(int propertyIndex) {
+            throw new UnsupportedOperationException("V2 does not support single stage filtering");
+        }
+
+        @Override
+        public String textValueKeyFor(int propertyIndex) {
+            throw new UnsupportedOperationException("V2 does not support single stage filtering");
+        }
+
+        @Override
+        public String temporalValueKeyFor(int propertyIndex, ValueGroup group) {
+            throw new UnsupportedOperationException("V2 does not support single stage filtering");
+        }
+
+        @Override
+        public String zoneOffsetValueKeyFor(int propertyIndex, ValueGroup group) {
+            throw new UnsupportedOperationException("V2 does not support single stage filtering");
+        }
+
+        @Override
+        public String zoneIdValueKeyFor(int propertyIndex, ValueGroup group) {
+            throw new UnsupportedOperationException("V2 does not support single stage filtering");
+        }
+
+        @Override
+        public String durationNanosValueKeyFor(int propertyIndex) {
+            throw new UnsupportedOperationException("V2 does not support single stage filtering");
+        }
+
+        @Override
+        public String durationSecondsValueKeyFor(int propertyIndex) {
+            throw new UnsupportedOperationException("V2 does not support single stage filtering");
+        }
+
+        @Override
+        public String durationDaysValueKeyFor(int propertyIndex) {
+            throw new UnsupportedOperationException("V2 does not support single stage filtering");
+        }
+
+        @Override
+        public String durationMonthsValueKeyFor(int propertyIndex) {
+            throw new UnsupportedOperationException("V2 does not support single stage filtering");
+        }
+    };
+
+    private static final VectorDocumentStructure V3 = new VectorDocumentStructure() {
+        static final String VECTOR_VALUE_KEY_SUFFIX = "d-vector";
+
+        @Override
+        public String vectorValueKeyFor(int dimensions) {
+            return dimensions + VECTOR_VALUE_KEY_SUFFIX;
+        }
+
+        @Override
+        public String booleanValueKeyFor(int propertyIndex) {
+            return "boolean-" + propertyIndex;
+        }
+
+        @Override
+        public String integralValueKeyFor(int propertyIndex) {
+            return "integral-" + propertyIndex;
+        }
+
+        @Override
+        public String floatingValueKeyFor(int propertyIndex) {
+            return "floating-" + propertyIndex;
+        }
+
+        @Override
+        public String textValueKeyFor(int propertyIndex) {
+            return "text-" + propertyIndex;
+        }
+
+        @Override
+        public String temporalValueKeyFor(int propertyIndex, ValueGroup group) {
+            return "temporal-" + group.name() + "-" + propertyIndex;
+        }
+
+        @Override
+        public String zoneOffsetValueKeyFor(int propertyIndex, ValueGroup group) {
+            return "zoneoffset-" + group.name() + "-" + propertyIndex;
+        }
+
+        @Override
+        public String zoneIdValueKeyFor(int propertyIndex, ValueGroup group) {
+            return "zoneid-" + group.name() + "-" + propertyIndex;
+        }
+
+        @Override
+        public String durationNanosValueKeyFor(int propertyIndex) {
+            return "nanos-" + propertyIndex;
+        }
+
+        @Override
+        public String durationSecondsValueKeyFor(int propertyIndex) {
+            return "seconds-" + propertyIndex;
+        }
+
+        @Override
+        public String durationDaysValueKeyFor(int propertyIndex) {
+            return "days-" + propertyIndex;
+        }
+
+        @Override
+        public String durationMonthsValueKeyFor(int propertyIndex) {
+            return "months-" + propertyIndex;
         }
     };
 }

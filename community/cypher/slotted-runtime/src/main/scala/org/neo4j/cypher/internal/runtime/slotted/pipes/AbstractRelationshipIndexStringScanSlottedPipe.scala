@@ -34,16 +34,14 @@ import org.neo4j.internal.kernel.api.RelationshipValueIndexCursor
 import org.neo4j.values.storable.TextValue
 
 abstract class AbstractRelationshipIndexStringScanSlottedPipe(
-  ident: String,
-  startNode: String,
-  endNode: String,
+  offset: Option[Int],
+  startNode: Option[Int],
+  endNode: Option[Int],
   property: SlottedIndexedProperty,
   queryIndexId: Int,
-  valueExpr: Expression,
-  slots: SlotConfiguration
+  valueExpr: Expression
 ) extends Pipe with IndexSlottedPipeWithValues {
 
-  override val offset: Int = slots.longOffset(ident)
   override val indexPropertySlotOffsets: Array[Int] = property.maybeCachedEntityPropertySlot.toArray
 
   override val indexPropertyIndices: Array[Int] =
@@ -58,8 +56,8 @@ abstract class AbstractRelationshipIndexStringScanSlottedPipe(
       case value: TextValue =>
         iterator(
           state,
-          slots.longOffset(startNode),
-          slots.longOffset(endNode),
+          startNode,
+          endNode,
           baseContext,
           queryContextCall(state, state.queryIndexes(queryIndexId), value)
         )
@@ -78,8 +76,8 @@ abstract class AbstractRelationshipIndexStringScanSlottedPipe(
 
   protected def iterator(
     state: QueryState,
-    startOffset: Int,
-    endOffset: Int,
+    startOffset: Option[Int],
+    endOffset: Option[Int],
     baseContext: CypherRow,
     cursor: RelationshipValueIndexCursor
   ): IndexIteratorBase[CypherRow]
@@ -90,8 +88,8 @@ trait Directed {
 
   override protected def iterator(
     state: QueryState,
-    startOffset: Int,
-    endOffset: Int,
+    startOffset: Option[Int],
+    endOffset: Option[Int],
     baseContext: CypherRow,
     cursor: RelationshipValueIndexCursor
   ): IndexIteratorBase[CypherRow] =
@@ -103,8 +101,8 @@ trait Undirected {
 
   override protected def iterator(
     state: QueryState,
-    startOffset: Int,
-    endOffset: Int,
+    startOffset: Option[Int],
+    endOffset: Option[Int],
     baseContext: CypherRow,
     cursor: RelationshipValueIndexCursor
   ): IndexIteratorBase[CypherRow] =
@@ -112,23 +110,23 @@ trait Undirected {
 }
 
 case class DirectedRelationshipIndexContainsScanSlottedPipe(
-  ident: String,
-  startNode: String,
-  endNode: String,
+  offset: Option[Int],
+  startNode: Option[Int],
+  endNode: Option[Int],
   property: SlottedIndexedProperty,
   queryIndexId: Int,
   valueExpr: Expression,
   slots: SlotConfiguration,
-  indexOrder: IndexOrder
+  indexOrder: IndexOrder,
+  includeChangesFromThisTransaction: Boolean
 )(val id: Id = Id.INVALID_ID)
     extends AbstractRelationshipIndexStringScanSlottedPipe(
-      ident,
+      offset,
       startNode,
       endNode,
       property,
       queryIndexId,
-      valueExpr,
-      slots
+      valueExpr
     ) with Directed {
 
   override protected def queryContextCall(
@@ -136,27 +134,33 @@ case class DirectedRelationshipIndexContainsScanSlottedPipe(
     index: IndexReadSession,
     value: TextValue
   ): RelationshipValueIndexCursor =
-    state.query.relationshipIndexSeekByContains(index, needsValues, indexOrder, value)
+    state.query.relationshipIndexSeekByContains(
+      index,
+      needsValues,
+      indexOrder,
+      value,
+      includeChangesFromThisTransaction
+    )
 }
 
 case class UndirectedRelationshipIndexContainsScanSlottedPipe(
-  ident: String,
-  startNode: String,
-  endNode: String,
+  offset: Option[Int],
+  startNode: Option[Int],
+  endNode: Option[Int],
   property: SlottedIndexedProperty,
   queryIndexId: Int,
   valueExpr: Expression,
   slots: SlotConfiguration,
-  indexOrder: IndexOrder
+  indexOrder: IndexOrder,
+  includeChangesFromThisTransaction: Boolean
 )(val id: Id = Id.INVALID_ID)
     extends AbstractRelationshipIndexStringScanSlottedPipe(
-      ident,
+      offset,
       startNode,
       endNode,
       property,
       queryIndexId,
-      valueExpr,
-      slots
+      valueExpr
     ) with Undirected {
 
   override protected def queryContextCall(
@@ -164,27 +168,33 @@ case class UndirectedRelationshipIndexContainsScanSlottedPipe(
     index: IndexReadSession,
     value: TextValue
   ): RelationshipValueIndexCursor =
-    state.query.relationshipIndexSeekByContains(index, needsValues, indexOrder, value)
+    state.query.relationshipIndexSeekByContains(
+      index,
+      needsValues,
+      indexOrder,
+      value,
+      includeChangesFromThisTransaction
+    )
 }
 
 case class DirectedRelationshipIndexEndsWithScanSlottedPipe(
-  ident: String,
-  startNode: String,
-  endNode: String,
+  offset: Option[Int],
+  startNode: Option[Int],
+  endNode: Option[Int],
   property: SlottedIndexedProperty,
   queryIndexId: Int,
   valueExpr: Expression,
   slots: SlotConfiguration,
-  indexOrder: IndexOrder
+  indexOrder: IndexOrder,
+  includeChangesFromThisTransaction: Boolean
 )(val id: Id = Id.INVALID_ID)
     extends AbstractRelationshipIndexStringScanSlottedPipe(
-      ident,
+      offset,
       startNode,
       endNode,
       property,
       queryIndexId,
-      valueExpr,
-      slots
+      valueExpr
     ) with Directed {
 
   override protected def queryContextCall(
@@ -192,27 +202,33 @@ case class DirectedRelationshipIndexEndsWithScanSlottedPipe(
     index: IndexReadSession,
     value: TextValue
   ): RelationshipValueIndexCursor =
-    state.query.relationshipIndexSeekByEndsWith(index, needsValues, indexOrder, value)
+    state.query.relationshipIndexSeekByEndsWith(
+      index,
+      needsValues,
+      indexOrder,
+      value,
+      includeChangesFromThisTransaction
+    )
 }
 
 case class UndirectedRelationshipIndexEndsWithScanSlottedPipe(
-  ident: String,
-  startNode: String,
-  endNode: String,
+  offset: Option[Int],
+  startNode: Option[Int],
+  endNode: Option[Int],
   property: SlottedIndexedProperty,
   queryIndexId: Int,
   valueExpr: Expression,
   slots: SlotConfiguration,
-  indexOrder: IndexOrder
+  indexOrder: IndexOrder,
+  includeChangesFromThisTransaction: Boolean
 )(val id: Id = Id.INVALID_ID)
     extends AbstractRelationshipIndexStringScanSlottedPipe(
-      ident,
+      offset,
       startNode,
       endNode,
       property,
       queryIndexId,
-      valueExpr,
-      slots
+      valueExpr
     ) with Undirected {
 
   override protected def queryContextCall(
@@ -220,5 +236,11 @@ case class UndirectedRelationshipIndexEndsWithScanSlottedPipe(
     index: IndexReadSession,
     value: TextValue
   ): RelationshipValueIndexCursor =
-    state.query.relationshipIndexSeekByEndsWith(index, needsValues, indexOrder, value)
+    state.query.relationshipIndexSeekByEndsWith(
+      index,
+      needsValues,
+      indexOrder,
+      value,
+      includeChangesFromThisTransaction
+    )
 }

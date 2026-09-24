@@ -24,18 +24,24 @@ import static java.util.stream.Collectors.toMap;
 import static org.neo4j.shell.TransactionHandler.TransactionType.USER_ACTION;
 import static org.neo4j.shell.util.Versions.version;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
+import java.util.stream.Collectors;
+import org.neo4j.driver.Record;
 import org.neo4j.driver.Value;
 import org.neo4j.driver.Values;
+import org.neo4j.driver.internal.InternalRecord;
 import org.neo4j.shell.CypherShell;
 import org.neo4j.shell.exception.CommandException;
 import org.neo4j.shell.exception.ExitException;
 import org.neo4j.shell.prettyprint.TableOutputFormatter;
 import org.neo4j.shell.printer.Printer;
+import org.neo4j.shell.state.ListBoltResult;
 import org.neo4j.shell.util.Version;
+import org.neo4j.shell.util.Versions;
 
 /**
  * Print neo4j system information
@@ -44,9 +50,11 @@ public class SysInfo implements Command {
     private final Printer printer;
     private final TableOutputFormatter tableFormatter;
     private final CypherShell shell;
-    private final Version firstSupportedVersion = version("4.4.0");
+    private final Version firstSupportedVersion = new Version(4, 4, 0);
+    private final Version sysInfoProcIntroducedVersion = new Version(2026, 4, 0);
     private final String SYSTEM_DB_TYPE = "system";
     private final String COMPOSITE_DB_TYPE = "composite";
+    private final String COMMUNITY_EDITION = "community";
 
     public SysInfo(Printer printer, CypherShell shell) {
         this.printer = printer;
@@ -58,12 +66,9 @@ public class SysInfo implements Command {
     public void execute(List<String> args) throws ExitException, CommandException {
         requireArgumentCount(args, 0);
 
-        final var version = shell.getServerVersion();
         if (!shell.isConnected()) {
             throw new CommandException("Connect to a database to use :sysinfo");
-        } else if (version != null
-                && !version.isBlank()
-                && version(shell.getServerVersion()).compareTo(firstSupportedVersion) < 0) {
+        } else if (!isSupportedVersion()) {
             throw new CommandException(":sysinfo is only supported since " + firstSupportedVersion);
         } else if (isSystemOrCompositeDb()) {
             throw new CommandException(
@@ -73,17 +78,62 @@ public class SysInfo implements Command {
             final var db = shell.getActualDatabaseAsReportedByServer();
             printDatabases();
 
-            for (final var group : allMetrics) {
-                printMetrics(clientConfig, db, group);
+            var isCommunityEdition = isCommunityEdition();
+            // We do not have this info in community edition
+            if (!isCommunityEdition) {
+                if (isSysInfoProcSupported()) {
+                    printSysInfoProcedureMetrics();
+                } else {
+                    for (final var group : allMetrics) {
+                        printMetrics(clientConfig, db, group);
+                    }
+                }
             }
         }
+    }
+
+    private boolean isSupportedVersion() {
+        final var version = shell.getServerVersion();
+        try {
+            return version == null || version.isBlank() || version(version).compareTo(firstSupportedVersion) >= 0;
+        } catch (Versions.FailedToParseException e) {
+            return true; // Assume supported
+        }
+    }
+
+    private boolean isSysInfoProcSupported() {
+        final var version = shell.getServerVersion();
+        try {
+            return version == null
+                    || version.isBlank()
+                    || version(version).compareTo(sysInfoProcIntroducedVersion) >= 0;
+        } catch (Versions.FailedToParseException e) {
+            return false; // Assume not supported
+        }
+    }
+
+    private boolean isCommunityEdition() throws CommandException {
+        var query = """
+            CALL dbms.components()
+            YIELD name, edition
+            WHERE name = 'Neo4j Kernel'
+            RETURN edition
+        """;
+        final var result = shell.runCypher(query, Map.of(), USER_ACTION);
+        if (result.isPresent()) {
+            for (final var record : result.get().getRecords()) {
+                final var edition = record.get("edition").asString("");
+                return COMMUNITY_EDITION.equals(edition);
+            }
+        }
+        return false;
     }
 
     private boolean isSystemOrCompositeDb() throws CommandException {
         final var dbName = shell.getActualDatabaseAsReportedByServer();
         final var query = "SHOW DATABASES WHERE name = $db";
 
-        final var result = shell.runCypher(query, Map.of("db", Values.value(dbName)), USER_ACTION);
+        final var result = shell.runCypher5(query, Map.of("db", Values.value(dbName)), USER_ACTION);
         if (result.isPresent()) {
             for (final var record : result.get().getRecords()) {
                 final var dbType = record.get("type").asString("");
@@ -98,10 +148,12 @@ public class SysInfo implements Command {
     }
 
     private ClientConfig clientConfig() throws CommandException {
-        final var clientConfigMap = shell.runCypher("CALL dbms.clientConfig() yield name, value", Map.of(), USER_ACTION)
+        final var clientConfigMap = shell.runCypher5(
+                        "CALL dbms.clientConfig() yield name, value", Map.of(), USER_ACTION)
                 .map(result -> result.getRecords().stream()
-                        .collect(toMap(r -> r.get("name").asString(), r -> r.get("value")
-                                .asString())))
+                        .collect(toMap(
+                                r -> r.get("name").asString(),
+                                r -> r.get("value").asString())))
                 .orElseGet(Map::of);
         final var serverMetricsPrefix = ofNullable(clientConfigMap.get("server.metrics.prefix")) // Version 5
                 .or(() -> ofNullable(clientConfigMap.get("metrics.prefix"))) // Version 4
@@ -115,23 +167,22 @@ public class SysInfo implements Command {
     }
 
     private void printDatabases() throws CommandException {
-        final var query =
-                """
+        final var query = """
                 SHOW DATABASES YIELD
                   name AS Name,
                   address AS Address,
                   role AS Role,
                   currentStatus AS Status,
-                  default AS Default""";
-        shell.runCypher(query, Map.of(), USER_ACTION).ifPresent(result -> {
+                  default AS Default,
+                  home AS Home""";
+        shell.runCypher5(query, Map.of(), USER_ACTION).ifPresent(result -> {
             printer.printOut("");
             tableFormatter.formatWithHeading(result, printer, "Databases");
         });
     }
 
     private void printMetrics(ClientConfig config, String database, MetricGroup group) throws CommandException {
-        final var query =
-                """
+        final var query = """
                 UNWIND $metrics as metric
                 CALL dbms.queryJmx(metric.name) YIELD name, attributes
                 WITH metric.displayName AS Name, attributes.Value.value AS value, attributes.Count.value AS count
@@ -142,9 +193,46 @@ public class SysInfo implements Command {
                 .map(m -> Map.of("name", m.fullName(config, database), "displayName", m.displayName()))
                 .toList();
         final var params = Map.of("metrics", Values.value(metricNamesParam));
-        shell.runCypher(query, params, USER_ACTION).ifPresent(result -> {
+        shell.runCypher5(query, params, USER_ACTION).ifPresent(result -> {
+            final var keys = List.of("Name", "Value");
             printer.printOut("");
-            tableFormatter.formatWithHeading(result, printer, group.name());
+            tableFormatter.formatWithHeading(
+                    new ListBoltResult(result.getRecords(), result.getSummary(), keys, List.of("Value")),
+                    printer,
+                    group.name());
+        });
+    }
+
+    private void printSysInfoProcedureMetrics() throws CommandException {
+        final var query = """
+            CALL internal.db.system.info()
+            YIELD tableName, columnName, value
+            RETURN tableName, columnName AS Name, value AS Value
+        """;
+        shell.runCypher(query, Map.of(), USER_ACTION).ifPresent(result -> {
+            final var records = result.getRecords();
+            final var groupedByTable = records.stream()
+                    .collect(Collectors.groupingBy(
+                            r -> r.get("tableName").asString(), Collectors.toCollection(ArrayList::new)));
+
+            final var tableNames = records.stream()
+                    .map(r -> r.get("tableName").asString())
+                    .distinct()
+                    .toList();
+
+            for (final var tableName : tableNames) {
+                final var groupRecords = groupedByTable.get(tableName);
+                final var keys = List.of("Name", "Value");
+                final var boltRecords = groupRecords.stream()
+                        .map(r -> (Record) new InternalRecord(keys, List.of(r.get("Name"), r.get("Value"))))
+                        .toList();
+
+                printer.printOut("");
+                tableFormatter.formatWithHeading(
+                        new ListBoltResult(boltRecords, result.getSummary(), keys, List.of("Value")),
+                        printer,
+                        tableName);
+            }
         });
     }
 
@@ -152,12 +240,15 @@ public class SysInfo implements Command {
             new MetricGroup(
                     "ID Allocation",
                     List.of(
-                            Metric.db("ids_in_use.property", "Property ID"),
+                            Metric.db("ids_in_use.node", "Node ID"),
                             Metric.db("ids_in_use.relationship", "Relationship ID"),
                             Metric.db("ids_in_use.relationship_type", "Relationship Type ID"))),
             new MetricGroup(
                     "Store Size",
-                    List.of(Metric.db("store.size.total", "Total"), Metric.db("store.size.database", "Database"))),
+                    List.of(
+                            Metric.db("store.size.total", "Total"), // 5.6.0 and earlier
+                            Metric.db("store.size.full", "Total"), // Later versions
+                            Metric.db("store.size.database", "Database"))),
             new MetricGroup(
                     "Page Cache",
                     List.of(

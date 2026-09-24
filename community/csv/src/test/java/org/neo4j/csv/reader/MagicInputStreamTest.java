@@ -33,15 +33,14 @@ import java.nio.file.spi.FileSystemProvider;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class MagicInputStreamTest {
 
     @Inject
@@ -51,7 +50,14 @@ class MagicInputStreamTest {
     @MethodSource("allTheMagic")
     void create(Magic headerMagic, boolean withMarkSupport) throws IOException {
         final var bytes = random.nextBytes(new byte[42 + headerMagic.length()]);
-        System.arraycopy(headerMagic.bytes(), 0, bytes, 0, headerMagic.length());
+        if (headerMagic == Magic.NONE) {
+            // ensure we don't randomly create a valid magic header by blatting out the determining header range
+            for (var i = 0; i < Magic.longest(); i++) {
+                bytes[i] = (byte) 0;
+            }
+        } else {
+            System.arraycopy(headerMagic.bytes(), 0, bytes, 0, headerMagic.length());
+        }
 
         final var streamCreationCount = new AtomicInteger();
         final var closed = new AtomicBoolean();

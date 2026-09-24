@@ -20,9 +20,17 @@
 package org.neo4j.values.virtual;
 
 import static org.neo4j.memory.HeapEstimator.shallowSizeOfInstance;
+import static org.neo4j.memory.HeapEstimator.shallowSizeOfObjectArray;
+import static org.neo4j.memory.HeapEstimator.sizeOf;
+import static org.neo4j.values.utils.ValueMath.HASH_CONSTANT;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
+import org.neo4j.values.AnyValue;
 import org.neo4j.values.AnyValueWriter;
+import org.neo4j.values.VirtualValue;
 
 public abstract class PathReference extends VirtualPathValue {
 
@@ -32,6 +40,14 @@ public abstract class PathReference extends VirtualPathValue {
 
     public static PathReference path(List<VirtualNodeValue> nodes, List<VirtualRelationshipValue> relationships) {
         return new PathReferenceReferences(nodes, relationships);
+    }
+
+    /**
+     * @param elementsHeapSize the combined {@link AnyValue#estimatedHeapUsage()} of the given nodes and relationships
+     */
+    public static PathReference path(
+            List<VirtualNodeValue> nodes, List<VirtualRelationshipValue> relationships, long elementsHeapSize) {
+        return new PathReferenceReferences(nodes, relationships, elementsHeapSize);
     }
 
     @Override
@@ -50,16 +66,16 @@ public abstract class PathReference extends VirtualPathValue {
 
         @Override
         public long estimatedHeapUsage() {
-            return SHALLOW_SIZE;
+            return SHALLOW_SIZE + sizeOf(nodes) + sizeOf(relationships);
         }
 
         @Override
-        public long startNodeId() {
+        public final long startNodeId() {
             return nodes[0];
         }
 
         @Override
-        public long endNodeId() {
+        public final long endNodeId() {
             return nodes[nodes.length - 1];
         }
 
@@ -110,6 +126,56 @@ public abstract class PathReference extends VirtualPathValue {
         }
 
         @Override
+        public int unsafeCompareTo(VirtualValue other, Comparator<AnyValue> comparator) {
+            if (!(other instanceof PathReferencePrimitive otherPath)) {
+                return super.unsafeCompareTo(other, comparator);
+            }
+
+            int x = Long.compare(nodes[0], otherPath.nodes[0]);
+            if (x == 0) {
+                int i = 0;
+                long[] otherRelationships = otherPath.relationships;
+                int length = Math.min(relationships.length, otherRelationships.length);
+
+                while (x == 0 && i < length) {
+                    x = Long.compare(relationships[i], otherRelationships[i]);
+                    ++i;
+                }
+
+                if (x == 0) {
+                    x = Integer.compare(relationships.length, otherRelationships.length);
+                }
+            }
+
+            return x;
+        }
+
+        @Override
+        public boolean equals(VirtualValue other) {
+            if (!(other instanceof PathReferencePrimitive that)) {
+                return super.equals(other);
+            }
+            return size() == that.size()
+                    && Arrays.equals(nodeIds(), that.nodeIds())
+                    && Arrays.equals(relationshipIds(), that.relationshipIds());
+        }
+
+        @Override
+        protected int computeHashToMemoize() {
+            int result = Long.hashCode(nodes[0]);
+            int length = relationships.length;
+            for (int i = 0; i < length; i++) {
+                result += HASH_CONSTANT * (result + Long.hashCode(relationships[i]));
+            }
+            return result;
+        }
+
+        @Override
+        public final long relationshipId(int index) {
+            return relationships[index];
+        }
+
+        @Override
         public String toString() {
             StringBuilder sb = new StringBuilder(getTypeName() + "{");
             int i = 0;
@@ -126,23 +192,48 @@ public abstract class PathReference extends VirtualPathValue {
     }
 
     private static class PathReferenceReferences extends PathReference {
-        private static final long SHALLOW_SIZE = shallowSizeOfInstance(PathReferencePrimitive.class);
+        private static final long SHALLOW_SIZE = shallowSizeOfInstance(PathReferenceReferences.class);
+        private static final long ARRAY_LIST_SHALLOW_SIZE = shallowSizeOfInstance(ArrayList.class);
 
         private final List<VirtualNodeValue> nodes;
         private final List<VirtualRelationshipValue> relationships;
+        private final long payloadSize;
 
         PathReferenceReferences(List<VirtualNodeValue> nodes, List<VirtualRelationshipValue> relationships) {
+            this(nodes, relationships, elementsHeapSize(nodes, relationships));
+        }
+
+        PathReferenceReferences(
+                List<VirtualNodeValue> nodes, List<VirtualRelationshipValue> relationships, long elementsHeapSize) {
             this.nodes = nodes;
             this.relationships = relationships;
+            // The concrete list implementations are not known, so they are estimated
+            // as ArrayLists backed by exactly sized object arrays.
+            this.payloadSize = elementsHeapSize
+                    + 2 * ARRAY_LIST_SHALLOW_SIZE
+                    + shallowSizeOfObjectArray(nodes.size())
+                    + shallowSizeOfObjectArray(relationships.size());
+        }
+
+        private static long elementsHeapSize(
+                List<VirtualNodeValue> nodes, List<VirtualRelationshipValue> relationships) {
+            long heapSize = 0;
+            for (VirtualNodeValue node : nodes) {
+                heapSize += node.estimatedHeapUsage();
+            }
+            for (VirtualRelationshipValue relationship : relationships) {
+                heapSize += relationship.estimatedHeapUsage();
+            }
+            return heapSize;
         }
 
         @Override
         public long estimatedHeapUsage() {
-            return SHALLOW_SIZE;
+            return SHALLOW_SIZE + payloadSize;
         }
 
         @Override
-        public long startNodeId() {
+        public final long startNodeId() {
             return nodes.get(0).id();
         }
 
@@ -177,6 +268,23 @@ public abstract class PathReference extends VirtualPathValue {
         @Override
         public int size() {
             return relationships.size();
+        }
+
+        @Override
+        protected int computeHashToMemoize() {
+            int result = Long.hashCode(startNodeId());
+            int length = size();
+            for (int i = 0; i < length; i++) {
+                result += HASH_CONSTANT * (result + Long.hashCode(relationshipId(i)));
+            }
+            return result;
+        }
+
+        @Override
+        public final long relationshipId(int index) {
+            // NOTE: Unless relationships is a List of type RandomAccess, this code is inefficient and should be avoided
+            //       in higher-order methods like equals() and unsafeCompareTo()
+            return relationships.get(index).id();
         }
 
         @Override

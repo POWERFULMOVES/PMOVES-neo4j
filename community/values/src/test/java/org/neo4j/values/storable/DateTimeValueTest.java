@@ -28,7 +28,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.neo4j.values.storable.AssertingStructureBuilder.asserting;
 import static org.neo4j.values.storable.DateTimeValue.builder;
 import static org.neo4j.values.storable.DateTimeValue.datetime;
+import static org.neo4j.values.storable.DateTimeValue.datetimeRaw;
 import static org.neo4j.values.storable.DateTimeValue.parse;
+import static org.neo4j.values.storable.DateTimeValue.parsePattern;
 import static org.neo4j.values.storable.DateValue.date;
 import static org.neo4j.values.storable.FrozenClock.assertEqualTemporal;
 import static org.neo4j.values.storable.InputMappingStructureBuilder.fromValues;
@@ -41,6 +43,7 @@ import static org.neo4j.values.storable.Values.stringValue;
 import static org.neo4j.values.utils.AnyValueTestUtil.assertEqual;
 import static org.neo4j.values.utils.AnyValueTestUtil.assertNotEqual;
 
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
@@ -50,9 +53,12 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.neo4j.exceptions.ArithmeticException;
 import org.neo4j.exceptions.InvalidArgumentException;
 import org.neo4j.exceptions.TemporalParseException;
 import org.neo4j.exceptions.UnsupportedTemporalUnitException;
+import org.neo4j.gqlstatus.ErrorGqlStatusObjectAssertions;
+import org.neo4j.gqlstatus.GqlStatusInfoCodes;
 
 class DateTimeValueTest {
     private FrozenClock clock = new FrozenClock("UTC");
@@ -165,6 +171,29 @@ class DateTimeValueTest {
     }
 
     @Test
+    void shouldParsePatternWithLiteral() {
+        assertEquals(
+                datetime(date(2024, 6, 27), time(14, 30, 0, 0, UTC)),
+                parsePattern(stringValue("2024-06-27 14:30"), stringValue("yyyy-MM-dd HH:mm"), inUTC));
+        assertEquals(
+                datetime(date(2024, 6, 27), time(14, 30, 0, 0, UTC)),
+                parsePattern(stringValue("2024-06-27 14:30 CEST"), stringValue("yyyy-MM-dd HH:mm 'CEST'"), inUTC));
+    }
+
+    @Test
+    void shouldNotParsePatternWhenLiteralDoesNotMatchInput() {
+        assertThrows(
+                TemporalParseException.class,
+                () -> parsePattern(stringValue("2024-06-27 14.30"), stringValue("yyyy-MM-dd HH:mm"), inUTC));
+        assertThrows(
+                TemporalParseException.class,
+                () -> parsePattern(stringValue("2024-06-27 14:30 UTC"), stringValue("yyyy-MM-dd HH:mm 'CEST'"), inUTC));
+        assertThrows(
+                TemporalParseException.class,
+                () -> parsePattern(stringValue("2024-06-27 14:30"), stringValue("yyyy-MM-dd HH:mm 'CEST'"), inUTC));
+    }
+
+    @Test
     void shouldWriteDateTime() {
         // given
         for (DateTimeValue value : new DateTimeValue[] {
@@ -213,7 +242,7 @@ class DateTimeValueTest {
                         .add("datetime", datetime(ZonedDateTime.now(clock)))
                         .build());
         assertEqualTemporal(
-                datetime(ZonedDateTime.now(clock)),
+                datetime(ZonedDateTime.now(clock).withEarlierOffsetAtOverlap()),
                 builder(clock)
                         .add("datetime", localDateTime(LocalDateTime.now(clock)))
                         .build());
@@ -439,6 +468,44 @@ class DateTimeValueTest {
     }
 
     @Test
+    void shouldFailOnInvalidRawValue() {
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> datetimeRaw(31556889864403200L, 0, UTC))
+                .isInstanceOf(InvalidArgumentException.class)
+                .hasMessage("Instant exceeds minimum or maximum instant")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22007)
+                .hasStatusDescription("error: data exception - invalid date, time, or datetime format")
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N11)
+                .hasStatusDescription(
+                        "error: data exception - invalid argument. Invalid argument: cannot process 'epochSecond'.");
+    }
+
+    @Test
+    void shouldConstructDateTimeFromEpochSeconds() {
+        assertEqualTemporal(
+                datetime(1000000000L, 0, clock.getZone()),
+                fromValues(builder(clock)).add("epochSeconds", 1000000000L).build());
+        assertEqualTemporal(
+                datetime(0L, 0, clock.getZone()),
+                fromValues(builder(clock)).add("epochSeconds", 0L).build());
+    }
+
+    @Test
+    void shouldFailOnOverflowingEpochSeconds() {
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(() -> fromValues(builder(clock))
+                        .add("epochSeconds", Long.MAX_VALUE)
+                        .build())
+                .isInstanceOf(InvalidArgumentException.class)
+                .hasMessage("Instant exceeds minimum or maximum instant")
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22007)
+                .hasStatusDescription("error: data exception - invalid date, time, or datetime format")
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N11)
+                .hasStatusDescription(
+                        "error: data exception - invalid argument. Invalid argument: cannot process 'epochSeconds'.");
+    }
+
+    @Test
     void shouldAddDurationToDateTimes() {
         assertEquals(
                 datetime(date(2018, 2, 1), time(1, 17, 3, 0, UTC)),
@@ -449,6 +516,20 @@ class DateTimeValueTest {
         assertEquals(
                 datetime(date(2018, 1, 28), time(0, 0, 0, 0, UTC)),
                 datetime(date(2018, 2, 28), time(0, 0, 0, 0, UTC)).add(DurationValue.duration(-1, 0, 0, 0)));
+    }
+
+    @Test
+    void shouldFailOnOverflowWhenAddingDurationToDateTimes() {
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(
+                        () -> DateTimeValue.MAX_VALUE.add(DurationValue.duration(0, 0, 0, 1)))
+                .isInstanceOf(ArithmeticException.class)
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22003)
+                .hasStatusDescription(
+                        "error: data exception - numeric value out of range. The numeric value +999999999-12-31T23:59:59.999999999+18:00 + PT0.000000001S is outside the required range.")
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N28)
+                .hasStatusDescription(
+                        "error: data exception - overflow error. The result of the operation '+' has caused an overflow.");
     }
 
     @Test
@@ -471,6 +552,20 @@ class DateTimeValueTest {
     }
 
     @Test
+    void shouldFailOnOverflowWhenSubtractionDurationFromDateTimes() {
+        ErrorGqlStatusObjectAssertions.assertThatThrownBy(
+                        () -> DateTimeValue.MIN_VALUE.sub(DurationValue.duration(0, 0, 1, 0)))
+                .isInstanceOf(ArithmeticException.class)
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22003)
+                .hasStatusDescription(
+                        "error: data exception - numeric value out of range. The numeric value -999999999-01-01T00:00-18:00 - PT1S is outside the required range.")
+                .gqlCause()
+                .hasGqlStatus(GqlStatusInfoCodes.STATUS_22N28)
+                .hasStatusDescription(
+                        "error: data exception - overflow error. The result of the operation '-' has caused an overflow.");
+    }
+
+    @Test
     void shouldEqualItself() {
         assertEqual(datetime(10000, 100, UTC), datetime(10000, 100, UTC));
     }
@@ -489,5 +584,51 @@ class DateTimeValueTest {
     void shouldNotEqualSameInstantButDifferentTimezoneWithSameOffset() {
         assertNotEqual(
                 datetime(1969, 12, 31, 23, 59, 59, 0, UTC), datetime(1969, 12, 31, 23, 59, 59, 0, "Africa/Freetown"));
+    }
+
+    @Test
+    void shouldCopyDateTimeOnOverlap() {
+        clock = new FrozenClock(Instant.parse("2025-10-26T02:30:00+01:00"), "Europe/Stockholm");
+        assertEqualTemporal(
+                datetime(ZonedDateTime.now(clock)),
+                builder(clock)
+                        .add("datetime", datetime(ZonedDateTime.now(clock)))
+                        .build());
+        assertEqualTemporal(
+                datetime(ZonedDateTime.now(clock).withEarlierOffsetAtOverlap()),
+                builder(clock)
+                        .add("datetime", localDateTime(LocalDateTime.now(clock)))
+                        .build());
+        assertEqualTemporal(
+                datetime(ZonedDateTime.now(clock).withZoneSameLocal(ZoneId.of("America/New_York"))),
+                builder(clock)
+                        .add("datetime", localDateTime(LocalDateTime.now(clock)))
+                        .add("timezone", stringValue("America/New_York"))
+                        .build());
+    }
+
+    @Test
+    void shouldRoundTripPre1893BerlinDateTime() {
+        DateTimeValue original = parse("1890-10-01T00:00:00[Europe/Berlin]", () -> UTC);
+
+        assertEquals(
+                ZoneOffset.ofHoursMinutesSeconds(0, 53, 28), original.temporal().getOffset());
+
+        DateTimeValue reparsed = parse(original.prettyPrint(), () -> UTC);
+        assertEqual(original, reparsed);
+    }
+
+    @Test
+    void shouldRoundTripDateTimeConstructedWithSubMinuteOffset() {
+        DateTimeValue original = fromValues(builder(clock))
+                .add("year", 2022)
+                .add("timezone", "+00:01:30")
+                .build();
+
+        assertEquals(
+                ZoneOffset.ofHoursMinutesSeconds(0, 1, 30), original.temporal().getOffset());
+
+        DateTimeValue reparsed = parse(original.prettyPrint(), () -> UTC);
+        assertEqual(original, reparsed);
     }
 }

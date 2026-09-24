@@ -45,11 +45,11 @@ import org.neo4j.configuration.GraphDatabaseInternalSettings;
 import org.neo4j.graphdb.security.URLAccessValidationError;
 import org.neo4j.internal.kernel.api.connectioninfo.ClientConnectionInfo;
 import org.neo4j.internal.kernel.api.security.AbstractSecurityLog;
-import org.neo4j.internal.kernel.api.security.AccessMode;
 import org.neo4j.internal.kernel.api.security.AuthSubject;
 import org.neo4j.internal.kernel.api.security.CommunitySecurityLog;
 import org.neo4j.internal.kernel.api.security.SecurityAuthorizationHandler;
 import org.neo4j.internal.kernel.api.security.SecurityContext;
+import org.neo4j.internal.kernel.api.security.StaticAccessMode;
 import org.neo4j.logging.NullLog;
 
 class WebURLAccessRuleTest {
@@ -74,13 +74,11 @@ class WebURLAccessRuleTest {
             final Config config = Config.defaults(
                     GraphDatabaseInternalSettings.cypher_ip_blocklist, List.of(blockedIpv4Range, blockedIpv6Range));
 
-            // execute the query
-            final var error = assertThrows(URLAccessValidationError.class, () -> new WebURLAccessRule(config)
-                    .validate(url, securityAuthorizationHandler, fullSecurityContext()));
-
-            // assert that the validation fails
-            assertThat(error.getMessage())
-                    .contains("blocked via the configuration property internal.dbms.cypher_ip_blocklist");
+            // execute the query and assert that the validation fails
+            assertThatThrownBy(() -> new WebURLAccessRule(config)
+                            .validate(url, securityAuthorizationHandler, fullSecurityContext()))
+                    .isInstanceOf(URLAccessValidationError.class)
+                    .hasMessageContaining("blocked via the configuration property internal.dbms.cypher_ip_blocklist");
         }
     }
 
@@ -122,13 +120,11 @@ class WebURLAccessRuleTest {
         final Config config =
                 Config.defaults(GraphDatabaseInternalSettings.cypher_ip_blocklist, List.of(blockedIpv4Range));
 
-        // execute the query
-        final var error = assertThrows(URLAccessValidationError.class, () -> new WebURLAccessRule(config)
-                .validate(url, securityAuthorizationHandler, fullSecurityContext()));
-
-        // assert that the validation fails
-        assertThat(error.getMessage())
-                .contains("blocked via the configuration property internal.dbms.cypher_ip_blocklist");
+        // execute the query and assert that the validation fails
+        assertThatThrownBy(() ->
+                        new WebURLAccessRule(config).validate(url, securityAuthorizationHandler, fullSecurityContext()))
+                .isInstanceOf(URLAccessValidationError.class)
+                .hasMessageContaining("blocked via the configuration property internal.dbms.cypher_ip_blocklist");
     }
 
     @Test
@@ -141,13 +137,12 @@ class WebURLAccessRuleTest {
         final Config config =
                 Config.defaults(GraphDatabaseInternalSettings.cypher_ip_blocklist, List.of(blockedIpv4Range));
 
-        // execute the query
-        final var error = assertThrows(UnknownHostException.class, () -> new WebURLAccessRule(config)
-                .validate(url, securityAuthorizationHandler, fullSecurityContext()));
-
-        // assert that the validation fails
+        // execute the query and assert that the validation fails
         // The error message is OS specific so only check that it fails on the expected host
-        assertThat(error.getMessage()).contains("always.invalid");
+        assertThatThrownBy(() ->
+                        new WebURLAccessRule(config).validate(url, securityAuthorizationHandler, fullSecurityContext()))
+                .isInstanceOf(UnknownHostException.class)
+                .hasMessageContaining("always.invalid");
     }
 
     @Test
@@ -172,13 +167,11 @@ class WebURLAccessRuleTest {
         final Config config =
                 Config.defaults(GraphDatabaseInternalSettings.cypher_ip_blocklist, List.of(blockedIpv4Range));
 
-        // execute the query
-        final var error = assertThrows(URLAccessValidationError.class, () -> new WebURLAccessRule(config)
-                .validate(url, securityAuthorizationHandler, fullSecurityContext()));
-
-        // assert that the validation fails
-        assertThat(error.getMessage())
-                .contains(
+        // execute the query and assert that the validation fails
+        assertThatThrownBy(() ->
+                        new WebURLAccessRule(config).validate(url, securityAuthorizationHandler, fullSecurityContext()))
+                .isInstanceOf(URLAccessValidationError.class)
+                .hasMessageContaining(
                         "access to /127.0.0.1 is blocked via the configuration property internal.dbms.cypher_ip_blocklist");
     }
 
@@ -321,7 +314,7 @@ class WebURLAccessRuleTest {
     private SecurityContext fullSecurityContext() {
         return new SecurityContext(
                 AuthSubject.ANONYMOUS,
-                AccessMode.Static.FULL,
+                StaticAccessMode.FULL,
                 ClientConnectionInfo.EMBEDDED_CONNECTION,
                 DEFAULT_DATABASE_NAME);
     }

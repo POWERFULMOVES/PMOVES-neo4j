@@ -25,9 +25,12 @@ import static java.lang.String.format;
 import static java.lang.System.currentTimeMillis;
 import static org.neo4j.function.Predicates.alwaysTrue;
 import static org.neo4j.internal.batchimport.cache.NumberArrayFactories.auto;
+import static org.neo4j.internal.batchimport.cache.idmapping.IdMappers.combineSkipListSorted;
 import static org.neo4j.internal.helpers.Format.duration;
 import static org.neo4j.io.ByteUnit.bytesToString;
 import static org.neo4j.io.IOUtils.closeAll;
+import static org.neo4j.storageengine.api.TransactionIdStore.BASE_TX_COMMIT_TIMESTAMP;
+import static org.neo4j.storageengine.api.TransactionIdStore.UNKNOWN_CONSENSUS_INDEX;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -37,7 +40,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.function.Function;
 import java.util.function.Predicate;
-import java.util.function.Supplier;
 import org.eclipse.collections.api.iterator.LongIterator;
 import org.eclipse.collections.api.set.primitive.IntSet;
 import org.eclipse.collections.api.set.primitive.LongSet;
@@ -53,35 +55,36 @@ import org.neo4j.configuration.GraphDatabaseSettings;
 import org.neo4j.counts.CountsUpdater;
 import org.neo4j.internal.batchimport.cache.GatheringMemoryStatsVisitor;
 import org.neo4j.internal.batchimport.cache.MemoryStatsVisitor;
-import org.neo4j.internal.batchimport.cache.NodeLabelsCache;
-import org.neo4j.internal.batchimport.cache.NodeRelationshipCache;
-import org.neo4j.internal.batchimport.cache.NodeType;
 import org.neo4j.internal.batchimport.cache.NumberArrayFactory;
-import org.neo4j.internal.batchimport.cache.PageCacheArrayFactoryMonitor;
 import org.neo4j.internal.batchimport.cache.idmapping.IdMapper;
 import org.neo4j.internal.batchimport.cache.idmapping.IdMappers;
+import org.neo4j.internal.batchimport.cache.legacy.NodeLabelsCache;
+import org.neo4j.internal.batchimport.cache.legacy.NodeRelationshipCache;
+import org.neo4j.internal.batchimport.cache.legacy.NodeType;
 import org.neo4j.internal.batchimport.input.EstimationSanityChecker;
 import org.neo4j.internal.batchimport.staging.ExecutionMonitor;
 import org.neo4j.internal.batchimport.staging.ExecutionSupervisors;
 import org.neo4j.internal.batchimport.staging.Stage;
 import org.neo4j.internal.batchimport.store.BatchingNeoStores;
 import org.neo4j.internal.counts.CountsBuilder;
+import org.neo4j.internal.helpers.progress.ProgressMonitorFactory;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.layout.recordstorage.RecordDatabaseLayout;
 import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.store.RecordStore;
 import org.neo4j.kernel.impl.store.RelationshipStore;
 import org.neo4j.kernel.impl.store.cursor.CachedStoreCursors;
 import org.neo4j.kernel.impl.store.format.RecordFormats;
 import org.neo4j.kernel.impl.store.record.RelationshipRecord;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.logging.InternalLog;
 import org.neo4j.logging.internal.LogService;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.scheduler.JobScheduler;
+import org.neo4j.storageengine.api.LogMetadataProvider;
 import org.neo4j.storageengine.api.cursor.StoreCursors;
 import org.neo4j.storageengine.migration.MigrationProgressMonitor;
 
@@ -95,7 +98,6 @@ import org.neo4j.storageengine.migration.MigrationProgressMonitor;
  */
 public class ImportLogic implements Closeable {
     private static final String ID_MAPPER_PREPARATION_TAG = "Id mapper preparation.";
-    public static final Supplier<SchemaMonitor> NO_SCHEMA_MONITORING = () -> SchemaMonitor.NO_MONITOR;
     private static final RelationshipLinkingMonitor NO_LINKING_MONITOR = new RelationshipLinkingMonitor() {};
 
     private final Path databaseDirectory;
@@ -132,6 +134,8 @@ public class ImportLogic implements Closeable {
     private IdMapper idMapper;
     private long peakMemoryUsage;
     private long availableMemoryForLinking;
+    private NodeInputIdPropertyLookup inputIdLookup;
+    private CursorContext cursorContext;
 
     /**
      * @param databaseLayout directory which the db will be created in.
@@ -176,19 +180,15 @@ public class ImportLogic implements Closeable {
         log.info("Import starting");
         startTime = currentTimeMillis();
         this.input = input;
-        PageCacheArrayFactoryMonitor numberArrayFactoryMonitor = new PageCacheArrayFactoryMonitor();
-        numberArrayFactory = auto(
-                neoStore.getPageCache(),
-                contextFactory,
-                databaseDirectory,
-                false,
-                numberArrayFactoryMonitor,
-                log,
-                databaseName);
+        numberArrayFactory = auto(neoStore.fileSystem(), databaseDirectory, log);
         // Some temporary caches and indexes in the import
-        Input.Estimates inputEstimates =
-                input.validateAndEstimate(neoStore.getPropertyStore().newValueEncodedSizeCalculator());
-        idMapper = instantiateIdMapper(input, inputEstimates);
+        Input.Estimates inputEstimates = input.validateAndEstimate(
+                neoStore.getPropertyStore().newValueEncodedSizeCalculator(), config.maxNumberOfWorkerThreads());
+        cursorContext = contextFactory.create(ID_MAPPER_PREPARATION_TAG);
+        inputIdLookup = new NodeInputIdPropertyLookup(
+                neoStore.getTemporaryPropertyStore(),
+                () -> new CachedStoreCursors(neoStore.getTemporaryNeoStores(), cursorContext));
+        idMapper = instantiateIdMapper(input, inputEstimates, inputIdLookup);
         nodeRelationshipCache = new NodeRelationshipCache(
                 numberArrayFactory, dbConfig.get(GraphDatabaseSettings.dense_node_threshold), memoryTracker);
 
@@ -202,8 +202,7 @@ public class ImportLogic implements Closeable {
                         NodeRelationshipCache.memoryEstimation(inputEstimates.numberOfNodes()),
                         idMapper.memoryEstimation(inputEstimates.numberOfNodes()));
 
-        dependencies.satisfyDependencies(
-                inputEstimates, idMapper, neoStore, nodeRelationshipCache, numberArrayFactoryMonitor);
+        dependencies.satisfyDependencies(inputEstimates, idMapper, neoStore, nodeRelationshipCache);
 
         if (neoStore.determineDoubleRelationshipRecordUnits(inputEstimates)) {
             monitor.doubleRelationshipRecordUnitsEnabled();
@@ -213,14 +212,16 @@ public class ImportLogic implements Closeable {
         executionMonitor.initialize(dependencies);
     }
 
-    protected IdMapper instantiateIdMapper(Input input, Input.Estimates inputEstimates) {
-        var estimatedNumNodes = inputEstimates.numberOfNodes();
-        return switch (input.idType()) {
-            case STRING -> IdMappers.strings(
-                    numberArrayFactory, input.groups(), config.strictNodeCheck(), memoryTracker, estimatedNumNodes);
-            case INTEGER -> IdMappers.longs(numberArrayFactory, input.groups(), memoryTracker, estimatedNumNodes);
-            case ACTUAL -> IdMappers.actual();
-        };
+    protected IdMapper instantiateIdMapper(
+            Input input, Input.Estimates inputEstimates, NodeInputIdPropertyLookup inputIdLookup) {
+        return IdMappers.idMapper(
+                input.idType(),
+                numberArrayFactory,
+                input.groups(),
+                config.strictNodeCheck(),
+                memoryTracker,
+                inputEstimates.numberOfNodes(),
+                inputIdLookup);
     }
 
     /**
@@ -248,17 +249,17 @@ public class ImportLogic implements Closeable {
     }
 
     public void importNodes() throws IOException {
-        importNodes(NO_SCHEMA_MONITORING);
+        importNodes(SchemaMonitors.NO_SCHEMA);
     }
 
     /**
      * Imports nodes w/ their properties and labels from {@link Input#nodes(Collector)}. This will as a side-effect populate the {@link IdMapper},
      * to later be used for looking up ID --> nodeId in {@link #importRelationships()}. After a completed node import,
-     * {@link #prepareIdMapper()} must be called.
+     * {@link #prepareIdMapper(LongSet)} must be called.
      *
      * @throws IOException on I/O error.
      */
-    public void importNodes(Supplier<SchemaMonitor> schemaMonitors) throws IOException {
+    public void importNodes(SchemaMonitors schemaMonitors) throws IOException {
         // Import nodes, properties, labels
         neoStore.startFlushingPageCache();
         DataImporter.importNodes(
@@ -274,22 +275,28 @@ public class ImportLogic implements Closeable {
                 schemaMonitors);
         neoStore.stopFlushingPageCache();
         updatePeakMemoryUsage();
+
+        if (storeUpdateMonitor.hasExternallyChosenNodeIds()) {
+            neoStore.needsRebuildNodeStoreIdFile();
+        }
+
+        // Compare notes with schema monitors
+        var otherViolatingNodes = schemaMonitors.validate(badCollector, ProgressMonitorFactory.NONE);
+        prepareIdMapper(otherViolatingNodes);
+        schemaMonitors.writeToTarget(
+                idMapper.leftOverDuplicateNodesIdsPredicate(), otherViolatingNodes, ProgressMonitorFactory.NONE);
     }
 
     /**
      * Prepares {@link IdMapper} to be queried for ID --> nodeId lookups. This is required for running {@link #importRelationships()}.
      */
-    public void prepareIdMapper() {
+    private void prepareIdMapper(LongSet otherViolatingNodes) {
         if (idMapper.needsPreparation()) {
             MemoryUsageStatsProvider memoryUsageStats = new MemoryUsageStatsProvider(neoStore, idMapper);
-            try (var cursorContext = contextFactory.create(ID_MAPPER_PREPARATION_TAG)) {
-                var inputIdLookup = new NodeInputIdPropertyLookup(
-                        neoStore.getTemporaryPropertyStore(),
-                        () -> new CachedStoreCursors(neoStore.getTemporaryNeoStores(), cursorContext));
-                executeStage(
-                        new IdMapperPreparationStage(config, idMapper, inputIdLookup, badCollector, memoryUsageStats));
-            }
-            final LongIterator duplicateNodeIds = idMapper.leftOverDuplicateNodesIds();
+            executeStage(new IdMapperPreparationStage(
+                    config, idMapper, inputIdLookup, badCollector, otherViolatingNodes, memoryUsageStats));
+            final LongIterator duplicateNodeIds =
+                    combineSkipListSorted(idMapper.leftOverDuplicateNodesIds(), otherViolatingNodes);
             if (duplicateNodeIds.hasNext()) {
                 executeStage(new DeleteDuplicateNodesStage(
                         config, duplicateNodeIds, neoStore.getNeoStores(), storeUpdateMonitor, contextFactory));
@@ -299,7 +306,7 @@ public class ImportLogic implements Closeable {
     }
 
     public void importRelationships() throws IOException {
-        importRelationships(NO_SCHEMA_MONITORING);
+        importRelationships(SchemaMonitors.NO_SCHEMA);
     }
 
     public void removeViolatingRelationships(LongSet violatingRelationships) {
@@ -325,7 +332,7 @@ public class ImportLogic implements Closeable {
      *
      * @throws IOException on I/O error.
      */
-    public void importRelationships(Supplier<SchemaMonitor> schemaMonitors) throws IOException {
+    public void importRelationships(SchemaMonitors schemaMonitors) throws IOException {
         // Import relationships (unlinked), properties
         neoStore.startFlushingPageCache();
         DataStatistics typeDistribution = DataImporter.importRelationships(
@@ -345,6 +352,11 @@ public class ImportLogic implements Closeable {
         idMapper.close();
         idMapper = null;
         putState(typeDistribution);
+
+        // Compare notes with schema monitors
+        var otherViolatingRelationships = schemaMonitors.validate(badCollector, ProgressMonitorFactory.NONE);
+        schemaMonitors.writeToTarget(null, otherViolatingRelationships, ProgressMonitorFactory.NONE);
+        removeViolatingRelationships(otherViolatingRelationships);
     }
 
     /**
@@ -575,14 +587,14 @@ public class ImportLogic implements Closeable {
                         nodeStore.getIdGenerator().getHighId());
     }
 
-    public void buildAuxiliaryStores() {
-        buildAuxiliaryStores(0);
+    public void buildAuxiliaryStores(LogMetadataProvider logMetadataProvider) {
+        buildAuxiliaryStores(0, logMetadataProvider);
     }
 
     /**
      * Builds the counts store and lookup indexes. Requires that {@link #importNodes()} and {@link #importRelationships()} has run.
      */
-    public void buildAuxiliaryStores(long fromNodeId) {
+    public void buildAuxiliaryStores(long fromNodeId, LogMetadataProvider logMetadataProvider) {
         neoStore.buildCountsStore(
                 new CountsBuilder() {
                     @Override
@@ -641,9 +653,10 @@ public class ImportLogic implements Closeable {
 
                     @Override
                     public long lastCommittedTxId() {
-                        return neoStore.getLastCommittedTransactionId();
+                        return logMetadataProvider.getLastCommittedTransactionId();
                     }
                 },
+                logMetadataProvider,
                 contextFactory,
                 memoryTracker);
     }
@@ -665,7 +678,7 @@ public class ImportLogic implements Closeable {
                 format("%n%s%nPeak memory usage: %s", additionalInformation, bytesToString(peakMemoryUsage)));
         log.info("Import " + (successful ? "completed successfully" : "failed") + ", took " + duration(totalTimeMillis)
                 + ". " + additionalInformation);
-        closeAll(nodeRelationshipCache, nodeLabelsCache, idMapper);
+        closeAll(nodeRelationshipCache, nodeLabelsCache, idMapper, cursorContext, numberArrayFactory);
         monitor.completed(successful);
     }
 
@@ -680,23 +693,35 @@ public class ImportLogic implements Closeable {
             Configuration config,
             LogService logService,
             AdditionalInitialIds additionalInitialIds,
-            LogTailLogVersionsMetadata logTailMetadata,
+            LogMetadataProvider logMetadataProvider,
             Config dbConfig,
             JobScheduler scheduler,
             MemoryTracker memoryTracker,
-            CursorContextFactory contextFactory) {
+            CursorContextFactory contextFactory,
+            DatabaseCreationOptions databaseCreationOptions) {
+        logMetadataProvider.setLastCommittedAndClosedTransactionId(
+                additionalInitialIds.lastCommittedTransactionId(),
+                additionalInitialIds.lastCommittedTransactionAppendIndex(),
+                logMetadataProvider.getLastCommittedTransaction().kernelVersion(),
+                additionalInitialIds.lastCommittedTransactionChecksum(),
+                BASE_TX_COMMIT_TIMESTAMP,
+                UNKNOWN_CONSENSUS_INDEX,
+                additionalInitialIds.lastCommittedTransactionLogByteOffset(),
+                additionalInitialIds.lastCommittedTransactionLogVersion(),
+                additionalInitialIds.lastAppendIndex(),
+                UNKNOWN_CONSENSUS_INDEX);
+        logMetadataProvider.setCheckpointLogVersion(additionalInitialIds.checkpointLogVersion());
         return BatchingNeoStores.batchingNeoStores(
                 fileSystem,
                 databaseLayout,
                 config,
                 logService,
-                additionalInitialIds,
-                logTailMetadata,
                 dbConfig,
                 scheduler,
                 cacheTracer,
                 contextFactory,
-                memoryTracker);
+                memoryTracker,
+                databaseCreationOptions);
     }
 
     private static long totalMemoryUsageOf(MemoryStatsVisitor.Visitable... users) {

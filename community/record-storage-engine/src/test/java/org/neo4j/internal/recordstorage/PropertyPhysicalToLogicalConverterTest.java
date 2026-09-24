@@ -38,6 +38,7 @@ import org.neo4j.io.layout.DatabaseLayout;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
+import org.neo4j.kernel.DatabaseCreationOptions;
 import org.neo4j.kernel.impl.store.DynamicAllocatorProvider;
 import org.neo4j.kernel.impl.store.DynamicAllocatorProviders;
 import org.neo4j.kernel.impl.store.NeoStores;
@@ -47,7 +48,6 @@ import org.neo4j.kernel.impl.store.StoreType;
 import org.neo4j.kernel.impl.store.record.NodeRecord;
 import org.neo4j.kernel.impl.store.record.PropertyBlock;
 import org.neo4j.kernel.impl.store.record.PropertyRecord;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.EmptyMemoryTracker;
 import org.neo4j.storageengine.api.EntityUpdates;
@@ -96,7 +96,7 @@ class PropertyPhysicalToLogicalConverterTest {
                 NullLogProvider.getInstance(),
                 new CursorContextFactory(pageCacheTracer, EMPTY_CONTEXT_SUPPLIER),
                 false,
-                LogTailLogVersionsMetadata.EMPTY_LOG_TAIL);
+                DatabaseCreationOptions.EMPTY_CREATION_OPTIONS);
         neoStores = storeFactory.openAllNeoStores();
         allocatorProvider = DynamicAllocatorProviders.nonTransactionalAllocator(neoStores);
 
@@ -257,7 +257,8 @@ class PropertyPhysicalToLogicalConverterTest {
                 allocatorProvider.allocator(StoreType.PROPERTY_STRING),
                 allocatorProvider.allocator(StoreType.PROPERTY_ARRAY),
                 NULL_CONTEXT,
-                INSTANCE);
+                INSTANCE,
+                "db-format-2000");
         return block;
     }
 

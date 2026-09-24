@@ -25,6 +25,7 @@ import java.util.Queue;
 import java.util.function.Supplier;
 import org.apache.commons.lang3.tuple.Pair;
 import org.neo4j.io.pagecache.PageCursor;
+import org.neo4j.io.pagecache.context.CursorContext;
 
 public class SimpleIdProvider implements IdProvider {
     private final Queue<Pair<Long, Long>> releasedIds = new ArrayDeque<>();
@@ -37,7 +38,7 @@ public class SimpleIdProvider implements IdProvider {
     }
 
     @Override
-    public long acquireNewId(long stableGeneration, long unstableGeneration, CursorCreator cursorCreator) {
+    public long acquireNewId(long stableGeneration, CursorCreator cursorCreator, CursorContext cursorContext) {
         if (!releasedIds.isEmpty()) {
             Pair<Long, Long> free = releasedIds.peek();
             if (free.getLeft() <= stableGeneration) {
@@ -69,6 +70,29 @@ public class SimpleIdProvider implements IdProvider {
     @Override
     public long lastId() {
         return lastId;
+    }
+
+    @Override
+    public ExclusiveAccessMode exclusiveAccess() {
+        return new ExclusiveAccessMode() {
+            @Override
+            public void shrink(long numberOfPages) {
+                lastId -= numberOfPages;
+            }
+
+            @Override
+            public RewriteResult rewrite(
+                    CursorCreator cursorCreator,
+                    long belowId,
+                    long stableGeneration,
+                    long unstableGeneration,
+                    CursorContext cursorContext) {
+                return null;
+            }
+
+            @Override
+            public void close() {}
+        };
     }
 
     void reset() {

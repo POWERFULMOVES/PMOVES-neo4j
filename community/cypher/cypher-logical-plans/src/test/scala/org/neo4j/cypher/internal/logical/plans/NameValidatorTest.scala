@@ -20,7 +20,9 @@
 package org.neo4j.cypher.internal.logical.plans
 
 import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
+import org.neo4j.cypher.internal.util.test_helpers.GqlExceptionMatchers.gqlStatus
 import org.neo4j.exceptions.InvalidArgumentException
+import org.neo4j.gqlstatus.GqlStatusInfoCodes
 
 class NameValidatorTest extends CypherFunSuite {
 
@@ -36,7 +38,13 @@ class NameValidatorTest extends CypherFunSuite {
 
       fail("Expected exception \"The provided username is empty.\" but succeeded.")
     } catch {
-      case e: InvalidArgumentException => e.getMessage should be("The provided username is empty.")
+      case e: InvalidArgumentException => e should (
+          have message "The provided username is empty."
+            and be(gqlStatus(
+              GqlStatusInfoCodes.STATUS_22NB6,
+              "error: data exception - input empty. Invalid input. Username is not allowed to be an empty string."
+            ))
+        )
     }
 
     try {
@@ -44,7 +52,13 @@ class NameValidatorTest extends CypherFunSuite {
 
       fail("Expected exception \"The provided username is empty.\" but succeeded.")
     } catch {
-      case e: InvalidArgumentException => e.getMessage should be("The provided username is empty.")
+      case e: InvalidArgumentException => e should (
+          have message "The provided username is empty."
+            and be(gqlStatus(
+              GqlStatusInfoCodes.STATUS_22NB6,
+              "error: data exception - input empty. Invalid input. Username is not allowed to be an empty string."
+            ))
+        )
     }
   }
 
@@ -55,7 +69,7 @@ class NameValidatorTest extends CypherFunSuite {
       fail("Expected exception \"Username 'user:' contains illegal characters.\" but succeeded.")
     } catch {
       case e: InvalidArgumentException =>
-        e.getMessage should be(
+        e should have message (
           """Username 'user:' contains illegal characters.
             |Use ascii characters that are not ',', ':' or whitespaces.""".stripMargin
         )
@@ -82,7 +96,13 @@ class NameValidatorTest extends CypherFunSuite {
 
       fail("Expected exception \"The provided role name is empty.\" but succeeded.")
     } catch {
-      case e: InvalidArgumentException => e.getMessage should be("The provided role name is empty.")
+      case e: InvalidArgumentException => e should (
+          have message "The provided role name is empty."
+            and be(gqlStatus(
+              GqlStatusInfoCodes.STATUS_22NB6,
+              "error: data exception - input empty. Invalid input. Role name is not allowed to be an empty string."
+            ))
+        )
     }
 
     try {
@@ -90,7 +110,13 @@ class NameValidatorTest extends CypherFunSuite {
 
       fail("Expected exception \"The provided role name is empty.\" but succeeded.")
     } catch {
-      case e: InvalidArgumentException => e.getMessage should be("The provided role name is empty.")
+      case e: InvalidArgumentException => e should (
+          have message "The provided role name is empty."
+            and be(gqlStatus(
+              GqlStatusInfoCodes.STATUS_22NB6,
+              "error: data exception - input empty. Invalid input. Role name is not allowed to be an empty string."
+            ))
+        )
     }
   }
 
@@ -101,7 +127,7 @@ class NameValidatorTest extends CypherFunSuite {
       fail("Expected exception \"Role name 'role%' contains illegal characters.\" but succeeded.")
     } catch {
       case e: InvalidArgumentException =>
-        e.getMessage should be(
+        e should have message (
           """Role name 'role%' contains illegal characters.
             |Use simple ascii characters, numbers and underscores.""".stripMargin
         )

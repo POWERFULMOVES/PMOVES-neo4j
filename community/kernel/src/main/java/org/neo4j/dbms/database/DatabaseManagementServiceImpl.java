@@ -27,23 +27,21 @@ import java.util.Map;
 import java.util.stream.Collectors;
 import org.neo4j.configuration.Config;
 import org.neo4j.dbms.api.DatabaseExistsException;
-import org.neo4j.dbms.api.DatabaseManagementException;
+import org.neo4j.dbms.api.DatabaseManagementHelper;
 import org.neo4j.dbms.api.DatabaseManagementService;
 import org.neo4j.dbms.api.DatabaseNotFoundException;
+import org.neo4j.dbms.api.DatabaseNotFoundHelper;
 import org.neo4j.graphdb.GraphDatabaseService;
 import org.neo4j.graphdb.QueryExecutionException;
 import org.neo4j.graphdb.config.Configuration;
 import org.neo4j.graphdb.event.DatabaseEventListener;
 import org.neo4j.graphdb.event.TransactionEventListener;
-import org.neo4j.internal.kernel.api.security.LoginContext;
-import org.neo4j.kernel.api.KernelTransaction;
 import org.neo4j.kernel.database.NamedDatabaseId;
-import org.neo4j.kernel.impl.coreapi.InternalTransaction;
-import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.kernel.internal.event.GlobalTransactionEventListeners;
 import org.neo4j.kernel.lifecycle.Lifecycle;
 import org.neo4j.kernel.monitoring.DatabaseEventListeners;
 import org.neo4j.logging.InternalLog;
+import org.neo4j.monitoring.ExceptionHandlerService;
 
 public class DatabaseManagementServiceImpl implements DatabaseManagementService {
     private final DatabaseContextProvider<?> databaseContextProvider;
@@ -52,6 +50,7 @@ public class DatabaseManagementServiceImpl implements DatabaseManagementService 
     private final GlobalTransactionEventListeners transactionEventListeners;
     private final InternalLog log;
     private final Config globalConfig;
+    private final ExceptionHandlerService exceptionHandlerService;
 
     public DatabaseManagementServiceImpl(
             DatabaseContextProvider<?> databaseContextProvider,
@@ -59,13 +58,15 @@ public class DatabaseManagementServiceImpl implements DatabaseManagementService 
             DatabaseEventListeners databaseEventListeners,
             GlobalTransactionEventListeners transactionEventListeners,
             InternalLog log,
-            Config globalConfig) {
+            Config globalConfig,
+            ExceptionHandlerService exceptionHandlerService) {
         this.databaseContextProvider = databaseContextProvider;
         this.globalLife = globalLife;
         this.databaseEventListeners = databaseEventListeners;
         this.transactionEventListeners = transactionEventListeners;
         this.log = log;
         this.globalConfig = globalConfig;
+        this.exceptionHandlerService = exceptionHandlerService;
     }
 
     @Override
@@ -75,7 +76,7 @@ public class DatabaseManagementServiceImpl implements DatabaseManagementService 
                 .getByName(name)
                 .flatMap(databaseContextProvider::getDatabaseContext)
                 .map(DatabaseContext::databaseFacade)
-                .orElseThrow(() -> new DatabaseNotFoundException(name));
+                .orElseThrow(() -> DatabaseNotFoundHelper.databaseDoesNotExist(name));
     }
 
     @Override
@@ -152,20 +153,16 @@ public class DatabaseManagementServiceImpl implements DatabaseManagementService 
         } catch (Exception throwable) {
             String message = "Shutdown failed";
             log.error(message, throwable);
+            exceptionHandlerService.raiseException(message, throwable);
             throw new RuntimeException(message, throwable);
         }
     }
 
     private void systemDatabaseExecute(String query, Map<String, Object> parameters) {
         try {
-            GraphDatabaseAPI database = (GraphDatabaseAPI) database(SYSTEM_DATABASE_NAME);
-            try (InternalTransaction transaction =
-                    database.beginTransaction(KernelTransaction.Type.EXPLICIT, LoginContext.AUTH_DISABLED)) {
-                transaction.execute(query, parameters);
-                transaction.commit();
-            }
+            database(SYSTEM_DATABASE_NAME).executeTransactionally(query, parameters);
         } catch (QueryExecutionException e) {
-            throw new DatabaseManagementException((Throwable) e);
+            throw DatabaseManagementHelper.wrapError(e);
         }
     }
 

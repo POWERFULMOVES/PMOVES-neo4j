@@ -30,9 +30,11 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import org.eclipse.collections.api.set.ImmutableSet;
 import org.neo4j.batchimport.api.AdditionalInitialIds;
 import org.neo4j.batchimport.api.BatchImporter;
+import org.neo4j.batchimport.api.BatchImporter.HardwareValidation;
 import org.neo4j.batchimport.api.Configuration;
 import org.neo4j.batchimport.api.IncrementalBatchImporter;
 import org.neo4j.batchimport.api.IndexImporterFactory;
@@ -40,12 +42,13 @@ import org.neo4j.batchimport.api.Monitor;
 import org.neo4j.batchimport.api.ReadBehaviour;
 import org.neo4j.batchimport.api.input.Collector;
 import org.neo4j.batchimport.api.input.Input;
+import org.neo4j.common.DependencyResolver;
 import org.neo4j.configuration.Config;
 import org.neo4j.consistency.checking.ConsistencyCheckIncompleteException;
+import org.neo4j.consistency.checking.ConsistencyCheckMonitor;
 import org.neo4j.consistency.checking.ConsistencyFlags;
 import org.neo4j.consistency.report.ConsistencySummaryStatistics;
 import org.neo4j.dbms.database.readonly.DatabaseReadOnlyChecker;
-import org.neo4j.function.ThrowingSupplier;
 import org.neo4j.index.internal.gbptree.RecoveryCleanupWorkCollector;
 import org.neo4j.internal.id.IdGeneratorFactory;
 import org.neo4j.internal.schema.IndexConfigCompleter;
@@ -59,23 +62,29 @@ import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.impl.muninn.VersionStorage;
 import org.neo4j.io.pagecache.prefetch.PagePrefetcher;
 import org.neo4j.io.pagecache.tracing.PageCacheTracer;
-import org.neo4j.kernel.KernelVersionRepository;
+import org.neo4j.kernel.DatabaseCreationOptions;
+import org.neo4j.kernel.KernelVersionProvider;
 import org.neo4j.kernel.api.index.IndexProvidersAccess;
 import org.neo4j.kernel.impl.api.index.IndexProviderMap;
 import org.neo4j.kernel.impl.locking.LockManager;
-import org.neo4j.kernel.impl.transaction.log.LogTailLogVersionsMetadata;
-import org.neo4j.kernel.impl.transaction.log.LogTailMetadata;
+import org.neo4j.kernel.impl.locking.LockMonitor;
 import org.neo4j.lock.LockService;
 import org.neo4j.logging.InternalLog;
 import org.neo4j.logging.InternalLogProvider;
 import org.neo4j.logging.internal.LogService;
 import org.neo4j.memory.MemoryTracker;
 import org.neo4j.monitoring.DatabaseHealth;
+import org.neo4j.monitoring.ExceptionHandlerService;
 import org.neo4j.scheduler.JobScheduler;
+import org.neo4j.storageengine.OperationMode;
+import org.neo4j.storageengine.VectorStoreCreator;
 import org.neo4j.storageengine.migration.SchemaRuleMigrationAccessExtended;
 import org.neo4j.storageengine.migration.StoreMigrationParticipant;
 import org.neo4j.time.SystemNanoClock;
 import org.neo4j.token.TokenHolders;
+import org.neo4j.wal.LogTailLogVersionsMetadata;
+import org.neo4j.wal.LogTailMetadata;
+import org.neo4j.wal.LogTailMetadataFactory;
 
 public class DelegatingStorageEngineFactory implements StorageEngineFactory {
     private final StorageEngineFactory delegate;
@@ -127,7 +136,8 @@ public class DelegatingStorageEngineFactory implements StorageEngineFactory {
             MemoryTracker memoryTracker,
             PageCacheTracer pageCacheTracer,
             CursorContextFactory contextFactory,
-            boolean forceBtreeIndexesToRange) {
+            boolean forceBtreeIndexesToRange,
+            long maxOffHeapMemory) {
         return delegate.migrationParticipants(
                 fs,
                 config,
@@ -137,7 +147,8 @@ public class DelegatingStorageEngineFactory implements StorageEngineFactory {
                 memoryTracker,
                 pageCacheTracer,
                 contextFactory,
-                forceBtreeIndexesToRange);
+                forceBtreeIndexesToRange,
+                maxOffHeapMemory);
     }
 
     @Override
@@ -154,16 +165,22 @@ public class DelegatingStorageEngineFactory implements StorageEngineFactory {
             LockService lockService,
             IdGeneratorFactory idGeneratorFactory,
             DatabaseHealth databaseHealth,
+            JobScheduler jobScheduler,
             InternalLogProvider internalLogProvider,
             InternalLogProvider userLogProvider,
             RecoveryCleanupWorkCollector recoveryCleanupWorkCollector,
-            LogTailMetadata logTailMetadata,
-            KernelVersionRepository kernelVersionRepository,
+            LogMetadataProvider logMetadataProvider,
             MemoryTracker memoryTracker,
             CursorContextFactory contextFactory,
             PageCacheTracer pageCacheTracer,
             VersionStorage versionStorage,
-            PagePrefetcher pagePrefetcher)
+            PagePrefetcher pagePrefetcher,
+            DependencyResolver databaseDependencies,
+            ExceptionHandlerService exceptionHandlerService,
+            OperationMode mode,
+            VectorStoreCreator vectorStoreCreator,
+            DatabaseCreationOptions databaseCreationOptions,
+            boolean singleThreadedApply)
             throws IOException {
         return delegate.instantiate(
                 fs,
@@ -178,16 +195,22 @@ public class DelegatingStorageEngineFactory implements StorageEngineFactory {
                 lockService,
                 idGeneratorFactory,
                 databaseHealth,
+                jobScheduler,
                 internalLogProvider,
                 userLogProvider,
                 recoveryCleanupWorkCollector,
-                logTailMetadata,
-                kernelVersionRepository,
+                logMetadataProvider,
                 memoryTracker,
                 contextFactory,
                 pageCacheTracer,
                 versionStorage,
-                pagePrefetcher);
+                pagePrefetcher,
+                databaseDependencies,
+                exceptionHandlerService,
+                mode,
+                vectorStoreCreator,
+                databaseCreationOptions,
+                singleThreadedApply);
     }
 
     @Override
@@ -207,13 +230,13 @@ public class DelegatingStorageEngineFactory implements StorageEngineFactory {
     }
 
     @Override
-    public boolean supportedFormat(String format, boolean includeFormatsUnderDevelopment) {
-        return delegate.supportedFormat(format, includeFormatsUnderDevelopment);
+    public boolean supportedFormat(String format) {
+        return delegate.supportedFormat(format);
     }
 
     @Override
-    public Set<String> supportedFormats(boolean includeFormatsUnderDevelopment) {
-        return delegate.supportedFormats(includeFormatsUnderDevelopment);
+    public Set<String> supportedFormats(boolean includeDevelopmentFormats) {
+        return delegate.supportedFormats(includeDevelopmentFormats);
     }
 
     @Override
@@ -222,9 +245,8 @@ public class DelegatingStorageEngineFactory implements StorageEngineFactory {
     }
 
     @Override
-    public StoreFormatLimits limitsForFormat(String formatName, boolean includeFormatsUnderDevelopment)
-            throws IllegalStateException {
-        return delegate.limitsForFormat(formatName, includeFormatsUnderDevelopment);
+    public StoreFormatLimits limitsForFormat(String formatName) throws IllegalStateException {
+        return delegate.limitsForFormat(formatName);
     }
 
     @Override
@@ -251,33 +273,10 @@ public class DelegatingStorageEngineFactory implements StorageEngineFactory {
             PageCache pageCache,
             DatabaseReadOnlyChecker readOnlyChecker,
             CursorContextFactory contextFactory,
-            LogTailLogVersionsMetadata logTailMetadata,
             PageCacheTracer pageCacheTracer)
             throws IOException {
         return delegate.transactionMetaDataStore(
-                fs,
-                databaseLayout,
-                config,
-                pageCache,
-                readOnlyChecker,
-                contextFactory,
-                logTailMetadata,
-                pageCacheTracer);
-    }
-
-    @Override
-    public void resetMetadata(
-            FileSystemAbstraction fs,
-            DatabaseLayout databaseLayout,
-            Config config,
-            PageCache pageCache,
-            CursorContextFactory contextFactory,
-            PageCacheTracer pageCacheTracer,
-            StoreId storeId,
-            UUID externalStoreId)
-            throws IOException {
-        delegate.resetMetadata(
-                fs, databaseLayout, config, pageCache, contextFactory, pageCacheTracer, storeId, externalStoreId);
+                fs, databaseLayout, config, pageCache, readOnlyChecker, contextFactory, pageCacheTracer);
     }
 
     @Override
@@ -354,8 +353,12 @@ public class DelegatingStorageEngineFactory implements StorageEngineFactory {
 
     @Override
     public StorageFilesState checkStoreFileState(
-            FileSystemAbstraction fs, DatabaseLayout databaseLayout, PageCache pageCache) {
-        return delegate.checkStoreFileState(fs, databaseLayout, pageCache);
+            FileSystemAbstraction fs,
+            DatabaseLayout databaseLayout,
+            PageCache pageCache,
+            KernelVersionProvider kernelVersionProvider,
+            boolean isDirty) {
+        return delegate.checkStoreFileState(fs, databaseLayout, pageCache, kernelVersionProvider, isDirty);
     }
 
     @Override
@@ -377,12 +380,14 @@ public class DelegatingStorageEngineFactory implements StorageEngineFactory {
     public BatchImporter batchImporter(
             DatabaseLayout databaseLayout,
             FileSystemAbstraction fileSystem,
+            boolean overwriteExistingDatabases,
             PageCacheTracer pageCacheTracer,
             Configuration config,
             LogService logService,
             PrintStream progressOutput,
             boolean verboseProgressOutput,
             AdditionalInitialIds additionalInitialIds,
+            LogTailMetadataFactory logTailMetadataFactory,
             Config dbConfig,
             Monitor monitor,
             JobScheduler jobScheduler,
@@ -390,16 +395,23 @@ public class DelegatingStorageEngineFactory implements StorageEngineFactory {
             LogFilesInitializer logFilesInitializer,
             IndexImporterFactory indexImporterFactory,
             MemoryTracker memoryTracker,
-            CursorContextFactory contextFactory) {
+            CursorContextFactory contextFactory,
+            Supplier<IndexProvidersAccess> indexProvidersAccess,
+            int numShards,
+            DependencyResolver storageSpecificArguments,
+            DatabaseCreationOptions databaseCreationOptions,
+            HardwareValidation hardwareValidation) {
         return delegate.batchImporter(
                 databaseLayout,
                 fileSystem,
+                overwriteExistingDatabases,
                 pageCacheTracer,
                 config,
                 logService,
                 progressOutput,
                 verboseProgressOutput,
                 additionalInitialIds,
+                logTailMetadataFactory,
                 dbConfig,
                 monitor,
                 jobScheduler,
@@ -407,7 +419,12 @@ public class DelegatingStorageEngineFactory implements StorageEngineFactory {
                 logFilesInitializer,
                 indexImporterFactory,
                 memoryTracker,
-                contextFactory);
+                contextFactory,
+                indexProvidersAccess,
+                numShards,
+                storageSpecificArguments,
+                databaseCreationOptions,
+                hardwareValidation);
     }
 
     @Override
@@ -444,8 +461,7 @@ public class DelegatingStorageEngineFactory implements StorageEngineFactory {
             LogService logService,
             PrintStream progressOutput,
             boolean verboseProgressOutput,
-            AdditionalInitialIds additionalInitialIds,
-            ThrowingSupplier<LogTailMetadata, IOException> logTailMetadataSupplier,
+            LogTailMetadataFactory logTailMetadataFactory,
             Config dbConfig,
             Monitor monitor,
             JobScheduler jobScheduler,
@@ -454,7 +470,9 @@ public class DelegatingStorageEngineFactory implements StorageEngineFactory {
             IndexImporterFactory indexImporterFactory,
             MemoryTracker memoryTracker,
             CursorContextFactory contextFactory,
-            IndexProvidersAccess indexProvidersAccess) {
+            Supplier<IndexProvidersAccess> indexProvidersAccess,
+            int numShards,
+            DependencyResolver storageSpecificArguments) {
         return delegate.incrementalBatchImporter(
                 databaseLayout,
                 fileSystem,
@@ -463,8 +481,7 @@ public class DelegatingStorageEngineFactory implements StorageEngineFactory {
                 logService,
                 progressOutput,
                 verboseProgressOutput,
-                additionalInitialIds,
-                logTailMetadataSupplier,
+                logTailMetadataFactory,
                 dbConfig,
                 monitor,
                 jobScheduler,
@@ -473,12 +490,19 @@ public class DelegatingStorageEngineFactory implements StorageEngineFactory {
                 indexImporterFactory,
                 memoryTracker,
                 contextFactory,
-                indexProvidersAccess);
+                indexProvidersAccess,
+                numShards,
+                storageSpecificArguments);
     }
 
     @Override
-    public LockManager createLockManager(Config config, SystemNanoClock clock) {
-        return delegate.createLockManager(config, clock);
+    public boolean supportsVectorData() {
+        return delegate.supportsVectorData();
+    }
+
+    @Override
+    public LockManager createLockManager(Config config, SystemNanoClock clock, LockMonitor lockMonitor) {
+        return delegate.createLockManager(config, clock, lockMonitor);
     }
 
     @Override
@@ -505,7 +529,8 @@ public class DelegatingStorageEngineFactory implements StorageEngineFactory {
             CursorContextFactory contextFactory,
             PageCacheTracer pageCacheTracer,
             LogTailMetadata logTailMetadata,
-            MemoryTracker memoryTracker)
+            MemoryTracker memoryTracker,
+            ConsistencyCheckMonitor monitor)
             throws ConsistencyCheckIncompleteException {
         delegate.consistencyCheck(
                 fileSystem,
@@ -524,7 +549,13 @@ public class DelegatingStorageEngineFactory implements StorageEngineFactory {
                 contextFactory,
                 pageCacheTracer,
                 logTailMetadata,
-                memoryTracker);
+                memoryTracker,
+                monitor);
+    }
+
+    @Override
+    public boolean multiVersioned() {
+        return delegate.multiVersioned();
     }
 
     @Override
@@ -534,7 +565,8 @@ public class DelegatingStorageEngineFactory implements StorageEngineFactory {
     }
 
     @Override
-    public StorageEngineFactory unwrap() {
-        return delegate.unwrap();
+    public RecoveryBehavior recoveryBehavior(
+            FileSystemAbstraction fs, PageCache pageCache, DatabaseLayout layout, CursorContextFactory contextFactory) {
+        return delegate.recoveryBehavior(fs, pageCache, layout, contextFactory);
     }
 }

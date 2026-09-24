@@ -78,10 +78,10 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.neo4j.bolt.protocol.common.connector.transport.NioConnectorTransport;
 import org.neo4j.bolt.testing.assertions.BoltConnectionAssertions;
 import org.neo4j.bolt.testing.client.BoltTestConnection;
 import org.neo4j.bolt.testing.client.SocketConnection;
-import org.neo4j.bolt.testing.messages.BoltDefaultWire;
 import org.neo4j.bolt.testing.messages.BoltWire;
 import org.neo4j.configuration.connectors.HttpConnector;
 import org.neo4j.configuration.connectors.HttpsConnector;
@@ -118,7 +118,7 @@ class ConnectionTrackingIT {
     private final Set<BoltTestConnection> connections = ConcurrentHashMap.newKeySet();
     private final Set<HttpClient> httpClients = ConcurrentHashMap.newKeySet();
 
-    private final BoltWire wire = new BoltDefaultWire();
+    private final BoltWire wire = BoltWire.latest();
 
     @Inject
     private TestDirectory dir;
@@ -361,7 +361,11 @@ class ConnectionTrackingIT {
     }
 
     private BoltTestConnection connectSocketTo(URI uri) throws IOException {
-        var connection = new SocketConnection(new InetSocketAddress(uri.getHost(), uri.getPort())).connect();
+        var connection = new SocketConnection(
+                        new NioConnectorTransport(),
+                        BoltWire.latest(),
+                        new InetSocketAddress(uri.getHost(), uri.getPort()))
+                .connect();
 
         connections.add(connection);
 

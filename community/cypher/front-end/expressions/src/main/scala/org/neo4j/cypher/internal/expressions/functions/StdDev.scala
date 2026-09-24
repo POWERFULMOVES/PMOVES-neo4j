@@ -20,9 +20,9 @@ import org.neo4j.cypher.internal.expressions.FunctionTypeSignature
 import org.neo4j.cypher.internal.util.symbols.CTFloat
 
 case object StdDev extends AggregatingFunction {
-  def name = "stdev"
+  def name = "stDev"
 
-  override val signatures = Vector(
+  override val signatures: Vector[FunctionTypeSignature] = Vector(
     FunctionTypeSignature(
       this,
       names = Vector("input"),

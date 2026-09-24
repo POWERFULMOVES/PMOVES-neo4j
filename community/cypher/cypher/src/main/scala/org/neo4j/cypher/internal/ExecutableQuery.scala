@@ -20,7 +20,9 @@
 package org.neo4j.cypher.internal
 
 import org.neo4j.common.EntityType
+import org.neo4j.cypher.internal.preparser.QueryOptions
 import org.neo4j.cypher.internal.runtime.InputDataStream
+import org.neo4j.cypher.internal.runtime.QueryRuntimeConfig
 import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.graphdb.ExecutionPlanDescription
 import org.neo4j.kernel.api.query.CompilerInfo
@@ -54,6 +56,7 @@ trait ExecutableQuery extends CacheabilityInfo {
    * @param input                          stream of existing records as input
    * @param queryMonitor                   monitor to submit query events to
    * @param subscriber                     The subscriber where results should be streamed to.
+   * @param queryConfig                    The runtime-specific configuration of this query.
    * @return the QueryExecution that controls the demand to the subscriber
    */
   def execute(
@@ -64,7 +67,8 @@ trait ExecutableQuery extends CacheabilityInfo {
     prePopulateResults: Boolean,
     input: InputDataStream,
     queryMonitor: QueryExecutionMonitor,
-    subscriber: QuerySubscriber
+    subscriber: QuerySubscriber,
+    queryConfig: QueryRuntimeConfig
   ): QueryExecution
 
   /**
@@ -91,17 +95,25 @@ trait ExecutableQuery extends CacheabilityInfo {
    * Returns label ids paired with the properties of the indexes used by this executable query, excluding lookup indexes.
    * Precomputed to reduce execution latency for very fast queries.
    */
-  val labelIdsOfUsedIndexes: Map[Long, Array[Int]] = compilerInfo.indexes().asScala
-    .collect { case item: SchemaIndexUsage => item.getLabelId.toLong -> item.getPropertyKeys }
-    .toMap
+  val labelIndexIdsOfUsedIndexes: Set[IndexIds] = compilerInfo.indexes().asScala
+    .collect { case item: SchemaIndexUsage => IndexIds(item.getLabelIds.map(_.toLong), item.getPropertyKeyIds) }
+    .toSet
 
   /**
    * Returns the relationship type id paired with the property keys of the indexes used by this executable query, excluding lookup indexes.
    * Precomputed to reduce execution latency for very fast queries.
    */
-  val relationshipsOfUsedIndexes: Map[Long, Array[Int]] = compilerInfo.relationshipTypeIndexes().asScala
-    .collect { case item: RelationshipTypeIndexUsage => (item.getRelationshipTypeId.toLong -> item.getPropertyKeyIds) }
-    .toMap
+  val relationshipIndexIdsOfUsedIndexes: Set[IndexIds] = compilerInfo.relationshipTypeIndexes().asScala
+    .collect { case item: RelationshipTypeIndexUsage =>
+      IndexIds(item.getRelationshipTypeIds.map(_.toLong), item.getPropertyKeyIds)
+    }
+    .toSet
+
+  val semanticNodeIndexesUsed: Set[SchemaIndexUsage] =
+    compilerInfo.semanticNodeIndexes().asScala.toSet
+
+  val semanticRelationshipIndexesUsed: Set[RelationshipTypeIndexUsage] =
+    compilerInfo.semanticRelationshipIndexes().asScala.toSet
 
   /**
    * Lookup entity types used by this executable query.

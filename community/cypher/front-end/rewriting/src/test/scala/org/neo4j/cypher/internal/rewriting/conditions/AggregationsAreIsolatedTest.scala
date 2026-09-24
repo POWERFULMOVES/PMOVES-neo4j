@@ -26,22 +26,22 @@ import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 
 class AggregationsAreIsolatedTest extends CypherFunSuite with AstConstructionTestSupport {
 
-  private val condition: Any => Seq[String] = aggregationsAreIsolated(_)(CancellationChecker.NeverCancelled)
+  private val condition: Any => Seq[String] = AggregationsAreIsolated(_)(CancellationChecker.NeverCancelled)
 
   test("happy when aggregation are top level in expressions") {
-    val ast = CountStar() _
+    val ast = CountStar()(pos)
 
     condition(ast) shouldBe empty
   }
 
   test("unhappy when aggregation is sub-expression of the expressions") {
-    val ast = equals(CountStar() _, literalUnsignedInt(42))
+    val ast = equals(CountStar()(pos), literalUnsignedInt(42))
 
     condition(ast) should equal(Seq(s"Expression $ast contains child expressions which are aggregations"))
   }
 
   test("unhappy when aggregations are both top-level and sub-expression of the expression") {
-    val innerEquals = equals(CountStar() _, literalUnsignedInt(42))
+    val innerEquals = equals(CountStar()(pos), literalUnsignedInt(42))
     val ast = count(innerEquals)
 
     condition(ast) should equal(Seq(s"Expression $innerEquals contains child expressions which are aggregations"))
@@ -61,7 +61,7 @@ class AggregationsAreIsolatedTest extends CypherFunSuite with AstConstructionTes
       singleQuery(match_(nodePat(Some("x"))), return_(varFor("n").as("n")))
     )(pos, None, None)
 
-    val l = listOf(fe, CountStar() _)
+    val l = listOf(fe, CountStar()(pos))
 
     condition(l) should equal(Seq(s"Expression $l contains child expressions which are aggregations"))
   }
@@ -71,7 +71,7 @@ class AggregationsAreIsolatedTest extends CypherFunSuite with AstConstructionTes
       singleQuery(match_(nodePat(Some("x"))), return_(varFor("n").as("n")))
     )(pos, None, None)
 
-    val l = listOf(CountStar() _, fe)
+    val l = listOf(CountStar()(pos), fe)
 
     condition(l) should equal(Seq(s"Expression $l contains child expressions which are aggregations"))
   }
@@ -90,7 +90,7 @@ class AggregationsAreIsolatedTest extends CypherFunSuite with AstConstructionTes
       singleQuery(match_(nodePat(Some("x"))), return_(varFor("n").as("n")))
     )(pos, None, None)
 
-    val l = listOf(fe, CountStar() _)
+    val l = listOf(fe, CountStar()(pos))
 
     condition(l) should equal(Seq(s"Expression $l contains child expressions which are aggregations"))
   }
@@ -100,7 +100,7 @@ class AggregationsAreIsolatedTest extends CypherFunSuite with AstConstructionTes
       singleQuery(match_(nodePat(Some("x"))), return_(varFor("n").as("n")))
     )(pos, None, None)
 
-    val l = listOf(CountStar() _, fe)
+    val l = listOf(CountStar()(pos), fe)
 
     condition(l) should equal(Seq(s"Expression $l contains child expressions which are aggregations"))
   }
@@ -119,7 +119,7 @@ class AggregationsAreIsolatedTest extends CypherFunSuite with AstConstructionTes
       singleQuery(match_(nodePat(Some("x"))), return_(varFor("n").as("n")))
     )(pos, None, None)
 
-    val l = listOf(fe, CountStar() _)
+    val l = listOf(fe, CountStar()(pos))
 
     condition(l) should equal(Seq(s"Expression $l contains child expressions which are aggregations"))
   }
@@ -129,7 +129,7 @@ class AggregationsAreIsolatedTest extends CypherFunSuite with AstConstructionTes
       singleQuery(match_(nodePat(Some("x"))), return_(varFor("n").as("n")))
     )(pos, None, None)
 
-    val l = listOf(CountStar() _, fe)
+    val l = listOf(CountStar()(pos), fe)
 
     condition(l) should equal(Seq(s"Expression $l contains child expressions which are aggregations"))
   }

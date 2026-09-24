@@ -27,6 +27,7 @@ import org.neo4j.cypher.internal.runtime.spec.Edition
 import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSupport
+import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSupport.WorkloadMode
 import org.neo4j.exceptions.EntityNotFoundException
 import org.neo4j.graphdb.GraphDatabaseService
 import org.neo4j.kernel.database.DatabaseIdFactory
@@ -45,6 +46,8 @@ import org.neo4j.values.storable.Values
 import org.neo4j.values.virtual.MapValue
 
 import java.util.UUID
+
+object RunQueryAtTestBase
 
 abstract class RunQueryAtTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
@@ -77,7 +80,7 @@ abstract class RunQueryAtTestBase[CONTEXT <: RuntimeContext](
     graphDb: GraphDatabaseService,
     edition: Edition[CONTEXT],
     runtime: CypherRuntime[CONTEXT],
-    workloadMode: Boolean,
+    workloadMode: WorkloadMode,
     logProvider: InternalLogProvider
   ): RuntimeTestSupport[CONTEXT] = {
     new RuntimeTestSupport[CONTEXT](graphDb, edition, runtime, workloadMode, logProvider, debugOptions) {
@@ -88,7 +91,7 @@ abstract class RunQueryAtTestBase[CONTEXT <: RuntimeContext](
               def transactionFor(databaseReference: DatabaseReference)
                 : ConstituentTransactionFactory.ConstituentTransaction =
                 (query: String, parameters: MapValue, querySubscriber: QuerySubscriber) => {
-                  val ex = stubbedExecution.apply(query, parameters)
+                  val ex = stubbedExecution.apply((query, parameters))
                   ex.subscriber = querySubscriber
                   ex
                 }
@@ -121,7 +124,8 @@ abstract class RunQueryAtTestBase[CONTEXT <: RuntimeContext](
       new NormalizedDatabaseName(alias),
       new NormalizedDatabaseName("composite"),
       Mockito.mock(classOf[RemoteUri]),
-      id
+      id,
+      false
     )
 
   test("should forward results from a remote constituent") {

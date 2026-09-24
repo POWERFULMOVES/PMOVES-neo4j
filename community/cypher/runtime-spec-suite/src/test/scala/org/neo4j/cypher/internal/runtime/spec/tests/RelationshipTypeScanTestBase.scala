@@ -29,11 +29,12 @@ import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RecordingRuntimeResult
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.graphdb.RelationshipType
-import org.neo4j.internal.schema.AnyTokenSchemaDescriptor
 import org.neo4j.internal.schema.IndexType
 import org.neo4j.kernel.impl.coreapi.schema.IndexDefinitionImpl
 
 import scala.util.Using
+
+object RelationshipTypeScanTestBase
 
 abstract class RelationshipTypeScanTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
@@ -244,7 +245,7 @@ abstract class RelationshipTypeScanTestBase[CONTEXT <: RuntimeContext](
   }
 
   test("directed relationship scan should use ascending index order when provided") {
-    assume(RelationshipTypeIndexIsOrdered && !isParallel)
+    assume(relationshipTypeIndexIsOrdered && !isParallel)
     // given
     val nNodes = Math.sqrt(sizeHint).ceil.toInt
     val (_, _, relationships, _) = givenGraph {
@@ -271,7 +272,7 @@ abstract class RelationshipTypeScanTestBase[CONTEXT <: RuntimeContext](
 
   test("directed relationship scan should use descending index order when provided") {
     // parallel does not maintain order
-    assume(RelationshipTypeIndexIsOrdered && !isParallel)
+    assume(relationshipTypeIndexIsOrdered && !isParallel)
     // given
     val nNodes = Math.sqrt(sizeHint).ceil.toInt
     val (_, _, relationships, _) = givenGraph {
@@ -297,7 +298,7 @@ abstract class RelationshipTypeScanTestBase[CONTEXT <: RuntimeContext](
   }
 
   test("undirected relationship scan should use ascending index order when provided") {
-    assume(RelationshipTypeIndexIsOrdered && !isParallel)
+    assume(relationshipTypeIndexIsOrdered && !isParallel)
     // given
     val nNodes = Math.sqrt(sizeHint).ceil.toInt
     val (_, _, relationships, _) = givenGraph {
@@ -323,7 +324,7 @@ abstract class RelationshipTypeScanTestBase[CONTEXT <: RuntimeContext](
   }
 
   test("undirected relationship scan should use descending index order when provided") {
-    assume(RelationshipTypeIndexIsOrdered && !isParallel)
+    assume(relationshipTypeIndexIsOrdered && !isParallel)
     // given
     val nNodes = Math.sqrt(sizeHint).ceil.toInt
     val (_, _, relationships, _) = givenGraph {
@@ -359,7 +360,7 @@ abstract class RelationshipTypeScanTestBase[CONTEXT <: RuntimeContext](
       .produceResults("r")
       .nonFuseable()
       .unwind(s"range(1, 10) AS r2")
-      .relationshipTypeScan("(n)-[r:R]-(m)")
+      .relationshipTypeScan("()-[r:R]-()")
       .build()
 
     // then
@@ -377,29 +378,29 @@ abstract class RelationshipTypeScanTestBase[CONTEXT <: RuntimeContext](
     // when
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("r")
-      .relationshipTypeScan("(n)-[r:R]-(m)")
+      .relationshipTypeScan("()-[r:R]-()")
       .build()
 
     execute(logicalQuery, runtime) should beColumns("r").withSingleRow(rel)
   }
 
-  private def RelationshipTypeIndexIsOrdered: Boolean = {
+  private def relationshipTypeIndexIsOrdered: Boolean = {
+    // No boundary/break here: Using.apply wraps the body in Try, which would swallow boundary.Break
+    var supportsOrdering: Option[Boolean] = None
     Using(graphDb.beginTx) { tx =>
       {
         tx.schema.getIndexes.forEach({ id =>
           {
             val index = id.asInstanceOf[IndexDefinitionImpl].getIndexReference
             if (
-              index.schema.isSchemaDescriptorType(
-                classOf[AnyTokenSchemaDescriptor]
-              ) && (index.schema.entityType eq EntityType.RELATIONSHIP) && (index.getIndexType eq IndexType.LOOKUP)
+              supportsOrdering.isEmpty && index.schema.isAnyTokenSchemaDescriptor && (index.schema.entityType eq EntityType.RELATIONSHIP) && (index.getIndexType eq IndexType.LOOKUP)
             ) {
-              return index.getCapability.supportsOrdering()
+              supportsOrdering = Some(index.getCapability.supportsOrdering())
             }
           }
         })
       }
     }
-    fail("Didn't find the relationship type token index")
+    supportsOrdering.getOrElse(fail("Didn't find the relationship type token index"))
   }
 }

@@ -34,26 +34,29 @@ import java.util.List;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.configuration.Config;
 import org.neo4j.gis.spatial.index.curves.SpaceFillingCurve;
 import org.neo4j.internal.kernel.api.PropertyIndexQuery;
+import org.neo4j.internal.kernel.api.PropertyIndexQuery.BoundingBoxPredicate;
 import org.neo4j.internal.kernel.api.QueryContext;
 import org.neo4j.internal.kernel.api.exceptions.schema.IndexNotApplicableKernelException;
 import org.neo4j.internal.schema.IndexDescriptor;
 import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
+import org.neo4j.io.pagecache.context.CursorContext;
 import org.neo4j.io.pagecache.context.CursorContextFactory;
 import org.neo4j.io.pagecache.tracing.DefaultPageCacheTracer;
 import org.neo4j.kernel.api.exceptions.index.IndexEntryConflictException;
 import org.neo4j.kernel.api.index.IndexReader;
+import org.neo4j.kernel.api.index.ValueIndexReader;
 import org.neo4j.kernel.impl.api.index.IndexUpdateMode;
 import org.neo4j.kernel.impl.index.schema.config.IndexSpecificSpaceFillingCurveSettings;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
 import org.neo4j.storageengine.api.schema.SimpleEntityValueClient;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.extension.pagecache.PageCacheExtension;
 import org.neo4j.test.utils.TestDirectory;
 import org.neo4j.values.storable.CoordinateReferenceSystem;
@@ -62,7 +65,7 @@ import org.neo4j.values.storable.Value;
 import org.neo4j.values.storable.Values;
 
 @PageCacheExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 abstract class BaseAccessorTilesTest<KEY extends NativeIndexKey<KEY>> {
     private static final CoordinateReferenceSystem crs = CoordinateReferenceSystem.WGS_84;
     private static final Config config = Config.defaults();
@@ -121,7 +124,7 @@ abstract class BaseAccessorTilesTest<KEY extends NativeIndexKey<KEY>> {
         double yWidthMultiplier = curve.getTileWidth(1, curve.getMaxLevel()) / 2;
 
         List<Value> pointValues = new ArrayList<>();
-        List<IndexEntryUpdate<IndexDescriptor>> updates = new ArrayList<>();
+        List<IndexEntryUpdate> updates = new ArrayList<>();
         long nodeId = 1;
         for (int i = 0; i < nbrOfValues / 4; i++) {
             double x1 = (random.nextDouble() * 2 - 1) * xWidthMultiplier;
@@ -194,14 +197,14 @@ abstract class BaseAccessorTilesTest<KEY extends NativeIndexKey<KEY>> {
         int nbrOfValues = 10_000;
 
         List<PointValue> pointsInside = new ArrayList<>();
-        List<IndexEntryUpdate<IndexDescriptor>> updates = new ArrayList<>();
+        List<IndexEntryUpdate> updates = new ArrayList<>();
 
         for (int i = 0; i < nbrOfValues; i++) {
             double distanceMultiplier = random.nextDouble() * 2;
             PointValue point =
                     Values.pointValue(WGS_84, searchStart[0] + distanceMultiplier * xTileWidth, searchStart[1]);
 
-            updates.add(IndexEntryUpdate.add(0, descriptor, point));
+            updates.add(EagerValueIndexEntryUpdate.add(0, descriptor, point));
 
             if (distanceMultiplier <= 1) {
                 pointsInside.add(point);
@@ -210,12 +213,13 @@ abstract class BaseAccessorTilesTest<KEY extends NativeIndexKey<KEY>> {
 
         processAll(updates);
 
-        try (var indexReader = accessor.newValueReader(NO_USAGE_TRACKING)) {
-            SimpleEntityValueClient client = new SimpleEntityValueClient();
+        try (ValueIndexReader indexReader = accessor.newValueReader(NO_USAGE_TRACKING);
+                SimpleEntityValueClient client = new SimpleEntityValueClient()) {
 
-            var boundingBox = PropertyIndexQuery.boundingBox(
+            BoundingBoxPredicate boundingBox = PropertyIndexQuery.boundingBox(
                     descriptor.schema().getPropertyId(), Values.pointValue(WGS_84, searchStart), limitPoint);
-            indexReader.query(client, QueryContext.NULL_CONTEXT, unorderedValues(), boundingBox);
+            indexReader.query(
+                    client, QueryContext.NULL_CONTEXT, CursorContext.NULL_CONTEXT, unorderedValues(), boundingBox);
 
             List<Value> queryResult = new ArrayList<>();
             while (client.next()) {
@@ -227,13 +231,10 @@ abstract class BaseAccessorTilesTest<KEY extends NativeIndexKey<KEY>> {
     }
 
     private long addPointsToLists(
-            List<Value> pointValues,
-            List<IndexEntryUpdate<IndexDescriptor>> updates,
-            long nodeId,
-            PointValue... values) {
+            List<Value> pointValues, List<IndexEntryUpdate> updates, long nodeId, PointValue... values) {
         for (PointValue value : values) {
             pointValues.add(value);
-            updates.add(IndexEntryUpdate.add(nodeId++, descriptor, value));
+            updates.add(EagerValueIndexEntryUpdate.add(nodeId++, descriptor, value));
         }
         return nodeId;
     }
@@ -248,21 +249,22 @@ abstract class BaseAccessorTilesTest<KEY extends NativeIndexKey<KEY>> {
         }
     }
 
-    void processAll(List<IndexEntryUpdate<IndexDescriptor>> updates) throws IndexEntryConflictException {
+    void processAll(List<IndexEntryUpdate> updates) throws IndexEntryConflictException {
         try (NativeIndexUpdater<KEY> updater = accessor.newUpdater(IndexUpdateMode.ONLINE, NULL_CONTEXT, false)) {
-            for (IndexEntryUpdate<IndexDescriptor> update : updates) {
+            for (IndexEntryUpdate update : updates) {
                 updater.process(update);
             }
         }
     }
 
     void exactMatchOnAllValues(List<Value> values) throws IndexNotApplicableKernelException {
-        try (var indexReader = accessor.newValueReader(NO_USAGE_TRACKING)) {
-            SimpleEntityValueClient client = new SimpleEntityValueClient();
+        try (ValueIndexReader indexReader = accessor.newValueReader(NO_USAGE_TRACKING);
+                SimpleEntityValueClient client = new SimpleEntityValueClient()) {
             for (Value value : values) {
                 PropertyIndexQuery.ExactPredicate exact =
                         PropertyIndexQuery.exact(descriptor.schema().getPropertyId(), value);
-                indexReader.query(client, QueryContext.NULL_CONTEXT, unorderedValues(), exact);
+                indexReader.query(
+                        client, QueryContext.NULL_CONTEXT, CursorContext.NULL_CONTEXT, unorderedValues(), exact);
 
                 // then
                 assertTrue(client.next());

@@ -23,6 +23,6 @@ import org.neo4j.cypher.internal.ir.QueryGraph
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 
 package object idp {
-  type Seed[SolvableItem, Result] = Iterable[((Set[SolvableItem], Boolean), Result)]
+  type Seed[SolvableItem, Result] = Iterable[(SolvableItemWithExtraRequirements[SolvableItem], Result)]
   type ComponentConnectorSolverStep = IDPSolverStep[QueryGraph, LogicalPlan, LogicalPlanningContext]
 }

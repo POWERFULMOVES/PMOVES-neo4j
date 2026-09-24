@@ -24,8 +24,12 @@ import org.neo4j.cypher.internal.RuntimeContext
 import org.neo4j.cypher.internal.runtime.spec.Edition
 import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
+import org.neo4j.cypher.internal.util.test_helpers.GqlExceptionMatchers.cantCoerceException
+import org.neo4j.exceptions.CypherTypeException
 
 import scala.util.Random
+
+object NodeByIdSeekTestBase
 
 abstract class NodeByIdSeekTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
@@ -159,5 +163,75 @@ abstract class NodeByIdSeekTestBase[CONTEXT <: RuntimeContext](
     // then
     val expectedRows = nodes.map(n => Array(n, toFind))
     runtimeResult should beColumns("n", "x").withRows(expectedRows)
+  }
+
+  test("should seek one + property read") {
+    // given
+    val nodes = givenGraph {
+      nodePropertyGraph(
+        sizeHint,
+        {
+          case i: Int => Map("prop" -> i)
+        }
+      )
+    }
+    val chosenIndex = random.nextInt(nodes.length)
+    val toFind = nodes(chosenIndex)
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("x")
+      .filter(s"x.prop = $chosenIndex")
+      .nodeByIdSeek("x", Set.empty, toFind.getId)
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("x").withRows(singleColumn(Seq(toFind)))
+  }
+
+  test("should seek many + property read") {
+    // given
+    val nodes = givenGraph {
+      nodePropertyGraph(
+        sizeHint,
+        {
+          case i: Int => Map("prop" -> i)
+        }
+      )
+    }
+    val chosenIndex1 = random.nextInt(nodes.length)
+    val chosenIndex2 = (chosenIndex1 + 1) % nodes.length
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("x")
+      .filter(s"x.prop IN [$chosenIndex1, $chosenIndex2]")
+      .nodeByIdSeek("x", Set.empty, nodes(chosenIndex1).getId, nodes(chosenIndex2).getId)
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("x").withRows(singleColumn(Seq(nodes(chosenIndex1), nodes(chosenIndex2))))
+  }
+
+  test("should throw the correct type error if nodeIds is not a list") {
+    givenGraph(nodeGraph(1))
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("x")
+      .nodeByIdSeek("x", Set.empty, literalString("foo"))
+      .build()
+
+    val exception = the[CypherTypeException] thrownBy execute(logicalQuery).consume()
+
+    exception should be(cantCoerceException(
+      "Can't coerce `String(\"foo\")` to SequenceValue",
+      "String(\"foo\")",
+      "SequenceValue"
+    ))
   }
 }

@@ -24,6 +24,7 @@ import static org.neo4j.storageengine.api.RelationshipDirection.LOOP;
 import static org.neo4j.storageengine.api.RelationshipDirection.OUTGOING;
 import static org.neo4j.storageengine.api.RelationshipDirection.directionOfStrict;
 
+import org.neo4j.graphdb.TransientTransactionFailureException;
 import org.neo4j.internal.counts.RelationshipGroupDegreesStore;
 import org.neo4j.io.pagecache.PageCursor;
 import org.neo4j.io.pagecache.context.CursorContext;
@@ -74,7 +75,11 @@ class RecordRelationshipTraversalCursor extends RecordRelationshipCursor impleme
     }
 
     @Override
-    public void init(long nodeReference, long reference, RelationshipSelection selection) {
+    public void init(
+            long nodeReference,
+            long reference,
+            RelationshipSelection selection,
+            boolean includeChangesFromThisTransaction) {
         if (reference == LongReference.NULL) {
             resetState();
             return;
@@ -157,6 +162,15 @@ class RecordRelationshipTraversalCursor extends RecordRelationshipCursor impleme
             }
 
             relationshipFull(this, next, pageCursor);
+
+            if (!traversingDenseNode) {
+                // When we start traversing relationships of a sparse node, and that node turns dense in the middle of
+                // the traversal, we need to fail the transaction since we might get missing/double reads now.
+                if (isGuaranteedDense(originNodeReference)) {
+                    throw TransientTransactionFailureException.outdatedRead();
+                }
+            }
+
             computeNext();
             if (tracer != null) {
                 tracer.onRelationship(entityReference());
@@ -290,12 +304,6 @@ class RecordRelationshipTraversalCursor extends RecordRelationshipCursor impleme
     @Override
     public void removeTracer() {
         this.tracer = null;
-    }
-
-    @Override
-    public void setForceLoad() {
-        super.setForceLoad();
-        group.loadMode = loadMode;
     }
 
     @Override

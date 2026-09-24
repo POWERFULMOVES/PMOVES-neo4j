@@ -20,23 +20,36 @@ import com.github.benmanes.caffeine.cache.Cache
 import com.github.benmanes.caffeine.cache.Caffeine
 import org.neo4j.cypher.internal.ast.ASTAnnotationMap
 import org.neo4j.cypher.internal.ast.ASTAnnotationMap.ASTAnnotationMap
+import org.neo4j.cypher.internal.ast.AlterCurrentGraphType
+import org.neo4j.cypher.internal.ast.AlterCurrentGraphType.AlterOperation
+import org.neo4j.cypher.internal.ast.FullSubqueryExpression
 import org.neo4j.cypher.internal.ast.GraphReference
 import org.neo4j.cypher.internal.ast.semantics.Scope.DeclarationsAndDependencies
 import org.neo4j.cypher.internal.ast.semantics.SemanticState.ScopeLocation
+import org.neo4j.cypher.internal.ast.semantics.{ScopeZipper => TopLevelScopeZipper}
 import org.neo4j.cypher.internal.expressions.Expression
+import org.neo4j.cypher.internal.expressions.ExpressionWithComputedDependencies
 import org.neo4j.cypher.internal.expressions.LogicalVariable
+import org.neo4j.cypher.internal.expressions.PatternComprehension
+import org.neo4j.cypher.internal.expressions.PatternExpression
 import org.neo4j.cypher.internal.expressions.Variable
+import org.neo4j.cypher.internal.notification.InternalNotification
 import org.neo4j.cypher.internal.util.ASTNode
 import org.neo4j.cypher.internal.util.CrossCompilation
-import org.neo4j.cypher.internal.util.InternalNotification
+import org.neo4j.cypher.internal.util.InputPosition
 import org.neo4j.cypher.internal.util.Ref
+import org.neo4j.cypher.internal.util.Rewriter
+import org.neo4j.cypher.internal.util.helpers.LazyVal
 import org.neo4j.cypher.internal.util.helpers.TreeElem
-import org.neo4j.cypher.internal.util.helpers.TreeZipper
+import org.neo4j.cypher.internal.util.symbols.CTAny
 import org.neo4j.cypher.internal.util.symbols.CTNode
+import org.neo4j.cypher.internal.util.symbols.CypherType
+import org.neo4j.cypher.internal.util.symbols.MapType
+import org.neo4j.cypher.internal.util.symbols.TypeRange
 import org.neo4j.cypher.internal.util.symbols.TypeSpec
+import org.neo4j.cypher.internal.util.topDown
 
 import scala.collection.immutable.HashMap
-import scala.language.postfixOps
 
 object SymbolUse {
   def apply(variable: LogicalVariable): SymbolUse = SymbolUse(Ref(variable))
@@ -112,30 +125,154 @@ object ExpressionTypeInfo {
    *
    * By caching ExpressionTypeInfo we can reuse instances that e.g. simply express that an Expression is a Boolean.
    * For large and complex queries this can significantly reduce memory consumption.
+   *
+   * A bounded LRU is used so that the cache cannot grow without limit on long-lived JVM processes.
+   * Caffeine is not used under TeaVM (semantic analysis JS build); see [[CrossCompilation.isTeaVM]].
    */
-  private lazy val cache: Cache[(TypeSpec, Option[TypeSpec]), ExpressionTypeInfo] =
-    Caffeine.newBuilder()
-      .maximumSize(100)
-      .build()
+  private def makeCache(): Cache[(TypeSpec, Option[TypeSpec]), ExpressionTypeInfo] = {
+    if (CrossCompilation.isTeaVM()) {
+      null
+    } else {
+      Caffeine
+        .newBuilder()
+        .maximumSize(100)
+        .build[(TypeSpec, Option[TypeSpec]), ExpressionTypeInfo]()
+    }
+  }
+
+  private val cache: LazyVal[Cache[(TypeSpec, Option[TypeSpec]), ExpressionTypeInfo]] = LazyVal(makeCache())
 
   def apply(specified: TypeSpec, expected: Option[TypeSpec] = None): ExpressionTypeInfo =
     if (CrossCompilation.isTeaVM()) {
       new ExpressionTypeInfo(specified, expected)
     } else {
-      cache.get((specified, expected), _ => new ExpressionTypeInfo(specified, expected))
+      cache.value.get((specified, expected), _ => new ExpressionTypeInfo(specified, expected))
     }
 }
 
-final case class ExpressionTypeInfo private (specified: TypeSpec, expected: Option[TypeSpec]) {
-  lazy val actual: TypeSpec = expected.fold(specified)(specified intersectOrCoerce)
+final case class ExpressionTypeInfo(specified: TypeSpec, expected: Option[TypeSpec]) {
+
+  private val actualLazy: LazyVal[TypeSpec] =
+    LazyVal(expected.map(specified intersectOrCoerce _).getOrElse(specified))
+  def actual: TypeSpec = actualLazy.value
+
+  private val actualNoCoercionLazy: LazyVal[TypeSpec] =
+    LazyVal(expected.map(specified intersect _).getOrElse(specified))
+  def actualNoCoercion: TypeSpec = actualNoCoercionLazy.value
 
   def expect(types: TypeSpec): ExpressionTypeInfo = ExpressionTypeInfo(specified, Some(types))
+
+  def rewrite(f: CypherType => CypherType): ExpressionTypeInfo =
+    ExpressionTypeInfo(specified.rewrite(f), expected.map(_.rewrite(f)))
+}
+
+case class MapExtendedType(outerType: MapType, innerTypes: Map[String, TypeSpec], defaultInnerType: TypeSpec)
+    extends CypherType {
+
+  override def parentType: CypherType =
+    outerType
+
+  override def isNullable: Boolean = outerType.isNullable
+
+  override def withIsNullable(isNullable: Boolean): CypherType = {
+    copy(outerType = outerType.withIsNullable(isNullable).asInstanceOf[MapType])
+  }
+
+  override def withPosition(position: InputPosition): CypherType = {
+    copy(outerType = outerType.withPosition(position).asInstanceOf[MapType])
+  }
+
+  override def sortOrder: Int = outerType.sortOrder
+
+  override def toCypherTypeString: String = outerType.toCypherTypeString
+
+  override def toClassString: String = "MapExt"
+
+  override def position: InputPosition = outerType.position
+
+  /**
+   * For an entry in the map, specified by the propertyName, what is the type?
+   */
+  def getEntryType(propertyName: String): TypeSpec =
+    innerTypes.getOrElse(propertyName, defaultInnerType)
+}
+
+object MapExtendedType {
+
+  /**
+   * outerType.invariant but with MapExtendedType as possible sub-type
+   */
+  def getTypeSpec(outerType: MapType, defaultInnerType: TypeSpec = CTAny.covariant): TypeSpec =
+    new TypeSpec(Vector(getTypeRange(outerType, defaultInnerType)))
+
+  def getTypeRange(outerType: MapType, defaultInnerType: TypeSpec = CTAny.covariant): TypeRange =
+    TypeRange(outerType, MapExtendedType(outerType, defaultInnerType))
+
+  def apply(outerType: MapType, defaultInnerType: TypeSpec): MapExtendedType =
+    MapExtendedType(outerType, Map.empty, defaultInnerType)
+
+  def apply(outerType: MapType, innerTypes: Map[String, TypeSpec]): MapExtendedType =
+    MapExtendedType(outerType, innerTypes, CTAny.covariant)
 }
 
 object Scope {
   val empty: Scope = Scope(symbolTable = HashMap.empty, children = Vector())
 
+  implicit def treeZipper: ScopeZipper.type = ScopeZipper
+
   case class DeclarationsAndDependencies(declarations: Set[SymbolUse], dependencies: Set[SymbolUse])
+
+  object DeclarationsAndDependencies {
+
+    /**
+     * [[ExpressionWithComputedDependencies]] do not carry their dependencies directly. Instead, the dependencies are stored in the recorded scopes in the semantic state.
+     *
+     * This rewriter allows to - on the fly - insert the dependencies into the expression. It does skip declarations though.
+     * @see [[computeDependenciesForExpressions]]
+     */
+    def dependenciesRewriter(semanticState: SemanticState): Rewriter =
+      topDown(Rewriter.lift {
+        case x: ExpressionWithComputedDependencies =>
+          val dependencies = getForExpression(semanticState, x).dependencies
+          x.withComputedScopeDependencies(dependencies.map(_.asVariable))
+      })
+
+    def rewriter(semanticState: SemanticState): Rewriter =
+      topDown(Rewriter.lift {
+        case x: ExpressionWithComputedDependencies =>
+          val DeclarationsAndDependencies(declarations, dependencies) =
+            getForExpression(semanticState, x)
+          x.withComputedIntroducedVariables(declarations.map(_.asVariable))
+            .withComputedScopeDependencies(dependencies.map(_.asVariable))
+      })
+
+    private def getForExpression(
+      semanticState: SemanticState,
+      x: ExpressionWithComputedDependencies
+    ): DeclarationsAndDependencies = {
+      val scope = semanticState.recordedScopes(x.subqueryAstNode)
+      val DeclarationsAndDependencies(declarations, dependencyDefinitions) =
+        x match {
+          case _: FullSubqueryExpression                      => scope.declarationsAndDependenciesForExpressions
+          case _: PatternExpression | _: PatternComprehension => scope.declarationsAndDependencies
+          case _                                              =>
+            // ExpressionWithComputedDependencies but not SubqueryExpression currently means IRExpression,
+            // which should not be present before IR generation.
+            throw new IllegalStateException(s"Unexpected expression during semantic analysis post processing: $x")
+        }
+
+      // Because the dependencies returned by declarationsAndDependenciesForExpressions are calculated using the
+      // definition in the symbol table and therefore have the position of the original definition, we need to find the
+      // variables in our expression that reference these definitions to be able to report errors in the right position.
+      val dependencyVariableNames = dependencyDefinitions.map(_.name)
+      val dependencies =
+        x.subqueryAstNode.folder.treeCollect {
+          case variable: Variable if dependencyVariableNames.contains(variable.name) =>
+            SymbolUse(variable)
+        }
+      DeclarationsAndDependencies(declarations, dependencies.toSet)
+    }
+  }
 }
 
 final case class Scope(symbolTable: Map[String, Symbol], children: Seq[Scope]) extends TreeElem[Scope] {
@@ -161,8 +298,11 @@ final case class Scope(symbolTable: Map[String, Symbol], children: Seq[Scope]) e
     definition: SymbolUse,
     uses: Set[SymbolUse],
     unionVariable: Boolean = false
-  ): Scope =
-    copy(symbolTable = symbolTable.updated(variable, Symbol(variable, types, definition, uses, unionVariable)))
+  ): Scope = {
+    copy(symbolTable =
+      symbolTable.updated(variable, Symbol(variable, types, definition, uses, unionVariable))
+    )
+  }
 
   /**
    * All symbol definitions of this scope and its children,
@@ -237,7 +377,8 @@ final case class Scope(symbolTable: Map[String, Symbol], children: Seq[Scope]) e
   private def dumpTree(indent: String, builder: StringBuilder): Unit = {
     symbolTable.keys.toSeq.sorted.foreach { key =>
       val symbol = symbolTable(key)
-      val symbolText = symbol.positionsAndUniqueIdString.toSeq.sorted.map(x => s"${x._1}(${x._2})").mkString(" ")
+      val symbolText =
+        symbol.positionsAndUniqueIdString.toSeq.sorted.map(x => s"${x._1}(${x._2})").mkString(" ")
       builder.append(s"$indent$key: $symbolText${System.lineSeparator}")
     }
     children.foreach { child => child.dumpSingle(indent, builder) }
@@ -246,12 +387,20 @@ final case class Scope(symbolTable: Map[String, Symbol], children: Seq[Scope]) e
 
 object SemanticState {
 
-  implicit object ScopeZipper extends TreeZipper[Scope]
+  implicit val ScopeZipper: TopLevelScopeZipper.type = TopLevelScopeZipper
 
-  val clean: SemanticState = SemanticState(
+  private val cleanLazy: LazyVal[SemanticState] = LazyVal(SemanticState(
     Scope.empty.location,
     ASTAnnotationMap.empty,
     ASTAnnotationMap.empty
+  ))
+  def clean: SemanticState = cleanLazy.value
+
+  def cleanWithFeatures(features: Set[SemanticFeature]): SemanticState = SemanticState(
+    Scope.empty.location,
+    ASTAnnotationMap.empty,
+    ASTAnnotationMap.empty,
+    features = features
   )
 
   implicit class ScopeLocation(val location: ScopeZipper.Location) extends AnyVal {
@@ -278,10 +427,17 @@ object SemanticState {
     def symbolNames: Set[String] = scope.symbolNames
 
     /**
-     * Local symbol names of this scope and all parent scopes.
+     * Local symbol definitions of this scope and all parent scopes.
      */
     def availableSymbolDefinitions: Set[SymbolUse] = {
       scope.symbolDefinitions ++ location.up.toSet.flatMap((l: ScopeZipper.Location) => l.availableSymbolDefinitions)
+    }
+
+    /**
+     * Local symbol names of this scope and all parent scopes.
+     */
+    def availableSymbolNames: Set[String] = {
+      scope.symbolNames ++ location.up.toSet.flatMap((l: ScopeZipper.Location) => l.availableSymbolNames)
     }
 
     def importValuesFromScope(other: Scope, exclude: Set[String] = Set.empty): ScopeLocation =
@@ -295,6 +451,18 @@ object SemanticState {
       unionVariable: Boolean = false
     ): ScopeLocation =
       location.replace(scope.updateVariable(variable, types, definition, uses, unionVariable))
+
+    /**
+     * Calculates the declarations and dependencies based on the symbol tables in scope and parent scope.
+     */
+    def declarationsAndDependenciesForExpressions: DeclarationsAndDependencies = {
+      val allDefinitions = scope.children.flatMap(_.allSymbolDefinitions.values.flatten).toSet
+      val parentDefinitions = parent.get.availableSymbolDefinitions
+      val (dependencies, declarations) = allDefinitions.partition { definition =>
+        parentDefinitions.map(_.name).contains(definition.name)
+      }
+      DeclarationsAndDependencies(declarations, dependencies)
+    }
 
     def declarationsAndDependencies: DeclarationsAndDependencies = {
       val allDefinitions = scope.allSymbolDefinitions.values.flatten.toSet
@@ -310,6 +478,10 @@ object SemanticState {
     (s: SemanticState) => SemanticCheckResult.success(s.recordCurrentScope(node))
 }
 
+/**
+ * @param targetGraph used to check different use clause targets given a regular session database
+ * @param workingGraph used for nested check given a composite session database
+ */
 case class SemanticState(
   currentScope: ScopeLocation,
   typeTable: ASTAnnotationMap[Expression, ExpressionTypeInfo],
@@ -318,9 +490,9 @@ case class SemanticState(
   features: Set[SemanticFeature] = Set.empty,
   declareVariablesToSuppressDuplicateErrors: Boolean = true,
   semanticCheckHasRunOnce: Boolean = false,
-  targetGraph: Option[GraphReference] =
-    None, // used to check different use clause targets given a regular session database
-  workingGraph: Option[GraphReference] = None // used for nested check given a composite session database
+  targetGraph: Option[GraphReference] = None,
+  workingGraph: Option[GraphReference] = None,
+  graphTypeMode: AlterOperation = AlterCurrentGraphType.Set
 ) {
 
   def scopeTree: Scope = currentScope.rootScope
@@ -357,7 +529,7 @@ case class SemanticState(
   ): Either[SemanticError, SemanticState] =
     currentScope.localSymbol(variable.name) match {
       case Some(_) if !overriding =>
-        Left(SemanticError(s"Variable `${variable.name}` already declared", variable.position))
+        Left(SemanticError.variableAlreadyDeclared(variable.name, variable.position))
       case _ =>
         val (definition, uses) = maybePreviousDeclaration match {
           case Some(previousDeclaration) =>
@@ -376,19 +548,27 @@ case class SemanticState(
   ): Either[SemanticError, SemanticState] =
     this.symbol(variable.name) match {
       case None =>
-        Right(updateVariable(variable, possibleTypes, SymbolUse(variable), Set.empty))
+        Right(updateVariable(variable, possibleTypes, SymbolUse(variable), Set.empty, unionVariable = false))
 
       case Some(symbol) =>
         val inferredTypes = symbol.types intersect possibleTypes
         if (inferredTypes.nonEmpty) {
-          Right(updateVariable(variable, inferredTypes, symbol.definition, symbol.uses + SymbolUse(variable)))
+          Right(updateVariable(
+            variable,
+            inferredTypes,
+            symbol.definition,
+            symbol.uses + SymbolUse(variable),
+            symbol.unionSymbol
+          ))
         } else {
           val existingTypes = symbol.types.mkString(", ", " or ")
+          val existingCypherTypeString =
+            TypeSpec.cypherTypeForTypeSpec(symbol.types).normalizedCypherTypeString()
           val expectedTypes = possibleTypes.mkString(", ", " or ")
           Left(SemanticError.invalidEntityType(
-            existingTypes,
+            existingCypherTypeString,
             variable.name,
-            possibleTypes.toStrings.toList,
+            possibleTypes.toCypherStrings,
             s"Type mismatch: ${variable.name} defined with conflicting type $existingTypes (expected $expectedTypes)",
             variable.position
           ))
@@ -398,9 +578,15 @@ case class SemanticState(
   def ensureVariableDefined(variable: LogicalVariable): Either[SemanticError, SemanticState] =
     this.symbol(variable.name) match {
       case None =>
-        Left(SemanticError(s"Variable `${variable.name}` not defined", variable.position))
+        Left(SemanticError.variableNotDefined(variable.name, variable.position))
       case Some(symbol) =>
-        Right(updateVariable(variable, symbol.types, symbol.definition, symbol.uses + SymbolUse(variable)))
+        Right(updateVariable(
+          variable,
+          symbol.types,
+          symbol.definition,
+          symbol.uses + SymbolUse(variable),
+          symbol.unionSymbol
+        ))
     }
 
   def specifyType(expression: Expression, possibleTypes: TypeSpec): Either[SemanticError, SemanticState] =
@@ -411,14 +597,15 @@ case class SemanticState(
         Right(copy(typeTable = typeTable.updated(expression, ExpressionTypeInfo(possibleTypes))))
     }
 
-  def expectType(expression: Expression, possibleTypes: TypeSpec): (SemanticState, TypeSpec) = {
+  def expectType(expression: Expression, possibleTypes: TypeSpec, coercion: Boolean): (SemanticState, TypeSpec) = {
     val expType = expressionType(expression)
     val updated = expType.expect(possibleTypes)
-    (copy(typeTable = typeTable.updated(expression, updated)), updated.actual)
+    val actualUpdated = if (coercion) updated.actual else updated.actualNoCoercion
+    (copy(typeTable = typeTable.updated(expression, updated)), actualUpdated)
   }
 
-  def withFeatures(features: SemanticFeature*): SemanticState =
-    features.foldLeft(this)(_.withFeature(_))
+  def withFeatures(features: Seq[SemanticFeature]): SemanticState =
+    copy(features = this.features ++ features)
 
   // Some semantic checks only make sense to be done on the first run before extensive rewriting
   def semanticCheckHasRunOnce(hasRun: Boolean): SemanticState = {
@@ -433,8 +620,8 @@ case class SemanticState(
     types: TypeSpec,
     definition: SymbolUse,
     uses: Set[SymbolUse],
-    unionVariable: Boolean = false
-  ): SemanticState =
+    unionVariable: Boolean
+  ) =
     copy(
       currentScope = currentScope.updateVariable(variable.name, types, definition, uses, unionVariable),
       typeTable = typeTable.updated(variable, ExpressionTypeInfo(types))

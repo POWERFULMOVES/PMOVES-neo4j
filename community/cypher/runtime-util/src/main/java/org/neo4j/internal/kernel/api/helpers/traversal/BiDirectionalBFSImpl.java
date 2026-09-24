@@ -69,14 +69,13 @@ import org.neo4j.values.virtual.PathReference;
  * <p>
  * Iteration and retracing of paths is done with a PathsIterator which is described in more detail at its declaration.
  */
-abstract class BiDirectionalBFSImpl<STEPS> implements AutoCloseable {
+abstract class BiDirectionalBFSImpl<STEPS> implements ShortestPathBFS {
     final int maxDepth;
     final BFS<STEPS> sourceBFS;
     final BFS<STEPS> targetBFS;
     State algorithmState;
 
     private final boolean allowZeroLength;
-    final Direction direction;
 
     /**
      * Create a BiDirectionalBFS which can be used to compute the shortest path(s) between
@@ -110,7 +109,6 @@ abstract class BiDirectionalBFSImpl<STEPS> implements AutoCloseable {
             boolean allowZeroLength) {
         this.maxDepth = maxDepth;
         this.allowZeroLength = allowZeroLength;
-        this.direction = direction;
         this.sourceBFS = createBFS(
                 sourceNodeId, types, direction, read, nodeCursor, relCursor, memoryTracker, nodeFilter, relFilter);
         this.targetBFS = createBFS(
@@ -138,24 +136,12 @@ abstract class BiDirectionalBFSImpl<STEPS> implements AutoCloseable {
             LongPredicate nodeFilter,
             Predicate<RelationshipTraversalEntities> relFilter);
 
-    abstract Iterator<PathReference> pathTracingIterator(LongIterator iterator);
-
     /**
      * Reset the BiDirectionalBFS in preparation of computing the shortest path(s) between
      * a new source and target node pair. Compared to creating a new BiDirectionalBFS object,
      * doing this has the advantage of not needing us to reinitialize all the data structures
      * we keep on the heap.
      */
-    void resetForNewRow(
-            long sourceNodeId,
-            long targetNodeId,
-            LongPredicate nodeFilter,
-            Predicate<RelationshipTraversalEntities> relFilter) {
-        sourceBFS.resetWithStartNode(sourceNodeId, nodeFilter, relFilter);
-        targetBFS.resetWithStartNode(targetNodeId, nodeFilter, new ReversedRelTraversalEntitiesPredicate(relFilter));
-        algorithmState = State.CAN_SEARCH_FOR_INTERSECTION;
-    }
-
     void resetForNewRow(
             long sourceNodeId,
             long targetNodeId,
@@ -169,6 +155,8 @@ abstract class BiDirectionalBFSImpl<STEPS> implements AutoCloseable {
         algorithmState = State.CAN_SEARCH_FOR_INTERSECTION;
     }
 
+    abstract Iterator<PathReference> pathTracingIterator(LongIterator iterator);
+
     /**
      * Computes the shortest paths between the source and target node, and returns an iterator over them.
      * An empty iterator is returned when the source and target nodes are disconnected, and when
@@ -176,7 +164,8 @@ abstract class BiDirectionalBFSImpl<STEPS> implements AutoCloseable {
      *
      * @return an iterator over the set of shortest paths between the source and target nodes specified at instantiation.
      */
-    Iterator<PathReference> shortestPathIterator() {
+    @Override
+    public Iterator<PathReference> shortestPathIterator() {
         assert (algorithmState == State.CAN_SEARCH_FOR_INTERSECTION);
 
         if (sourceBFS.startNodeId == targetBFS.startNodeId && allowZeroLength) {
@@ -212,7 +201,8 @@ abstract class BiDirectionalBFSImpl<STEPS> implements AutoCloseable {
         targetBFS.close();
     }
 
-    void setTracer(KernelReadTracer tracer) {
+    @Override
+    public void setTracer(KernelReadTracer tracer) {
         sourceBFS.setTracer(tracer);
         targetBFS.setTracer(tracer);
     }

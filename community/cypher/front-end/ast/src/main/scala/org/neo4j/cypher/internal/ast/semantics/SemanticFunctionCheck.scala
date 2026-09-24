@@ -16,21 +16,35 @@
  */
 package org.neo4j.cypher.internal.ast.semantics
 
+import org.neo4j.cypher.internal.CypherVersion
+import org.neo4j.cypher.internal.ast.prettifier.ExpressionStringifier
+import org.neo4j.cypher.internal.ast.semantics.SemanticCheck.fromContext
 import org.neo4j.cypher.internal.ast.semantics.SemanticCheck.when
 import org.neo4j.cypher.internal.expressions.ContainerIndex
 import org.neo4j.cypher.internal.expressions.DoubleLiteral
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.FunctionInvocation
+import org.neo4j.cypher.internal.expressions.FunctionTypeSignatures
 import org.neo4j.cypher.internal.expressions.IntegerLiteral
 import org.neo4j.cypher.internal.expressions.Literal
 import org.neo4j.cypher.internal.expressions.MapExpression
+import org.neo4j.cypher.internal.expressions.NumberLiteral
 import org.neo4j.cypher.internal.expressions.PatternExpression
 import org.neo4j.cypher.internal.expressions.Property
 import org.neo4j.cypher.internal.expressions.PropertyKeyName
 import org.neo4j.cypher.internal.expressions.TypeSignature
-import org.neo4j.cypher.internal.expressions.TypeSignatures
 import org.neo4j.cypher.internal.expressions.functions.AggregatingFunction
+import org.neo4j.cypher.internal.expressions.functions.AllReduce
+import org.neo4j.cypher.internal.expressions.functions.Cardinality
 import org.neo4j.cypher.internal.expressions.functions.Coalesce
+import org.neo4j.cypher.internal.expressions.functions.CollDistinct
+import org.neo4j.cypher.internal.expressions.functions.CollFlatten
+import org.neo4j.cypher.internal.expressions.functions.CollIndexOf
+import org.neo4j.cypher.internal.expressions.functions.CollInsert
+import org.neo4j.cypher.internal.expressions.functions.CollMax
+import org.neo4j.cypher.internal.expressions.functions.CollMin
+import org.neo4j.cypher.internal.expressions.functions.CollRemove
+import org.neo4j.cypher.internal.expressions.functions.CollSort
 import org.neo4j.cypher.internal.expressions.functions.Collect
 import org.neo4j.cypher.internal.expressions.functions.Distance
 import org.neo4j.cypher.internal.expressions.functions.Exists
@@ -40,12 +54,14 @@ import org.neo4j.cypher.internal.expressions.functions.GraphByName
 import org.neo4j.cypher.internal.expressions.functions.Head
 import org.neo4j.cypher.internal.expressions.functions.IsEmpty
 import org.neo4j.cypher.internal.expressions.functions.Last
+import org.neo4j.cypher.internal.expressions.functions.LocalFunction
 import org.neo4j.cypher.internal.expressions.functions.Max
 import org.neo4j.cypher.internal.expressions.functions.Min
 import org.neo4j.cypher.internal.expressions.functions.PercentileCont
 import org.neo4j.cypher.internal.expressions.functions.PercentileDisc
 import org.neo4j.cypher.internal.expressions.functions.Point
 import org.neo4j.cypher.internal.expressions.functions.Reduce
+import org.neo4j.cypher.internal.expressions.functions.Replace
 import org.neo4j.cypher.internal.expressions.functions.Reverse
 import org.neo4j.cypher.internal.expressions.functions.Tail
 import org.neo4j.cypher.internal.expressions.functions.ToBoolean
@@ -57,211 +73,313 @@ import org.neo4j.cypher.internal.util.symbols.CTBoolean
 import org.neo4j.cypher.internal.util.symbols.CTFloat
 import org.neo4j.cypher.internal.util.symbols.CTInteger
 import org.neo4j.cypher.internal.util.symbols.CTList
+import org.neo4j.cypher.internal.util.symbols.CTMap
+import org.neo4j.cypher.internal.util.symbols.CTPath
 import org.neo4j.cypher.internal.util.symbols.CTString
 import org.neo4j.cypher.internal.util.symbols.CypherType
-
-import java.util.Locale
+import org.neo4j.cypher.internal.util.symbols.TypeSpec
+import org.neo4j.cypher.internal.util.symbols.invariantTypeSpec
+import org.neo4j.gqlstatus.GqlHelper
 
 object SemanticFunctionCheck extends SemanticAnalysisTooling {
 
   def check(
     ctx: Expression.SemanticContext,
     invocation: FunctionInvocation
-  ): SemanticCheck =
-    invocation.function match {
-      case f: AggregatingFunction =>
-        when(ctx == Expression.SemanticContext.Simple) {
-          error(s"Invalid use of aggregating function ${f.name}(...) in this context", invocation.position)
-        } chain {
-          checkNoNestedAggregateFunctions(invocation) chain
+  ): SemanticCheck = {
+    fromContext(semanticCheckContext => {
+      invocation.functionWithScope(semanticCheckContext.cypherVersion) match {
+        case lf: LocalFunction =>
+          SemanticExpressionCheck.check(ctx, invocation.arguments) chain
+            checkFunctionTypeSignatures(semanticCheckContext, lf, invocation) ifOkChain {
+              specifyType(lf.returnType, invocation)
+            }
+
+        case f: AggregatingFunction =>
+          when(ctx == Expression.SemanticContext.Simple) {
+            SemanticCheck.error(
+              SemanticError.aggregateExpressionsNotAllowedInSimpleExpressions(
+                invocation.asCanonicalStringVal,
+                f.name,
+                invocation.position
+              )
+            )
+          } chain {
+            checkNoNestedAggregateFunctions(invocation) chain
+              SemanticExpressionCheck.check(ctx, invocation.arguments) chain
+              semanticCheck(ctx, invocation)
+          }
+
+        case Reduce =>
+          error(SemanticError.invalidReduceAccumulator(invocation.position))
+
+        case AllReduce =>
+          error(SemanticError.invalidAllReduceSyntax(invocation.position))
+
+        case f: Function =>
+          when(invocation.distinct) {
+            error(SemanticError.invalidDistinct(invocation.functionName.name, invocation.position))
+          } chain
             SemanticExpressionCheck.check(ctx, invocation.arguments) chain
             semanticCheck(ctx, invocation)
-        }
-
-      case Reduce =>
-        error(s"${Reduce.name}(...) requires '| expression' (an accumulation expression)", invocation.position)
-
-      case _: Function
-        if invocation.name.equalsIgnoreCase("graph.names") || invocation.name.equalsIgnoreCase(
-          "graph.propertiesByName"
-        ) =>
-        SemanticCheck.fromState(state =>
-          if (state.workingGraph.nonEmpty) { // We are targeting a constituent graph.
-            SemanticError.apply(
-              "Calling %s() is only supported on composite databases.".formatted(invocation.name),
-              invocation.position
-            )
-          } else {
-            SemanticExpressionCheck.check(ctx, invocation.arguments) chain semanticCheck(
-              ctx,
-              invocation
-            )
-          }
-        )
-
-      case _: Function =>
-        when(invocation.distinct) {
-          error(s"Invalid use of DISTINCT with function '${invocation.functionName.name}'", invocation.position)
-        } chain SemanticExpressionCheck.check(ctx, invocation.arguments) chain semanticCheck(
-          ctx,
-          invocation
-        )
-    }
+      }
+    })
+  }
 
   private def checkNoNestedAggregateFunctions(invocation: FunctionInvocation): SemanticCheck =
     invocation.args.collectFirst {
       case expr if expr.containsAggregate => expr.findAggregate.get
     } foldSemanticCheck {
-      expr => error("Can't use aggregate functions inside of aggregate functions.", expr.position)
+      val prettifier = ExpressionStringifier()
+      expr =>
+        error(SemanticError.aggregateExpressionsNotAllowedInAggregationFunctions(
+          prettifier(expr),
+          expr.position
+        ))
     }
 
-  protected def semanticCheck(ctx: Expression.SemanticContext, invocation: FunctionInvocation): SemanticCheck =
-    invocation.function match {
-      case Coalesce =>
-        checkMinArgs(invocation, 1, Coalesce.signatures) chain
-          expectType(CTAny.covariant, invocation.arguments) chain
-          specifyType(unionOfTypes(invocation.arguments), invocation)
+  private def semanticCheck(ctx: Expression.SemanticContext, invocation: FunctionInvocation): SemanticCheck =
+    fromContext(semanticCheckContext =>
+      invocation.functionWithScope(semanticCheckContext.cypherVersion) match {
+        case Cardinality =>
+          checkMinArgs(invocation, 1, Cardinality.signatures) ifOkChain
+            checkMaxArgs(invocation, 1, Cardinality.signatures) ifOkChain
+            expectType(
+              CTMap.invariant | CTList(CTAny).covariant | CTPath.invariant,
+              invocation.arguments.head
+            ) ifOkChain
+            specifyType(CTInteger, invocation)
 
-      case Collect =>
-        checkTypeSignatures(ctx, Collect, invocation) ifOkChain {
-          specifyType(types(invocation.arguments(0))(_).wrapInList, invocation)
-        }
+        case Coalesce =>
+          checkMinArgs(invocation, 1, Coalesce.signatures) chain
+            expectType(CTAny.covariant, invocation.arguments) chain
+            specifyType(unionOfTypes(invocation.arguments), invocation)
 
-      case Exists =>
-        checkArgs(invocation, 1, Exists.signatures) ifOkChain {
-          expectType(CTAny.covariant, invocation.arguments.head) chain
-            (invocation.arguments.head match {
-              case _: PatternExpression => None
-              case _: Property | _: ContainerIndex =>
-                Some(SemanticError(
-                  "The property existence syntax `... exists(variable.property)` is no longer supported. Please use `variable.property IS NOT NULL` instead.",
-                  invocation.position
-                ))
-              case e =>
-                Some(SemanticError.invalidEntityType(
-                  "argument",
-                  invocation.name,
-                  List("pattern"),
-                  s"Argument to ${invocation.name}(...) is not a pattern",
-                  e.position
-                ))
-            })
-        } chain specifyType(CTBoolean, invocation)
-
-      case Head =>
-        checkArgs(invocation, 1, Head.signatures) ifOkChain {
-          expectType(CTList(CTAny).covariant, invocation.arguments.head) chain
-            specifyType(possibleTypes(invocation.arguments.head), invocation)
-        }
-
-      case GraphByName =>
-        checkTypeSignatures(ctx, GraphByName, invocation) ifOkChain {
-          if (invocation.calledFromUseClause) {
-            SemanticCheck.success
-          } else {
-            SemanticCheck.error(SemanticError.invalidUseOfGraphFunction("graph.byName", invocation.position))
+        case Collect =>
+          checkFunctionTypeSignatures(semanticCheckContext, Collect, invocation) ifOkChain {
+            specifyType(types(invocation.arguments(0))(_).wrapInList, invocation)
           }
-        }
 
-      case GraphByElementId =>
-        checkTypeSignatures(ctx, GraphByElementId, invocation) ifOkChain {
-          if (invocation.calledFromUseClause) {
-            SemanticCheck.success
-          } else {
-            SemanticCheck.error(SemanticError.invalidUseOfGraphFunction("graph.byElementId", invocation.position))
-          }
-        }
-
-      case Last =>
-        def possibleTypes(expression: Expression): TypeGenerator = s =>
-          (types(expression)(s) constrain CTList(CTAny)).unwrapLists
-
-        checkArgs(invocation, 1, Last.signatures) ifOkChain {
-          expectType(CTList(CTAny).covariant, invocation.arguments.head) chain
-            specifyType(possibleTypes(invocation.arguments.head), invocation)
-        }
-
-      case Max =>
-        checkTypeSignatures(ctx, Max, invocation) ifOkChain {
-          specifyType(types(invocation.arguments(0))(_), invocation)
-        }
-
-      case IsEmpty =>
-        checkTypeSignatures(ctx, IsEmpty, invocation)
-
-      case Min =>
-        checkTypeSignatures(ctx, Min, invocation) ifOkChain {
-          specifyType(types(invocation.arguments(0))(_), invocation)
-        }
-
-      case PercentileCont =>
-        checkTypeSignatures(ctx, PercentileCont, invocation) ifOkChain
-          checkPercentileRange(invocation.args(1))
-
-      case PercentileDisc =>
-        checkTypeSignatures(ctx, PercentileDisc, invocation) ifOkChain
-          checkPercentileRange(invocation.args(1))
-
-      case Point =>
-        checkTypeSignatures(ctx, Point, invocation) ifOkChain
-          checkPointMap(invocation.args(0))
-
-      case Reverse =>
-        checkArgs(invocation, 1, Reverse.signatures) ifOkChain {
-          expectType(CTList(CTAny).covariant | CTString, invocation.arguments.head) chain
+        case CollDistinct =>
+          checkFunctionTypeSignatures(semanticCheckContext, CollDistinct, invocation) ifOkChain {
             specifyType(types(invocation.arguments.head), invocation)
-        }
+          }
 
-      case Tail =>
-        checkArgs(invocation, 1, Tail.signatures) ifOkChain {
-          expectType(CTList(CTAny).covariant, invocation.arguments(0)) chain
-            specifyType(types(invocation.arguments(0)), invocation)
-        }
+        case CollFlatten =>
+          checkFunctionTypeSignatures(semanticCheckContext, CollFlatten, invocation) ifOkChain {
+            specifyType(CTAny.covariant, invocation)
+          }
 
-      case ToBoolean =>
-        checkArgs(invocation, 1, ToBoolean.signatures) ifOkChain
-          checkToSpecifiedTypeOfArgument(invocation, Seq(CTString, CTBoolean, CTInteger)) ifOkChain
-          specifyType(CTBoolean, invocation)
+        case CollIndexOf =>
+          checkFunctionTypeSignatures(semanticCheckContext, CollIndexOf, invocation) ifOkChain {
+            specifyType(CTInteger, invocation)
+          }
 
-      case ToString =>
-        checkArgs(invocation, 1, ToString.signatures) ifOkChain
-          checkToSpecifiedTypeOfArgument(invocation, ToString.validInputTypes) ifOkChain
-          specifyType(CTString, invocation)
+        case CollInsert =>
+          checkFunctionTypeSignatures(semanticCheckContext, CollInsert, invocation) ifOkChain {
+            specifyType(
+              (s: SemanticState) => // Original list + new item
+                possibleTypes(invocation.arguments.head)(s) coerceOrLeastUpperBound types(
+                  invocation.arguments(2)
+                )(s).wrapInList,
+              invocation
+            )
+          }
 
-      // distance has been replaced with point.distance, make sure we provide a nice error message
-      case UnresolvedFunction
-        if invocation.functionName.namespace.parts.isEmpty && invocation.functionName.name.toLowerCase(
-          Locale.ROOT
-        ) == "distance" =>
-        SemanticError(s"'distance' has been replaced by 'point.distance'", invocation.position)
+        case CollMax =>
+          checkFunctionTypeSignatures(semanticCheckContext, CollMax, invocation) ifOkChain {
+            specifyType(possibleTypes(invocation.arguments.head), invocation)
+          }
 
-      case Distance =>
-        checkArgs(invocation, 2, Distance.signatures) ifOkChain
-          specifyType(CTFloat, invocation)
+        case CollMin =>
+          checkFunctionTypeSignatures(semanticCheckContext, CollMin, invocation) ifOkChain {
+            specifyType(possibleTypes(invocation.arguments.head), invocation)
+          }
 
-      case WithinBBox =>
-        checkArgs(invocation, 3, WithinBBox.signatures) ifOkChain
-          specifyType(CTBoolean, invocation)
+        case CollRemove =>
+          checkFunctionTypeSignatures(semanticCheckContext, CollRemove, invocation) ifOkChain {
+            specifyType(types(invocation.arguments.head), invocation)
+          }
 
-      case UnresolvedFunction =>
-        // We cannot do a full semantic check until we have resolved the function call.
-        SemanticCheck.success
+        case CollSort =>
+          checkFunctionTypeSignatures(semanticCheckContext, CollSort, invocation) ifOkChain {
+            specifyType(types(invocation.arguments.head), invocation)
+          }
 
-      case x: TypeSignatures =>
-        checkTypeSignatures(ctx, x, invocation)
-    }
+        case Exists =>
+          checkArgs(invocation, 1, Exists.signatures) ifOkChain {
+            expectType(CTAny.covariant, invocation.arguments.head) chain
+              (invocation.arguments.head match {
+                case _: PatternExpression => None
+                case _: Property | _: ContainerIndex =>
+                  val position = invocation.position
+                  val message =
+                    "The property existence syntax `... exists(variable.property)` is no longer supported. Please use `variable.property IS NOT NULL` instead."
+                  Some(SemanticError(
+                    GqlHelper.getGql42001_42I52(message, position.offset, position.line, position.column),
+                    message,
+                    position
+                  ))
+                case e =>
+                  Some(SemanticError.invalidEntityType(
+                    "argument",
+                    invocation.name,
+                    List("pattern"),
+                    s"Argument to ${invocation.name}(...) is not a pattern",
+                    e.position
+                  ))
+              })
+          } chain specifyType(CTBoolean, invocation)
+
+        case Head =>
+          checkArgs(invocation, 1, Head.signatures) ifOkChain {
+            expectType(CTList(CTAny).covariant, invocation.arguments.head) chain
+              specifyType(possibleTypes(invocation.arguments.head), invocation)
+          }
+
+        case GraphByName =>
+          checkFunctionTypeSignatures(semanticCheckContext, GraphByName, invocation) ifOkChain {
+            if (invocation.calledFromUseClause) {
+              SemanticCheck.success
+            } else {
+              SemanticCheck.error(SemanticError.invalidUseOfGraphFunction("graph.byName", invocation.position))
+            }
+          }
+
+        case GraphByElementId =>
+          checkFunctionTypeSignatures(semanticCheckContext, GraphByElementId, invocation) ifOkChain {
+            if (invocation.calledFromUseClause) {
+              SemanticCheck.success
+            } else {
+              SemanticCheck.error(SemanticError.invalidUseOfGraphFunction("graph.byElementId", invocation.position))
+            }
+          }
+
+        case Last =>
+          def possibleTypes(expression: Expression): TypeGenerator = s =>
+            (types(expression)(s) constrain CTList(CTAny)).unwrapLists
+
+          checkArgs(invocation, 1, Last.signatures) ifOkChain {
+            expectType(CTList(CTAny).covariant, invocation.arguments.head) chain
+              specifyType(possibleTypes(invocation.arguments.head), invocation)
+          }
+
+        case Max =>
+          checkFunctionTypeSignatures(semanticCheckContext, Max, invocation) ifOkChain {
+            specifyType(types(invocation.arguments(0))(_), invocation)
+          }
+
+        case IsEmpty =>
+          checkFunctionTypeSignatures(semanticCheckContext, IsEmpty, invocation)
+
+        case Min =>
+          checkFunctionTypeSignatures(semanticCheckContext, Min, invocation) ifOkChain {
+            specifyType(types(invocation.arguments(0))(_), invocation)
+          }
+
+        case PercentileCont =>
+          checkFunctionTypeSignatures(semanticCheckContext, PercentileCont, invocation) ifOkChain
+            checkPercentileRange(invocation.args(1))
+
+        case PercentileDisc =>
+          checkFunctionTypeSignatures(semanticCheckContext, PercentileDisc, invocation) ifOkChain
+            checkPercentileRange(invocation.args(1))
+
+        case Point =>
+          checkFunctionTypeSignatures(semanticCheckContext, Point, invocation) ifOkChain
+            checkPointMap(invocation.args(0))
+
+        case Reverse =>
+          checkArgs(invocation, 1, Reverse.signatures) ifOkChain {
+            specifyType(types(invocation.arguments.head), invocation)
+          }
+
+        case Replace =>
+          checkFunctionTypeSignatures(semanticCheckContext, Replace, invocation) ifOkChain {
+            if (invocation.arguments.size == 4) {
+              invocation.arguments(3) match {
+                case i: IntegerLiteral if i.value >= 0 => SemanticCheck.success
+                case lit: NumberLiteral =>
+                  SemanticAnalysisToolingErrorWithGqlInfo.specifiedNumberOutOfRangeError(
+                    "limit",
+                    "INTEGER",
+                    0,
+                    Long.MaxValue,
+                    String.valueOf(lit.value),
+                    "The limit needs to be greater than or equal to 0.",
+                    lit.position
+                  )
+                case _ => SemanticCheck.success
+              }
+            } else {
+              SemanticCheck.success
+            }
+          }
+
+        case Tail =>
+          checkArgs(invocation, 1, Tail.signatures) ifOkChain {
+            expectType(CTList(CTAny).covariant, invocation.arguments(0)) chain
+              specifyType(types(invocation.arguments(0)), invocation)
+          }
+
+        case ToBoolean =>
+          checkArgs(invocation, 1, ToBoolean.signatures) ifOkChain
+            checkToSpecifiedTypeOfArgument(
+              invocation,
+              semanticCheckContext.cypherVersion,
+              Seq(CTString, CTBoolean, CTInteger)
+            ) ifOkChain
+            specifyType(CTBoolean, invocation)
+
+        case ToString =>
+          val allowedTypes = semanticCheckContext.cypherVersion match {
+            case CypherVersion.Cypher5 => ToString.validInputTypesCypher5
+            case _ /* ≥ Cypher 25 */   => ToString.validInputTypes
+          }
+          checkArgs(
+            invocation,
+            1,
+            ToString.signaturesByScope(semanticCheckContext.cypherVersion).toVector
+          ) ifOkChain
+            checkToSpecifiedTypeOfArgument(invocation, semanticCheckContext.cypherVersion, allowedTypes) ifOkChain
+            specifyType(CTString, invocation)
+
+        case Distance =>
+          checkArgs(invocation, 2, Distance.signatures) ifOkChain
+            specifyType(CTFloat, invocation)
+
+        case WithinBBox =>
+          checkArgs(invocation, 3, WithinBBox.signatures) ifOkChain
+            specifyType(CTBoolean, invocation)
+
+        case UnresolvedFunction =>
+          // We cannot do a full semantic check until we have resolved the function call.
+          SemanticCheck.success
+
+        case x: FunctionTypeSignatures =>
+          checkFunctionTypeSignatures(semanticCheckContext, x, invocation)
+      }
+    )
 
   /**
    * Check that invocation align with one of the functions type signatures
    */
-  def checkTypeSignatures(
-    ctx: Expression.SemanticContext,
-    f: TypeSignatures,
+  def checkFunctionTypeSignatures(
+    ctx: SemanticCheckContext,
+    f: FunctionTypeSignatures,
     invocation: FunctionInvocation
   ): SemanticCheck =
-    checkMinArgs(invocation, f.signatureLengths.min, f.signatures) chain
-      checkMaxArgs(invocation, f.signatureLengths.max, f.signatures) chain
-      checkTypes(invocation, f.signatures)
+    checkMinArgs(
+      invocation,
+      f.signatureLengthsByScope(ctx.cypherVersion).min,
+      f.signaturesByScope(ctx.cypherVersion)
+    ) chain
+      checkMaxArgs(
+        invocation,
+        f.signatureLengthsByScope(ctx.cypherVersion).max,
+        f.signaturesByScope(ctx.cypherVersion)
+      ) chain
+      checkTypes(invocation, f.signaturesByScope(ctx.cypherVersion))
 
   protected def checkArgs(
     invocation: FunctionInvocation,
@@ -314,7 +432,7 @@ object SemanticFunctionCheck extends SemanticAnalysisTooling {
       case i: IntegerLiteral if i.value == 0L || i.value == 1L =>
         SemanticCheck.success
       case d: DoubleLiteral =>
-        specifiedNumberOutOfRangeError(
+        SemanticAnalysisToolingErrorWithGqlInfo.specifiedNumberOutOfRangeError(
           "percentile range",
           "FLOAT",
           0.0,
@@ -325,7 +443,7 @@ object SemanticFunctionCheck extends SemanticAnalysisTooling {
         )
 
       case l: Literal =>
-        specifiedNumberOutOfRangeError(
+        SemanticAnalysisToolingErrorWithGqlInfo.specifiedNumberOutOfRangeError(
           "percentile range",
           "FLOAT",
           0.0,
@@ -356,10 +474,7 @@ object SemanticFunctionCheck extends SemanticAnalysisTooling {
         SemanticCheck.success
 
       case map: MapExpression => error(
-          s"A map with keys ${map.items.map(a => s"'${a._1.name}'").mkString(", ")} is not describing a valid point, " +
-            s"a point is described either by using cartesian coordinates e.g. {x: 2.3, y: 4.5, crs: 'cartesian'} or using " +
-            s"geographic coordinates e.g. {latitude: 12.78, longitude: 56.7, crs: 'WGS-84'}.",
-          map.position
+          SemanticError.invalidPoint(map.items.map(a => a._1.name), map.position)
         )
 
       // if using variable or parameter we can't introspect the map here
@@ -370,6 +485,7 @@ object SemanticFunctionCheck extends SemanticAnalysisTooling {
 
   private def checkToSpecifiedTypeOfArgument(
     invocation: FunctionInvocation,
+    cypherVersion: CypherVersion,
     allowedTypes: Seq[CypherType]
   ): SemanticCheck =
     (s: SemanticState) => {
@@ -382,26 +498,56 @@ object SemanticFunctionCheck extends SemanticAnalysisTooling {
       if (correctType) SemanticCheckResult.success(s)
       else {
         val error = invocation.function match {
+          case ToString if cypherVersion == CypherVersion.Cypher5 =>
+            SemanticCheckResult.error(
+              s,
+              SemanticError.invalidEntityType(
+                TypeSpec.cypherTypeForTypeSpec(specifiedType).normalizedCypherTypeString(),
+                "argument to function toString()",
+                List(
+                  "BOOLEAN",
+                  "FLOAT",
+                  "INTEGER",
+                  "POINT",
+                  "STRING",
+                  "DURATION",
+                  "DATE",
+                  "ZONED TIME",
+                  "LOCAL TIME",
+                  "LOCAL DATETIME",
+                  "ZONED DATETIME"
+                ),
+                s"Type mismatch: expected Boolean, Float, Integer, Point, String, Duration, Date, Time, LocalTime, LocalDateTime or DateTime but was ${specifiedType.mkString(", ")}",
+                argument.position
+              )
+            )
           case ToString =>
             SemanticCheckResult.error(
               s,
               SemanticError.invalidEntityType(
-                specifiedType.mkString(", "),
+                TypeSpec.cypherTypeForTypeSpec(specifiedType).normalizedCypherTypeString(),
                 "argument to function toString()",
                 List(
-                  "Boolean",
-                  "Float",
-                  "Integer",
-                  "Point",
-                  "String",
-                  "Duration",
-                  "Date",
-                  "Time",
-                  "LocalTime",
-                  "LocalDateTime",
-                  "DateTime"
+                  "BOOLEAN",
+                  "FLOAT",
+                  "INTEGER",
+                  "POINT",
+                  "STRING",
+                  "UUID",
+                  "DURATION",
+                  "DATE",
+                  "ZONED TIME",
+                  "LOCAL TIME",
+                  "LOCAL DATETIME",
+                  "ZONED DATETIME",
+                  "VECTOR",
+                  "LIST<ANY>",
+                  "MAP",
+                  "NODE",
+                  "RELATIONSHIP",
+                  "PATH"
                 ),
-                s"Type mismatch: expected Boolean, Float, Integer, Point, String, Duration, Date, Time, LocalTime, LocalDateTime or DateTime but was ${specifiedType.mkString(", ")}",
+                s"Type mismatch: expected Boolean, Float, Integer, Point, String, UUID, Duration, Date, Time, LocalTime, LocalDateTime, DateTime, Vector, List<Any>, Map, Node, Relationship or Path but was ${specifiedType.mkString(", ")}",
                 argument.position
               )
             )
@@ -409,9 +555,9 @@ object SemanticFunctionCheck extends SemanticAnalysisTooling {
             SemanticCheckResult.error(
               s,
               SemanticError.invalidEntityType(
-                specifiedType.mkString(", "),
+                TypeSpec.cypherTypeForTypeSpec(specifiedType).normalizedCypherTypeString(),
                 "argument of function toBoolean()",
-                List("Boolean", "Integer", "String"),
+                List("BOOLEAN", "INTEGER", "STRING"),
                 s"Type mismatch: expected Boolean, Integer or String but was ${specifiedType.mkString(", ")}",
                 argument.position
               )
@@ -421,8 +567,8 @@ object SemanticFunctionCheck extends SemanticAnalysisTooling {
               s,
               SemanticError.invalidEntityType(
                 specifiedType.mkString(", "),
-                invocation.function.name,
-                List("Boolean", "String"),
+                invocation.functionName.name,
+                List("BOOLEAN", "STRING"),
                 s"Type mismatch: expected Boolean or String but was ${specifiedType.mkString(", ")}",
                 argument.position
               )

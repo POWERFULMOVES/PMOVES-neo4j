@@ -20,10 +20,7 @@
 package org.neo4j.internal.id.indexed;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.junit.jupiter.params.provider.Arguments.arguments;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -43,7 +40,6 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
 import java.util.stream.Stream;
@@ -53,7 +49,6 @@ import org.eclipse.collections.impl.factory.primitive.LongSets;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -62,7 +57,6 @@ import org.neo4j.index.internal.gbptree.GBPTreeBuilder;
 import org.neo4j.index.internal.gbptree.GBPTreeVisitor;
 import org.neo4j.index.internal.gbptree.Seeker;
 import org.neo4j.index.internal.gbptree.ValueHolder;
-import org.neo4j.index.internal.gbptree.ValueMerger;
 import org.neo4j.index.internal.gbptree.Writer;
 import org.neo4j.internal.id.IdValidator;
 import org.neo4j.internal.id.TestIdType;
@@ -70,14 +64,14 @@ import org.neo4j.io.fs.FileSystemAbstraction;
 import org.neo4j.io.pagecache.PageCache;
 import org.neo4j.test.RandomSupport;
 import org.neo4j.test.extension.Inject;
-import org.neo4j.test.extension.RandomExtension;
+import org.neo4j.test.extension.RandomSupportExtension;
 import org.neo4j.test.extension.pagecache.PageCacheExtension;
 import org.neo4j.test.utils.TestDirectory;
 
 @PageCacheExtension
-@ExtendWith(RandomExtension.class)
+@RandomSupportExtension
 class IdRangeMarkerTest {
-    private static final IdRangeMerger MERGER = new IdRangeMerger(false, NO_MONITOR, null);
+    private static final IdRangeMerger MERGER = new IdRangeMerger(false, NO_MONITOR, null, true);
 
     @Inject
     PageCache pageCache;
@@ -109,7 +103,7 @@ class IdRangeMarkerTest {
     @Test
     void shouldCreateEntryOnFirstAddition() throws IOException {
         // given
-        ValueMerger merger = mock(ValueMerger.class);
+        IdRangeMerger merger = mock(IdRangeMerger.class);
 
         // when
         try (IdRangeMarker marker = instantiateMarker(mock(Lock.class), merger)) {
@@ -121,20 +115,20 @@ class IdRangeMarkerTest {
         verify(merger).completed();
         verifyNoMoreInteractions(merger);
         try (Seeker<IdRangeKey, IdRange> seek = tree.seek(new IdRangeKey(0), new IdRangeKey(1), NULL_CONTEXT)) {
-            assertTrue(seek.next());
-            assertEquals(0, seek.key().getIdRangeIdx());
+            assertThat(seek.next()).isTrue();
+            assertThat(seek.key().getIdRangeIdx()).isEqualTo(0);
         }
     }
 
     @Test
     void shouldMergeAdditionIntoExistingEntry() throws IOException {
         // given
-        try (IdRangeMarker marker = instantiateMarker(mock(Lock.class), mock(ValueMerger.class))) {
+        try (IdRangeMarker marker = instantiateMarker(mock(Lock.class), mock(IdRangeMerger.class))) {
             marker.markDeleted(0);
         }
 
         // when
-        ValueMerger merger = realMergerMock();
+        var merger = realMergerMock();
         try (IdRangeMarker marker = instantiateMarker(mock(Lock.class), merger)) {
             marker.markDeleted(1);
         }
@@ -142,18 +136,18 @@ class IdRangeMarkerTest {
         // then
         verify(merger).merge(any(), any(), any(), any());
         try (Seeker<IdRangeKey, IdRange> seek = tree.seek(new IdRangeKey(0), new IdRangeKey(1), NULL_CONTEXT)) {
-            assertTrue(seek.next());
-            assertEquals(0, seek.key().getIdRangeIdx());
-            assertEquals(IdRange.IdState.DELETED, seek.value().getState(0));
-            assertEquals(IdRange.IdState.DELETED, seek.value().getState(1));
-            assertEquals(IdRange.IdState.USED, seek.value().getState(2));
+            assertThat(seek.next()).isTrue();
+            assertThat(seek.key().getIdRangeIdx()).isEqualTo(0);
+            assertThat(seek.value().getState(0)).isEqualTo(IdRange.IdState.DELETED);
+            assertThat(seek.value().getState(1)).isEqualTo(IdRange.IdState.DELETED);
+            assertThat(seek.value().getState(2)).isEqualTo(IdRange.IdState.USED);
         }
     }
 
     @Test
     void shouldNotCreateEntryOnFirstRemoval() throws IOException {
         // when
-        ValueMerger merger = mock(ValueMerger.class);
+        var merger = mock(IdRangeMerger.class);
         try (IdRangeMarker marker = instantiateMarker(mock(Lock.class), merger)) {
             marker.markUsed(0);
         }
@@ -163,7 +157,7 @@ class IdRangeMarkerTest {
         verifyNoMoreInteractions(merger);
         try (Seeker<IdRangeKey, IdRange> seek =
                 tree.seek(new IdRangeKey(0), new IdRangeKey(Long.MAX_VALUE), NULL_CONTEXT)) {
-            assertFalse(seek.next());
+            assertThat(seek.next()).isFalse();
         }
     }
 
@@ -186,7 +180,7 @@ class IdRangeMarkerTest {
                     @Override
                     public void key(IdRangeKey key, boolean isLeaf, long offloadId) {
                         if (isLeaf) {
-                            assertEquals(0, key.getIdRangeIdx());
+                            assertThat(key.getIdRangeIdx()).isEqualTo(0);
                             exists.set(true);
                         }
                     }
@@ -205,7 +199,9 @@ class IdRangeMarkerTest {
                 new GBPTreeVisitor.Adaptor<>() {
                     @Override
                     public void key(IdRangeKey key, boolean isLeaf, long offloadId) {
-                        assertFalse(isLeaf, "Should not have any key still in the tree, but got: " + key);
+                        assertThat(isLeaf)
+                                .as("Should not have any key still in the tree, but got: " + key)
+                                .isFalse();
                     }
                 },
                 NULL_CONTEXT);
@@ -217,7 +213,7 @@ class IdRangeMarkerTest {
         Lock lock = mock(Lock.class);
 
         // when
-        try (IdRangeMarker marker = instantiateMarker(lock, mock(ValueMerger.class))) {
+        try (IdRangeMarker marker = instantiateMarker(lock, mock(IdRangeMerger.class))) {
             verifyNoMoreInteractions(lock);
         }
 
@@ -228,10 +224,10 @@ class IdRangeMarkerTest {
     @Test
     void shouldHandleCloseIfLockAbsent() throws IOException {
         // when
-        var idRangeMarker = instantiateMarker(null, mock(ValueMerger.class));
+        var idRangeMarker = instantiateMarker(null, mock(IdRangeMerger.class));
 
         // then
-        assertDoesNotThrow(idRangeMarker::close);
+        assertThatCode(idRangeMarker::close).doesNotThrowAnyException();
     }
 
     @Test
@@ -244,11 +240,12 @@ class IdRangeMarkerTest {
                 layout,
                 writer,
                 mock(Lock.class),
-                mock(ValueMerger.class),
+                MERGER,
                 true,
-                new AtomicInteger(),
+                new FreeIdFindState(),
                 1,
                 new AtomicLong(-1),
+                new AtomicLong(),
                 true,
                 false,
                 NO_MONITOR)) {
@@ -274,9 +271,10 @@ class IdRangeMarkerTest {
                 mock(Lock.class),
                 MERGER,
                 true,
-                new AtomicInteger(),
+                new FreeIdFindState(),
                 1,
                 new AtomicLong(reservedId - 1),
+                new AtomicLong(reservedId),
                 true,
                 false,
                 NO_MONITOR)) {
@@ -289,7 +287,7 @@ class IdRangeMarkerTest {
         }
 
         // then
-        assertEquals(expectedIds, gatherIds(DELETED));
+        assertThat(gatherIds(DELETED)).isEqualTo(expectedIds);
     }
 
     @Test
@@ -307,9 +305,10 @@ class IdRangeMarkerTest {
                 mock(Lock.class),
                 MERGER,
                 true,
-                new AtomicInteger(),
+                new FreeIdFindState(),
                 1,
                 new AtomicLong(reservedId - 1),
+                new AtomicLong(reservedId),
                 true,
                 false,
                 NO_MONITOR)) {
@@ -320,7 +319,7 @@ class IdRangeMarkerTest {
         }
 
         // then
-        assertEquals(expectedIds, gatherIds(DELETED));
+        assertThat(gatherIds(DELETED)).isEqualTo(expectedIds);
     }
 
     @Test
@@ -335,9 +334,10 @@ class IdRangeMarkerTest {
                 mock(Lock.class),
                 MERGER,
                 true,
-                new AtomicInteger(),
+                new FreeIdFindState(),
                 1,
                 new AtomicLong(-1),
+                new AtomicLong(),
                 true,
                 false,
                 NO_MONITOR)) {
@@ -368,9 +368,10 @@ class IdRangeMarkerTest {
                 mock(Lock.class),
                 MERGER,
                 true,
-                new AtomicInteger(),
+                new FreeIdFindState(),
                 1,
                 new AtomicLong(highestWrittenId),
+                new AtomicLong(highestWrittenId + 1),
                 true,
                 false,
                 NO_MONITOR)) {
@@ -391,10 +392,36 @@ class IdRangeMarkerTest {
         }
     }
 
+    @ParameterizedTest
+    @MethodSource("markOperations")
+    void batchWriteShouldHandleBatchesCrossingOverTheRangeBoundary(NamedOperation markOperation) {
+        Writer<IdRangeKey, IdRange> writer = mock(Writer.class);
+        int highestWrittenId = markOperation.name.equals("unallocated") ? 100 : -1;
+        try (IdRangeMarker marker = new IdRangeMarker(
+                TestIdType.TEST,
+                idsPerEntry,
+                layout,
+                writer,
+                mock(Lock.class),
+                MERGER,
+                true,
+                new FreeIdFindState(),
+                1,
+                new AtomicLong(highestWrittenId),
+                new AtomicLong(highestWrittenId + 1),
+                true,
+                false,
+                NO_MONITOR)) {
+            long id = random.nextLong(1000L);
+            assertThatCode(() -> markOperation.operation.apply(marker, id, idsPerEntry + 1))
+                    .doesNotThrowAnyException();
+        }
+    }
+
     @Test
     void shouldMarkDeletedAndFree() throws IOException {
         // given
-        var freeIdsNotifier = new AtomicInteger();
+        var freeIdFindState = new FreeIdFindState();
         try (var marker = new IdRangeMarker(
                 TestIdType.TEST,
                 idsPerEntry,
@@ -403,9 +430,10 @@ class IdRangeMarkerTest {
                 mock(Lock.class),
                 MERGER,
                 true,
-                freeIdsNotifier,
+                freeIdFindState,
                 1,
                 new AtomicLong(-1),
+                new AtomicLong(),
                 true,
                 false,
                 NO_MONITOR)) {
@@ -414,7 +442,7 @@ class IdRangeMarkerTest {
         }
 
         // then
-        assertThat(freeIdsNotifier.get()).isGreaterThan(0);
+        assertThat(freeIdFindState.snapshot().notificationCount()).isGreaterThan(0);
         assertThat(gatherIds(IdRange.IdState.FREE)).isEqualTo(LongSets.immutable.of(5, 6, 7));
     }
 
@@ -432,9 +460,10 @@ class IdRangeMarkerTest {
                 mock(Lock.class),
                 MERGER,
                 true,
-                new AtomicInteger(),
+                new FreeIdFindState(),
                 1,
                 new AtomicLong(-1),
+                new AtomicLong(),
                 true,
                 false,
                 NO_MONITOR)) {
@@ -455,8 +484,37 @@ class IdRangeMarkerTest {
         }
     }
 
-    private static ValueMerger realMergerMock() {
-        ValueMerger merger = mock(ValueMerger.class);
+    @Test
+    void shouldBumpHighIdOnBridgingIdsDuringUnallocate() throws IOException {
+        // given
+        var highestWrittenId = new AtomicLong();
+        var highId = new AtomicLong();
+        try (var marker = new IdRangeMarker(
+                TestIdType.TEST,
+                idsPerEntry,
+                layout,
+                tree.writer(NULL_CONTEXT),
+                mock(Lock.class),
+                MERGER,
+                true,
+                new FreeIdFindState(),
+                1,
+                highestWrittenId,
+                highId,
+                true,
+                false,
+                NO_MONITOR)) {
+            // when
+            marker.markUnallocated(10, 2);
+        }
+
+        // then
+        assertThat(highestWrittenId.longValue()).isEqualTo(11);
+        assertThat(highId.longValue()).isEqualTo(12);
+    }
+
+    private static IdRangeMerger realMergerMock() {
+        IdRangeMerger merger = mock(IdRangeMerger.class);
         when(merger.merge(any(), any(), any(), any()))
                 .thenAnswer(invocation -> MERGER.merge(
                         invocation.getArgument(0),
@@ -466,7 +524,7 @@ class IdRangeMarkerTest {
         return merger;
     }
 
-    private IdRangeMarker instantiateMarker(Lock lock, ValueMerger merger) throws IOException {
+    private IdRangeMarker instantiateMarker(Lock lock, IdRangeMerger merger) throws IOException {
         return new IdRangeMarker(
                 TestIdType.TEST,
                 idsPerEntry,
@@ -475,9 +533,10 @@ class IdRangeMarkerTest {
                 lock,
                 merger,
                 true,
-                new AtomicInteger(),
+                new FreeIdFindState(),
                 1,
                 highestWritternId,
+                new AtomicLong(),
                 true,
                 false,
                 NO_MONITOR);

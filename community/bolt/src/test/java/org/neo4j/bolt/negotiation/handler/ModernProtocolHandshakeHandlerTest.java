@@ -25,21 +25,21 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
-import io.netty.channel.embedded.EmbeddedChannel;
 import java.util.EnumSet;
 import java.util.Optional;
 import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
-import org.neo4j.bolt.negotiation.ProtocolVersion;
 import org.neo4j.bolt.negotiation.codec.ModernProtocolNegotiationFinalizeMessageDecoder;
 import org.neo4j.bolt.negotiation.codec.ModernProtocolNegotiationInitMessageEncoder;
 import org.neo4j.bolt.negotiation.message.ModernProtocolNegotiationFinalizeMessage;
 import org.neo4j.bolt.negotiation.message.ModernProtocolNegotiationInitMessage;
 import org.neo4j.bolt.negotiation.message.ProtocolCapability;
-import org.neo4j.bolt.protocol.common.BoltProtocol;
+import org.neo4j.bolt.negotiation.version.ProtocolVersion;
 import org.neo4j.bolt.protocol.common.handler.ProtocolLoggingHandler;
+import org.neo4j.bolt.testing.annotation.StrictBufferExtension;
 import org.neo4j.bolt.testing.assertions.ChannelAssertions;
+import org.neo4j.bolt.testing.channel.StrictBufferContext;
 import org.neo4j.bolt.testing.mock.ConnectionMockFactory;
 import org.neo4j.configuration.connectors.BoltConnectorInternalSettings.ProtocolLoggingMode;
 import org.neo4j.logging.AssertableLogProvider.Level;
@@ -47,10 +47,11 @@ import org.neo4j.logging.LogAssertions;
 import org.neo4j.logging.NullLogProvider;
 import org.neo4j.memory.MemoryTracker;
 
+@StrictBufferExtension
 public class ModernProtocolHandshakeHandlerTest extends AbstractProtocolHandshakeHandlerTest {
 
     @Test
-    void shouldNegotiateProtocol() {
+    void shouldNegotiateProtocol(StrictBufferContext ctx) {
         // Given
         var version = new ProtocolVersion(2, 0);
         var protocol = newBoltProtocol(version);
@@ -58,7 +59,7 @@ public class ModernProtocolHandshakeHandlerTest extends AbstractProtocolHandshak
 
         when(protocolRegistry.get(eq(new ProtocolVersion(2, 0)))).thenReturn(Optional.of(protocol));
 
-        var channel = new EmbeddedChannel();
+        var channel = ctx.channel();
         var connection = ConnectionMockFactory.newFactory()
                 .withConnector(factory -> factory.withProtocolRegistry(protocolRegistry))
                 .attachTo(channel, new ModernProtocolHandshakeHandler(logProvider));
@@ -69,10 +70,7 @@ public class ModernProtocolHandshakeHandlerTest extends AbstractProtocolHandshak
 
         Assertions.assertThat(msg.negotiationVersion()).isEqualTo(ProtocolVersion.NEGOTIATION_V2);
 
-        Assertions.assertThat(msg.supportedVersions())
-                .containsAll(BoltProtocol.available().stream()
-                        .map(BoltProtocol::version)
-                        .toList());
+        Assertions.assertThat(msg.supportedVersions()).containsAll(protocolRegistry.versionsAvailable());
 
         channel.writeInbound(
                 new ModernProtocolNegotiationFinalizeMessage(version, EnumSet.noneOf(ProtocolCapability.class)));
@@ -83,21 +81,23 @@ public class ModernProtocolHandshakeHandlerTest extends AbstractProtocolHandshak
     }
 
     @Test
-    void shouldFreeMemoryUponRemoval() {
+    void shouldFreeMemoryUponRemoval(StrictBufferContext ctx) {
         var memoryTracker = mock(MemoryTracker.class);
 
-        var channel = ConnectionMockFactory.newFactory()
-                .withMemoryTracker(memoryTracker)
-                .createChannel(new ModernProtocolHandshakeHandler(logProvider));
+        var channel = ctx.withConnection(
+                conn -> conn.withMemoryTracker(memoryTracker), new ModernProtocolHandshakeHandler(logProvider));
 
         channel.pipeline().removeFirst();
 
         verify(memoryTracker).releaseHeap(ModernProtocolHandshakeHandler.SHALLOW_SIZE);
         verifyNoMoreInteractions(memoryTracker);
+
+        // do not validate outbound communication
+        channel.releaseOutbound();
     }
 
     @Test
-    void shouldInstallProtocolLoggingHandlers() {
+    void shouldInstallProtocolLoggingHandlers(StrictBufferContext ctx) {
         var memoryTracker = mock(MemoryTracker.class);
 
         var version = new ProtocolVersion(5, 0);
@@ -106,12 +106,12 @@ public class ModernProtocolHandshakeHandlerTest extends AbstractProtocolHandshak
 
         when(protocolRegistry.get(eq(version))).thenReturn(Optional.of(protocol));
 
-        var channel = ConnectionMockFactory.newFactory()
-                .withConnector(factory -> factory.withProtocolRegistry(protocolRegistry)
-                        .withConfiguration(config -> config.withProtocolLogging(ProtocolLoggingMode.BOTH)
-                                .withInboundBufferThrottle(512, 1024)))
-                .withMemoryTracker(memoryTracker)
-                .createChannel(new ModernProtocolHandshakeHandler(logProvider));
+        var channel = ctx.withConnection(
+                conn -> conn.withConnector(factory -> factory.withProtocolRegistry(protocolRegistry)
+                                .withConfiguration(config -> config.enableProtocolLogging(ProtocolLoggingMode.BOTH)
+                                        .enableInboundBufferThrottle(512, 1024)))
+                        .withMemoryTracker(memoryTracker),
+                new ModernProtocolHandshakeHandler(logProvider));
 
         // pre-install handlers as would be the case if the prior protocol stage had initialized the
         // pipeline
@@ -131,10 +131,13 @@ public class ModernProtocolHandshakeHandlerTest extends AbstractProtocolHandshak
                 .containsSubsequence("readThrottleHandler", ProtocolLoggingHandler.DECODED_NAME);
 
         Mockito.verify(memoryTracker, Mockito.never()).allocateHeap(ProtocolLoggingHandler.SHALLOW_SIZE);
+
+        // do not validate outbound communication
+        channel.releaseOutbound();
     }
 
     @Test
-    void shouldInstallRawProtocolLoggingHandlers() {
+    void shouldInstallRawProtocolLoggingHandlers(StrictBufferContext ctx) {
         var memoryTracker = mock(MemoryTracker.class);
 
         var version = new ProtocolVersion(5, 0);
@@ -143,11 +146,11 @@ public class ModernProtocolHandshakeHandlerTest extends AbstractProtocolHandshak
 
         when(protocolRegistry.get(eq(version))).thenReturn(Optional.of(protocol));
 
-        var channel = ConnectionMockFactory.newFactory()
-                .withConnector(factory -> factory.withProtocolRegistry(protocolRegistry)
-                        .withConfiguration(config -> config.withProtocolLogging(ProtocolLoggingMode.RAW)))
-                .withMemoryTracker(memoryTracker)
-                .createChannel(new ModernProtocolHandshakeHandler(logProvider));
+        var channel = ctx.withConnection(
+                conn -> conn.withConnector(factory -> factory.withProtocolRegistry(protocolRegistry)
+                                .withConfiguration(config -> config.enableProtocolLogging(ProtocolLoggingMode.RAW)))
+                        .withMemoryTracker(memoryTracker),
+                new ModernProtocolHandshakeHandler(logProvider));
 
         // pre-install handlers as would be the case if the prior protocol stage had initialized the
         // pipeline
@@ -166,10 +169,13 @@ public class ModernProtocolHandshakeHandlerTest extends AbstractProtocolHandshak
                 .doesNotContain(ProtocolLoggingHandler.DECODED_NAME);
 
         Mockito.verify(memoryTracker, Mockito.never()).allocateHeap(ProtocolLoggingHandler.SHALLOW_SIZE);
+
+        // do not validate outbound communication
+        channel.releaseOutbound();
     }
 
     @Test
-    void shouldInstallDecodedProtocolLoggingHandlers() {
+    void shouldInstallDecodedProtocolLoggingHandlers(StrictBufferContext ctx) {
         var memoryTracker = mock(MemoryTracker.class);
 
         var version = new ProtocolVersion(5, 0);
@@ -178,12 +184,12 @@ public class ModernProtocolHandshakeHandlerTest extends AbstractProtocolHandshak
 
         when(protocolRegistry.get(eq(version))).thenReturn(Optional.of(protocol));
 
-        var channel = ConnectionMockFactory.newFactory()
-                .withConnector(factory -> factory.withProtocolRegistry(protocolRegistry)
-                        .withConfiguration(config -> config.withProtocolLogging(ProtocolLoggingMode.DECODED)
-                                .withInboundBufferThrottle(512, 1024)))
-                .withMemoryTracker(memoryTracker)
-                .createChannel(new ModernProtocolHandshakeHandler(logProvider));
+        var channel = ctx.withConnection(
+                conn -> conn.withConnector(factory -> factory.withProtocolRegistry(protocolRegistry)
+                                .withConfiguration(config -> config.enableProtocolLogging(ProtocolLoggingMode.DECODED)
+                                        .enableInboundBufferThrottle(512, 1024)))
+                        .withMemoryTracker(memoryTracker),
+                new ModernProtocolHandshakeHandler(logProvider));
 
         // pre-install handlers as would be the case if the prior protocol stage had initialized the
         // pipeline
@@ -202,22 +208,25 @@ public class ModernProtocolHandshakeHandlerTest extends AbstractProtocolHandshak
                 .doesNotContain(ProtocolLoggingHandler.RAW_NAME);
 
         Mockito.verify(memoryTracker, Mockito.never()).allocateHeap(ProtocolLoggingHandler.SHALLOW_SIZE);
+
+        // do not validate outbound communication
+        channel.releaseOutbound();
     }
 
     @Test
-    void shouldLogRejectedNegotiations() {
+    void shouldLogRejectedNegotiations(StrictBufferContext ctx) {
         var memoryTracker = mock(MemoryTracker.class);
 
         var version = new ProtocolVersion(5, 0);
         var protocol = newBoltProtocol(version);
         var protocolRegistry = newProtocolFactory(version, protocol);
 
-        var channel = ConnectionMockFactory.newFactory()
-                .withConnector(factory -> factory.withProtocolRegistry(protocolRegistry)
-                        .withConfiguration(config -> config.withProtocolLogging(ProtocolLoggingMode.DECODED)
-                                .withInboundBufferThrottle(512, 1024)))
-                .withMemoryTracker(memoryTracker)
-                .createChannel(new ModernProtocolHandshakeHandler(logProvider));
+        var channel = ctx.withConnection(
+                conn -> conn.withConnector(factory -> factory.withProtocolRegistry(protocolRegistry)
+                                .withConfiguration(config -> config.enableProtocolLogging(ProtocolLoggingMode.DECODED)
+                                        .enableInboundBufferThrottle(512, 1024)))
+                        .withMemoryTracker(memoryTracker),
+                new ModernProtocolHandshakeHandler(logProvider));
 
         // pre-install handlers as would be the case if the prior protocol stage had initialized the
         // pipeline
@@ -235,5 +244,8 @@ public class ModernProtocolHandshakeHandlerTest extends AbstractProtocolHandshak
                         "Failed Bolt handshake: Client does not support any of the proposed Bolt versions supported by this server.");
 
         ChannelAssertions.assertThat(channel).isInactive().isClosed();
+
+        // do not validate outbound communication
+        channel.releaseOutbound();
     }
 }

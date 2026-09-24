@@ -19,6 +19,7 @@
  */
 package org.neo4j.cypher.graphcounts
 
+import org.json4s.AsJsonInput
 import org.json4s.CustomSerializer
 import org.json4s.DefaultFormats
 import org.json4s.FileInput
@@ -27,6 +28,7 @@ import org.json4s.JArray
 import org.json4s.JString
 import org.json4s.JValue
 import org.json4s.StringInput
+import org.json4s.jvalue2extractable
 import org.json4s.native.JsonMethods
 import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.expressions.Expression
@@ -38,6 +40,7 @@ import org.neo4j.cypher.internal.expressions.StringLiteral
 import org.neo4j.cypher.internal.parser.AstParserFactory
 import org.neo4j.cypher.internal.util.Neo4jCypherExceptionFactory
 import org.neo4j.internal.schema.ConstraintType
+import org.neo4j.internal.schema.EndpointType
 import org.neo4j.internal.schema.IndexProviderDescriptor
 import org.neo4j.internal.schema.IndexType
 import org.neo4j.internal.schema.IndexType.RANGE
@@ -51,8 +54,11 @@ import scala.util.Try
 object GraphCountsJson {
 
   val allFormatsExceptRowSerializer: Formats =
-    DefaultFormats + IndexTypeSerializer + IndexProviderSerializer + ConstraintTypeSerializer + SchemaValueTypes.Serializer
+    DefaultFormats + IndexTypeSerializer + IndexProviderSerializer + ConstraintTypeSerializer + SchemaValueTypes.Serializer + EndpointTypeSerializer
   val allFormats: Formats = allFormatsExceptRowSerializer + RowSerializer
+
+  implicit private val jsonFileInput: AsJsonInput[FileInput] = AsJsonInput.fromFunction(identity)
+  implicit private val jsonStringInput: AsJsonInput[StringInput] = AsJsonInput.fromFunction(identity)
 
   /**
    * Given a JSON file obtained from the data collector, e.g. via
@@ -78,6 +84,19 @@ object GraphCountsJson {
     JsonMethods.parse(StringInput(str)).extract[GraphCountData]
   }
 
+  def parseAsGraphCountRowsFromFile(file: File): GraphCountData = {
+    parseAsGraphCountRowsFromString(readFile(file))
+  }
+
+  def parseAsGraphCountRowsFromString(str: String): GraphCountData = {
+    // this format is used when downloading the graph counts from the browser after calling
+    // `db.stats.retrieve("GRAPH COUNTS")
+    implicit val formats: Formats = allFormatsExceptRowSerializer
+    val value = JsonMethods.parse(StringInput(str))
+    val rows = value.extract[Seq[Row]]
+    rows.head.data
+  }
+
   def parseAsGraphCountsJsonFromString(str: String): DbStatsRetrieveGraphCountsJSON = {
     implicit val formats: Formats = allFormats
     JsonMethods.parse(StringInput(str)).extract[DbStatsRetrieveGraphCountsJSON]
@@ -98,10 +117,11 @@ object GraphCountsJson {
 
   def parseAsGraphCountDataFromCypherMapString(mapString: String): GraphCountData = {
     // Note, assumes default cypher version.
-    val mapExpression = AstParserFactory(CypherVersion.Default)(
+    val mapExpression = AstParserFactory(CypherVersion.Legacy.legacyVersion())(
       mapString,
       Neo4jCypherExceptionFactory(mapString, None),
-      None
+      None,
+      Seq()
     ).expression()
     val json = mapLiteralToJson(mapExpression)
     GraphCountsJson.parseAsGraphCountDataFromString(json)
@@ -165,6 +185,8 @@ object GraphCountsJson {
       val graphCounts = parseAsGraphCountsJsonFromString(content)
       graphCounts.results.head.data.head.row.data
     } orElse {
+      Try(parseAsGraphCountRowsFromString(content))
+    } orElse {
       // If your json is missing the boiler plate
       Try(parseAsGraphCountDataFromString(content))
     } orElse {
@@ -173,6 +195,12 @@ object GraphCountsJson {
     } getOrElse {
       parseAsGraphCountsCsvString(content)
     }
+  }
+
+  def parseMetaStats(file: File): ApocMetaStats = {
+    implicit val formats: Formats = DefaultFormats
+    val json = JsonMethods.parse(FileInput(file))
+    json.extract[Seq[ApocMeta]].head.stats
   }
 }
 
@@ -200,14 +228,14 @@ case class GraphCountData(
   def matchingUniquenessConstraintExists(index: Index): Boolean = {
     index match {
       case Index(Some(Seq(label)), None, RANGE, properties, _, _, _, _) => constraints.exists {
-          case Constraint(Some(`label`), None, `properties`, ConstraintType.UNIQUE, _)        => true
-          case Constraint(Some(`label`), None, `properties`, ConstraintType.UNIQUE_EXISTS, _) => true
-          case _                                                                              => false
+          case Constraint(Some(`label`), None, `properties`, _, ConstraintType.UNIQUE, _, _)        => true
+          case Constraint(Some(`label`), None, `properties`, _, ConstraintType.UNIQUE_EXISTS, _, _) => true
+          case _                                                                                    => false
         }
       case Index(None, Some(Seq(relType)), RANGE, properties, _, _, _, _) => constraints.exists {
-          case Constraint(None, Some(`relType`), `properties`, ConstraintType.UNIQUE, _)        => true
-          case Constraint(None, Some(`relType`), `properties`, ConstraintType.UNIQUE_EXISTS, _) => true
-          case _                                                                                => false
+          case Constraint(None, Some(`relType`), `properties`, _, ConstraintType.UNIQUE, _, _)        => true
+          case Constraint(None, Some(`relType`), `properties`, _, ConstraintType.UNIQUE_EXISTS, _, _) => true
+          case _                                                                                      => false
         }
       case _ => false
     }
@@ -218,8 +246,10 @@ case class Constraint(
   label: Option[String],
   relationshipType: Option[String],
   properties: Seq[String],
+  enforcedLabel: Option[String],
   `type`: ConstraintType,
-  propertyTypes: Seq[SchemaValueType]
+  propertyTypes: Seq[SchemaValueType],
+  endpointType: Option[EndpointType]
 )
 
 case class Index(
@@ -304,6 +334,19 @@ case object ConstraintTypeSerializer extends CustomSerializer[ConstraintType](fo
       )
     )
 
+case object EndpointTypeSerializer extends CustomSerializer[EndpointType](format =>
+      (
+        {
+          case JString("START") => EndpointType.START
+          case JString("END")   => EndpointType.END
+        },
+        {
+          case EndpointType.START => JString("START")
+          case EndpointType.END   => JString("END")
+        }
+      )
+    )
+
 object SchemaValueTypes {
 
   case object Serializer extends CustomSerializer[SchemaValueType](_ => (serializer, deserializer))
@@ -317,3 +360,35 @@ object SchemaValueTypes {
     case valueType: SchemaValueType => JString(valueType.serialize())
   }
 }
+
+/*
+ * The below classes represent the JSON structure from apoc.meta.stats
+ * We assume the format is as follows:
+ *
+ * [
+ *  {
+ *    "stats": {
+ *      "relTypeCount": 14,
+ *      "labelCount": 15,
+ *      "relTypes": {
+ *        "(:Photo)-[:HAS_AVG_CLUSTER_BASE]->()": 256151,
+ *      }
+ *   "relCount": 256151,
+ *   "labels": {
+ *       "Photo": 256151
+ *    },
+ *    "nodeCount": 256151
+ *  }
+ * ]
+ *
+ * Additional fields are ignored.
+ */
+
+case class ApocMeta(stats: ApocMetaStats)
+
+case class ApocMetaStats(
+  relTypes: Map[String, Int],
+  relCount: Int,
+  labels: Map[String, Int],
+  nodeCount: Int
+)

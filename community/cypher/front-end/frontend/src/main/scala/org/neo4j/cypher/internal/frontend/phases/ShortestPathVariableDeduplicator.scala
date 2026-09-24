@@ -19,8 +19,7 @@ package org.neo4j.cypher.internal.frontend.phases
 import org.neo4j.cypher.internal.ast.Match
 import org.neo4j.cypher.internal.ast.Query
 import org.neo4j.cypher.internal.ast.Where
-import org.neo4j.cypher.internal.ast.semantics.Scope
-import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
+import org.neo4j.cypher.internal.ast.semantics.scoping.WorkingScope
 import org.neo4j.cypher.internal.expressions.Ands
 import org.neo4j.cypher.internal.expressions.Equals
 import org.neo4j.cypher.internal.expressions.Expression
@@ -28,12 +27,14 @@ import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.ParenthesizedPath
 import org.neo4j.cypher.internal.expressions.PathPatternPart
 import org.neo4j.cypher.internal.expressions.PatternPart.SelectiveSelector
-import org.neo4j.cypher.internal.expressions.PatternPartWithSelector
+import org.neo4j.cypher.internal.expressions.PrefixedPatternPart
 import org.neo4j.cypher.internal.expressions.QuantifiedPath
 import org.neo4j.cypher.internal.frontend.phases.CompilationPhaseTracer.CompilationPhase
+import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerConfig
 import org.neo4j.cypher.internal.frontend.phases.factories.PlanPipelineTransformerFactory
+import org.neo4j.cypher.internal.frontend.phases.parserTransformers.scoping.UpToDateScopes
 import org.neo4j.cypher.internal.rewriting.conditions.SemanticInfoAvailable
-import org.neo4j.cypher.internal.rewriting.rewriters.normalizePredicates
+import org.neo4j.cypher.internal.rewriting.rewriters.astRewriters.NormalizePredicates
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.cypher.internal.util.Ref
 import org.neo4j.cypher.internal.util.Rewriter
@@ -53,10 +54,8 @@ case object ShortestPathVariableDeduplicator extends Phase[BaseContext, BaseStat
     with DefaultPostCondition
     with PlanPipelineTransformerFactory {
 
-  override def getTransformer(
-    pushdownPropertyReads: Boolean,
-    semanticFeatures: Seq[SemanticFeature]
-  ): Transformer[_ <: BaseContext, _ <: BaseState, BaseState] = this
+  override def getTransformer(planPipelineConfig: PlanPipelineTransformerConfig)
+    : Transformer[_ <: BaseContext, _ <: BaseState, BaseState] = this
 
   override def process(from: BaseState, context: BaseContext): BaseState = {
     val renamings = mutable.Map.empty[Ref[LogicalVariable], LogicalVariable]
@@ -64,9 +63,11 @@ case object ShortestPathVariableDeduplicator extends Phase[BaseContext, BaseStat
     val statementWithPredicates = from.statement().endoRewrite(
       topDown(Rewriter.lift {
         case clause: Match =>
-          val currentScope = from.semantics().recordedScopes(clause).scope
+          val clauseScope = from.scopeState().scopeOfOpt(clause).getOrElse(
+            throw new IllegalStateException(s"No working scope was recorded for MATCH clause: $clause")
+          )
           clause.endoRewrite(
-            clauseRewriter(from.anonymousVariableNameGenerator, currentScope, renamings)
+            clauseRewriter(from.anonymousVariableNameGenerator, clauseScope, renamings)
           )
       })
     )
@@ -85,24 +86,24 @@ case object ShortestPathVariableDeduplicator extends Phase[BaseContext, BaseStat
   private def generateRenaming(anonymousVariableNameGenerator: AnonymousVariableNameGenerator)(
     variable: LogicalVariable
   ): (Ref[LogicalVariable], LogicalVariable) = {
-    val newName = Namespacer.genName(anonymousVariableNameGenerator, variable.name)
+    val newName = AnonymousVariableNameGenerator.genName(anonymousVariableNameGenerator, variable.name)
     Ref(variable) -> variable.renameId(newName)
   }
 
   private def clauseRewriter(
     anonymousVariableNameGenerator: AnonymousVariableNameGenerator,
-    currentScope: Scope,
+    clauseScope: WorkingScope,
     renamings: mutable.Map[Ref[LogicalVariable], LogicalVariable]
   ): Rewriter = {
     val innerRewriter = patternElementRewriter(anonymousVariableNameGenerator, renamings)
 
     topDown(
       Rewriter.lift {
-        case p @ PatternPartWithSelector(_: SelectiveSelector, patternPart) =>
+        case p @ PrefixedPatternPart(_: SelectiveSelector, _, patternPart) =>
           val element = patternPart.element
 
           val rewrittenElement = element.endoRewrite(innerRewriter)
-          val variables = rewrittenElement.allTopLevelVariablesLeftToRight
+          val variables = rewrittenElement.allSingletonVariablesLeftToRight
           val exterior = Set(variables.head, variables.last)
           val interior = variables.tail.init
 
@@ -112,9 +113,7 @@ case object ShortestPathVariableDeduplicator extends Phase[BaseContext, BaseStat
             case (_, variables) =>
               val firstVariable = variables.head
               val variableDefinedInThisClause =
-                currentScope
-                  .symbolTable(firstVariable.name)
-                  .definition.asVariable.position == firstVariable.position
+                !clauseScope.incoming.allSymbols.exists(_.name == firstVariable.name)
               if (variableDefinedInThisClause) {
                 variables.tail.map(generateRenaming(anonymousVariableNameGenerator))
               } else {
@@ -153,7 +152,7 @@ case object ShortestPathVariableDeduplicator extends Phase[BaseContext, BaseStat
     renamings: mutable.Map[Ref[LogicalVariable], LogicalVariable]
   ): Rewriter = topDown(Rewriter.lift {
     case qpp: QuantifiedPath =>
-      val variables = qpp.part.element.allTopLevelVariablesLeftToRight
+      val variables = qpp.part.element.allSingletonVariablesLeftToRight
       val currentRenamings = variables.groupBy(identity).flatMap {
         case (_, variables) =>
           variables.tail.map(generateRenaming(anonymousVariableNameGenerator))
@@ -183,12 +182,15 @@ case object ShortestPathVariableDeduplicator extends Phase[BaseContext, BaseStat
     }.to(ListSet)
 
   override def preConditions: Set[StepSequencer.Condition] =
-    // Reads scope of MATCH clauses
-    SemanticInfoAvailable +
+    Set(
+      // Reads the WorkingScope of MATCH clauses
+      UpToDateScopes,
       // Rewrites predicates
-      normalizePredicates.completed
+      NormalizePredicates.completed
+    )
 
-  override def invalidatedConditions: Set[StepSequencer.Condition] = SemanticInfoAvailable // Introduces new AST nodes
+  override def invalidatedConditions: Set[StepSequencer.Condition] =
+    SemanticInfoAvailable + UpToDateScopes // Introduces new AST nodes
 
   override def phase: CompilationPhase = CompilationPhase.AST_REWRITE
 }

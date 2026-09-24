@@ -37,21 +37,30 @@ import java.util.List;
 import java.util.function.LongFunction;
 import java.util.stream.LongStream;
 import org.eclipse.collections.impl.factory.Sets;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.neo4j.common.TokenNameLookup;
 import org.neo4j.configuration.Config;
 import org.neo4j.internal.schema.AllIndexProviderDescriptors;
+import org.neo4j.internal.schema.IndexDescriptor;
+import org.neo4j.internal.schema.IndexPrototype;
 import org.neo4j.internal.schema.IndexProviderDescriptor;
 import org.neo4j.internal.schema.SchemaDescriptorSupplier;
 import org.neo4j.internal.schema.SchemaDescriptors;
 import org.neo4j.internal.schema.StorageEngineIndexingBehaviour;
 import org.neo4j.io.fs.DefaultFileSystemAbstraction;
+import org.neo4j.io.memory.ByteBufferFactory;
+import org.neo4j.kernel.api.impl.index.lucene.LuceneContext;
 import org.neo4j.kernel.api.impl.index.storage.DirectoryFactory;
-import org.neo4j.kernel.api.impl.schema.TextIndexProvider;
+import org.neo4j.kernel.api.impl.schema.text.TextIndexProvider;
+import org.neo4j.kernel.api.index.IndexDirectoryStructure.Factory;
 import org.neo4j.kernel.api.index.IndexPopulator;
 import org.neo4j.kernel.api.index.IndexSample;
+import org.neo4j.kernel.api.index.IndexUpdater;
 import org.neo4j.kernel.impl.api.index.IndexSamplingConfig;
+import org.neo4j.logging.NullLogProvider;
 import org.neo4j.monitoring.Monitors;
+import org.neo4j.storageengine.api.EagerValueIndexEntryUpdate;
 import org.neo4j.storageengine.api.IndexEntryUpdate;
 import org.neo4j.test.extension.Inject;
 import org.neo4j.test.extension.testdirectory.TestDirectoryExtension;
@@ -68,159 +77,177 @@ class TextIndexPopulatingUpdaterIT {
     @Inject
     private TestDirectory testDir;
 
-    private static final SchemaDescriptorSupplier SCHEMA_DESCRIPTOR = () -> SchemaDescriptors.forLabel(1, 42);
+    private static final IndexDescriptor INDEX_DESCRIPTOR = IndexPrototype.forSchema(SchemaDescriptors.forLabel(1, 42))
+            .withName("index_1")
+            .materialise(1);
 
-    @Test
-    void shouldSampleAdditions() throws Exception {
+    @ParameterizedTest
+    @EnumSource
+    void shouldSampleAdditions(LuceneContext luceneContext) throws Exception {
         // Given
-        var provider = createIndexProvider();
-        var populator = getPopulator(provider, SCHEMA_DESCRIPTOR);
+        TextIndexProvider provider = createIndexProvider(luceneContext);
+        IndexPopulator populator = getPopulator(provider, INDEX_DESCRIPTOR);
 
         // When
-        try (var updater = populator.newPopulatingUpdater(NULL_CONTEXT)) {
-            updater.process(add(1, SCHEMA_DESCRIPTOR, "foo"));
-            updater.process(add(2, SCHEMA_DESCRIPTOR, "bar"));
-            updater.process(add(3, SCHEMA_DESCRIPTOR, "baz"));
-            updater.process(add(4, SCHEMA_DESCRIPTOR, "bar"));
+        try (IndexUpdater updater = populator.newPopulatingUpdater(NULL_CONTEXT)) {
+            updater.process(add(1, INDEX_DESCRIPTOR, "foo"));
+            updater.process(add(2, INDEX_DESCRIPTOR, "bar"));
+            updater.process(add(3, INDEX_DESCRIPTOR, "baz"));
+            updater.process(add(4, INDEX_DESCRIPTOR, "bar"));
         }
 
         // Then
         assertThat(populator.sample(NULL_CONTEXT)).isEqualTo(new IndexSample(4, 3, 4));
     }
 
-    @Test
-    void shouldSampleUpdates() throws Exception {
+    @ParameterizedTest
+    @EnumSource
+    void shouldSampleUpdates(LuceneContext luceneContext) throws Exception {
         // Given
-        var provider = createIndexProvider();
-        var populator = getPopulator(provider, SCHEMA_DESCRIPTOR);
+        TextIndexProvider provider = createIndexProvider(luceneContext);
+        IndexPopulator populator = getPopulator(provider, INDEX_DESCRIPTOR);
 
         // When
-        try (var updater = populator.newPopulatingUpdater(NULL_CONTEXT)) {
-            updater.process(add(1, SCHEMA_DESCRIPTOR, "initial1"));
-            updater.process(add(2, SCHEMA_DESCRIPTOR, "initial2"));
-            updater.process(add(3, SCHEMA_DESCRIPTOR, "new2"));
-            updater.process(change(1, SCHEMA_DESCRIPTOR, "initial1", "new1"));
-            updater.process(change(1, SCHEMA_DESCRIPTOR, "initial2", "new2"));
+        try (IndexUpdater updater = populator.newPopulatingUpdater(NULL_CONTEXT)) {
+            updater.process(add(1, INDEX_DESCRIPTOR, "initial1"));
+            updater.process(add(2, INDEX_DESCRIPTOR, "initial2"));
+            updater.process(add(3, INDEX_DESCRIPTOR, "new2"));
+            updater.process(change(1, INDEX_DESCRIPTOR, "initial1", "new1"));
+            updater.process(change(1, INDEX_DESCRIPTOR, "initial2", "new2"));
         }
 
         // Then samples calculated with documents pending merge
         assertThat(populator.sample(NULL_CONTEXT)).isEqualTo(new IndexSample(3, 4, 5));
     }
 
-    @Test
-    void shouldSampleRemovals() throws Exception {
+    @ParameterizedTest
+    @EnumSource
+    void shouldSampleRemovals(LuceneContext luceneContext) throws Exception {
         // Given
-        var provider = createIndexProvider();
-        var populator = getPopulator(provider, SCHEMA_DESCRIPTOR);
+        TextIndexProvider provider = createIndexProvider(luceneContext);
+        IndexPopulator populator = getPopulator(provider, INDEX_DESCRIPTOR);
 
         // When
-        try (var updater = populator.newPopulatingUpdater(NULL_CONTEXT)) {
-            updater.process(add(1, SCHEMA_DESCRIPTOR, "foo"));
-            updater.process(add(2, SCHEMA_DESCRIPTOR, "bar"));
-            updater.process(add(3, SCHEMA_DESCRIPTOR, "baz"));
-            updater.process(add(4, SCHEMA_DESCRIPTOR, "qux"));
-            updater.process(remove(1, SCHEMA_DESCRIPTOR, "foo"));
-            updater.process(remove(2, SCHEMA_DESCRIPTOR, "bar"));
-            updater.process(remove(4, SCHEMA_DESCRIPTOR, "qux"));
+        try (IndexUpdater updater = populator.newPopulatingUpdater(NULL_CONTEXT)) {
+            updater.process(add(1, INDEX_DESCRIPTOR, "foo"));
+            updater.process(add(2, INDEX_DESCRIPTOR, "bar"));
+            updater.process(add(3, INDEX_DESCRIPTOR, "baz"));
+            updater.process(add(4, INDEX_DESCRIPTOR, "qux"));
+            updater.process(remove(1, INDEX_DESCRIPTOR, "foo"));
+            updater.process(remove(2, INDEX_DESCRIPTOR, "bar"));
+            updater.process(remove(4, INDEX_DESCRIPTOR, "qux"));
         }
 
         // Then samples calculated with documents pending merge
         assertThat(populator.sample(NULL_CONTEXT)).isEqualTo(new IndexSample(1, 4, 4));
     }
 
-    @Test
-    final void shouldIgnoreAddedUnsupportedValueTypes() throws Exception {
+    @ParameterizedTest
+    @EnumSource
+    final void shouldIgnoreAddedUnsupportedValueTypes(LuceneContext luceneContext) throws Exception {
         // given  the population of an empty index
-        final var externalUpdates =
-                generateUpdates(10, id -> IndexEntryUpdate.add(id, SCHEMA_DESCRIPTOR, unsupportedValue(id)));
+        Collection<IndexEntryUpdate> externalUpdates =
+                generateUpdates(10, id -> EagerValueIndexEntryUpdate.add(id, INDEX_DESCRIPTOR, unsupportedValue(id)));
         // when   processing the addition of unsupported value types
         // then   updates should not have been indexed
-        test(List.of(), externalUpdates, 0);
+        test(luceneContext, List.of(), externalUpdates, 0);
     }
 
-    @Test
-    final void shouldIgnoreRemovedUnsupportedValueTypes() throws Exception {
+    @ParameterizedTest
+    @EnumSource
+    final void shouldIgnoreRemovedUnsupportedValueTypes(LuceneContext luceneContext) throws Exception {
         // given  the population of an empty index
-        final var externalUpdates =
-                generateUpdates(10, id -> IndexEntryUpdate.remove(id, SCHEMA_DESCRIPTOR, unsupportedValue(id)));
+        Collection<IndexEntryUpdate> externalUpdates = generateUpdates(
+                10, id -> EagerValueIndexEntryUpdate.remove(id, INDEX_DESCRIPTOR, unsupportedValue(id)));
         // when   processing the removal of unsupported value types
         // then   updates should not have been indexed
-        test(List.of(), externalUpdates, 0);
+        test(luceneContext, List.of(), externalUpdates, 0);
     }
 
-    @Test
-    final void shouldIgnoreChangesBetweenUnsupportedValueTypes() throws Exception {
+    @ParameterizedTest
+    @EnumSource
+    final void shouldIgnoreChangesBetweenUnsupportedValueTypes(LuceneContext luceneContext) throws Exception {
         // given  the population of an empty index
-        final var externalUpdates = generateUpdates(
+        Collection<IndexEntryUpdate> externalUpdates = generateUpdates(
                 10,
-                id -> IndexEntryUpdate.change(id, SCHEMA_DESCRIPTOR, unsupportedValue(id), unsupportedValue(id + 1)));
+                id -> EagerValueIndexEntryUpdate.change(
+                        id, INDEX_DESCRIPTOR, unsupportedValue(id), unsupportedValue(id + 1)));
         // when   processing the change between unsupported value types
         // then   updates should not have been indexed
-        test(List.of(), externalUpdates, 0);
+        test(luceneContext, List.of(), externalUpdates, 0);
     }
 
-    @Test
-    final void shouldNotIgnoreChangesUnsupportedValueTypesToSupportedValueTypes() throws Exception {
+    @ParameterizedTest
+    @EnumSource
+    final void shouldNotIgnoreChangesUnsupportedValueTypesToSupportedValueTypes(LuceneContext luceneContext)
+            throws Exception {
         // given  the population of an empty index
-        final var externalUpdates = generateUpdates(
-                10, id -> IndexEntryUpdate.change(id, SCHEMA_DESCRIPTOR, unsupportedValue(id), supportedValue(id)));
+        Collection<IndexEntryUpdate> externalUpdates = generateUpdates(
+                10,
+                id -> EagerValueIndexEntryUpdate.change(
+                        id, INDEX_DESCRIPTOR, unsupportedValue(id), supportedValue(id)));
         // when   processing the change from an unsupported to a supported value type
         // then   updates should have been indexed as additions
-        test(List.of(), externalUpdates, externalUpdates.size());
+        test(luceneContext, List.of(), externalUpdates, externalUpdates.size());
     }
 
-    @Test
-    final void shouldNotIgnoreChangesSupportedValueTypesToUnsupportedValueTypes() throws Exception {
+    @ParameterizedTest
+    @EnumSource
+    final void shouldNotIgnoreChangesSupportedValueTypesToUnsupportedValueTypes(LuceneContext luceneContext)
+            throws Exception {
         // given  the population of an empty index
-        final var internalUpdates =
-                generateUpdates(10, id1 -> IndexEntryUpdate.add(id1, SCHEMA_DESCRIPTOR, supportedValue(id1)));
-        final var externalUpdates = generateUpdates(
-                10, id -> IndexEntryUpdate.change(id, SCHEMA_DESCRIPTOR, supportedValue(id), unsupportedValue(id)));
+        Collection<IndexEntryUpdate> internalUpdates =
+                generateUpdates(10, id1 -> EagerValueIndexEntryUpdate.add(id1, INDEX_DESCRIPTOR, supportedValue(id1)));
+        Collection<IndexEntryUpdate> externalUpdates = generateUpdates(
+                10,
+                id -> EagerValueIndexEntryUpdate.change(
+                        id, INDEX_DESCRIPTOR, supportedValue(id), unsupportedValue(id)));
         // when   processing the change from a supported to an unsupported value type
         // then   updates should have been indexed as removals
-        test(internalUpdates, externalUpdates, 0);
+        test(luceneContext, internalUpdates, externalUpdates, 0);
     }
 
     private void test(
-            Collection<IndexEntryUpdate<?>> internalUpdates,
-            Collection<IndexEntryUpdate<?>> externalUpdates,
+            LuceneContext luceneContext,
+            Collection<IndexEntryUpdate> internalUpdates,
+            Collection<IndexEntryUpdate> externalUpdates,
             long expectedIndexSize)
             throws Exception {
 
-        final var provider = createIndexProvider();
-        final var populator = getPopulator(provider, SCHEMA_DESCRIPTOR);
+        TextIndexProvider provider = createIndexProvider(luceneContext);
+        IndexPopulator populator = getPopulator(provider, INDEX_DESCRIPTOR);
         populator.add(internalUpdates, NULL_CONTEXT);
 
-        try (var updater = populator.newPopulatingUpdater(NULL_CONTEXT)) {
-            for (final var update : externalUpdates) {
+        try (IndexUpdater updater = populator.newPopulatingUpdater(NULL_CONTEXT)) {
+            for (IndexEntryUpdate update : externalUpdates) {
                 updater.process(update);
             }
         }
 
-        final var sample = populator.sample(NULL_CONTEXT);
+        IndexSample sample = populator.sample(NULL_CONTEXT);
         assertThat(sample.indexSize()).isEqualTo(expectedIndexSize);
     }
 
-    private Value supportedValue(long i) {
+    private static Value supportedValue(long i) {
         return Values.of("string_" + i);
     }
 
-    private Value unsupportedValue(long i) {
+    private static Value unsupportedValue(long i) {
         return Values.of(i);
     }
 
-    private Collection<IndexEntryUpdate<?>> generateUpdates(long n, LongFunction<IndexEntryUpdate<?>> updateFunction) {
+    private static Collection<IndexEntryUpdate> generateUpdates(long n, LongFunction<IndexEntryUpdate> updateFunction) {
         return LongStream.range(0L, n).mapToObj(updateFunction).toList();
     }
 
     private IndexPopulator getPopulator(TextIndexProvider provider, SchemaDescriptorSupplier supplier)
             throws Exception {
-        var samplingConfig = new IndexSamplingConfig(Config.defaults());
-        var index = forSchema(supplier.schema(), getIndexProviderDescriptor())
+        IndexSamplingConfig samplingConfig = new IndexSamplingConfig(Config.defaults());
+        IndexDescriptor index = forSchema(supplier.schema(), getIndexProviderDescriptor())
                 .withName("some_name")
                 .materialise(1);
-        var bufferFactory = heapBufferFactory((int) kibiBytes(100));
-        var populator = provider.getPopulator(
+        ByteBufferFactory bufferFactory = heapBufferFactory((int) kibiBytes(100));
+        IndexPopulator populator = provider.getPopulator(
                 index,
                 samplingConfig,
                 bufferFactory,
@@ -237,10 +264,16 @@ class TextIndexPopulatingUpdaterIT {
         return AllIndexProviderDescriptors.TEXT_V1_DESCRIPTOR;
     }
 
-    private TextIndexProvider createIndexProvider() {
-        var directoryFactory = new DirectoryFactory.InMemoryDirectoryFactory();
-        var directoryStructureFactory = directoriesByProvider(testDir.homePath());
+    private TextIndexProvider createIndexProvider(LuceneContext luceneContext) {
+        DirectoryFactory directoryFactory = DirectoryFactory.inMemory(luceneContext);
+        Factory directoryStructureFactory = directoriesByProvider(testDir.homePath());
         return new TextIndexProvider(
-                fileSystem, directoryFactory, directoryStructureFactory, new Monitors(), Config.defaults(), writable());
+                fileSystem,
+                directoryFactory,
+                directoryStructureFactory,
+                new Monitors(),
+                Config.defaults(),
+                writable(),
+                NullLogProvider.getInstance());
     }
 }

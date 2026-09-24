@@ -19,34 +19,43 @@
  */
 package org.neo4j.dbms.database;
 
-import java.util.Optional;
-import org.neo4j.configuration.DatabaseConfig;
+import static org.neo4j.kernel.DatabaseCreationOptions.EMPTY_CREATION_OPTIONS;
+
+import java.util.Map;
 import org.neo4j.cypher.internal.javacompat.CommunityCypherEngineProvider;
 import org.neo4j.dbms.identity.ServerIdentity;
 import org.neo4j.dbms.systemgraph.TopologyGraphDbmsModel.HostedOnMode;
 import org.neo4j.graphdb.factory.module.GlobalModule;
 import org.neo4j.graphdb.factory.module.ModularDatabaseCreationContext;
-import org.neo4j.graphdb.factory.module.id.IdContextFactory;
 import org.neo4j.io.device.DeviceMapper;
 import org.neo4j.kernel.api.Kernel;
 import org.neo4j.kernel.database.Database;
 import org.neo4j.kernel.database.DatabaseCreationContext;
+import org.neo4j.kernel.database.DatabaseMonitors;
+import org.neo4j.kernel.database.DatabaseMonitorsFactory;
 import org.neo4j.kernel.database.DatabaseTracers;
+import org.neo4j.kernel.database.DefaultDatabaseMonitorsFactory;
 import org.neo4j.kernel.database.GlobalAvailabilityGuardController;
+import org.neo4j.kernel.database.IdContextFactory;
+import org.neo4j.kernel.database.IdGeneratorSettings;
 import org.neo4j.kernel.database.NamedDatabaseId;
 import org.neo4j.kernel.impl.api.ExternalIdReuseConditionProvider;
 import org.neo4j.kernel.impl.api.LeaseService;
 import org.neo4j.kernel.impl.api.TransactionalProcessFactory;
 import org.neo4j.kernel.impl.api.TransactionsFactory;
 import org.neo4j.kernel.impl.constraints.StandardConstraintSemantics;
+import org.neo4j.kernel.impl.core.IsolatedTransactionVectorStoreCreator;
 import org.neo4j.kernel.impl.factory.AccessCapabilityFactory;
 import org.neo4j.kernel.impl.index.DatabaseIndexStats;
 import org.neo4j.kernel.impl.pagecache.CommunityVersionStorageFactory;
 import org.neo4j.kernel.impl.pagecache.IOControllerService;
 import org.neo4j.kernel.impl.transaction.stats.DatabaseTransactionStats;
+import org.neo4j.logging.internal.DatabaseLogIdentifier;
+import org.neo4j.logging.internal.DatabaseLogProvider;
+import org.neo4j.wal.pruning.LogPruneStrategyFactory;
 
 public class DefaultDatabaseContextFactory
-        extends AbstractDatabaseContextFactory<StandaloneDatabaseContext, Optional<?>> {
+        extends AbstractDatabaseContextFactory<StandaloneDatabaseContext, NamedDatabaseId> {
     private final DatabaseTransactionStats.Factory transactionStatsFactory;
     private final DatabaseIndexStats.Factory indexStatsFactory;
     private final DeviceMapper deviceMapper;
@@ -76,7 +85,7 @@ public class DefaultDatabaseContextFactory
     }
 
     @Override
-    public StandaloneDatabaseContext create(NamedDatabaseId namedDatabaseId, Optional<?> ignored) {
+    public StandaloneDatabaseContext create(NamedDatabaseId namedDatabaseId) {
         return new Creator(namedDatabaseId).context();
     }
 
@@ -85,19 +94,20 @@ public class DefaultDatabaseContextFactory
         private final StandaloneDatabaseContext context;
 
         private Creator(NamedDatabaseId namedDatabaseId) {
-            var databaseConfig = new DatabaseConfig(globalModule.getGlobalConfig());
-            var contextFactory = createContextFactory(databaseConfig, namedDatabaseId);
+            var databaseConfig = createDatabaseConfig(namedDatabaseId, Map.of());
+            var contextFactory = createContextFactorySupplier(databaseConfig, namedDatabaseId);
+            var databaseLogIdentifier = DatabaseLogIdentifier.create(namedDatabaseId);
             var creationContext = new ModularDatabaseCreationContext(
                     HostedOnMode.SINGLE,
                     serverIdentity,
                     namedDatabaseId,
+                    databaseLogIdentifier,
                     globalModule,
                     globalModule.getGlobalDependencies(),
                     contextFactory,
                     deviceMapper,
                     new CommunityVersionStorageFactory(),
                     databaseConfig,
-                    globalModule.getGlobalMonitors(),
                     LeaseService.NO_LEASES,
                     () -> DatabaseCreationContext.selectStorageEngine(
                             globalModule.getFileSystem(),
@@ -111,17 +121,32 @@ public class DefaultDatabaseContextFactory
                     ModularDatabaseCreationContext.defaultFileWatcherFilter(),
                     AccessCapabilityFactory.configDependent(),
                     ExternalIdReuseConditionProvider.NONE,
-                    idContextFactory.createIdContext(namedDatabaseId, contextFactory, databaseConfig, true),
+                    idContextFactory,
+                    new IdGeneratorSettings(true, true),
                     commitProcessFactory,
                     createTokenHolderProvider(this::kernel),
+                    new IsolatedTransactionVectorStoreCreator(this::kernel),
                     new GlobalAvailabilityGuardController(globalModule.getGlobalAvailabilityGuard()),
                     components.readOnlyDatabases(),
                     controllerService,
                     new DatabaseTracers(globalModule.getTracers(), namedDatabaseId),
                     globalModule.getDefaultCommandCommitListeners(),
-                    TransactionsFactory.DEFAULT);
+                    TransactionsFactory.DEFAULT,
+                    databaseMonitorsFactory(databaseLogIdentifier),
+                    globalModule.getExceptionHandlerService(),
+                    EMPTY_CREATION_OPTIONS,
+                    new LogPruneStrategyFactory(),
+                    false,
+                    false);
             kernelDatabase = new Database(creationContext);
             context = new StandaloneDatabaseContext(kernelDatabase);
+        }
+
+        private DatabaseMonitorsFactory databaseMonitorsFactory(DatabaseLogIdentifier databaseLogIdentifier) {
+            return new DefaultDatabaseMonitorsFactory(new DatabaseMonitors(
+                    globalModule.getGlobalMonitors(),
+                    new DatabaseLogProvider(
+                            databaseLogIdentifier, globalModule.getLogService().getInternalLogProvider())));
         }
 
         private StandaloneDatabaseContext context() {

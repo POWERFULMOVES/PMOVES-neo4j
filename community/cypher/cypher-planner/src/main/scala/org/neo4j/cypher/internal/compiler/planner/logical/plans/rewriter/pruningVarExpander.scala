@@ -53,10 +53,10 @@ import org.neo4j.cypher.internal.logical.plans.Projection
 import org.neo4j.cypher.internal.logical.plans.PruningVarExpand
 import org.neo4j.cypher.internal.logical.plans.RemoteBatchProperties
 import org.neo4j.cypher.internal.logical.plans.RemoteBatchPropertiesWithFilter
+import org.neo4j.cypher.internal.logical.plans.RemoteBatchPropertiesWithPushdownOperators
 import org.neo4j.cypher.internal.logical.plans.RightOuterHashJoin
 import org.neo4j.cypher.internal.logical.plans.Selection
 import org.neo4j.cypher.internal.logical.plans.SemiApply
-import org.neo4j.cypher.internal.logical.plans.TraversalMatchMode
 import org.neo4j.cypher.internal.logical.plans.Union
 import org.neo4j.cypher.internal.logical.plans.ValueHashJoin
 import org.neo4j.cypher.internal.logical.plans.VarExpand
@@ -83,7 +83,7 @@ import scala.collection.mutable
  * .pruningVarExpand((n)-[r*]->(m))
  * .allNodeScan(n)
  *
- * Should run after [[TrailToVarExpandRewriter]] in order to rewrite as many VarExpand as possible.
+ * Should run after [[RepeatToVarExpandRewriter]] in order to rewrite as many VarExpand as possible.
  *
  * @param policy Determines whether a VarExpand(Into) should be planned as a BFS or DFS
  */
@@ -185,7 +185,7 @@ case class pruningVarExpander(
     private def canReplaceWithPruning(expand: VarExpand): Boolean = {
       horizonPlan != null &&
       validMaxLength(expand, requireMaxLength = true) &&
-      expand.mode == ExpandAll &&
+      expand.expansionMode == ExpandAll &&
       !allDependencies(expand.relName.name)
     }
 
@@ -315,6 +315,15 @@ case class pruningVarExpander(
 
         case RemoteBatchPropertiesWithFilter(_, predicates, _) if distinctHorizon.isInDistinctHorizon =>
           (distinctHorizon.withAddedDependencies(predicates), DistinctHorizon.empty)
+        case pushedDownOperators: RemoteBatchPropertiesWithPushdownOperators if distinctHorizon.isInDistinctHorizon =>
+          (
+            distinctHorizon.withAddedDependencies(
+              pushedDownOperators.importedConstantValues ++ pushedDownOperators.importedPerRowValues.values.flatMap(
+                _.dependencies + pushedDownOperators.variable
+              )
+            ),
+            DistinctHorizon.empty
+          )
 
         /**
          * For Apply plans that _do_ introduce an argument, it is never safe to traverse both sides in the same horizon.
@@ -347,6 +356,7 @@ case class pruningVarExpander(
           _: Union |
           _: ValueHashJoin =>
           val newHorizon = plan match {
+
             /**
              * [[ValueHashJoin]] needs its own case so dependencies from its join expression can be tracked.
              */
@@ -394,7 +404,7 @@ case class pruningVarExpander(
                 mode,
                 nodePredicate,
                 relationshipPredicate,
-                TraversalMatchMode.Trail
+                pathMode
               ) =>
               if (replacementPlans.bfsPruningExpands.contains(Ref(expand))) {
                 BFSPruningVarExpand(
@@ -408,7 +418,8 @@ case class pruningVarExpander(
                   depthName = replacementPlans.bfsPruningExpands(Ref(expand)).map(varFor),
                   mode,
                   nodePredicate,
-                  relationshipPredicate
+                  relationshipPredicate,
+                  pathMode
                 )(SameId(expand.id))
               } else if (replacementPlans.pruningExpands(Ref(expand))) {
                 PruningVarExpand(
@@ -420,7 +431,8 @@ case class pruningVarExpander(
                   length.min,
                   length.max.get,
                   nodePredicate,
-                  relationshipPredicate
+                  relationshipPredicate,
+                  pathMode
                 )(SameId(expand.id))
               } else {
                 expand
@@ -453,7 +465,7 @@ case class pruningVarExpander(
 sealed trait VarExpandRewritePolicy {
 
   def accept(plan: VarExpand): Boolean =
-    (this, plan.mode) match {
+    (this, plan.expansionMode) match {
       case (PreferDFS, ExpandInto) => false
       case _                       => true
     }

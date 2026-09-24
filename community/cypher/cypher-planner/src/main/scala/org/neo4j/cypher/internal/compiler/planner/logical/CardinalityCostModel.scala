@@ -23,18 +23,25 @@ import org.neo4j.cypher.internal.ast.semantics.SemanticTable
 import org.neo4j.cypher.internal.compiler.ExecutionModel
 import org.neo4j.cypher.internal.compiler.ExecutionModel.SelectedBatchSize
 import org.neo4j.cypher.internal.compiler.ExecutionModel.VolcanoBatchSize
+import org.neo4j.cypher.internal.compiler.helpers.PropertyAccessHelper
 import org.neo4j.cypher.internal.compiler.helpers.PropertyAccessHelper.PropertyAccess
 import org.neo4j.cypher.internal.compiler.planner.logical.CardinalityCostModel.ALL_SCAN_COST_PER_ROW
+import org.neo4j.cypher.internal.compiler.planner.logical.CardinalityCostModel.DEFAULT_COST_PER_ROW
 import org.neo4j.cypher.internal.compiler.planner.logical.CardinalityCostModel.EffectiveCardinalities
 import org.neo4j.cypher.internal.compiler.planner.logical.CardinalityCostModel.HashJoin
 import org.neo4j.cypher.internal.compiler.planner.logical.CardinalityCostModel.PROBE_BUILD_COST
+import org.neo4j.cypher.internal.compiler.planner.logical.CardinalityCostModel.PROBE_BUILD_LHS_LIMIT
+import org.neo4j.cypher.internal.compiler.planner.logical.CardinalityCostModel.PROBE_BUILD_MEMORY_MULTIPLIER
 import org.neo4j.cypher.internal.compiler.planner.logical.CardinalityCostModel.PROBE_SEARCH_COST
+import org.neo4j.cypher.internal.compiler.planner.logical.CardinalityCostModel.STORE_LOOKUP_COST_PER_ROW
 import org.neo4j.cypher.internal.compiler.planner.logical.CardinalityCostModel.costPerRow
 import org.neo4j.cypher.internal.compiler.planner.logical.CardinalityCostModel.effectiveCardinalities
 import org.neo4j.cypher.internal.compiler.planner.logical.CardinalityCostModel.getEffectiveBatchSize
 import org.neo4j.cypher.internal.compiler.planner.logical.CardinalityCostModel.hackyRelTypeScanCost
+import org.neo4j.cypher.internal.compiler.planner.logical.CardinalityCostModel.selectivityForLabels
 import org.neo4j.cypher.internal.compiler.planner.logical.Metrics.CostModel
 import org.neo4j.cypher.internal.compiler.planner.logical.Metrics.QueryGraphSolverInput
+import org.neo4j.cypher.internal.compiler.planner.logical.cardinality.IndependenceCombiner
 import org.neo4j.cypher.internal.compiler.planner.logical.cardinality.assumeIndependence.RepetitionCardinalityModel
 import org.neo4j.cypher.internal.expressions.AndedPropertyInequalities
 import org.neo4j.cypher.internal.expressions.CachedHasProperty
@@ -44,6 +51,7 @@ import org.neo4j.cypher.internal.expressions.HasLabels
 import org.neo4j.cypher.internal.expressions.HasLabelsOrTypes
 import org.neo4j.cypher.internal.expressions.HasTypes
 import org.neo4j.cypher.internal.expressions.InequalityExpression
+import org.neo4j.cypher.internal.expressions.LabelName
 import org.neo4j.cypher.internal.expressions.LogicalProperty
 import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.Property
@@ -66,6 +74,9 @@ import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipIndexScan
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipIndexSeek
 import org.neo4j.cypher.internal.logical.plans.DirectedRelationshipTypeScan
 import org.neo4j.cypher.internal.logical.plans.DirectedUnionRelationshipTypesScan
+import org.neo4j.cypher.internal.logical.plans.DynamicDirectedRelationshipTypeLookup
+import org.neo4j.cypher.internal.logical.plans.DynamicLabelNodeLookup
+import org.neo4j.cypher.internal.logical.plans.DynamicUndirectedRelationshipTypeLookup
 import org.neo4j.cypher.internal.logical.plans.ExhaustiveLimit
 import org.neo4j.cypher.internal.logical.plans.ExhaustiveLogicalPlan
 import org.neo4j.cypher.internal.logical.plans.Expand
@@ -73,6 +84,7 @@ import org.neo4j.cypher.internal.logical.plans.Expand.ExpandAll
 import org.neo4j.cypher.internal.logical.plans.Expand.ExpandInto
 import org.neo4j.cypher.internal.logical.plans.FindShortestPaths
 import org.neo4j.cypher.internal.logical.plans.ForeachApply
+import org.neo4j.cypher.internal.logical.plans.IndexedProperty
 import org.neo4j.cypher.internal.logical.plans.IntersectionNodeByLabelsScan
 import org.neo4j.cypher.internal.logical.plans.LeftOuterHashJoin
 import org.neo4j.cypher.internal.logical.plans.Limit
@@ -82,15 +94,16 @@ import org.neo4j.cypher.internal.logical.plans.LogicalLeafPlan
 import org.neo4j.cypher.internal.logical.plans.LogicalPlan
 import org.neo4j.cypher.internal.logical.plans.LogicalPlanExtension
 import org.neo4j.cypher.internal.logical.plans.LogicalUnaryPlan
+import org.neo4j.cypher.internal.logical.plans.MergeInto
 import org.neo4j.cypher.internal.logical.plans.NodeByElementIdSeek
 import org.neo4j.cypher.internal.logical.plans.NodeByIdSeek
 import org.neo4j.cypher.internal.logical.plans.NodeByLabelScan
 import org.neo4j.cypher.internal.logical.plans.NodeHashJoin
 import org.neo4j.cypher.internal.logical.plans.NodeIndexContainsScan
 import org.neo4j.cypher.internal.logical.plans.NodeIndexEndsWithScan
+import org.neo4j.cypher.internal.logical.plans.NodeIndexLeafPlan
 import org.neo4j.cypher.internal.logical.plans.NodeIndexScan
-import org.neo4j.cypher.internal.logical.plans.NodeIndexSeek
-import org.neo4j.cypher.internal.logical.plans.NodeUniqueIndexSeek
+import org.neo4j.cypher.internal.logical.plans.NodeIndexSeekLeafPlan
 import org.neo4j.cypher.internal.logical.plans.Optional
 import org.neo4j.cypher.internal.logical.plans.OptionalExpand
 import org.neo4j.cypher.internal.logical.plans.OrderedUnion
@@ -98,9 +111,11 @@ import org.neo4j.cypher.internal.logical.plans.PartialSort
 import org.neo4j.cypher.internal.logical.plans.PartitionedScanPlan
 import org.neo4j.cypher.internal.logical.plans.ProcedureCall
 import org.neo4j.cypher.internal.logical.plans.ProjectEndpoints
+import org.neo4j.cypher.internal.logical.plans.RelationshipIndexLeafPlan
 import org.neo4j.cypher.internal.logical.plans.RemoteBatchProperties
 import org.neo4j.cypher.internal.logical.plans.RemoteBatchPropertiesWithFilter
-import org.neo4j.cypher.internal.logical.plans.RepeatTrail
+import org.neo4j.cypher.internal.logical.plans.RemoteBatchPropertiesWithPushdownOperators
+import org.neo4j.cypher.internal.logical.plans.Repeat
 import org.neo4j.cypher.internal.logical.plans.RightOuterHashJoin
 import org.neo4j.cypher.internal.logical.plans.Selection
 import org.neo4j.cypher.internal.logical.plans.SingleFromRightLogicalPlan
@@ -121,13 +136,17 @@ import org.neo4j.cypher.internal.logical.plans.Union
 import org.neo4j.cypher.internal.logical.plans.UnionNodeByLabelsScan
 import org.neo4j.cypher.internal.logical.plans.UnwindCollection
 import org.neo4j.cypher.internal.logical.plans.ValueHashJoin
+import org.neo4j.cypher.internal.logical.plans.ValueMergeJoin
 import org.neo4j.cypher.internal.logical.plans.VarExpand
-import org.neo4j.cypher.internal.macros.AssertMacros
+import org.neo4j.cypher.internal.macros.AssertMacros3
+import org.neo4j.cypher.internal.planner.spi.DatabaseMode
+import org.neo4j.cypher.internal.planner.spi.DatabaseMode.DatabaseMode
 import org.neo4j.cypher.internal.planner.spi.GraphStatistics
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.Cardinalities
 import org.neo4j.cypher.internal.planner.spi.PlanningAttributes.ProvidedOrders
 import org.neo4j.cypher.internal.util.CancellationChecker
 import org.neo4j.cypher.internal.util.Cardinality
+import org.neo4j.cypher.internal.util.Cardinality.NumericCardinality
 import org.neo4j.cypher.internal.util.Cost
 import org.neo4j.cypher.internal.util.CostPerRow
 import org.neo4j.cypher.internal.util.Foldable.TraverseChildren
@@ -138,8 +157,11 @@ import org.neo4j.cypher.internal.util.WorkReduction
 import org.neo4j.cypher.internal.util.symbols.CTNode
 import org.neo4j.cypher.internal.util.symbols.CTRelationship
 
-case class CardinalityCostModel(executionModel: ExecutionModel, cancellationChecker: CancellationChecker)
-    extends CostModel {
+case class CardinalityCostModel(
+  executionModel: ExecutionModel,
+  cancellationChecker: CancellationChecker,
+  databaseMode: DatabaseMode = DatabaseMode.SINGLE
+) extends CostModel {
 
   override def costFor(
     plan: LogicalPlan,
@@ -282,11 +304,11 @@ case class CardinalityCostModel(executionModel: ExecutionModel, cancellationChec
         val rhsExecutions = batchSize.numBatchesFor(lhsCardinality)
         lhsCost + rhsExecutions * rhsCost
 
-      case t: RepeatTrail =>
+      case r: Repeat =>
         val lhsCardinality = effectiveCardinalities.lhs
         val rhsCardinality = effectiveCardinalities.rhs
 
-        val qppRange = RepetitionCardinalityModel.quantifiedPathPatternRepetitionAsRange(t.repetition)
+        val qppRange = RepetitionCardinalityModel.quantifiedPathPatternRepetitionAsRange(r.repetition)
 
         // For iteration 1 the RHS executes with LHS cardinality.
         val iteration1Cost =
@@ -313,12 +335,26 @@ case class CardinalityCostModel(executionModel: ExecutionModel, cancellationChec
       case _: ApplyPlan =>
         val lhsCardinality = effectiveCardinalities.lhs
         // The RHS is executed for each LHS row
-        lhsCost + lhsCardinality * rhsCost
+        if (databaseMode == DatabaseMode.SHARDED) {
+          lhsCost + lhsCardinality * (rhsCost + nestedIndexJoinShardAccessPenalty(plan.rhs))
+        } else {
+          lhsCost + lhsCardinality * rhsCost
+        }
 
       case HashJoin() =>
+        val memoryCostMultiplier =
+          if (databaseMode == DatabaseMode.SHARDED) probeBuildMemoryMultiplier(effectiveCardinalities.lhs) else 1.0
+
         lhsCost + rhsCost +
-          effectiveCardinalities.lhs * PROBE_BUILD_COST +
+          effectiveCardinalities.lhs * PROBE_BUILD_COST * memoryCostMultiplier +
           effectiveCardinalities.rhs * PROBE_SEARCH_COST
+
+      case _: ValueMergeJoin =>
+        val bufferingCost = Multiplier.ofDivision(
+          effectiveCardinalities.outputCardinality,
+          effectiveCardinalities.rhs
+        ).getOrElse(Multiplier.ZERO) * effectiveCardinalities.lhs * DEFAULT_COST_PER_ROW
+        lhsCost + rhsCost + bufferingCost
 
       case _: Union | _: OrderedUnion =>
         val inCardinality = effectiveCardinalities.lhs + effectiveCardinalities.rhs
@@ -340,15 +376,16 @@ case class CardinalityCostModel(executionModel: ExecutionModel, cancellationChec
       // Always consider AllNodesScan + Expand more expensive than RelationshipTypeScan
       case exp @ Expand(AllNodesScanIsh(), _, _, types, _, _, ExpandAll) if types.size == 1 =>
         val rowCost =
-          CostPerRow(1.1 * hackyRelTypeScanCost(propertyAccess, exp.relName, exp.dir != SemanticDirection.BOTH))
+          CostPerRow(1.1 * hackyRelTypeScanCost(propertyAccess, exp.maybeRelName, exp.dir != SemanticDirection.BOTH))
         // Note: we use the outputCardinality to compute the cost
         val costForThisPlan = effectiveCardinalities.outputCardinality * rowCost
         costForThisPlan + lhsCost + rhsCost
 
       case UnionNodeByLabelsScan(_, labels, _, _) =>
         val rowCost = costPerRow(plan, effectiveCardinalities.inputCardinality, semanticTable, propertyAccess)
-        val nextCallsForCursor = labels.map(l => statistics.nodesWithLabelCardinality(semanticTable.id(l)).amount).sum
-        Cardinality(nextCallsForCursor) * rowCost
+        val nextCallsForCursor =
+          labels.map(l => statistics.nodesWithLabelCardinality(semanticTable.id(l))).sum(NumericCardinality)
+        nextCallsForCursor * effectiveCardinalities.lhsReduction.fraction * rowCost
 
       case IntersectionNodeByLabelsScan(_, labels, _, _) =>
         // We don't use the outgoing cardinality to compute the cost here since for doing the intersection
@@ -358,7 +395,7 @@ case class CardinalityCostModel(executionModel: ExecutionModel, cancellationChec
         // need to visit all 10 A nodes to find all the intersecting nodes.
         val nextCallsForCursor = labels.map(l => statistics.nodesWithLabelCardinality(semanticTable.id(l))).min
         val rowCost = costPerRow(plan, effectiveCardinalities.inputCardinality, semanticTable, propertyAccess)
-        nextCallsForCursor * rowCost
+        nextCallsForCursor * effectiveCardinalities.lhsReduction.fraction * rowCost
 
       case SubtractionNodeByLabelsScan(_, positiveLabels, negativeLabels, _, _) =>
         val rowCost = costPerRow(plan, effectiveCardinalities.inputCardinality, semanticTable, propertyAccess)
@@ -370,14 +407,21 @@ case class CardinalityCostModel(executionModel: ExecutionModel, cancellationChec
         // Nodes with any negative label:  n3, n4, n6, n7
         // The set difference gives all resulting nodes of the subtraction scan: n5
         val nextCallsForPositiveCursor =
-          positiveLabels.map(l => statistics.nodesWithLabelCardinality(semanticTable.id(l)).amount).min
+          positiveLabels.map(l => statistics.nodesWithLabelCardinality(semanticTable.id(l))).min
+
+        // Assume that only nodes with all positive labels will be checked against negative labels.
+        // This helps when comparing the cost of SubtractionNodeByLabelsScan to IntersectionNodeByLabelsScan+Filter
+        val positiveLabelsCardinality =
+          statistics.nodesAllCardinality() *
+            selectivityForLabels(positiveLabels, semanticTable, statistics)
+              .getOrElse(Selectivity.ZERO)
+
         // Take the worst case where the sets are disjoint (i.e. the sum of the set cardinalities)
         val negativeLabelsCardinalitySum = negativeLabels.map(l =>
-          statistics.nodesWithLabelCardinality(semanticTable.id(l)).amount
-        ).sum
-        val nextCallsForNegativeCursor = math.min(nextCallsForPositiveCursor, negativeLabelsCardinalitySum)
-
-        Cardinality(nextCallsForPositiveCursor + nextCallsForNegativeCursor) * rowCost
+          statistics.nodesWithLabelCardinality(semanticTable.id(l))
+        ).sum(NumericCardinality)
+        val nextCallsForNegativeCursor = Cardinality.min(positiveLabelsCardinality, negativeLabelsCardinalitySum)
+        (nextCallsForPositiveCursor + nextCallsForNegativeCursor) * effectiveCardinalities.lhsReduction.fraction * rowCost
 
       case _ =>
         val rowCost = costPerRow(plan, effectiveCardinalities.inputCardinality, semanticTable, propertyAccess)
@@ -386,14 +430,43 @@ case class CardinalityCostModel(executionModel: ExecutionModel, cancellationChec
         costForThisPlan + lhsCost + rhsCost
     }
   }
+
+  // Scales gradually above PROBE_BUILD_LHS_LIMIT, capped at PROBE_BUILD_MEMORY_MULTIPLIER, instead
+  // of jumping straight to the cap for a build side that only just crosses the limit.
+  private def probeBuildMemoryMultiplier(lhsCardinality: Cardinality): Double =
+    if (lhsCardinality.amount > PROBE_BUILD_LHS_LIMIT) {
+      val overLimitRatio = lhsCardinality.amount / PROBE_BUILD_LHS_LIMIT
+      Math.min(overLimitRatio * overLimitRatio, PROBE_BUILD_MEMORY_MULTIPLIER)
+    } else {
+      1.0
+    }
+
+  // In Sharded mode, every index seek on RHS is costly since they are remote and not batched.
+  private def nestedIndexJoinShardAccessPenalty(rhs: Option[LogicalPlan]): Cost = rhs match {
+    case Some(plan) => plan.leftmostLeaf match {
+        case _: NodeIndexLeafPlan         => STORE_LOOKUP_COST_PER_ROW
+        case _: RelationshipIndexLeafPlan => STORE_LOOKUP_COST_PER_ROW
+        case _                            => Cost.ZERO
+      }
+    case None => Cost.ZERO
+  }
 }
 
 object CardinalityCostModel {
   val DEFAULT_COST_PER_ROW: CostPerRow = 0.1
+  val PROBE_BUILD_LHS_LIMIT = 10_000_000 // 10 million rows is a heuristic limit for when to switch join strategies
+
+  val PROBE_BUILD_MEMORY_MULTIPLIER =
+    // The maximum value `probeBuildMemoryMultiplier` can scale up to for a build side far beyond
+    // PROBE_BUILD_LHS_LIMIT. Large enough that, once capped, the resulting cost reaches the scale of the
+    // largest exactly representable integer in a double (2^53), so it dominates other terms for a genuinely
+    // huge build side while still allowing values greater than 1.0 to influence totals.
+    1_000_000.0
   val PROBE_BUILD_COST: CostPerRow = 3.1
   val PROBE_SEARCH_COST: CostPerRow = 2.4
   // A property has at least 2 db hits, even though it could even have many more.
   val PROPERTY_ACCESS_DB_HITS = 2
+  val PROPERTY_ACCESS_CACHE_HITS = 1
   val LABEL_CHECK_DB_HITS = 1
   val EXPAND_INTO_COST: CostPerRow = 6.4
   val EXPAND_ALL_COST: CostPerRow = 1.5
@@ -423,14 +496,18 @@ object CardinalityCostModel {
    * The cost of evaluating an expression, per row.
    */
   def costPerRowFor(expression: Expression, semanticTable: SemanticTable): CostPerRow = {
-    val noOfStoreAccesses = calculateNumberOfStoreAccesses(expression, semanticTable)
+    val noOfStoreAccesses = calculateNumberOfStoreAccesses(expression, semanticTable, includeCacheAccesses = true)
     if (noOfStoreAccesses > 0)
       CostPerRow(noOfStoreAccesses)
     else
       DEFAULT_COST_PER_ROW
   }
 
-  def calculateNumberOfStoreAccesses(expression: Expression, semanticTable: SemanticTable): Int =
+  def calculateNumberOfStoreAccesses(
+    expression: Expression,
+    semanticTable: SemanticTable,
+    includeCacheAccesses: Boolean = false
+  ): Int =
     expression.folder.treeFold(0) {
       case AndedPropertyInequalities(_: LogicalVariable, _: LogicalProperty, _: NonEmptyList[InequalityExpression]) =>
         count =>
@@ -439,6 +516,8 @@ object CardinalityCostModel {
         count => TraverseChildren(count + PROPERTY_ACCESS_DB_HITS)
       case cp: CachedProperty if cp.knownToAccessStore    => count => TraverseChildren(count + PROPERTY_ACCESS_DB_HITS)
       case cp: CachedHasProperty if cp.knownToAccessStore => count => TraverseChildren(count + PROPERTY_ACCESS_DB_HITS)
+      case _: CachedProperty | _: CachedHasProperty if includeCacheAccesses =>
+        count => TraverseChildren(count + PROPERTY_ACCESS_CACHE_HITS)
       case _: HasLabels |
         _: HasTypes |
         _: HasLabelsOrTypes => count => TraverseChildren(count + LABEL_CHECK_DB_HITS)
@@ -447,23 +526,24 @@ object CardinalityCostModel {
 
   def hackyRelTypeScanCost(
     propertyAccess: Set[PropertyAccess],
-    relVariable: LogicalVariable,
+    relVariable: Option[LogicalVariable],
     directed: Boolean
   ): Double = {
-    // A workaround for cases where we might get value from an index scan instead. Using the same cost means we will use leaf plan heuristic to decide.
-    if (propertyAccess.exists(_.variable == relVariable)) {
-      // If undirected only every second row needs to access the index and the store
-      val multiplier = if (directed) 1.0 else 0.5
-      DIRECTED_RELATIONSHIP_INDEX_SCAN_COST_PER_ROW * multiplier
-    } else {
-      val allNodeScanCostMultiplier = if (directed) 2.2 else 1.3
-      ALL_SCAN_COST_PER_ROW * allNodeScanCostMultiplier
+    relVariable match {
+      // A workaround for cases where we might get value from an index scan instead. Using the same cost means we will use leaf plan heuristic to decide.
+      case Some(value) if propertyAccess.exists(_.variable == value) =>
+        // If undirected only every second row needs to access the index and the store
+        val multiplier = if (directed) 1.0 else 0.5
+        DIRECTED_RELATIONSHIP_INDEX_SCAN_COST_PER_ROW * multiplier
+      case _ =>
+        val allNodeScanCostMultiplier = if (directed) 2.2 else 1.3
+        ALL_SCAN_COST_PER_ROW * allNodeScanCostMultiplier
     }
   }
 
   /**
-   * @param plan the plan
-   * @param cardinality the input cardinality of the plan
+   * @param plan          the plan
+   * @param cardinality   the input cardinality of the plan
    * @param semanticTable the semantic table
    * @return the cost of the plan per incoming row, if defined.
    *         For leaf plans, the cost of the plan per outgoing row.
@@ -484,7 +564,10 @@ object CardinalityCostModel {
 
       case _: NodeByLabelScan |
         _: UnionNodeByLabelsScan |
-        _: NodeIndexScan => INDEX_SCAN_COST_PER_ROW
+        _: SubtractionNodeByLabelsScan |
+        _: DynamicLabelNodeLookup => INDEX_SCAN_COST_PER_ROW
+
+      case NodeIndexScan(_, _, properties, _, _, _, _) => INDEX_SCAN_COST_PER_ROW + indexGetValueCost(properties)
 
       case plan: IntersectionNodeByLabelsScan =>
         // A workaround for cases where we might get value from an index scan instead. Using the same cost means we will use leaf plan heuristic to decide.
@@ -498,8 +581,25 @@ object CardinalityCostModel {
 
       case Selection(predicate, _) => costPerRowFor(predicate, semanticTable)
 
-      case RemoteBatchPropertiesWithFilter(_, _, properties) =>
-        properties.flatMap(_.dependencies).size * STORE_LOOKUP_COST_PER_ROW
+      case RemoteBatchPropertiesWithFilter(_, predicates, properties) =>
+        // RemoteBatchPropertiesWithFilter will execute the predicates on the shard and fetch properties.
+        // We need to include a cost for property retrieval as well as the cost of evaluating the predicates.
+        val predicatePropertyAccesses: Int =
+          predicates.foldRight(0) {
+            case (predicate, acc) => acc + PropertyAccessHelper.findPropertyAccesses(Iterable(predicate)).size
+          }
+        val propertyAccessCost = properties.size * 0.1
+        (propertyAccessCost + predicatePropertyAccesses) * STORE_LOOKUP_COST_PER_ROW
+
+      case remoteBatchPropertiesWithPushdownOperators: RemoteBatchPropertiesWithPushdownOperators =>
+        // The operator will execute the predicates on the shard and fetch properties.
+        // We need to include a cost for property retrieval as well as the cost of evaluating the predicates.
+        val predicatePropertyAccesses: Int =
+          remoteBatchPropertiesWithPushdownOperators.predicates.foldRight(0) {
+            case (predicate, acc) => acc + PropertyAccessHelper.findPropertyAccesses(Iterable(predicate)).size
+          }
+        val propertyAccessCost = remoteBatchPropertiesWithPushdownOperators.properties.size * 0.1
+        (propertyAccessCost + predicatePropertyAccesses) * STORE_LOOKUP_COST_PER_ROW
 
       case _: AllNodesScan => ALL_SCAN_COST_PER_ROW
 
@@ -507,16 +607,22 @@ object CardinalityCostModel {
 
       case e: Expand if e.mode == ExpandInto => EXPAND_INTO_COST
 
-      case e: VarExpand if e.mode == ExpandInto => EXPAND_INTO_COST
+      case _: MergeInto => EXPAND_INTO_COST
+
+      case e: VarExpand if e.expansionMode == ExpandInto => EXPAND_INTO_COST
 
       case _: Expand |
         _: VarExpand |
         _: OptionalExpand => EXPAND_ALL_COST
 
-      case _: NodeUniqueIndexSeek |
-        _: NodeIndexSeek |
-        _: NodeIndexContainsScan |
-        _: NodeIndexEndsWithScan => INDEX_SEEK_COST_PER_ROW
+      case nodeIndexSeekLeafPlan: NodeIndexSeekLeafPlan =>
+        INDEX_SEEK_COST_PER_ROW + indexGetValueCost(nodeIndexSeekLeafPlan.properties)
+
+      case NodeIndexContainsScan(_, _, containsProperty, _, _, _, _) =>
+        INDEX_SEEK_COST_PER_ROW + indexGetValueCost(Seq(containsProperty))
+
+      case NodeIndexEndsWithScan(_, _, endsWithProperty, _, _, _, _) =>
+        INDEX_SEEK_COST_PER_ROW + indexGetValueCost(Seq(endsWithProperty))
 
       case _: NodeByIdSeek |
         _: NodeByElementIdSeek |
@@ -531,6 +637,12 @@ object CardinalityCostModel {
 
       case _: UndirectedAllRelationshipsScan => ALL_SCAN_COST_PER_ROW / 2
 
+      case plan: DynamicDirectedRelationshipTypeLookup =>
+        hackyRelTypeScanCost(propertyAccess, plan.idName, directed = true)
+
+      case plan: DynamicUndirectedRelationshipTypeLookup =>
+        hackyRelTypeScanCost(propertyAccess, plan.idName, directed = false)
+
       case plan: DirectedRelationshipTypeScan =>
         hackyRelTypeScanCost(propertyAccess, plan.idName, directed = true)
 
@@ -543,21 +655,33 @@ object CardinalityCostModel {
       case plan: UndirectedUnionRelationshipTypesScan =>
         hackyRelTypeScanCost(propertyAccess, plan.idName, directed = false)
 
-      case _: DirectedRelationshipIndexScan => DIRECTED_RELATIONSHIP_INDEX_SCAN_COST_PER_ROW
+      case directedRelationshipIndexScan: DirectedRelationshipIndexScan =>
+        DIRECTED_RELATIONSHIP_INDEX_SCAN_COST_PER_ROW + indexGetValueCost(directedRelationshipIndexScan.properties)
 
-      case _: UndirectedRelationshipIndexScan
+      case undirectedRelationshipIndexScan: UndirectedRelationshipIndexScan
         // Only every second row needs to access the index and the store
-        => DIRECTED_RELATIONSHIP_INDEX_SCAN_COST_PER_ROW / 2
+        => DIRECTED_RELATIONSHIP_INDEX_SCAN_COST_PER_ROW / 2 + indexGetValueCost(
+          undirectedRelationshipIndexScan.properties
+        )
 
-      case _: DirectedRelationshipIndexSeek |
-        _: DirectedRelationshipIndexContainsScan |
-        _: DirectedRelationshipIndexEndsWithScan => INDEX_SEEK_COST_PER_ROW + STORE_LOOKUP_COST_PER_ROW
+      case directedRelationshipIndexSeek: DirectedRelationshipIndexSeek =>
+        INDEX_SEEK_COST_PER_ROW + STORE_LOOKUP_COST_PER_ROW + indexGetValueCost(
+          directedRelationshipIndexSeek.properties
+        )
+      case containsScan: DirectedRelationshipIndexContainsScan =>
+        INDEX_SEEK_COST_PER_ROW + STORE_LOOKUP_COST_PER_ROW + indexGetValueCost(containsScan.properties)
+      case endsWithScan: DirectedRelationshipIndexEndsWithScan =>
+        INDEX_SEEK_COST_PER_ROW + STORE_LOOKUP_COST_PER_ROW + indexGetValueCost(endsWithScan.properties)
 
-      case _: UndirectedRelationshipIndexSeek |
-        _: UndirectedRelationshipIndexContainsScan |
-        _: UndirectedRelationshipIndexEndsWithScan
-        // Only every second row needs to access the index and the store
-        => (INDEX_SEEK_COST_PER_ROW + STORE_LOOKUP_COST_PER_ROW) / 2
+      // Only every second row needs to access the index and the store
+      case undirectedRelationshipIndexSeek: UndirectedRelationshipIndexSeek =>
+        (INDEX_SEEK_COST_PER_ROW + STORE_LOOKUP_COST_PER_ROW) / 2 + indexGetValueCost(
+          undirectedRelationshipIndexSeek.properties
+        )
+      case containsScan: UndirectedRelationshipIndexContainsScan =>
+        (INDEX_SEEK_COST_PER_ROW + STORE_LOOKUP_COST_PER_ROW) / 2 + indexGetValueCost(containsScan.properties)
+      case endsWithScan: UndirectedRelationshipIndexEndsWithScan =>
+        (INDEX_SEEK_COST_PER_ROW + STORE_LOOKUP_COST_PER_ROW) / 2 + indexGetValueCost(endsWithScan.properties)
 
       case _: NodeHashJoin |
         _: AggregatingPlan |
@@ -592,11 +716,40 @@ object CardinalityCostModel {
       case _: PartitionedScanPlan =>
         throw new IllegalStateException("partitioned scans should only be planned at physical planning")
 
-      case RemoteBatchProperties(_, properties) => properties.flatMap(_.dependencies).size * STORE_LOOKUP_COST_PER_ROW
-
+      case RemoteBatchProperties(_, properties) =>
+        // RemoteBatchProperties will need to consider two things for cost:
+        // 1. The number of distinct variables that we need to fetch from the shard.
+        // 2. The number of properties per variable that we need to fetch from the shard.
+        // While the cost of fetching each variable is higher, the cost of each property per variable is not free either.
+        // Therefore, each variable will have a cost proportional to 1 + properties.size * 0.1. where 1 is the cost factor for fetching the variable and 0.1 for fetching each property.
+        properties.groupBy(_.map).foldLeft(0.0) {
+          case (count, (_, props)) => count + (1 + props.size * 0.1) * STORE_LOOKUP_COST_PER_ROW
+        }
       case _ // Default
         => DEFAULT_COST_PER_ROW
     }
+
+  // An index seek is 0.9 costlier per row than an index scan, but a seek getting 1 value should be cheaper than a scan getting 2 values.
+  // Essentially, we want
+  //      .nodeIndexOperator(
+  //        "n:Person(firstName = 'foo')",
+  //        indexOrder = IndexOrderAscending,
+  //        getValue = Map("firstName" -> DoNotGetValue)
+  //      ) this has a cost of 1.9
+  // to be cheaper than
+  //
+  //       .nodeIndexOperator(
+  //        "n:Person(firstName)",
+  //        indexOrder = IndexOrderAscending,
+  //        getValue = Map("firstName" -> GetValue)
+  //      ) the index operator here has a cost of 1.0 (ignoring firstName -> getValue). (That could be used in a filter like this later .filter(cache[n.firstName] == 'foo'))
+  // However, given that we actually have to fetch the values, this scan should be more expensive than a seek that does not get the value.
+  // Therefore, we use a cost of 0.95 for each property that should be fetched.
+  // This example is further accentuated in composite indexes, in order to reduce the number of variables that need to be fetched.
+  // This is particularly important for SPD, where the properties are fetched from a remote shard.
+  // In other cases this metric will not be used, since the GetValue behaviour is determined after the plan is generated in rewriters.
+  private def indexGetValueCost(indexProperties: Seq[IndexedProperty]): Double =
+    indexProperties.count(_.shouldGetValue) * 0.95
 
   /**
    * The input cardinality if defined, otherwise the output cardinality
@@ -619,9 +772,9 @@ object CardinalityCostModel {
   /**
    * The limit selectivity of a limiting plan.
    *
-   * @param inputCardinality        the cardinality of the plan's parent
-   * @param outputCardinality       the cardinality of plan
-   * @param parentLimitSelectivity  the limit selectivity of the plan's parent
+   * @param inputCardinality       the cardinality of the plan's parent
+   * @param outputCardinality      the cardinality of plan
+   * @param parentLimitSelectivity the limit selectivity of the plan's parent
    */
   def limitingPlanSelectivity(
     inputCardinality: Cardinality,
@@ -633,9 +786,9 @@ object CardinalityCostModel {
   /**
    * The work reduction of a limiting plan.
    *
-   * @param inputCardinality        the cardinality of the plan's parent
-   * @param outputCardinality       the cardinality of plan
-   * @param parentWorkReduction     the work reduction of the plan's parent
+   * @param inputCardinality    the cardinality of the plan's parent
+   * @param outputCardinality   the cardinality of plan
+   * @param parentWorkReduction the work reduction of the plan's parent
    */
   def limitingPlanWorkReduction(
     inputCardinality: Cardinality,
@@ -716,9 +869,9 @@ object CardinalityCostModel {
       // ForeachApply is an ApplyPlan, but only yields LHS rows, therefore we match this before matching ApplyPlan
       (parentWorkReduction, WorkReduction.NoReduction)
 
-    case t: RepeatTrail =>
-      // Trail is an ApplyPlan, but nestedLoopChildrenWorkReduction makes some assumptions that don't hold for Trail
-      trailChildrenWorkReduction(t, parentWorkReduction, cardinalities)
+    case r: Repeat =>
+      // Repeat is an ApplyPlan, but nestedLoopChildrenWorkReduction makes some assumptions that don't hold for Trail
+      repeatChildrenWorkReduction(r, parentWorkReduction, cardinalities)
 
     case a: ApplyPlan =>
       nestedLoopChildrenWorkReduction(a, parentWorkReduction, VolcanoBatchSize, cardinalities)
@@ -757,6 +910,8 @@ object CardinalityCostModel {
     case HashJoin() =>
       (WorkReduction.NoReduction, parentWorkReduction)
 
+    case _: ValueMergeJoin => (parentWorkReduction, parentWorkReduction)
+
     case _: PartialSort =>
       // Let's assume the child has to do "a little more" work.
       // This happens because PartialSort has to process at least a whole bucket of identical values.
@@ -775,7 +930,7 @@ object CardinalityCostModel {
 
     case lp: LogicalBinaryPlan =>
       // Forces us to hopefully think about this when adding new binary plans
-      AssertMacros.checkOnlyWhenAssertionsAreEnabled(
+      AssertMacros3.checkOnlyWhenAssertionsAreEnabled(
         false,
         s"childrenWorkReduction: No case for ${lp.getClass.getSimpleName} added."
       )
@@ -834,17 +989,17 @@ object CardinalityCostModel {
 
   /**
    * Given an parent WorkReduction, calculate how this reduction applies to the LHS and RHS.
-   * 
+   *
    * This is essentially a much simplified version of [[nestedLoopChildrenWorkReduction]] with [[VolcanoBatchSize]].
    * It differs from [[nestedLoopChildrenWorkReduction]] in the fact that here
    * `lhsReduction * rhsReduction = parentReduction` always holds,
    * which is not true in [[nestedLoopChildrenWorkReduction]] if the RHS cardinality is < 1.0.
-   * 
+   *
    * [[nestedLoopChildrenWorkReduction]] also assumes that `lhsCardinality * rhsCardinality = parentCardinality`, 
-   * which is not true for Trail.
+   * which is not true for Repeat.
    */
-  private def trailChildrenWorkReduction(
-    plan: RepeatTrail,
+  private def repeatChildrenWorkReduction(
+    plan: Repeat,
     parentWorkReduction: WorkReduction,
     cardinalities: Cardinalities
   ): (WorkReduction, WorkReduction) = {
@@ -879,6 +1034,20 @@ object CardinalityCostModel {
         ExecutionModel.VolcanoBatchSize // A CartesianProduct that provides order is rewritten to execute in a row-by-row fashion
       case _ => batchSize
     }
+  }
+
+  // This duplicates NodeCardinalityModel logic somewhat, but using NodeCardinalityModel directly would pull in many dependencies.
+  private[logical] def selectivityForLabels(
+    labels: Seq[LabelName],
+    semanticTable: SemanticTable,
+    statistics: GraphStatistics
+  ): Option[Selectivity] = {
+    val all = statistics.nodesAllCardinality()
+    val selectivities = labels.map(l =>
+      (statistics.nodesWithLabelCardinality(semanticTable.id(l)) / all)
+        .getOrElse(Selectivity.ZERO)
+    )
+    IndependenceCombiner.andTogetherSelectivities(selectivities)
   }
 
   private object HashJoin {

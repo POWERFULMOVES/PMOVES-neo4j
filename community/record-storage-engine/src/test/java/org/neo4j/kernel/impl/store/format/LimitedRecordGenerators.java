@@ -108,7 +108,10 @@ public class LimitedRecordGenerators implements RecordGenerators {
                         randomLongOrOccasionallyNull(entityBits),
                         randomLongOrOccasionallyNull(entityBits),
                         random.nextBoolean(),
-                        random.nextBoolean());
+                        random.nextBoolean(),
+                        // Not supported by high limit format, so we have to set these to false here
+                        false,
+                        false);
     }
 
     @Override
@@ -136,7 +139,8 @@ public class LimitedRecordGenerators implements RecordGenerators {
                         stringAllocator,
                         arrayAllocator,
                         CursorContext.NULL_CONTEXT,
-                        INSTANCE);
+                        INSTANCE,
+                        "db-format-2000");
                 int tentativeBlocksWithThisOne = blocksOccupied + block.getValueBlocks().length;
                 if (tentativeBlocksWithThisOne <= 4) {
                     record.addPropertyBlock(block);

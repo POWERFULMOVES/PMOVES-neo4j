@@ -26,9 +26,11 @@ import org.neo4j.configuration.Config
 import org.neo4j.csv.reader.CharReadable
 import org.neo4j.cypher.internal.CypherVersion
 import org.neo4j.cypher.internal.expressions.SemanticDirection
+import org.neo4j.cypher.internal.frontend.phases.InternalUsageStats
 import org.neo4j.cypher.internal.logical.plans.IndexOrder
 import org.neo4j.cypher.internal.runtime.ClosingIterator
 import org.neo4j.cypher.internal.runtime.ClosingLongIterator
+import org.neo4j.cypher.internal.runtime.ClosingRelationshipIterator
 import org.neo4j.cypher.internal.runtime.ConstraintInfo
 import org.neo4j.cypher.internal.runtime.ConstraintInformation
 import org.neo4j.cypher.internal.runtime.EntityTransformer
@@ -38,6 +40,7 @@ import org.neo4j.cypher.internal.runtime.NodeOperations
 import org.neo4j.cypher.internal.runtime.NodeReadOperations
 import org.neo4j.cypher.internal.runtime.Operations
 import org.neo4j.cypher.internal.runtime.QueryContext
+import org.neo4j.cypher.internal.runtime.QueryRuntimeConfig
 import org.neo4j.cypher.internal.runtime.QueryStatistics
 import org.neo4j.cypher.internal.runtime.QueryTransactionalContext
 import org.neo4j.cypher.internal.runtime.ReadOperations
@@ -45,14 +48,17 @@ import org.neo4j.cypher.internal.runtime.RelationshipIterator
 import org.neo4j.cypher.internal.runtime.RelationshipOperations
 import org.neo4j.cypher.internal.runtime.RelationshipReadOperations
 import org.neo4j.cypher.internal.runtime.ResourceManager
+import org.neo4j.cypher.internal.runtime.admin.topology.ShowDatabaseService
 import org.neo4j.dbms.database.DatabaseContext
 import org.neo4j.dbms.database.DatabaseContextProvider
 import org.neo4j.graphdb.Entity
 import org.neo4j.graphdb.GraphDatabaseService
 import org.neo4j.internal.kernel.api
 import org.neo4j.internal.kernel.api.CursorFactory
+import org.neo4j.internal.kernel.api.IndexQueryConstraints
 import org.neo4j.internal.kernel.api.IndexReadSession
 import org.neo4j.internal.kernel.api.Locks
+import org.neo4j.internal.kernel.api.MutatingEntityCursor
 import org.neo4j.internal.kernel.api.NodeCursor
 import org.neo4j.internal.kernel.api.NodeLabelIndexCursor
 import org.neo4j.internal.kernel.api.NodeValueIndexCursor
@@ -81,7 +87,8 @@ import org.neo4j.internal.schema.IndexConfig
 import org.neo4j.internal.schema.IndexDescriptor
 import org.neo4j.internal.schema.IndexProviderDescriptor
 import org.neo4j.internal.schema.IndexType
-import org.neo4j.internal.schema.constraints.PropertyTypeSet
+import org.neo4j.internal.schema.SchemaCommand.ConstraintCommand
+import org.neo4j.internal.schema.SchemaDescriptor
 import org.neo4j.io.pagecache.context.CursorContext
 import org.neo4j.kernel.api.ExecutionContext
 import org.neo4j.kernel.api.KernelTransaction
@@ -94,6 +101,7 @@ import org.neo4j.kernel.impl.query.FunctionInformation
 import org.neo4j.kernel.impl.query.QueryExecutionConfiguration
 import org.neo4j.kernel.impl.query.statistic.StatisticProvider
 import org.neo4j.logging.InternalLogProvider
+import org.neo4j.memory.HeapEstimatorCacheConfig
 import org.neo4j.memory.MemoryTracker
 import org.neo4j.scheduler.JobScheduler
 import org.neo4j.values.AnyValue
@@ -107,6 +115,9 @@ import org.neo4j.values.virtual.MapValueBuilder
 import org.neo4j.values.virtual.VirtualRelationshipValue
 
 import java.net.URI
+import java.util
+
+import scala.collection.immutable.ArraySeq
 
 abstract class DelegatingQueryContext(val inner: QueryContext) extends QueryContext {
 
@@ -117,13 +128,12 @@ abstract class DelegatingQueryContext(val inner: QueryContext) extends QueryCont
   protected def manyDbHits(value: ClosingLongIterator): ClosingLongIterator = value
   protected def manyDbHits(value: RelationshipIterator): RelationshipIterator = value
 
-  protected def manyDbHitsCliRi(value: ClosingLongIterator with RelationshipIterator)
-    : ClosingLongIterator with RelationshipIterator = value
+  protected def manyDbHitsCliRi(value: ClosingRelationshipIterator)
+    : ClosingRelationshipIterator = value
   protected def manyDbHits(value: RelationshipTraversalCursor): RelationshipTraversalCursor = value
-  protected def manyDbHits(value: NodeValueIndexCursor): NodeValueIndexCursor = value
-  protected def manyDbHits(value: RelationshipValueIndexCursor): RelationshipValueIndexCursor = value
   protected def manyDbHits(value: NodeCursor): NodeCursor = value
   protected def manyDbHits(value: NodeLabelIndexCursor): NodeLabelIndexCursor = value
+  protected def manyDbHits(value: NodeValueIndexCursor): NodeValueIndexCursor = value
   protected def manyDbHits(value: RelationshipTypeIndexCursor): RelationshipTypeIndexCursor = value
   protected def manyDbHits(value: RelationshipScanCursor): RelationshipScanCursor = value
   protected def manyDbHits(value: PropertyCursor): PropertyCursor = value
@@ -133,6 +143,8 @@ abstract class DelegatingQueryContext(val inner: QueryContext) extends QueryCont
 
   override def transactionalContext: QueryTransactionalContext = inner.transactionalContext
 
+  override def queryConfig: QueryRuntimeConfig = inner.queryConfig
+
   override def setLabelsOnNode(node: Long, labelIds: Iterator[Int]): Int =
     singleDbHit(inner.setLabelsOnNode(node, labelIds))
 
@@ -140,6 +152,39 @@ abstract class DelegatingQueryContext(val inner: QueryContext) extends QueryCont
 
   override def createRelationshipId(start: Long, end: Long, relType: Int): Long =
     singleDbHit(inner.createRelationshipId(start, end, relType))
+
+  override def mergeInto(
+    nodeCursor: NodeCursor,
+    traversalCursor: RelationshipTraversalCursor,
+    propertyCursor: PropertyCursor,
+    source: Long,
+    relType: Int,
+    direction: SemanticDirection,
+    target: Long,
+    onMatch: IntObjectMap[Value],
+    onCreate: IntObjectMap[Value]
+  ): MutatingEntityCursor = {
+    // NOTE: db-hits counting should be done by the cursors we pass in
+    inner.mergeInto(
+      nodeCursor,
+      traversalCursor,
+      propertyCursor,
+      source,
+      relType,
+      direction,
+      target,
+      onMatch,
+      onCreate
+    )
+  }
+
+  override def onMutation(
+    nodesCreated: Int,
+    relationshipsCreated: Int,
+    labelsCreated: Int,
+    propertiesCreated: Int
+  ): Unit =
+    inner.onMutation(nodesCreated, relationshipsCreated, labelsCreated, propertiesCreated)
 
   override def getOrCreateRelTypeId(relTypeName: String): Int = singleDbHit(inner.getOrCreateRelTypeId(relTypeName))
 
@@ -163,24 +208,34 @@ abstract class DelegatingQueryContext(val inner: QueryContext) extends QueryCont
     node: Long,
     dir: SemanticDirection,
     types: Array[Int]
-  ): ClosingLongIterator with RelationshipIterator =
+  ): ClosingRelationshipIterator =
     manyDbHitsCliRi(inner.getRelationshipsForIds(node, dir, types))
 
   override def getRelationshipsByType(
     tokenReadSession: TokenReadSession,
     relType: Int,
-    indexOrder: IndexOrder
-  ): ClosingLongIterator with RelationshipIterator =
-    manyDbHitsCliRi(inner.getRelationshipsByType(tokenReadSession, relType, indexOrder))
+    indexOrder: IndexOrder,
+    includeChangesFromThisTransaction: Boolean
+  ): ClosingRelationshipIterator =
+    manyDbHitsCliRi(inner.getRelationshipsByType(
+      tokenReadSession,
+      relType,
+      indexOrder,
+      includeChangesFromThisTransaction
+    ))
 
   override def nodeCursor(): NodeCursor = manyDbHits(inner.nodeCursor())
 
   override def nodeLabelIndexCursor(): NodeLabelIndexCursor = manyDbHits(inner.nodeLabelIndexCursor())
 
+  override def nodeValueIndexCursor(): NodeValueIndexCursor = manyDbHits(inner.nodeValueIndexCursor())
+
   override def relationshipTypeIndexCursor(): RelationshipTypeIndexCursor =
     manyDbHits(inner.relationshipTypeIndexCursor())
 
   override def traversalCursor(): RelationshipTraversalCursor = manyDbHits(inner.traversalCursor())
+
+  override def propertyCursor(): PropertyCursor = manyDbHits(inner.propertyCursor())
 
   override def scanCursor(): RelationshipScanCursor = manyDbHits(inner.scanCursor())
 
@@ -276,14 +331,23 @@ abstract class DelegatingQueryContext(val inner: QueryContext) extends QueryCont
     singleDbHit(inner.addPointIndexRule(entityId, entityType, propertyKeyIds, name, provider, indexConfig))
 
   override def addVectorIndexRule(
-    entityId: Int,
+    entityIds: List[Int],
     entityType: EntityType,
     propertyKeyIds: Seq[Int],
+    additionalPropertyKeyIds: Seq[Int],
     name: Option[String],
     provider: Option[IndexProviderDescriptor],
     indexConfig: IndexConfig
   ): IndexDescriptor =
-    singleDbHit(inner.addVectorIndexRule(entityId, entityType, propertyKeyIds, name, provider, indexConfig))
+    singleDbHit(inner.addVectorIndexRule(
+      entityIds,
+      entityType,
+      propertyKeyIds,
+      additionalPropertyKeyIds,
+      name,
+      provider,
+      indexConfig
+    ))
 
   override def dropIndexRule(name: String): Unit = singleDbHit(inner.dropIndexRule(name))
 
@@ -305,6 +369,13 @@ abstract class DelegatingQueryContext(val inner: QueryContext) extends QueryCont
   override def constraintExists(matchFn: ConstraintDescriptor => Boolean, entityId: Int, properties: Int*): Boolean =
     singleDbHit(inner.constraintExists(matchFn, entityId, properties: _*))
 
+  override def indexReferences(
+    entityId: Int,
+    entityType: EntityType,
+    properties: Int*
+  ): util.Iterator[IndexDescriptor] =
+    singleDbHit(inner.indexReferences(entityId, entityType, properties: _*))
+
   override def indexReference(
     indexType: IndexType,
     entityId: Int,
@@ -315,50 +386,74 @@ abstract class DelegatingQueryContext(val inner: QueryContext) extends QueryCont
   override def lookupIndexReference(entityType: EntityType): IndexDescriptor =
     singleDbHit(inner.lookupIndexReference(entityType))
 
-  override def fulltextIndexReference(entityIds: List[Int], entityType: EntityType, properties: Int*): IndexDescriptor =
-    singleDbHit(inner.fulltextIndexReference(entityIds, entityType, properties: _*))
+  override def semanticIndexReference(
+    indexType: IndexType,
+    entityIds: List[Int],
+    entityType: EntityType,
+    properties: Int*
+  ): IndexDescriptor =
+    singleDbHit(inner.semanticIndexReference(indexType, entityIds, entityType, properties: _*))
 
   override def nodeIndexSeek(
     index: IndexReadSession,
     needsValues: Boolean,
     indexOrder: IndexOrder,
-    queries: Seq[PropertyIndexQuery]
+    queries: Seq[PropertyIndexQuery],
+    includeChangesFromThisTransaction: Boolean
   ): NodeValueIndexCursor =
-    manyDbHits(inner.nodeIndexSeek(index, needsValues, indexOrder, queries))
+    inner.nodeIndexSeek(index, needsValues, indexOrder, queries, includeChangesFromThisTransaction)
+
+  override def nodeFulltextIndexSeek(
+    index: IndexReadSession,
+    constraints: IndexQueryConstraints,
+    query: PropertyIndexQuery.FulltextSearchPredicate
+  ): NodeValueIndexCursor =
+    inner.nodeFulltextIndexSeek(index, constraints, query)
+
+  override def relationshipFulltextIndexSeek(
+    index: IndexReadSession,
+    constraints: IndexQueryConstraints,
+    query: PropertyIndexQuery.FulltextSearchPredicate
+  ): RelationshipValueIndexCursor =
+    inner.relationshipFulltextIndexSeek(index, constraints, query)
 
   override def nodeIndexScan(
     index: IndexReadSession,
     needsValues: Boolean,
-    indexOrder: IndexOrder
+    indexOrder: IndexOrder,
+    includeChangesFromThisTransaction: Boolean
   ): NodeValueIndexCursor =
-    manyDbHits(inner.nodeIndexScan(index, needsValues, indexOrder))
+    inner.nodeIndexScan(index, needsValues, indexOrder, includeChangesFromThisTransaction)
 
   override def nodeIndexSeekByContains(
     index: IndexReadSession,
     needsValues: Boolean,
     indexOrder: IndexOrder,
-    value: TextValue
+    value: TextValue,
+    includeChangesFromThisTransaction: Boolean
   ): NodeValueIndexCursor =
-    manyDbHits(inner.nodeIndexSeekByContains(index, needsValues, indexOrder, value))
+    inner.nodeIndexSeekByContains(index, needsValues, indexOrder, value, includeChangesFromThisTransaction)
 
   override def nodeIndexSeekByEndsWith(
     index: IndexReadSession,
     needsValues: Boolean,
     indexOrder: IndexOrder,
-    value: TextValue
+    value: TextValue,
+    includeChangesFromThisTransaction: Boolean
   ): NodeValueIndexCursor =
-    manyDbHits(inner.nodeIndexSeekByEndsWith(index, needsValues, indexOrder, value))
+    inner.nodeIndexSeekByEndsWith(index, needsValues, indexOrder, value, includeChangesFromThisTransaction)
 
   override def relationshipIndexSeek(
     index: IndexReadSession,
     needsValues: Boolean,
     indexOrder: IndexOrder,
-    queries: Seq[PropertyIndexQuery]
+    queries: Seq[PropertyIndexQuery],
+    includeChangesFromThisTransaction: Boolean
   ): RelationshipValueIndexCursor =
-    manyDbHits(inner.relationshipIndexSeek(index, needsValues, indexOrder, queries))
+    inner.relationshipIndexSeek(index, needsValues, indexOrder, queries, includeChangesFromThisTransaction)
 
   override def relationshipLockingUniqueIndexSeek(
-    index: IndexDescriptor,
+    index: IndexReadSession,
     queries: Seq[PropertyIndexQuery.ExactPredicate]
   ): RelationshipValueIndexCursor =
     singleDbHit(inner.relationshipLockingUniqueIndexSeek(index, queries))
@@ -367,31 +462,35 @@ abstract class DelegatingQueryContext(val inner: QueryContext) extends QueryCont
     index: IndexReadSession,
     needsValues: Boolean,
     indexOrder: IndexOrder,
-    value: TextValue
+    value: TextValue,
+    includeChangesFromThisTransaction: Boolean
   ): RelationshipValueIndexCursor =
-    manyDbHits(inner.relationshipIndexSeekByContains(index, needsValues, indexOrder, value))
+    inner.relationshipIndexSeekByContains(index, needsValues, indexOrder, value, includeChangesFromThisTransaction)
 
   override def relationshipIndexSeekByEndsWith(
     index: IndexReadSession,
     needsValues: Boolean,
     indexOrder: IndexOrder,
-    value: TextValue
+    value: TextValue,
+    includeChangesFromThisTransaction: Boolean
   ): RelationshipValueIndexCursor =
-    manyDbHits(inner.relationshipIndexSeekByEndsWith(index, needsValues, indexOrder, value))
+    inner.relationshipIndexSeekByEndsWith(index, needsValues, indexOrder, value, includeChangesFromThisTransaction)
 
   override def relationshipIndexScan(
     index: IndexReadSession,
     needsValues: Boolean,
-    indexOrder: IndexOrder
+    indexOrder: IndexOrder,
+    includeChangesFromThisTransaction: Boolean
   ): RelationshipValueIndexCursor =
-    manyDbHits(inner.relationshipIndexScan(index, needsValues, indexOrder))
+    inner.relationshipIndexScan(index, needsValues, indexOrder, includeChangesFromThisTransaction)
 
   override def getNodesByLabel(
     tokenReadSession: TokenReadSession,
     id: Int,
-    indexOrder: IndexOrder
+    indexOrder: IndexOrder,
+    includeChangesFromThisTransaction: Boolean
   ): ClosingLongIterator =
-    manyDbHits(inner.getNodesByLabel(tokenReadSession, id, indexOrder))
+    manyDbHits(inner.getNodesByLabel(tokenReadSession, id, indexOrder, includeChangesFromThisTransaction))
 
   override def nodeAsMap(
     id: Long,
@@ -430,66 +529,11 @@ abstract class DelegatingQueryContext(val inner: QueryContext) extends QueryCont
     map
   }
 
-  override def createNodeKeyConstraint(
-    labelId: Int,
-    propertyKeyIds: Seq[Int],
-    name: Option[String],
-    provider: Option[IndexProviderDescriptor]
-  ): Unit =
-    singleDbHit(inner.createNodeKeyConstraint(labelId, propertyKeyIds, name, provider))
+  override def createConstraint(constraint: ConstraintCommand.Create): Unit =
+    singleDbHit(inner.createConstraint(constraint))
 
-  override def createRelationshipKeyConstraint(
-    relTypeId: Int,
-    propertyKeyIds: Seq[Int],
-    name: Option[String],
-    provider: Option[IndexProviderDescriptor]
-  ): Unit =
-    singleDbHit(inner.createRelationshipKeyConstraint(relTypeId, propertyKeyIds, name, provider))
-
-  override def createNodeUniqueConstraint(
-    labelId: Int,
-    propertyKeyIds: Seq[Int],
-    name: Option[String],
-    provider: Option[IndexProviderDescriptor]
-  ): Unit =
-    singleDbHit(inner.createNodeUniqueConstraint(labelId, propertyKeyIds, name, provider))
-
-  override def createRelationshipUniqueConstraint(
-    relTypeId: Int,
-    propertyKeyIds: Seq[Int],
-    name: Option[String],
-    provider: Option[IndexProviderDescriptor]
-  ): Unit =
-    singleDbHit(inner.createRelationshipUniqueConstraint(relTypeId, propertyKeyIds, name, provider))
-
-  override def createNodePropertyExistenceConstraint(labelId: Int, propertyKeyId: Int, name: Option[String]): Unit =
-    singleDbHit(inner.createNodePropertyExistenceConstraint(labelId, propertyKeyId, name))
-
-  override def createRelationshipPropertyExistenceConstraint(
-    relTypeId: Int,
-    propertyKeyId: Int,
-    name: Option[String]
-  ): Unit =
-    singleDbHit(inner.createRelationshipPropertyExistenceConstraint(relTypeId, propertyKeyId, name))
-
-  override def createNodePropertyTypeConstraint(
-    labelId: Int,
-    propertyKeyId: Int,
-    propertyTypes: PropertyTypeSet,
-    name: Option[String]
-  ): Unit =
-    singleDbHit(inner.createNodePropertyTypeConstraint(labelId, propertyKeyId, propertyTypes, name))
-
-  override def createRelationshipPropertyTypeConstraint(
-    relTypeId: Int,
-    propertyKeyId: Int,
-    propertyTypes: PropertyTypeSet,
-    name: Option[String]
-  ): Unit =
-    singleDbHit(inner.createRelationshipPropertyTypeConstraint(relTypeId, propertyKeyId, propertyTypes, name))
-
-  override def dropNamedConstraint(name: String): Unit =
-    singleDbHit(inner.dropNamedConstraint(name))
+  override def dropNamedConstraint(name: String, allowDependent: Boolean): Unit =
+    singleDbHit(inner.dropNamedConstraint(name, allowDependent))
 
   override def getConstraintInformation(name: String): ConstraintInformation =
     singleDbHit(inner.getConstraintInformation(name))
@@ -503,8 +547,15 @@ abstract class DelegatingQueryContext(val inner: QueryContext) extends QueryCont
 
   override def getAllConstraints(): Map[ConstraintDescriptor, ConstraintInfo] = singleDbHit(inner.getAllConstraints())
 
+  override def getGeneratedNameForConstraint(
+    forNode: Boolean,
+    entityId: Int,
+    propertyIds: ArraySeq[Int],
+    descriptor: SchemaDescriptor => ConstraintDescriptor
+  ): String = singleDbHit(inner.getGeneratedNameForConstraint(forNode, entityId, propertyIds, descriptor))
+
   override def nodeLockingUniqueIndexSeek(
-    index: IndexDescriptor,
+    index: IndexReadSession,
     queries: Seq[PropertyIndexQuery.ExactPredicate]
   ): NodeValueIndexCursor =
     singleDbHit(inner.nodeLockingUniqueIndexSeek(index, queries))
@@ -517,48 +568,48 @@ abstract class DelegatingQueryContext(val inner: QueryContext) extends QueryCont
 
   override def getImportDataConnection(uri: URI): CharReadable = inner.getImportDataConnection(uri)
 
-  override def nodeGetOutgoingDegreeWithMax(maxDegree: Int, node: Long, nodeCursor: NodeCursor): Int =
+  override def nodeGetOutgoingDegreeWithMax(maxDegree: Long, node: Long, nodeCursor: NodeCursor): Long =
     singleDbHit(inner.nodeGetOutgoingDegreeWithMax(maxDegree, node, nodeCursor))
 
   override def nodeGetOutgoingDegreeWithMax(
-    maxDegree: Int,
+    maxDegree: Long,
     node: Long,
     relationship: Int,
     nodeCursor: NodeCursor
-  ): Int = singleDbHit(inner.nodeGetOutgoingDegreeWithMax(maxDegree, node, relationship, nodeCursor))
+  ): Long = singleDbHit(inner.nodeGetOutgoingDegreeWithMax(maxDegree, node, relationship, nodeCursor))
 
-  override def nodeGetIncomingDegreeWithMax(maxDegree: Int, node: Long, nodeCursor: NodeCursor): Int =
+  override def nodeGetIncomingDegreeWithMax(maxDegree: Long, node: Long, nodeCursor: NodeCursor): Long =
     singleDbHit(inner.nodeGetIncomingDegreeWithMax(maxDegree, node, nodeCursor))
 
   override def nodeGetIncomingDegreeWithMax(
-    maxDegree: Int,
+    maxDegree: Long,
     node: Long,
     relationship: Int,
     nodeCursor: NodeCursor
-  ): Int = singleDbHit(inner.nodeGetIncomingDegreeWithMax(maxDegree, node, relationship, nodeCursor))
+  ): Long = singleDbHit(inner.nodeGetIncomingDegreeWithMax(maxDegree, node, relationship, nodeCursor))
 
-  override def nodeGetTotalDegreeWithMax(maxDegree: Int, node: Long, nodeCursor: NodeCursor): Int =
+  override def nodeGetTotalDegreeWithMax(maxDegree: Long, node: Long, nodeCursor: NodeCursor): Long =
     singleDbHit(inner.nodeGetTotalDegreeWithMax(maxDegree, node, nodeCursor))
 
-  override def nodeGetTotalDegreeWithMax(maxDegree: Int, node: Long, relationship: Int, nodeCursor: NodeCursor): Int =
+  override def nodeGetTotalDegreeWithMax(maxDegree: Long, node: Long, relationship: Int, nodeCursor: NodeCursor): Long =
     singleDbHit(inner.nodeGetTotalDegreeWithMax(maxDegree, node, relationship, nodeCursor))
 
-  override def nodeGetOutgoingDegree(node: Long, nodeCursor: NodeCursor): Int =
+  override def nodeGetOutgoingDegree(node: Long, nodeCursor: NodeCursor): Long =
     singleDbHit(inner.nodeGetOutgoingDegree(node, nodeCursor))
 
-  override def nodeGetOutgoingDegree(node: Long, relationship: Int, nodeCursor: NodeCursor): Int =
+  override def nodeGetOutgoingDegree(node: Long, relationship: Int, nodeCursor: NodeCursor): Long =
     singleDbHit(inner.nodeGetOutgoingDegree(node, relationship, nodeCursor))
 
-  override def nodeGetIncomingDegree(node: Long, nodeCursor: NodeCursor): Int =
+  override def nodeGetIncomingDegree(node: Long, nodeCursor: NodeCursor): Long =
     singleDbHit(inner.nodeGetIncomingDegree(node, nodeCursor))
 
-  override def nodeGetIncomingDegree(node: Long, relationship: Int, nodeCursor: NodeCursor): Int =
+  override def nodeGetIncomingDegree(node: Long, relationship: Int, nodeCursor: NodeCursor): Long =
     singleDbHit(inner.nodeGetIncomingDegree(node, relationship, nodeCursor))
 
-  override def nodeGetTotalDegree(node: Long, nodeCursor: NodeCursor): Int =
+  override def nodeGetTotalDegree(node: Long, nodeCursor: NodeCursor): Long =
     singleDbHit(inner.nodeGetTotalDegree(node, nodeCursor))
 
-  override def nodeGetTotalDegree(node: Long, relationship: Int, nodeCursor: NodeCursor): Int =
+  override def nodeGetTotalDegree(node: Long, relationship: Int, nodeCursor: NodeCursor): Long =
     singleDbHit(inner.nodeGetTotalDegree(node, relationship, nodeCursor))
 
   override def nodeHasCheapDegrees(node: Long, nodeCursor: NodeCursor): Boolean =
@@ -667,11 +718,15 @@ abstract class DelegatingQueryContext(val inner: QueryContext) extends QueryCont
 
   override def asObject(value: AnyValue): AnyRef = inner.asObject(value)
 
-  override def getTxStateNodePropertyOrNull(nodeId: Long, propertyKey: Int): Value =
-    inner.getTxStateNodePropertyOrNull(nodeId, propertyKey)
+  override def getTxStateNodePropertyOrNull(nodeId: Long, propertyKey: Int, failOnDeletedNode: Boolean): Value =
+    inner.getTxStateNodePropertyOrNull(nodeId, propertyKey, failOnDeletedNode)
 
-  override def getTxStateRelationshipPropertyOrNull(relId: Long, propertyKey: Int): Value =
-    inner.getTxStateRelationshipPropertyOrNull(relId, propertyKey)
+  override def getTxStateRelationshipPropertyOrNull(
+    relId: Long,
+    propertyKey: Int,
+    failOnDeletedRelationship: Boolean
+  ): Value =
+    inner.getTxStateRelationshipPropertyOrNull(relId, propertyKey, failOnDeletedRelationship)
 
   override def getTransactionType: KernelTransaction.Type = inner.getTransactionType
 
@@ -683,9 +738,13 @@ abstract class DelegatingQueryContext(val inner: QueryContext) extends QueryCont
 
   override def systemGraph: GraphDatabaseService = inner.systemGraph
 
+  override def getShowDatabaseService: ShowDatabaseService = inner.getShowDatabaseService
+
   override def jobScheduler: JobScheduler = inner.jobScheduler
 
   override def logProvider: InternalLogProvider = inner.logProvider
+
+  override def internalUsageStats: InternalUsageStats = inner.internalUsageStats
 
   override def providedLanguageFunctions: Seq[FunctionInformation] = inner.providedLanguageFunctions
 
@@ -757,7 +816,8 @@ class DelegatingReadOperations[T, CURSOR](protected val inner: ReadOperations[T,
   override def propertyKeyIds(obj: T, cursor: CURSOR, propertyCursor: PropertyCursor): Array[Int] =
     singleDbHit(inner.propertyKeyIds(obj, cursor, propertyCursor))
 
-  override def all: ClosingLongIterator = manyDbHits(inner.all)
+  override def all(includeChangesFromThisTransaction: Boolean): ClosingLongIterator =
+    manyDbHits(inner.all(includeChangesFromThisTransaction))
 
   override def isDeletedInThisTx(id: Long): Boolean = inner.isDeletedInThisTx(id)
 
@@ -855,7 +915,10 @@ class DelegatingQueryTransactionalContext(val inner: QueryTransactionalContext) 
 
   override def constituentTransactionFactory: ConstituentTransactionFactory = inner.constituentTransactionFactory
 
-  override def createExecutionContextMemoryTracker(): MemoryTracker = inner.createExecutionContextMemoryTracker
+  override def createExecutionContextMemoryTracker(heapEstimatorCacheConfig: HeapEstimatorCacheConfig): MemoryTracker =
+    inner.createExecutionContextMemoryTracker(heapEstimatorCacheConfig)
 
   override def queryExecutingConfiguration: QueryExecutionConfiguration = inner.queryExecutingConfiguration
+
+  override def registerTransactionResource(resource: AutoCloseable): Unit = inner.registerTransactionResource(resource)
 }

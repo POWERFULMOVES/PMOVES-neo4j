@@ -24,7 +24,6 @@ import org.neo4j.cypher.internal.expressions.Ands
 import org.neo4j.cypher.internal.expressions.Expression
 import org.neo4j.cypher.internal.expressions.HasLabels
 import org.neo4j.cypher.internal.expressions.HasTypes
-import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.Variable
 import org.neo4j.cypher.internal.ir.Predicate
 import org.neo4j.cypher.internal.util.Foldable.SkipChildren
@@ -36,16 +35,12 @@ object ExpressionConverters {
   implicit class PredicateConverter(val predicate: Expression) extends AnyVal {
 
     def asPredicates: ListSet[Predicate] = {
-      asPredicates(ListSet.empty)
-    }
-
-    def asPredicates(outerScope: Set[LogicalVariable]): ListSet[Predicate] = {
       val builder = ListSet.newBuilder[Predicate]
       predicate.folder.treeFold(()) {
         // n:Label
         case p @ HasLabels(v: Variable, labels) =>
           builder ++= labels.map { label =>
-            Predicate(Set(v), p.copy(labels = Seq(label))(p.position))
+            Predicate(Set(v), p.copy(labels = Seq(label))(p.position, p.isPostfix))
           }
           SkipChildren(_)
         // r:T
@@ -58,7 +53,7 @@ object ExpressionConverters {
         case _: Ands | _: And =>
           TraverseChildren(_)
         case p: Expression =>
-          builder += Predicate(p.dependencies -- outerScope, p)
+          builder += Predicate(p.dependencies, p)
           SkipChildren(_)
       }
       builder.result()
