@@ -38,6 +38,7 @@ import org.neo4j.cypher.internal.runtime.NodeOperations
 import org.neo4j.cypher.internal.runtime.NodeReadOperations
 import org.neo4j.cypher.internal.runtime.Operations
 import org.neo4j.cypher.internal.runtime.QueryContext
+import org.neo4j.cypher.internal.runtime.QueryRuntimeConfig
 import org.neo4j.cypher.internal.runtime.QueryStatistics
 import org.neo4j.cypher.internal.runtime.QueryTransactionalContext
 import org.neo4j.cypher.internal.runtime.ReadOperations
@@ -94,6 +95,7 @@ import org.neo4j.kernel.impl.query.FunctionInformation
 import org.neo4j.kernel.impl.query.QueryExecutionConfiguration
 import org.neo4j.kernel.impl.query.statistic.StatisticProvider
 import org.neo4j.logging.InternalLogProvider
+import org.neo4j.memory.HeapEstimatorCacheConfig
 import org.neo4j.memory.MemoryTracker
 import org.neo4j.scheduler.JobScheduler
 import org.neo4j.values.AnyValue
@@ -132,6 +134,8 @@ abstract class DelegatingQueryContext(val inner: QueryContext) extends QueryCont
   override def resources: ResourceManager = inner.resources
 
   override def transactionalContext: QueryTransactionalContext = inner.transactionalContext
+
+  override def queryConfig: QueryRuntimeConfig = inner.queryConfig
 
   override def setLabelsOnNode(node: Long, labelIds: Iterator[Int]): Int =
     singleDbHit(inner.setLabelsOnNode(node, labelIds))
@@ -667,11 +671,15 @@ abstract class DelegatingQueryContext(val inner: QueryContext) extends QueryCont
 
   override def asObject(value: AnyValue): AnyRef = inner.asObject(value)
 
-  override def getTxStateNodePropertyOrNull(nodeId: Long, propertyKey: Int): Value =
-    inner.getTxStateNodePropertyOrNull(nodeId, propertyKey)
+  override def getTxStateNodePropertyOrNull(nodeId: Long, propertyKey: Int, failOnDeletedNode: Boolean): Value =
+    inner.getTxStateNodePropertyOrNull(nodeId, propertyKey, failOnDeletedNode)
 
-  override def getTxStateRelationshipPropertyOrNull(relId: Long, propertyKey: Int): Value =
-    inner.getTxStateRelationshipPropertyOrNull(relId, propertyKey)
+  override def getTxStateRelationshipPropertyOrNull(
+    relId: Long,
+    propertyKey: Int,
+    failOnDeletedRelationship: Boolean
+  ): Value =
+    inner.getTxStateRelationshipPropertyOrNull(relId, propertyKey, failOnDeletedRelationship)
 
   override def getTransactionType: KernelTransaction.Type = inner.getTransactionType
 
@@ -855,7 +863,8 @@ class DelegatingQueryTransactionalContext(val inner: QueryTransactionalContext) 
 
   override def constituentTransactionFactory: ConstituentTransactionFactory = inner.constituentTransactionFactory
 
-  override def createExecutionContextMemoryTracker(): MemoryTracker = inner.createExecutionContextMemoryTracker
+  override def createExecutionContextMemoryTracker(heapEstimatorCacheConfig: HeapEstimatorCacheConfig): MemoryTracker =
+    inner.createExecutionContextMemoryTracker(heapEstimatorCacheConfig)
 
   override def queryExecutingConfiguration: QueryExecutionConfiguration = inner.queryExecutingConfiguration
 }

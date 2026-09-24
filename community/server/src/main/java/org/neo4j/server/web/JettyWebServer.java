@@ -21,11 +21,13 @@ package org.neo4j.server.web;
 
 import static java.lang.String.format;
 
+import java.io.BufferedOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
@@ -36,23 +38,24 @@ import java.util.Map;
 import java.util.SortedSet;
 import java.util.TreeSet;
 import java.util.concurrent.BlockingQueue;
+import java.util.zip.ZipInputStream;
 import javax.servlet.DispatcherType;
 import javax.servlet.Filter;
+import org.eclipse.jetty.ee8.servlet.FilterHolder;
+import org.eclipse.jetty.ee8.servlet.ServletContextHandler;
+import org.eclipse.jetty.ee8.webapp.WebAppContext;
 import org.eclipse.jetty.io.ByteBufferPool;
 import org.eclipse.jetty.server.RequestLog;
 import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.server.ServerConnector;
-import org.eclipse.jetty.server.handler.HandlerCollection;
-import org.eclipse.jetty.server.handler.HandlerList;
+import org.eclipse.jetty.server.handler.ContextHandler;
+import org.eclipse.jetty.server.handler.ContextHandlerCollection;
 import org.eclipse.jetty.server.handler.MovedContextHandler;
-import org.eclipse.jetty.server.handler.RequestLogHandler;
-import org.eclipse.jetty.server.session.SessionHandler;
-import org.eclipse.jetty.servlet.FilterHolder;
-import org.eclipse.jetty.servlet.ServletContextHandler;
+import org.eclipse.jetty.session.SessionHandler;
 import org.eclipse.jetty.util.BlockingArrayQueue;
 import org.eclipse.jetty.util.resource.Resource;
+import org.eclipse.jetty.util.resource.ResourceFactory;
 import org.eclipse.jetty.util.thread.QueuedThreadPool;
-import org.eclipse.jetty.webapp.WebAppContext;
 import org.neo4j.configuration.Config;
 import org.neo4j.configuration.connectors.CommonConnectorConfig;
 import org.neo4j.configuration.helpers.PortBindException;
@@ -78,14 +81,14 @@ public class JettyWebServer implements WebServer, WebContainerThreadInfo {
     private RequestLog requestLog;
 
     private Server jetty;
-    private HandlerCollection handlers;
+    private ContextHandlerCollection handlers;
     private SocketAddress httpAddress = DEFAULT_ADDRESS;
     private SocketAddress httpsAddress;
 
     private ServerConnector httpConnector;
     private ServerConnector httpsConnector;
 
-    private final Map<String, String> staticContent = new HashMap<>();
+    private final Map<String, StaticContent> staticContent = new HashMap<>();
     private final Map<String, JaxRsServletHolderFactory> jaxRsServletHolderFactories = new HashMap<>();
     private final List<FilterDefinition> filters = new ArrayList<>();
 
@@ -137,11 +140,11 @@ public class JettyWebServer implements WebServer, WebContainerThreadInfo {
             }
         }
 
-        handlers = new HandlerList();
+        handlers = new ContextHandlerCollection();
         jetty.setHandler(handlers);
-        handlers.addHandler(new MovedContextHandler());
 
         loadAllMounts();
+        handlers.addHandler(new MovedContextHandler());
 
         if (requestLog != null) {
             loadRequestLogging();
@@ -259,12 +262,12 @@ public class JettyWebServer implements WebServer, WebContainerThreadInfo {
     }
 
     @Override
-    public void addStaticContent(String contentLocation, String serverMountPoint) {
+    public void addStaticContent(StaticContent contentLocation, String serverMountPoint) {
         staticContent.put(serverMountPoint, contentLocation);
     }
 
     @Override
-    public void removeStaticContent(String contentLocation, String serverMountPoint) {
+    public void removeStaticContent(String serverMountPoint) {
         staticContent.remove(serverMountPoint);
     }
 
@@ -319,11 +322,7 @@ public class JettyWebServer implements WebServer, WebContainerThreadInfo {
 
     private void loadRequestLogging() {
         // This makes the request log handler decorate whatever other handlers are already set up
-        final RequestLogHandler requestLogHandler = new HttpChannelOptionalRequestLogHandler();
-        requestLogHandler.setRequestLog(requestLog);
-        requestLogHandler.setServer(jetty);
-        requestLogHandler.setHandler(jetty.getHandler());
-        jetty.setHandler(requestLogHandler);
+        jetty.setRequestLog(requestLog);
     }
 
     private static String trimTrailingSlashToKeepJettyHappy(String mountPoint) {
@@ -352,19 +351,32 @@ public class JettyWebServer implements WebServer, WebContainerThreadInfo {
     }
 
     private void loadStaticContent(String mountPoint) {
-        String contentLocation = staticContent.get(mountPoint);
+        var staticContent = this.staticContent.get(mountPoint);
         try {
-            SessionHandler sessionHandler = new SessionHandler();
-            sessionHandler.setServer(getJetty());
             final WebAppContext staticContext = new WebAppContext();
             staticContext.setServer(getJetty());
-            staticContext.setContextPath(mountPoint);
-            staticContext.setSessionHandler(sessionHandler);
             staticContext.setInitParameter("org.eclipse.jetty.servlet.Default.dirAllowed", "false");
-            URL resourceLoc = getClass().getClassLoader().getResource(contentLocation);
-            if (resourceLoc != null) {
-                URL url = resourceLoc.toURI().toURL();
-                final Resource resource = Resource.newResource(url);
+            Resource resource = null;
+
+            final Path browserPath = Path.of(staticContent.location());
+            switch (staticContent.type()) {
+                case JAR -> {
+                    staticContext.setContextPath(mountPoint);
+                    var tempDir = Files.createTempDirectory("decompressed-browser");
+                    tempDir.toFile().deleteOnExit();
+                    var content = extractZip(browserPath, tempDir);
+                    resource = ResourceFactory.root().newResource(content);
+                }
+                case CLASSPATH -> {
+                    var resourceLoc = getClass().getClassLoader().getResource(staticContent.location());
+                    if (resourceLoc != null) {
+                        resource = ResourceFactory.root().newResource(resourceLoc);
+                        staticContext.setContextPath(mountPoint);
+                    }
+                }
+            }
+
+            if (resource != null) {
                 staticContext.setBaseResource(resource);
 
                 addFiltersTo(staticContext);
@@ -373,11 +385,14 @@ public class JettyWebServer implements WebServer, WebContainerThreadInfo {
                         "/*",
                         EnumSet.of(DispatcherType.REQUEST, DispatcherType.FORWARD));
 
-                handlers.addHandler(staticContext);
+                var contextHandler = new ContextHandler();
+                contextHandler.setContextPath(mountPoint);
+                contextHandler.setHandler(staticContext);
+
+                handlers.addHandler(contextHandler);
             }
         } catch (Exception e) {
             log.error("Unknown error loading static content", e);
-            e.printStackTrace();
             throw new RuntimeException(e);
         }
     }
@@ -392,7 +407,6 @@ public class JettyWebServer implements WebServer, WebContainerThreadInfo {
         jerseyContext.setServer(getJetty());
         jerseyContext.setErrorHandler(new NeoJettyErrorHandler());
         jerseyContext.setContextPath(mountPoint);
-        jerseyContext.setSessionHandler(sessionHandler);
         jerseyContext.addServlet(jaxRsServletHolderFactory.create(binder, wadlEnabled), "/*");
         addFiltersTo(jerseyContext);
         handlers.addHandler(jerseyContext);
@@ -463,5 +477,40 @@ public class JettyWebServer implements WebServer, WebContainerThreadInfo {
         String getPathSpec() {
             return pathSpec;
         }
+    }
+
+    private Path extractZip(Path zippedFile, Path tempDirectory) {
+        try (var inputStream = Files.newInputStream(zippedFile);
+                var zipInputStream = new ZipInputStream(inputStream)) {
+
+            var scratchBuffer = new byte[1024];
+            var zipEntry = zipInputStream.getNextEntry();
+
+            if (zipEntry == null) {
+                throw new IOException("Compressed file was empty");
+            }
+
+            // Get the root directory name so we can ignore it and host from it directly
+            var rootDirName = zipEntry.getName();
+
+            while (zipEntry != null) {
+                if (zipEntry.isDirectory()) {
+                    Files.createDirectory(tempDirectory.resolve(zipEntry.getName()));
+                } else {
+                    var uncompressedFile = Files.createFile(tempDirectory.resolve(zipEntry.getName()));
+                    try (var fileOutputStream = new BufferedOutputStream(Files.newOutputStream(uncompressedFile))) {
+                        int len;
+                        while ((len = zipInputStream.read(scratchBuffer)) > 0) {
+                            fileOutputStream.write(scratchBuffer, 0, len);
+                        }
+                    }
+                }
+                zipEntry = zipInputStream.getNextEntry();
+            }
+            return tempDirectory.resolve(rootDirName);
+        } catch (IOException e) {
+            log.warn("Unable to decompress browser archive.", e);
+        }
+        return null;
     }
 }

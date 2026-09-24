@@ -311,6 +311,17 @@ public class StubRead implements Read {
     }
 
     @Override
+    public void relationshipProperties(
+            long nodeReference,
+            long startNodeReference,
+            int type,
+            Reference reference,
+            PropertySelection selection,
+            PropertyCursor cursor) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
     public boolean nodeDeletedInTransaction(long node) {
         throw new UnsupportedOperationException();
     }

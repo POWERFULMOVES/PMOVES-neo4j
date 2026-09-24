@@ -744,6 +744,46 @@ class OptionalMatchRemoverTest extends CypherFunSuite with PlannerQueryRewriterT
   }
 
   test(
+    """OPTIONAL MATCH p = ALL SHORTEST((a:A)-[r:REL*]->(b:B))
+      |RETURN DISTINCT a AS a
+      |""".stripMargin
+  ) {
+    assertIsNotRewritten(testName)
+  }
+
+  test(
+    """OPTIONAL MATCH p = ALL SHORTEST((a:A)-[r:REL*]->(b:B))
+      |RETURN DISTINCT p AS p
+      |""".stripMargin
+  ) {
+    assertIsNotRewritten(testName)
+  }
+
+  test(
+    """OPTIONAL MATCH p = ALL SHORTEST((a:A)-[r:REL*]->(b:B))
+      |RETURN collect(DISTINCT a) AS result
+      |""".stripMargin
+  ) {
+    assertIsNotRewritten(testName)
+  }
+
+  test(
+    """OPTIONAL MATCH p = ALL SHORTEST((a:A)-[r:REL*]->(b:B))
+      |RETURN collect(DISTINCT p) AS result
+      |""".stripMargin
+  ) {
+    assertIsNotRewritten(testName)
+  }
+
+  test(
+    """OPTIONAL MATCH ALL SHORTEST (a:L0)<-[r*1..1]-(b:L5)
+      |RETURN DISTINCT (b.prop) AS bProp
+      |""".stripMargin
+  ) {
+    assertIsNotRewritten(testName)
+  }
+
+  test(
     """OPTIONAL MATCH (a:A) ((n)-[r:REL]->(m)){1, 10} (b:B)
       |RETURN collect(DISTINCT a) AS result
       |""".stripMargin
@@ -868,7 +908,9 @@ class OptionalMatchRemoverTest extends CypherFunSuite with PlannerQueryRewriterT
     )
   }
 
-  test("find smallest graph if mustInclude has all but one of many relationships") { // MATCH (n)-[r1]->(m)-[r2]->(c)-[r3:R3]-(d), (n)-[r4]-(e)
+  test(
+    "find smallest graph if mustInclude has all but one of many relationships"
+  ) { // MATCH (n)-[r1]->(m)-[r2]->(c)-[r3:R3]-(d), (n)-[r4]-(e)
     val pattRel1 = PatternRelationship(r1, (n, m), BOTH, Seq.empty, SimplePatternLength)
     val pattRel2 = PatternRelationship(r2, (m, c), BOTH, Seq.empty, SimplePatternLength)
     val pattRel3 = PatternRelationship(r3, (c, d), BOTH, Seq.empty, SimplePatternLength)

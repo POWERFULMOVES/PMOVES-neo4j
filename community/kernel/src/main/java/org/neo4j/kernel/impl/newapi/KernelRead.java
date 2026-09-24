@@ -592,8 +592,21 @@ public final class KernelRead implements Read {
             Reference reference,
             PropertySelection selection,
             PropertyCursor cursor) {
+        relationshipProperties(
+                relationshipReference, startNodeReference, TokenConstants.NO_TOKEN, reference, selection, cursor);
+    }
+
+    @Override
+    public void relationshipProperties(
+            long relationshipReference,
+            long startNodeReference,
+            int type,
+            Reference reference,
+            PropertySelection selection,
+            PropertyCursor cursor) {
         ((DefaultPropertyCursor) cursor)
-                .initRelationship(relationshipReference, reference, selection, this, txStateHolder, accessModeProvider);
+                .initRelationship(
+                        relationshipReference, type, reference, selection, this, txStateHolder, accessModeProvider);
     }
 
     private void validateConstraints(IndexQueryConstraints constraints, DefaultIndexReadSession indexSession) {

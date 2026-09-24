@@ -7,13 +7,14 @@
     <parent>
         <groupId>org.neo4j</groupId>
         <artifactId>parent</artifactId>
-        <version>5.26.0</version>
+        <version>5.26.25-SNAPSHOT</version>
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
     <properties>
         <moduleName>org.neo4j.bolt</moduleName>
         <default.jupiter.test.mode>concurrent</default.jupiter.test.mode>
+        <test.vm.netty.leakDetection.level>DISABLED</test.vm.netty.leakDetection.level>
     </properties>
 
     <artifactId>neo4j-bolt</artifactId>
@@ -124,6 +125,12 @@
         </dependency>
         <dependency>
             <groupId>org.neo4j</groupId>
+            <artifactId>io-test-utils</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.neo4j</groupId>
             <artifactId>neo4j-random-values</artifactId>
             <version>${project.version}</version>
             <scope>test</scope>
@@ -131,7 +138,7 @@
 
         <dependency>
             <groupId>org.eclipse.jetty.websocket</groupId>
-            <artifactId>websocket-jetty-client</artifactId>
+            <artifactId>jetty-websocket-jetty-client</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

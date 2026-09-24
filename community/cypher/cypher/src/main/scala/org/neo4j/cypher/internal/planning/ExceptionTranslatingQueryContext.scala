@@ -38,6 +38,7 @@ import org.neo4j.cypher.internal.runtime.NodeOperations
 import org.neo4j.cypher.internal.runtime.NodeReadOperations
 import org.neo4j.cypher.internal.runtime.Operations
 import org.neo4j.cypher.internal.runtime.QueryContext
+import org.neo4j.cypher.internal.runtime.QueryRuntimeConfig
 import org.neo4j.cypher.internal.runtime.QueryTransactionalContext
 import org.neo4j.cypher.internal.runtime.ReadOperations
 import org.neo4j.cypher.internal.runtime.ReadQueryContext
@@ -93,6 +94,8 @@ class ExceptionTranslatingReadQueryContext(val inner: ReadQueryContext) extends 
   override def resources: ResourceManager = inner.resources
 
   override def transactionalContext: QueryTransactionalContext = ExceptionTranslatingTransactionalContext
+
+  override def queryConfig: QueryRuntimeConfig = inner.queryConfig
 
   override def getLabelsForNode(node: Long, nodeCursor: NodeCursor): ListValue =
     translateException(tokenNameLookup, inner.getLabelsForNode(node, nodeCursor))
@@ -478,11 +481,18 @@ class ExceptionTranslatingReadQueryContext(val inner: ReadQueryContext) extends 
   override def asObject(value: AnyValue): AnyRef =
     translateException(tokenNameLookup, inner.asObject(value))
 
-  override def getTxStateNodePropertyOrNull(nodeId: Long, propertyKey: Int): Value =
-    translateException(tokenNameLookup, inner.getTxStateNodePropertyOrNull(nodeId, propertyKey))
+  override def getTxStateNodePropertyOrNull(nodeId: Long, propertyKey: Int, failOnDeletedNode: Boolean): Value =
+    translateException(tokenNameLookup, inner.getTxStateNodePropertyOrNull(nodeId, propertyKey, failOnDeletedNode))
 
-  override def getTxStateRelationshipPropertyOrNull(relId: Long, propertyKey: Int): Value =
-    translateException(tokenNameLookup, inner.getTxStateRelationshipPropertyOrNull(relId, propertyKey))
+  override def getTxStateRelationshipPropertyOrNull(
+    relId: Long,
+    propertyKey: Int,
+    failOnDeletedRelationship: Boolean
+  ): Value =
+    translateException(
+      tokenNameLookup,
+      inner.getTxStateRelationshipPropertyOrNull(relId, propertyKey, failOnDeletedRelationship)
+    )
 
   override def nodeCountByCountStore(labelId: Int): Long =
     translateException(tokenNameLookup, inner.nodeCountByCountStore(labelId))

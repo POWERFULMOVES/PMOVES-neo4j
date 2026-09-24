@@ -56,6 +56,7 @@ class IdRange {
     static final byte ADDITION_REUSE = 1 << BITSET_REUSE;
     static final byte ADDITION_RESERVED = 1 << BITSET_RESERVED;
     static final byte ADDITION_ALL = ADDITION_COMMIT | ADDITION_REUSE | ADDITION_RESERVED;
+    static final byte ADDITION_NONE = 0;
 
     private long generation;
     private byte addition;
@@ -251,6 +252,10 @@ class IdRange {
             var numberOfIds = prevFreeI - firstFreeI + 1;
             visitor.visitFreeId(id, numberOfIds);
         }
+    }
+
+    int idsPerEntry() {
+        return idsPerEntry;
     }
 
     private void verifyMerge(IdRangeKey key, IdRange other) {

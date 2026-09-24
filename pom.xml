@@ -5,7 +5,7 @@
 
   <groupId>org.neo4j</groupId>
   <artifactId>parent</artifactId>
-  <version>5.26.0</version>
+  <version>5.26.25-SNAPSHOT</version>
   <packaging>pom</packaging>
   <name>Neo4j - Parent</name>
   <description>Neo4j Graph Database</description>
@@ -80,6 +80,7 @@
     <maven.compiler.source>${vm.target.version}</maven.compiler.source>
     <maven.compiler.target>${vm.target.version}</maven.compiler.target>
     <generate-config-docs-phase>prepare-package</generate-config-docs-phase>
+    <test.runner.mockito.agent>-javaagent:${settings.localRepository}/org/mockito/mockito-core/${mockito.version}/mockito-core-${mockito.version}.jar</test.runner.mockito.agent>
     <jdk.custom.options>
       --add-opens=java.base/java.nio=ALL-UNNAMED
       --add-opens=java.base/java.io=ALL-UNNAMED
@@ -90,6 +91,7 @@
     <test.runner.jvm.settings.additional/>
     <test.runner.jvm.settings.db.format/>
     <test.runner.jvm.settings>
+      ${test.runner.mockito.agent}
       -Xmx${test.vm.heap.size}
       -XX:+UseG1GC
       -XX:-OmitStackTraceInFastThrow
@@ -124,7 +126,7 @@
       -XX:+UnlockDiagnosticVMOptions
       -XX:+DebugNonSafepoints
       -XX:MaxMetaspaceSize=550m
-      -XX:+EnableDynamicAgentLoading
+      -Xshare:off
       ${jdk.custom.options}
       ${test.runner.jvm.settings.db.format}
       ${test.runner.jvm.settings.additional}
@@ -145,8 +147,8 @@
 
     <jamm.version>0.4.0</jamm.version>
     <lucene.version>9.11.1</lucene.version>
-    <bouncycastle.version>1.78.1</bouncycastle.version>
-    <jetty.version>10.0.24</jetty.version>
+    <bouncycastle.version>1.79</bouncycastle.version>
+    <jetty.version>12.0.33</jetty.version>
     <scala-maven-plugin.version>4.9.2</scala-maven-plugin.version>
     <scala.version>2.13.11</scala.version>
     <scala.binary.version>2.13</scala.binary.version>
@@ -155,25 +157,26 @@
     <asm.version>9.7.1</asm.version>
     <metrics.version>4.2.28</metrics.version>
     <scala.target.vm>${vm.target.version}</scala.target.vm>
-    <jersey.version>2.43</jersey.version>
+    <jersey.version>2.46</jersey.version>
     <junit.version>5.11.2</junit.version>
     <junit.platform.version>1.11.2</junit.platform.version>
     <mockito.version>5.14.1</mockito.version>
     <opencypher.version>1.0.0-M23</opencypher.version>
     <caffeine.version>3.1.8</caffeine.version>
     <required.maven.version>3.8.2</required.maven.version>
-    <jackson.version>2.18.0</jackson.version>
-    <jackson-databind.version>2.18.0</jackson-databind.version>
+    <jackson.version>2.21.1</jackson.version>
+    <jackson-databind.version>2.21.1</jackson-databind.version>
+    <jackson.annotation.version>2.21</jackson.annotation.version>
     <amazon-sdk.version>1.12.772</amazon-sdk.version>
-    <awssdk.version>2.28.20</awssdk.version>
-    <awssdk-crt.version>0.31.3</awssdk-crt.version>
+    <awssdk.version>2.31.20</awssdk.version>
+    <awssdk-crt.version>0.38.1</awssdk-crt.version>
     <guava.version>33.3.1-jre</guava.version>
     <awaitility.version>4.2.2</awaitility.version>
-    <log4j.version>2.20.0</log4j.version>
+    <log4j.version>2.25.3</log4j.version>
     <slf4j.version>2.0.9</slf4j.version>
-    <neo4j-java-driver.version>5.26.0</neo4j-java-driver.version>
+    <neo4j-java-driver.version>5.28.12</neo4j-java-driver.version>
     <eclipse-collections.version>11.1.0</eclipse-collections.version>
-    <parquet-floor.version>1.47</parquet-floor.version>
+    <parquet-floor.version>1.62</parquet-floor.version>
     <picocli.version>4.7.6</picocli.version>
     <jakarta.activation-api.version>1.2.2</jakarta.activation-api.version>
     <jakarta.ws.rs-api.version>2.1.6</jakarta.ws.rs-api.version>
@@ -183,7 +186,8 @@
     <javapoet.version>1.13.0</javapoet.version>
     <grpc.version>1.68.0</grpc.version>
     <testcontainers.version>1.20.2</testcontainers.version>
-    <build-resources.version>2024-07.1</build-resources.version>
+    <build-resources.version>2025.11.1</build-resources.version>
+    <s3mock.version>3.12.0</s3mock.version>
   </properties>
 
   <modules>
@@ -345,6 +349,7 @@
             <systemPropertyVariables>
               <java.io.tmpdir>${project.build.directory}</java.io.tmpdir>
               <jdk.custom.options>${jdk.custom.options}</jdk.custom.options>
+              <s3mock.version>${s3mock.version}</s3mock.version>
             </systemPropertyVariables>
             <jvm>${test.runner.jvm}</jvm>
             <excludes>
@@ -855,6 +860,8 @@
           </java>
           <scala>
             <scalafmt>
+              <version>3.8.4-RC3</version>
+              <scalaMajorVersion>2.13</scalaMajorVersion>
               <file>scalafmt/scalafmt.conf</file>
             </scalafmt>
           </scala>
@@ -1090,9 +1097,9 @@
   <dependencyManagement>
     <dependencies>
       <dependency>
-        <groupId>org.lz4</groupId>
+        <groupId>at.yawk.lz4</groupId>
         <artifactId>lz4-java</artifactId>
-        <version>1.8.0</version>
+        <version>1.10.1</version>
       </dependency>
       <dependency>
         <groupId>org.apache.logging.log4j</groupId>
@@ -1152,7 +1159,7 @@
       <dependency>
         <groupId>org.apache.shiro</groupId>
         <artifactId>shiro-core</artifactId>
-        <version>2.0.1</version>
+        <version>2.1.0</version>
         <exclusions>
           <exclusion>
             <groupId>org.bouncycastle</groupId>
@@ -1222,7 +1229,7 @@
       <dependency>
         <groupId>io.projectreactor</groupId>
         <artifactId>reactor-bom</artifactId>
-        <version>2023.0.10</version>
+        <version>2024.0.11</version>
         <type>pom</type>
         <scope>import</scope>
       </dependency>
@@ -1237,6 +1244,12 @@
         <groupId>blue.strategic.parquet</groupId>
         <artifactId>parquet-floor</artifactId>
         <version>${parquet-floor.version}</version>
+        <exclusions>
+          <exclusion>
+            <groupId>io.airlift</groupId>
+            <artifactId>aircompressor</artifactId>
+          </exclusion>
+        </exclusions>
       </dependency>
 
       <!-- testing -->
@@ -1295,7 +1308,7 @@
       <dependency>
         <groupId>org.assertj</groupId>
         <artifactId>assertj-core</artifactId>
-        <version>3.26.3</version>
+        <version>3.27.7</version>
         <scope>test</scope>
         <exclusions>
           <exclusion>
@@ -1535,7 +1548,7 @@
       <dependency>
         <groupId>org.apache.commons</groupId>
         <artifactId>commons-lang3</artifactId>
-        <version>3.17.0</version>
+        <version>3.18.0</version>
       </dependency>
       <dependency>
         <groupId>org.apache.commons</groupId>
@@ -1560,7 +1573,7 @@
       <dependency>
         <groupId>io.netty</groupId>
         <artifactId>netty-bom</artifactId>
-        <version>4.1.115.Final</version>
+        <version>4.1.132.Final</version>
         <type>pom</type>
         <scope>import</scope>
       </dependency>
@@ -1631,7 +1644,7 @@
       </dependency>
       <dependency>
         <groupId>org.eclipse.jetty.http2</groupId>
-        <artifactId>http2-server</artifactId>
+        <artifactId>jetty-http2-server</artifactId>
         <version>${jetty.version}</version>
       </dependency>
       <dependency>
@@ -1645,13 +1658,13 @@
         <version>${jetty.version}</version>
       </dependency>
       <dependency>
-        <groupId>org.eclipse.jetty</groupId>
-        <artifactId>jetty-webapp</artifactId>
+        <groupId>org.eclipse.jetty.ee8</groupId>
+        <artifactId>jetty-ee8-webapp</artifactId>
         <version>${jetty.version}</version>
       </dependency>
       <dependency>
-        <groupId>org.eclipse.jetty</groupId>
-        <artifactId>jetty-servlet</artifactId>
+        <groupId>org.eclipse.jetty.ee8</groupId>
+        <artifactId>jetty-ee8-servlet</artifactId>
         <version>${jetty.version}</version>
         <exclusions>
           <exclusion>
@@ -1662,7 +1675,7 @@
       </dependency>
       <dependency>
         <groupId>org.eclipse.jetty.websocket</groupId>
-        <artifactId>websocket-jetty-client</artifactId>
+        <artifactId>jetty-websocket-jetty-client</artifactId>
         <version>${jetty.version}</version>
       </dependency>
       <dependency>
@@ -1818,6 +1831,11 @@
         <version>3.25.5</version>
       </dependency>
       <dependency>
+        <groupId>com.google.protobuf</groupId>
+        <artifactId>protobuf-java-util</artifactId>
+        <version>3.25.5</version>
+      </dependency>
+      <dependency>
         <groupId>com.google.errorprone</groupId>
         <artifactId>error_prone_annotations</artifactId>
         <version>${error_prone.version}</version>
@@ -1825,7 +1843,7 @@
       <dependency>
         <groupId>com.fasterxml.jackson.core</groupId>
         <artifactId>jackson-annotations</artifactId>
-        <version>${jackson.version}</version>
+        <version>${jackson.annotation.version}</version>
       </dependency>
       <dependency>
         <groupId>net.bytebuddy</groupId>

@@ -19,6 +19,7 @@
  */
 package org.neo4j.cypher.internal.compiler.planner.logical
 
+import org.neo4j.cypher.internal.ast.Hint
 import org.neo4j.cypher.internal.ast.prettifier.ExpressionStringifier
 import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
 import org.neo4j.cypher.internal.compiler.helpers.SeqSupport.RichSeq
@@ -52,6 +53,7 @@ import org.neo4j.cypher.internal.ir.ast.ExistsIRExpression
 import org.neo4j.cypher.internal.ir.ordering.InterestingOrder
 import org.neo4j.cypher.internal.util.AnonymousVariableNameGenerator
 import org.neo4j.cypher.internal.util.InputPosition
+import org.neo4j.cypher.internal.util.NonEmptyList
 import org.neo4j.cypher.internal.util.Rewriter
 import org.neo4j.cypher.internal.util.StepSequencer
 import org.neo4j.cypher.internal.util.StepSequencer.DefaultPostCondition
@@ -84,7 +86,9 @@ case object OptionalMatchRemover extends PlannerQueryRewriter with StepSequencer
             tail,
             queryInput
           )
-          if noOptionalShortestPathOrQpp(graph) && graph.mutatingPatterns.isEmpty && validAggregations(aggregations) =>
+          if noOptionalShortestPathSelectivePathOrQpp(graph) && graph.mutatingPatterns.isEmpty && validAggregations(
+            aggregations
+          ) =>
           val projectionDeps: Iterable[LogicalVariable] =
             (distinctExpressions.values ++ aggregations.values).flatMap(_.dependencies)
           rewrite(projectionDeps, graph, interestingOrder, proj, tail, queryInput, from.anonymousVariableNameGenerator)
@@ -95,7 +99,7 @@ case object OptionalMatchRemover extends PlannerQueryRewriter with StepSequencer
             proj @ DistinctQueryProjection(distinctExpressions, _, _, _, _),
             tail,
             queryInput
-          ) if noOptionalShortestPathOrQpp(graph) && graph.mutatingPatterns.isEmpty =>
+          ) if noOptionalShortestPathSelectivePathOrQpp(graph) && graph.mutatingPatterns.isEmpty =>
           val projectionDeps: Iterable[LogicalVariable] = distinctExpressions.values.flatMap(_.dependencies)
           rewrite(projectionDeps, graph, interestingOrder, proj, tail, queryInput, from.anonymousVariableNameGenerator)
 
@@ -167,17 +171,20 @@ case object OptionalMatchRemover extends PlannerQueryRewriter with StepSequencer
             original.patternRelationships.partition(r => elementsToKeep(r.variable))
           val patternNodes = original.patternNodes.filter(elementsToKeep.apply)
 
-          val patternPredicates = patternsToFilter.map(toAst(
-            elementsToKeep,
-            predicatesForPatternExpression,
-            _,
-            anonymousVariableNameGenerator
-          ))
+          val (patternPredicates, hintsFulfilledInPredicates) =
+            patternsToFilter.map(toAst(
+              elementsToKeep,
+              predicatesForPatternExpression,
+              _,
+              anonymousVariableNameGenerator,
+              original.hints
+            )).unzip
 
           val newOptionalGraph = original
             .withPatternRelationships(patternsToKeep)
             .withPatternNodes(patternNodes)
             .withSelections(Selections.from(predicatesToKeep) ++ patternPredicates)
+            .withHints(original.hints.diff(hintsFulfilledInPredicates.flatten))
 
           Some(newOptionalGraph)
         }
@@ -310,29 +317,35 @@ case object OptionalMatchRemover extends PlannerQueryRewriter with StepSequencer
     }
   }
 
-  private def noOptionalShortestPathOrQpp(qg: QueryGraph): Boolean = {
+  private def noOptionalShortestPathSelectivePathOrQpp(qg: QueryGraph): Boolean = {
     qg.optionalMatches.forall(qg =>
-      qg.shortestRelationshipPatterns.isEmpty && qg.quantifiedPathPatterns.isEmpty
+      qg.shortestRelationshipPatterns.isEmpty && qg.quantifiedPathPatterns.isEmpty && qg.selectivePathPatterns.isEmpty
     )
   }
 
+  /**
+   * Convert a pattern into an ExistsIRExpression, accompanied by the hints that the pattern fulfils.
+   */
   private def toAst(
     elementsToKeep: Set[LogicalVariable],
     predicates: Map[LogicalVariable, Expression],
     pattern: PatternRelationship,
-    anonymousVariableNameGenerator: AnonymousVariableNameGenerator
-  ): Expression = {
+    anonymousVariableNameGenerator: AnonymousVariableNameGenerator,
+    hints: Set[Hint]
+  ): (Expression, Set[Hint]) = {
 
     val innerVars = pattern.boundaryNodesSet
     val innerPreds = innerVars.flatMap(predicates.get)
 
     val arguments = innerVars.intersect(elementsToKeep)
+    val hintsFulfilledByPattern = hints.filter(_.variables == NonEmptyList(pattern.variable))
     val query = RegularSinglePlannerQuery(
       queryGraph = QueryGraph(
         argumentIds = arguments,
         patternNodes = pattern.boundaryNodesSet,
         patternRelationships = Set(pattern),
-        selections = Selections.from(innerPreds)
+        selections = Selections.from(innerPreds),
+        hints = hintsFulfilledByPattern
       ),
       horizon = RegularQueryProjection(
         importedExposedSymbols = arguments
@@ -345,14 +358,17 @@ case object OptionalMatchRemover extends PlannerQueryRewriter with StepSequencer
       case _                        => "\n  WHERE " + stringifier(Ands(innerPreds)(InputPosition.NONE))
     }
 
-    ExistsIRExpression(
-      query,
-      varFor(anonymousVariableNameGenerator.nextName),
-      s"EXISTS { MATCH ${pattern.solvedString(withTypes = true)}$whereString }"
-    )(
-      InputPosition.NONE,
-      None, // There is no reasonable way of calculating introduced variables, so IRExpressions should not be accessing it and it can be left blank
-      Some(arguments)
+    (
+      ExistsIRExpression(
+        query,
+        varFor(anonymousVariableNameGenerator.nextName),
+        s"EXISTS { MATCH ${pattern.solvedString(withTypes = true)}$whereString }"
+      )(
+        InputPosition.NONE,
+        None, // There is no reasonable way of calculating introduced variables, so IRExpressions should not be accessing it and it can be left blank
+        Some(arguments)
+      ),
+      hintsFulfilledByPattern
     )
   }
 

@@ -40,10 +40,12 @@ import org.neo4j.cypher.internal.options.CypherDebugOptions
 import org.neo4j.cypher.internal.options.CypherEagerAnalyzerOption
 import org.neo4j.cypher.internal.options.CypherExecutionMode
 import org.neo4j.cypher.internal.options.CypherExpressionEngineOption
+import org.neo4j.cypher.internal.options.CypherHeapEstimatorCacheOption
 import org.neo4j.cypher.internal.options.CypherInferSchemaPartsOption
 import org.neo4j.cypher.internal.options.CypherInterpretedPipesFallbackOption
 import org.neo4j.cypher.internal.options.CypherOperatorEngineOption
 import org.neo4j.cypher.internal.options.CypherParallelRuntimeSupportOption
+import org.neo4j.cypher.internal.options.CypherPipelinedBatchReuseOption
 import org.neo4j.cypher.internal.options.CypherPlanVarExpandInto
 import org.neo4j.cypher.internal.options.CypherPlannerOption
 import org.neo4j.cypher.internal.options.CypherQueryOptions
@@ -92,7 +94,12 @@ class FabricPlannerTest
     with AstConstructionTestSupport {
 
   private def makeConfig() =
-    new FabricConfig(() => Duration.ZERO, new FabricConfig.DataStream(0, 0, 0, 0), false)
+    new FabricConfig(
+      () => Duration.ZERO,
+      new FabricConfig.DataStream(0, 0, 0, 0),
+      false,
+      () => new FabricConfig.Profiling(false, null)
+    )
 
   private val config = makeConfig()
   private val planner = FabricPlanner(config, cypherConfig, monitors, cacheFactory)
@@ -1011,7 +1018,9 @@ class FabricPlannerTest
           eagerAnalyzer = CypherEagerAnalyzerOption.default,
           inferSchemaParts = CypherInferSchemaPartsOption.default,
           statefulShortestPlanningModeOption = CypherStatefulShortestPlanningModeOption.default,
-          planVarExpandInto = CypherPlanVarExpandInto.default
+          planVarExpandInto = CypherPlanVarExpandInto.default,
+          pipelinedBatchReuseOption = CypherPipelinedBatchReuseOption.default,
+          heapEstimatorCacheOption = CypherHeapEstimatorCacheOption.default
         )
       )
 

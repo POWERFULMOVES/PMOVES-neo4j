@@ -17,6 +17,29 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
-package org.neo4j.packstream.io;
+package org.neo4j.fabric.executor;
 
-public class NativeStructReadTest {}
+import org.neo4j.graphdb.ExecutionPlanDescription;
+
+interface ProfilingContext extends AutoCloseable {
+
+    QueryFragment fragmentStart(Location location, String query);
+
+    @Override
+    void close();
+
+    interface QueryFragment {
+
+        void finish(ExecutionPlanDescription profile);
+    }
+
+    ProfilingContext NO_OP = new ProfilingContext() {
+        @Override
+        public QueryFragment fragmentStart(Location location, String query) {
+            return profile -> {};
+        }
+
+        @Override
+        public void close() {}
+    };
+}

@@ -31,7 +31,8 @@ public record QueryRequest(
         AccessMode accessMode,
         int maxExecutionTime,
         List<String> bookmarks,
-        String impersonatedUser) {
+        String impersonatedUser,
+        String txType) {
 
     public static class Builder {
         private String statement;
@@ -41,6 +42,7 @@ public record QueryRequest(
         private int maxExecutionTime;
         private List<String> bookmarks = List.of();
         private String impersonatedUser;
+        String txType;
 
         public Builder statement(String statement) {
             this.statement = statement;
@@ -54,6 +56,11 @@ public record QueryRequest(
 
         public Builder includeCounters() {
             this.includeCounters = true;
+            return this;
+        }
+
+        public Builder withoutCounters() {
+            this.includeCounters = false;
             return this;
         }
 
@@ -77,13 +84,29 @@ public record QueryRequest(
             return this;
         }
 
+        public Builder txType(String txType) {
+            this.txType = txType;
+            return this;
+        }
+
         public QueryRequest build() {
             return new QueryRequest(
-                    statement, parameters, includeCounters, accessMode, maxExecutionTime, bookmarks, impersonatedUser);
+                    statement,
+                    parameters,
+                    includeCounters,
+                    accessMode,
+                    maxExecutionTime,
+                    bookmarks,
+                    impersonatedUser,
+                    txType);
         }
     }
 
     public static Builder newBuilder() {
         return new Builder();
+    }
+
+    public static QueryRequest returnOne() {
+        return newBuilder().statement("RETURN 1").build();
     }
 }

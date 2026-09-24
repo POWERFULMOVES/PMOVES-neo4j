@@ -48,6 +48,7 @@ import org.neo4j.cypher.internal.runtime.KernelAPISupport.asKernelIndexOrder
 import org.neo4j.cypher.internal.runtime.KernelAPISupport.isImpossibleIndexQuery
 import org.neo4j.cypher.internal.runtime.NodeValueHit
 import org.neo4j.cypher.internal.runtime.QueryContext
+import org.neo4j.cypher.internal.runtime.QueryRuntimeConfig
 import org.neo4j.cypher.internal.runtime.ReadQueryContext
 import org.neo4j.cypher.internal.runtime.RelationshipIterator
 import org.neo4j.cypher.internal.runtime.RelationshipValueHit
@@ -155,9 +156,11 @@ import scala.util.control.NonFatal
 sealed class TransactionBoundQueryContext(
   transactionalContext: TransactionalContextWrapper,
   resources: ResourceManager,
-  closeable: Option[AutoCloseable] = None
+  closeable: Option[AutoCloseable] = None,
+  queryConfig: QueryRuntimeConfig = QueryRuntimeConfig.DEFAULT
 )(implicit indexSearchMonitor: IndexSearchMonitor)
-    extends TransactionBoundReadQueryContext(transactionalContext, resources, closeable) with QueryContext {
+    extends TransactionBoundReadQueryContext(transactionalContext, resources, closeable, queryConfig)
+    with QueryContext {
 
   override val nodeWriteOps: NodeWriteOperations = new NodeWriteOperations
   override val relationshipWriteOps: RelationshipWriteOperations = new RelationshipWriteOperations
@@ -566,7 +569,8 @@ sealed class TransactionBoundQueryContext(
 private[internal] class TransactionBoundReadQueryContext(
   val transactionalContext: TransactionalContextWrapper,
   val resources: ResourceManager,
-  private val closeable: Option[AutoCloseable] = None
+  private val closeable: Option[AutoCloseable] = None,
+  val queryConfig: QueryRuntimeConfig = QueryRuntimeConfig.DEFAULT
 )(implicit indexSearchMonitor: IndexSearchMonitor)
     extends TransactionBoundReadTokenContext(transactionalContext) with ReadQueryContext {
 
@@ -581,7 +585,7 @@ private[internal] class TransactionBoundReadQueryContext(
     new DefaultValueMapper(transactionalContext.kernelTransactionalContext.transaction())
 
   override def createParallelQueryContext(initialHeapMemory: Long): QueryContext = {
-    val newTransactionalContext = transactionalContext.createParallelTransactionalContext()
+    val newTransactionalContext = transactionalContext.createParallelTransactionalContext(queryConfig)
 
     // Transfer some initial heap memory to the newly created execution context memory tracker,
     // to prevent it from immediately grabbing memory from the transaction pool in case it turns out to be short-lived
@@ -592,7 +596,9 @@ private[internal] class TransactionBoundReadQueryContext(
     AssertMacros.checkOnlyWhenAssertionsAreEnabled(resources.isInstanceOf[ThreadSafeResourceManager])
     resources.trace(newResourceManager)
 
-    new ParallelTransactionBoundQueryContext(newTransactionalContext, newResourceManager)(indexSearchMonitor)
+    new ParallelTransactionBoundQueryContext(newTransactionalContext, newResourceManager, queryConfig = queryConfig)(
+      indexSearchMonitor
+    )
   }
 
   // We cannot assign to value because of periodic commit
@@ -1234,31 +1240,41 @@ private[internal] class TransactionBoundReadQueryContext(
 
   override def asObject(value: AnyValue): AnyRef = value.map(valueMapper)
 
-  override def getTxStateNodePropertyOrNull(nodeId: Long, propertyKey: Int): Value = {
+  override def getTxStateNodePropertyOrNull(nodeId: Long, propertyKey: Int, failOnDeletedNode: Boolean): Value = {
     if (nodeId != -1L) {
       val ops = reads()
-      if (ops.nodeDeletedInTransaction(nodeId)) {
+      val deleted = ops.nodeDeletedInTransaction(nodeId)
+      if (failOnDeletedNode && deleted) {
         throw new EntityNotFoundException(
           s"Node with id $nodeId has been deleted in this transaction"
         )
+      } else if (deleted) {
+        Values.NO_VALUE
+      } else {
+        ops.nodePropertyChangeInBatchOrNull(nodeId, propertyKey)
       }
-
-      ops.nodePropertyChangeInBatchOrNull(nodeId, propertyKey)
     } else {
       null
     }
   }
 
-  override def getTxStateRelationshipPropertyOrNull(relId: Long, propertyKey: Int): Value = {
+  override def getTxStateRelationshipPropertyOrNull(
+    relId: Long,
+    propertyKey: Int,
+    failOnDeletedRelationship: Boolean
+  ): Value = {
     if (relId != -1L) {
       val ops = reads()
-      if (ops.relationshipDeletedInTransaction(relId)) {
+      val deleted = ops.relationshipDeletedInTransaction(relId)
+      if (failOnDeletedRelationship && deleted) {
         throw new EntityNotFoundException(
           s"Relationship with id $relId has been deleted in this transaction"
         )
+      } else if (deleted) {
+        Values.NO_VALUE
+      } else {
+        ops.relationshipPropertyChangeInBatchOrNull(relId, propertyKey)
       }
-
-      ops.relationshipPropertyChangeInBatchOrNull(relId, propertyKey)
     } else {
       null
     }
@@ -1321,7 +1337,7 @@ private[internal] class TransactionBoundReadQueryContext(
     }
 
     override def getTxStateProperty(nodeId: Long, propertyKeyId: Int): Value =
-      getTxStateNodePropertyOrNull(nodeId, propertyKeyId)
+      getTxStateNodePropertyOrNull(nodeId, propertyKeyId, failOnDeletedNode = true)
 
     override def hasProperty(
       id: Long,
@@ -1487,7 +1503,7 @@ private[internal] class TransactionBoundReadQueryContext(
       transactionalContext.locks.releaseExclusiveRelationshipLock(obj)
 
     override def getTxStateProperty(relId: Long, propertyKeyId: Int): Value =
-      getTxStateRelationshipPropertyOrNull(relId, propertyKeyId)
+      getTxStateRelationshipPropertyOrNull(relId, propertyKeyId, failOnDeletedRelationship = true)
 
     override def hasTxStatePropertyForCachedProperty(relId: Long, propertyKeyId: Int): Option[Boolean] = {
       if (isDeletedInThisTx(relId)) {
@@ -1779,7 +1795,8 @@ private[internal] class TransactionBoundReadQueryContext(
     new TransactionBoundQueryContext(
       newTransactionalContext,
       newResourceManager,
-      None
+      closeable = None,
+      queryConfig = queryConfig
     )(indexSearchMonitor)
   }
 

@@ -89,14 +89,19 @@ public class AuthenticationSecurityConnectionListener implements ConnectionListe
         log.debug("[%s] Removing authentication timeout handler", this.connection.id());
 
         if (timeoutHandler != null) {
-            this.connection.channel().pipeline().remove(timeoutHandler);
+            var timeoutHandler = this.timeoutHandler;
+            var protocolLimiterHandler = this.protocolLimiterHandler;
+
+            this.connection.modifyPipeline(pipeline -> {
+                pipeline.remove(timeoutHandler);
+
+                if (protocolLimiterHandler != null) {
+                    pipeline.remove(protocolLimiterHandler);
+                }
+            });
+
             this.timeoutHandler = null;
-
-            if (this.protocolLimiterHandler != null) {
-                this.connection.channel().pipeline().remove(protocolLimiterHandler);
-
-                this.protocolLimiterHandler = null;
-            }
+            this.protocolLimiterHandler = null;
         }
     }
 
@@ -105,12 +110,11 @@ public class AuthenticationSecurityConnectionListener implements ConnectionListe
         log.debug("[%s] Re-adding authentication timeout handler", this.connection.id());
         connection.memoryTracker().allocateHeap(AuthenticationTimeoutHandler.SHALLOW_SIZE);
 
-        timeoutHandler = new AuthenticationTimeoutHandler(timeout);
+        var timeoutHandler = new AuthenticationTimeoutHandler(timeout);
+        this.timeoutHandler = timeoutHandler;
 
-        connection
-                .channel()
-                .pipeline()
-                .addBefore(HouseKeeperHandler.HANDLER_NAME, "authenticationTimeoutHandler", timeoutHandler);
+        this.connection.modifyPipeline(pipeline ->
+                pipeline.addBefore(HouseKeeperHandler.HANDLER_NAME, "authenticationTimeoutHandler", timeoutHandler));
 
         this.installStructureLimitHandler();
     }
@@ -130,11 +134,11 @@ public class AuthenticationSecurityConnectionListener implements ConnectionListe
                 this.connection.id(), structureElementLimit, structureDepthLimit);
 
         connection.memoryTracker().allocateHeap(AuthenticationProtocolLimiterHandler.SHALLOW_SIZE);
-        protocolLimiterHandler = new AuthenticationProtocolLimiterHandler(structureElementLimit, structureDepthLimit);
+        var protocolLimiterHandler =
+                new AuthenticationProtocolLimiterHandler(structureElementLimit, structureDepthLimit);
+        this.protocolLimiterHandler = protocolLimiterHandler;
 
-        this.connection
-                .channel()
-                .pipeline()
-                .addAfter(ChunkFrameDecoder.NAME, "protocolLimiterHandler", protocolLimiterHandler);
+        this.connection.modifyPipeline(pipeline ->
+                pipeline.addAfter(ChunkFrameDecoder.NAME, "protocolLimiterHandler", protocolLimiterHandler));
     }
 }

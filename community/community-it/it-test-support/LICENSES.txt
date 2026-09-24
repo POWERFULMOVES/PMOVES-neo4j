@@ -4,7 +4,6 @@ libraries. For an overview of the licenses see the NOTICE.txt file.
 
 ------------------------------------------------------------------------------
 Apache Software License, Version 2.0
-  aircompressor
   Apache Commons Codec
   Apache Commons Compress
   Apache Commons Configuration
@@ -14,7 +13,7 @@ Apache Software License, Version 2.0
   Apache Commons Text
   Apache Log4j API
   Apache Log4j Core
-  Apache Log4j Layout for JSON template
+  Apache Log4j JSON Template Layout
   Apache Lucene (module: backward-codecs)
   Apache Lucene (module: common)
   Apache Lucene (module: core)
@@ -32,29 +31,29 @@ Apache Software License, Version 2.0
   Apache Shiro :: Cryptography :: Hashing
   Apache Shiro :: Event
   Apache Shiro :: Lang
-  Arrow Flight Core
-  Arrow Format
-  Arrow Memory - Core
-  Arrow Vectors
   AssertJ Core
   Byte Buddy (without dependencies)
   Byte Buddy agent
   Caffeine cache
+  Core :: ALPN :: Java Server
+  Core :: ALPN :: Server
+  Core :: EE Common
+  Core :: HTTP
+  Core :: HTTP2 :: Common
+  Core :: HTTP2 :: HPACK
+  Core :: HTTP2 :: Server
+  Core :: IO
+  Core :: Security
+  Core :: Server
+  Core :: Sessions
+  Core :: Utilities
+  Core :: XML
+  EE8 :: Nested
+  EE8 :: Security
+  EE8 :: Servlet
+  EE8 :: WebApp
   fastinfoset
-  FindBugs-jsr305
-  FlatBuffers Java API
-  Guava InternalFutureFailureAccess and InternalFutures
-  Guava ListenableFuture only
-  Guava: Google Core Libraries for Java
-  io.grpc:grpc-api
-  io.grpc:grpc-context
-  io.grpc:grpc-core
-  io.grpc:grpc-netty
-  io.grpc:grpc-protobuf
-  io.grpc:grpc-stub
   IPAddress
-  Jackson datatype: jdk8
-  Jackson datatype: JSR310
   Jackson module: Old JAXB Annotations (javax.xml.bind)
   Jackson-annotations
   Jackson-core
@@ -72,20 +71,7 @@ Apache Software License, Version 2.0
   jersey-core-server
   jersey-inject-hk2
   Jettison
-  Jetty :: ALPN :: JDK9 Server Implementation
-  Jetty :: ALPN :: Server
-  Jetty :: Http Utility
-  Jetty :: HTTP2 :: Common
-  Jetty :: HTTP2 :: HPACK
-  Jetty :: HTTP2 :: Server
-  Jetty :: IO Utility
-  Jetty :: Security
-  Jetty :: Server Core
   Jetty :: Servlet API and Schemas for JPMS and OSGi
-  Jetty :: Servlet Handling
-  Jetty :: Utilities
-  Jetty :: Webapp Application Support
-  Jetty :: XML utilities
   jPowerShell
   jProcesses
   magnolia
@@ -93,7 +79,6 @@ Apache Software License, Version 2.0
   Netty/Buffer
   Netty/Codec
   Netty/Codec/HTTP
-  Netty/Codec/HTTP2
   Netty/Common
   Netty/Handler
   Netty/Resolver
@@ -107,7 +92,6 @@ Apache Software License, Version 2.0
   org.apiguardian:apiguardian-api
   org.opentest4j:opentest4j
   picocli
-  proto-google-common-protos
   Scala Reflect
   scala-collection-contrib
   snappy-java
@@ -369,8 +353,6 @@ BSD License
   asm-analysis
   asm-tree
   asm-util
-  Protocol Buffers [Core]
-  Protocol Buffers [Util]
   Zstandard
 ------------------------------------------------------------------------------
 
@@ -835,6 +817,7 @@ Eclipse Distribution License - v 1.0
   jersey-container-servlet-core
   jersey-core-client
   jersey-inject-hk2
+  org.locationtech.jts:jts-core
   TXW2 Runtime
 ------------------------------------------------------------------------------
 

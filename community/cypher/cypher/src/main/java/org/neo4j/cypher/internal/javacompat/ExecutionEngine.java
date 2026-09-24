@@ -19,6 +19,7 @@
  */
 package org.neo4j.cypher.internal.javacompat;
 
+import java.io.IOException;
 import java.time.Clock;
 import java.util.List;
 import java.util.Set;
@@ -211,5 +212,10 @@ public class ExecutionEngine implements QueryExecutionEngine {
                 params,
                 parsedQuery,
                 CollectionConverters.asScala(parsingNotifications).toSet());
+    }
+
+    @Override
+    public void close() throws IOException {
+        cypherExecutionEngine.close();
     }
 }

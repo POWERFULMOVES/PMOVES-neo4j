@@ -20,6 +20,7 @@
 package org.neo4j.cypher.internal.runtime.spec.tests
 
 import org.neo4j.configuration.GraphDatabaseInternalSettings
+import org.neo4j.configuration.GraphDatabaseInternalSettings.HeapEstimatorCachePreset
 import org.neo4j.configuration.GraphDatabaseSettings
 import org.neo4j.cypher.internal.CypherRuntime
 import org.neo4j.cypher.internal.LogicalQuery
@@ -28,17 +29,21 @@ import org.neo4j.cypher.internal.logical.plans.IndexOrderNone
 import org.neo4j.cypher.internal.logical.plans.TransactionConcurrency
 import org.neo4j.cypher.internal.options.CypherRuntimeOption.slotted
 import org.neo4j.cypher.internal.runtime.InputDataStream
+import org.neo4j.cypher.internal.runtime.QueryRuntimeConfig
 import org.neo4j.cypher.internal.runtime.spec.Edition
 import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.cypher.internal.runtime.spec.rewriters.TestPlanCombinationRewriter.NoRewrites
+import org.neo4j.cypher.internal.runtime.spec.tests.MemoryManagementTestBase.largeObjectThreshold
 import org.neo4j.graphdb.Label
 import org.neo4j.graphdb.RelationshipType
 import org.neo4j.internal.helpers.ArrayUtil
 import org.neo4j.io.ByteUnit
 import org.neo4j.kernel.api.KernelTransaction
 import org.neo4j.kernel.impl.util.ValueUtils
+import org.neo4j.memory.HeapEstimatorCacheConfig
 import org.neo4j.memory.MemoryLimitExceededException
+import org.neo4j.values.storable.Values
 import org.neo4j.values.virtual.VirtualValues
 
 import java.util.Locale
@@ -47,6 +52,7 @@ object MemoryManagementTestBase {
   // The configured max memory per transaction in Bytes
   val maxMemory: Long = ByteUnit.mebiBytes(6)
   val perWorkerGrabSize: Long = ByteUnit.kibiBytes(8)
+  val largeObjectThreshold: Long = 2048
 }
 
 trait InputStreams[CONTEXT <: RuntimeContext] {
@@ -208,6 +214,7 @@ abstract class MemoryManagementTestBase[CONTEXT <: RuntimeContext](
         GraphDatabaseInternalSettings.initial_transaction_heap_grab_size_per_worker -> Long.box(
           MemoryManagementTestBase.perWorkerGrabSize
         ),
+        GraphDatabaseInternalSettings.heap_estimator_cache_preset -> HeapEstimatorCachePreset.DEFAULT,
         GraphDatabaseInternalSettings.cypher_pipelined_batch_size_small -> Integer.valueOf(6),
         GraphDatabaseInternalSettings.cypher_pipelined_batch_size_big -> Integer.valueOf(6)
       ),
@@ -680,7 +687,7 @@ abstract class MemoryManagementTestBase[CONTEXT <: RuntimeContext](
   // adding support to the memory manager, prefer tests that use `infiniteNodeInput` instead.
   test("should kill pruning-var-expand before it runs out of memory") {
     // given
-    getConfig.setDynamic(GraphDatabaseSettings.memory_transaction_max_size, Long.box(ByteUnit.mebiBytes(115)), "Test")
+    getConfig.setDynamic(GraphDatabaseSettings.memory_transaction_max_size, Long.box(ByteUnit.mebiBytes(117)), "Test")
     restartTx()
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
@@ -703,7 +710,7 @@ abstract class MemoryManagementTestBase[CONTEXT <: RuntimeContext](
 
   test("should kill distinct-pruning-var-expand before it runs out of memory") {
     // given
-    getConfig.setDynamic(GraphDatabaseSettings.memory_transaction_max_size, Long.box(ByteUnit.mebiBytes(115)), "Test")
+    getConfig.setDynamic(GraphDatabaseSettings.memory_transaction_max_size, Long.box(ByteUnit.mebiBytes(117)), "Test")
     restartTx()
     val logicalQuery = new LogicalQueryBuilder(this)
       .produceResults("y")
@@ -976,6 +983,91 @@ abstract class MemoryManagementTestBase[CONTEXT <: RuntimeContext](
     val result = profile(logicalQuery, runtime)
     val expected = Range.inclusive(1, sizeHint).reverse.map(i => Array[Any](i, aaa))
     result should beColumns("i", "aaa").withRows(inOrder(expected))
+
+    result.runtimeResult.queryProfile().maxAllocatedMemory() should be < 200000L
+  }
+
+  test("should not count duplicated memory of large object in collect aggregation") {
+    // given
+    val sizeHint = 2000
+    val largeObject = "a".repeat(65536)
+    val input = inputValues(Array(largeObject))
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("c2")
+      .aggregation(Seq.empty, Seq("collect(x2) as c2"))
+      .unwind("c AS x2")
+      .aggregation(Seq.empty, Seq("collect(x) as c"))
+      .unwind(s"range(1, $sizeHint) as i")
+      .input(variables = Seq("x"))
+      .build()
+
+    val queryConfig = QueryRuntimeConfig.DEFAULT.withHeapEstimatorCacheConfig(HeapEstimatorCacheConfig.SMALL)
+    val result = profileQuery(logicalQuery, runtime, input.stream(), queryConfig = queryConfig)
+
+    // Matching on the result is painfully slow, so skip it. It is tested elsewhere.
+    // val c = ValueUtils.asListValue(Range.inclusive(1, sizeHint).map(_ => largeObject).asJava)
+    // result should beColumns("c2").withSingleRow(Array[Any](c))
+
+    result.awaitAll()
+
+    result.runtimeResult.queryProfile().maxAllocatedMemory() should be < 200000L
+  }
+
+  test(
+    "should not count duplicated memory of many large object in collect aggregation when fits in heap estimator cache"
+  ) {
+    // given
+    val sizeHint = 2000
+    val nInputRows = sizeHint
+    val nUniqueLargeObjects = 16
+    val queryConfig = QueryRuntimeConfig.DEFAULT
+      .withHeapEstimatorCacheConfig(new HeapEstimatorCacheConfig(nUniqueLargeObjects, largeObjectThreshold))
+
+    val largeObjects = 0 until nUniqueLargeObjects map { i =>
+      val o = "a".repeat(largeObjectThreshold.toInt + i)
+      Values.utf8Value(o) // NOTE: Important to convert to Value here, otherwise the input stream conversion will create unique objects per row
+    }
+    val input = inputValues((0 until nInputRows).map(i => Array[Any](largeObjects(i % nUniqueLargeObjects))): _*)
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("c2")
+      .aggregation(Seq.empty, Seq("collect(x2) as c2"))
+      .unwind("c AS x2")
+      .aggregation(Seq.empty, Seq("collect(x) as c"))
+      .unwind(s"range(1, 3) as i")
+      .input(variables = Seq("x"))
+      .build()
+
+    val result = profileQuery(logicalQuery, runtime, input.stream(), queryConfig = queryConfig)
+
+    // Matching on the result is painfully slow, so skip it. It is tested elsewhere.
+    // val c = ValueUtils.asListValue(Range.inclusive(1, sizeHint).map(_ => largeObject).asJava)
+    // result should beColumns("c2").withSingleRow(Array[Any](c))
+
+    result.awaitAll()
+
+    result.runtimeResult.queryProfile().maxAllocatedMemory() should be < 200000L
+  }
+
+  test("should not count duplicated memory of large object in top-level distinct") {
+    // given
+    val sizeHint = 1000
+    val largeObject = "a".repeat(65536)
+    val input = inputValues(Array(largeObject))
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("c2")
+      .distinct("i2 AS i2", "c AS c2")
+      .unwind(s"range(1, $sizeHint) AS i2")
+      .aggregation(Seq.empty, Seq("collect(x) as c"))
+      .unwind(s"range(1, $sizeHint) as i")
+      .input(variables = Seq("x"))
+      .build()
+
+    val queryConfig = QueryRuntimeConfig.DEFAULT.withHeapEstimatorCacheConfig(HeapEstimatorCacheConfig.SMALL)
+    val result = profileQuery(logicalQuery, runtime, input.stream(), queryConfig = queryConfig)
+
+    // Matching on the result is painfully slow, so skip it. It is tested elsewhere.
+
+    result.awaitAll()
 
     result.runtimeResult.queryProfile().maxAllocatedMemory() should be < 200000L
   }
@@ -1498,9 +1590,10 @@ trait TransactionForeachMemoryManagementTestBase[CONTEXT <: RuntimeContext] {
   ) {
     // Determined empirically
     val rowCount = runtimeUsed match {
-      case Interpreted => 12000
-      case Slotted     => 13000
-      case Pipelined   => 15000
+      case Interpreted                                             => 12000
+      case Slotted if concurrency eq TransactionConcurrency.Serial => 13000
+      case Slotted                                                 => 12000
+      case Pipelined                                               => 15000
     }
 
     // given

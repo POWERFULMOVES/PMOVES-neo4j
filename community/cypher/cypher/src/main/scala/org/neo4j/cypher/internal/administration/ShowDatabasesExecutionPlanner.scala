@@ -116,7 +116,11 @@ case class ShowDatabasesExecutionPlanner(
            |props.$STORE_COL as $STORE_COL,
            |props.$OPTIONS_COL as $OPTIONS_COL,
            |d:$COMPOSITE_DATABASE as $isCompositeKey
-           |with *, CASE WHEN $isCompositeKey THEN NULL ELSE $OPTIONS_COL END as $OPTIONS_COL
+           |with *,
+           |CASE WHEN $isCompositeKey THEN NULL ELSE $OPTIONS_COL END as $OPTIONS_COL,
+           |CASE WHEN $isCompositeKey THEN NULL ELSE $STORE_COL END as $STORE_COL,
+           |CASE WHEN $isCompositeKey THEN NULL ELSE $CURRENT_PRIMARIES_COUNT_COL END as $CURRENT_PRIMARIES_COUNT_COL,
+           |CASE WHEN $isCompositeKey THEN NULL ELSE $CURRENT_SECONDARIES_COUNT_COL END as $CURRENT_SECONDARIES_COUNT_COL
            |""".stripMargin
       } else {
         ""
@@ -142,11 +146,9 @@ case class ShowDatabasesExecutionPlanner(
            |WITH d, dn, props, homeDbName
            |OPTIONAL MATCH (d)<-[:$TARGETS]-(a:$DATABASE_NAME)
            |WITH a, d, dn, props, homeDbName ORDER BY a.$DISPLAY_NAME_PROPERTY
-           |OPTIONAL MATCH (constituent:$DATABASE_NAME {$NAMESPACE_PROPERTY: dn.$NAME_PROPERTY})
-           |WHERE d:$COMPOSITE_DATABASE AND constituent <> dn
            |WITH d.name as name,
            |collect(a) as aliases,
-           |collect(constituent.$DISPLAY_NAME_PROPERTY) as constituents,
+           |props.$CONSTITUENTS_COL as $CONSTITUENTS_COL,
            |props.$ACCESS_COL as $ACCESS_COL,
            |props.$ADDRESS_COL as $ADDRESS_COL,
            |props.$ROLE_COL as $ROLE_COL,

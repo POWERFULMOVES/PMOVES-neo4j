@@ -17,6 +17,19 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
-package org.neo4j.server.queryapi.response;
+package org.neo4j.server.queryapi.exception;
 
-public record HttpError(String code, String message) {}
+import java.util.List;
+import javax.ws.rs.core.Response;
+import org.neo4j.gqlstatus.GqlHelper;
+import org.neo4j.kernel.api.exceptions.Status;
+
+public class UnknownTypeException extends QueryApiException {
+    public UnknownTypeException(String value, List<String> expectedValueTypeList, String actual) {
+        super(
+                String.format("Type %s is not supported as a column value", actual),
+                GqlHelper.getGql22G03_22N01(value, expectedValueTypeList, actual),
+                Status.Request.Invalid,
+                Response.Status.BAD_REQUEST);
+    }
+}

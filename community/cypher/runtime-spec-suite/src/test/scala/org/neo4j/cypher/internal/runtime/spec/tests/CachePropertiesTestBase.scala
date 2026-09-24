@@ -22,21 +22,56 @@ package org.neo4j.cypher.internal.runtime.spec.tests
 import org.neo4j.cypher.internal.CypherRuntime
 import org.neo4j.cypher.internal.ExecutionPlan
 import org.neo4j.cypher.internal.RuntimeContext
+import org.neo4j.cypher.internal.expressions.CachedProperty
+import org.neo4j.cypher.internal.expressions.NODE_TYPE
+import org.neo4j.cypher.internal.expressions.RELATIONSHIP_TYPE
+import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.column
+import org.neo4j.cypher.internal.logical.builder.AbstractLogicalPlanBuilder.createNodeFull
 import org.neo4j.cypher.internal.logical.plans.GetValue
 import org.neo4j.cypher.internal.runtime.NoInput
+import org.neo4j.cypher.internal.runtime.ast.PropertiesUsingCachedProperties
 import org.neo4j.cypher.internal.runtime.spec.Edition
 import org.neo4j.cypher.internal.runtime.spec.LogicalQueryBuilder
 import org.neo4j.cypher.internal.runtime.spec.RuntimeTestSuite
 import org.neo4j.graphdb.Label
 
+import scala.jdk.CollectionConverters.IteratorHasAsScala
 import scala.util.Random
 
 abstract class CachePropertiesTestBase[CONTEXT <: RuntimeContext](
   edition: Edition[CONTEXT],
   runtime: CypherRuntime[CONTEXT],
-  sizeHint: Int,
+  val sizeHint: Int,
   protected val tokenLookupDbHits: Int
 ) extends RuntimeTestSuite[CONTEXT](edition, runtime) {
+
+  test("should work with morsel reuse") {
+    assume(!isParallel)
+    givenGraph {
+      runtimeTestSupport.tx.createNode(Label.label("EXISTING")).setProperty("idx", 0)
+      runtimeTestSupport.tx.createNode(Label.label("START"), Label.label("EXISTING")).setProperty("idx", 1)
+      runtimeTestSupport.tx.createNode(Label.label("EXISTING")).setProperty("idx", 2)
+      runtimeTestSupport.tx.createNode(Label.label("EXISTING")).setProperty("idx", 3)
+    }
+
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults()
+      .emptyResult()
+      .create(createNodeFull("newNode"))
+      .filter("cacheN[s.idx] = a.idx")
+      .apply()
+      .|.nodeByLabelScan("s", "EXISTING")
+      .nodeByLabelScan("a", "START")
+      .build(readOnly = false)
+
+    val runtimeResult = execute(logicalQuery, runtime)
+    runtimeResult.awaitAll()
+    runtimeResult should beColumns().withNoRows().withStatistics(nodesCreated = 1)
+    // extra check in case statistics is lying
+    givenGraph {
+      runtimeTestSupport.tx.getAllNodes.iterator().asScala should have size 5
+    }
+  }
 
   test("should not explode on cached properties") {
     // given
@@ -774,6 +809,170 @@ abstract class CachePropertiesTestBase[CONTEXT <: RuntimeContext](
 
     result should beColumns("prop").withRows(inAnyOrder(Seq(Array(30), Array(40))))
   }
+
+  test("should handle nullable node property") {
+    // given
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("p")
+      .projection("cache[n.p] AS p")
+      .cacheProperties("cache[n.p]")
+      .optionalExpandAll("(n)-[r]->(m)")
+      .optional()
+      .allNodeScan("n")
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("p").withSingleRow(null)
+  }
+
+  test("should handle nullable relationship property") {
+    // given
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("p")
+      .projection("cacheR[r.p] AS p")
+      .cacheProperties("cacheR[r.p]")
+      .optionalExpandAll("(n)-[r]->(m)")
+      .optional()
+      .allNodeScan("n")
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("p").withSingleRow(null)
+  }
+
+  test("should handle multiple cached node properties") {
+    // given
+    val nodes = givenGraph { nodePropertyGraph(sizeHint, { case i => Map("p" -> i, "q" -> i, "r" -> i) }) }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults(column("n", "cacheN[n.p]", "cacheN[n.q]", "cacheN[n.r]"))
+      .filter("cache[n.p] < 20 AND cache[n.q] < 20 AND cache[n.r] < 20")
+      .allNodeScan("n")
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    val expected = nodes.take(20).map(n => Array(n))
+    runtimeResult should beColumns("n").withRows(expected)
+  }
+
+  test("should handle cached properties in a separate (potentially fused) pipeline") {
+    // given
+    val nodes = givenGraph { nodePropertyGraph(sizeHint, { case i => Map("p" -> i, "q" -> i) }) }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults(column("n", "cacheN[n.p]", "cacheN[n.q]", "cacheN[n.r]"))
+      .unwind("[1] AS i")
+      .nonFuseable()
+      .filter("cache[n.p] < 20 AND cache[n.q] < 20 AND cache[n.r] IS NULL")
+      .allNodeScan("n")
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    val expected = nodes.take(20).map(n => Array(n))
+    runtimeResult should beColumns("n").withRows(expected)
+  }
+
+  test("should handle multiple cached node properties using properties function") {
+    // given
+    givenGraph { nodePropertyGraph(sizeHint, { case i => Map("p" -> i, "q" -> i, "r" -> i) }) }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("res")
+      .projection(Map("res" -> PropertiesUsingCachedProperties(
+        varFor("n"),
+        Set(
+          CachedProperty(varFor("n"), varFor("n"), propName("p"), NODE_TYPE)(pos),
+          CachedProperty(varFor("n"), varFor("n"), propName("q"), NODE_TYPE)(pos),
+          CachedProperty(varFor("n"), varFor("n"), propName("r"), NODE_TYPE)(pos)
+        )
+      )))
+      .filter("cache[n.p] < 20 AND cache[n.q] < 20 AND cache[n.r] < 20")
+      .allNodeScan("n")
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    val expected = (0 until 20).map(i => Array(java.util.Map.of("p", i, "q", i, "r", i)))
+    runtimeResult should beColumns("res").withRows(expected)
+  }
+
+  test("should handle multiple cached relationship properties") {
+    // given
+    val rels = givenGraph {
+      val (_, rels) = circleGraph(sizeHint)
+      rels.zipWithIndex.foreach {
+        case (r, i) =>
+          r.setProperty("p", i)
+          r.setProperty("q", i)
+          r.setProperty("r", i)
+      }
+      rels
+    }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults(column("r", "cacheR[r.p]", "cacheR[r.q]", "cacheR[r.r]"))
+      .filter("cacheR[r.p] < 20 AND cacheR[r.q] < 20 AND cacheR[r.r] < 20")
+      .allRelationshipsScan("(n)-[r]->(m)")
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    val expected = rels.take(20).map(r => Array(r))
+    runtimeResult should beColumns("r").withRows(expected)
+  }
+
+  test("should handle multiple cached relationship properties with properties function") {
+    // given
+    givenGraph {
+      val (_, rels) = circleGraph(sizeHint)
+      rels.zipWithIndex.foreach {
+        case (r, i) =>
+          r.setProperty("p", i)
+          r.setProperty("q", i)
+          r.setProperty("r", i)
+      }
+      rels
+    }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("res")
+      .projection(Map("res" -> PropertiesUsingCachedProperties(
+        varFor("n"),
+        Set(
+          CachedProperty(varFor("r"), varFor("r"), propName("p"), RELATIONSHIP_TYPE)(pos),
+          CachedProperty(varFor("r"), varFor("r"), propName("q"), RELATIONSHIP_TYPE)(pos),
+          CachedProperty(varFor("r"), varFor("r"), propName("r"), RELATIONSHIP_TYPE)(pos)
+        )
+      )))
+      .filter("cacheR[r.p] < 20 AND cacheR[r.q] < 20 AND cacheR[r.r] < 20")
+      .allRelationshipsScan("(n)-[r]->(m)")
+      .build()
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    val expected = (0 until 20).map(i => Array(java.util.Map.of("p", i, "q", i, "r", i)))
+    runtimeResult should beColumns("res").withRows(expected)
+  }
 }
 
 trait CachePropertiesTxStateTestBase[CONTEXT <: RuntimeContext] {
@@ -880,5 +1079,89 @@ trait CachePropertiesTxStateTestBase[CONTEXT <: RuntimeContext] {
 
     result2.runtimeResult.queryProfile().operatorProfile(1).dbHits() should be >= (25L * tokenLookupDbHits)
     result2.runtimeResult.queryProfile().operatorProfile(2).dbHits() should be > 0L
+  }
+
+  test("should handle value population with cached properties and deleted node") {
+    // given
+    val nodes = givenGraph { nodePropertyGraph(sizeHint, { case i => Map("p" -> i) }) }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults(column("n", "cacheN[n.p]"))
+      .deleteNode("n")
+      .cacheProperties("cache[n.p]")
+      .allNodeScan("n")
+      .build(readOnly = false)
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("n").withRows(singleColumn(nodes))
+  }
+
+  test("should handle value population with cached properties and deleted node in different pipelines") {
+    // given
+    val nodes = givenGraph { nodePropertyGraph(sizeHint, { case i => Map("p" -> i) }) }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults(column("n", "cacheN[n.p]"))
+      .unwind("[1] AS ignore")
+      .nonFuseable()
+      .deleteNode("n")
+      .cacheProperties("cache[n.p]")
+      .allNodeScan("n")
+      .build(readOnly = false)
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("n").withRows(singleColumn(nodes))
+  }
+
+  test("should handle value population with cached properties and deleted relationship") {
+    // given
+    val rels = givenGraph {
+      val (_, rels) = circleGraph(sizeHint)
+      rels.foreach(r => r.setProperty("p", Random.nextInt()))
+      rels
+    }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults(column("r", "cacheR[r.p]"))
+      .deleteRelationship("r")
+      .cacheProperties("cacheR[r.p]")
+      .allRelationshipsScan("()-[r]->()")
+      .build(readOnly = false)
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("r").withRows(singleColumn(rels))
+  }
+
+  test("should handle value population with cached properties and deleted relationship in different pipelines") {
+    // given
+    val rels = givenGraph {
+      val (_, rels) = circleGraph(sizeHint)
+      rels.foreach(r => r.setProperty("p", Random.nextInt()))
+      rels
+    }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults(column("r", "cacheR[r.p]"))
+      .unwind("[1] AS ignore")
+      .nonFuseable()
+      .deleteRelationship("r")
+      .cacheProperties("cacheR[r.p]")
+      .allRelationshipsScan("()-[r]->()")
+      .build(readOnly = false)
+
+    val runtimeResult = execute(logicalQuery, runtime)
+
+    // then
+    runtimeResult should beColumns("r").withRows(singleColumn(rels))
   }
 }

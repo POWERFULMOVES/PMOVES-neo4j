@@ -31,6 +31,7 @@ import org.neo4j.cypher.internal.expressions.LogicalVariable
 import org.neo4j.cypher.internal.expressions.PartialPredicate
 import org.neo4j.cypher.internal.expressions.PropertyKeyName
 import org.neo4j.cypher.internal.expressions.RelTypeName
+import org.neo4j.cypher.internal.ir.QueryGraph.PredicatesAndLegacyShortestByDependencies
 import org.neo4j.cypher.internal.ir.ast.IRExpression
 import org.neo4j.cypher.internal.ir.helpers.ExpressionConverters.PredicateConverter
 import org.neo4j.cypher.internal.util.Foldable.FoldableAny
@@ -38,6 +39,7 @@ import org.neo4j.cypher.internal.util.Foldable.FoldableAny
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.runtime.ScalaRunTime
+import scala.util.chaining.scalaUtilChainingOps
 
 /**
  * This is one of the core classes used during query planning. It represents the declarative query,
@@ -228,8 +230,12 @@ final case class QueryGraph private (
     )
   }
 
-  def addShortestRelationships(shortestRelationships: ShortestRelationshipPattern*): QueryGraph =
+  def addShortestRelationships(shortestRelationships: Iterable[ShortestRelationshipPattern]): QueryGraph =
     shortestRelationships.foldLeft(this)((qg, p) => qg.addShortestRelationship(p))
+
+  def removeShortestRelationships(toRemove: Set[ShortestRelationshipPattern]): QueryGraph = {
+    copy(shortestRelationshipPatterns = shortestRelationshipPatterns -- toRemove)
+  }
 
   /**
    * Returns a copy of the query graph, with an additional selective path pattern added.
@@ -253,7 +259,7 @@ final case class QueryGraph private (
   }
 
   def addPredicates(predicates: Set[Predicate]): QueryGraph = {
-    val newSelections = Selections(selections.predicates ++ predicates)
+    val newSelections = Selections(predicates ++ selections.predicates)
     copy(selections = newSelections)
   }
 
@@ -443,7 +449,7 @@ final case class QueryGraph private (
   def idsWithoutOptionalMatchesOrUpdates: Set[LogicalVariable] =
     coveredIdsForPatterns ++
       argumentIds ++
-      shortestRelationshipPatterns.flatMap(_.maybePathVar)
+      shortestRelationshipPatterns.flatMap(_.availableSymbols)
 
   /**
    * All variables that are bound after this QG has been matched
@@ -522,6 +528,23 @@ final case class QueryGraph private (
     }.toMap
   }
 
+  def predicatesAndLegacyShortestPartitionedByDependencyOnNonArgumentIds: PredicatesAndLegacyShortestByDependencies = {
+    val (argumentOnlyPredicates, otherPredicates) = selections.predicates.partition(_.hasDependenciesMet(argumentIds))
+    val (argumentOnlyShortest, otherShortest) =
+      shortestRelationshipPatterns.partition(_.rel.boundaryNodesSet.forall(argumentIds.contains))
+
+    PredicatesAndLegacyShortestByDependencies(
+      dependOnArgumentsOnly = PredicatesAndLegacyShortestByDependencies.Bucket(
+        predicates = argumentOnlyPredicates,
+        shortestRelationshipPatterns = argumentOnlyShortest
+      ),
+      hasNonArgumentDependencies = PredicatesAndLegacyShortestByDependencies.Bucket(
+        predicates = otherPredicates,
+        shortestRelationshipPatterns = otherShortest
+      )
+    )
+  }
+
   /**
    * Returns the connected patterns of this query graph where each connected pattern is represented by a QG.
    * Connected here means can be reached through a relationship pattern.
@@ -531,25 +554,39 @@ final case class QueryGraph private (
   def connectedComponents: Seq[QueryGraph] = {
     val visited = mutable.Set.empty[LogicalVariable]
 
-    val (predicatesWithLocalDependencies, strayPredicates) = selections.predicates.partition {
-      p => (p.dependencies -- argumentIds).nonEmpty
-    }
+    val predicatesAndLegacyShortestByDependencies = predicatesAndLegacyShortestPartitionedByDependencyOnNonArgumentIds
 
     def createComponentQueryGraphStartingFrom(patternNode: LogicalVariable): QueryGraph = {
-      val qg = connectedComponentFor(patternNode, visited)
-      val coveredIds = qg.idsWithoutOptionalMatchesOrUpdates
-      val shortestRelationships = shortestRelationshipPatterns.filter {
-        _.rel.boundaryNodesSet.forall(coveredIds.contains)
-      }
-      val shortestPathIds = shortestRelationships.flatMap(p => Set(p.rel.variable) ++ p.maybePathVar)
-      val allIds = coveredIds ++ argumentIds ++ shortestPathIds
-
-      val predicates = predicatesWithLocalDependencies.filter(_.dependencies.subsetOf(allIds))
-      val filteredHints = hints.filter(_.variables.forall(coveredIds.contains))
-      qg.withSelections(Selections(predicates))
+      val isFirstComponent = visited.isEmpty
+      connectedComponentFor(patternNode, visited)
         .withArgumentIds(argumentIds)
-        .addHints(filteredHints)
-        .addShortestRelationships(shortestRelationships.toIndexedSeq: _*)
+        .pipe { qg =>
+          if (!isFirstComponent) {
+            qg
+          } else {
+            qg.addPredicates(
+              predicatesAndLegacyShortestByDependencies.dependOnArgumentsOnly.predicates
+            ).addShortestRelationships(
+              predicatesAndLegacyShortestByDependencies.dependOnArgumentsOnly.shortestRelationshipPatterns
+            )
+          }
+        } pipe { qg =>
+        val coveredIds = qg.idsWithoutOptionalMatchesOrUpdates
+        val shortestRelationships =
+          predicatesAndLegacyShortestByDependencies.hasNonArgumentDependencies
+            .shortestRelationshipPatterns.filter {
+              _.rel.boundaryNodesSet.forall(coveredIds.contains)
+            }
+        val filteredHints = hints.filter(_.variables.forall(coveredIds.contains))
+        qg.addHints(filteredHints).addShortestRelationships(shortestRelationships)
+      } pipe { qg =>
+        // this stage needs to see ids introduced by shortestRelationshipPatterns above
+        val coveredIds = qg.idsWithoutOptionalMatchesOrUpdates
+        val predicates =
+          predicatesAndLegacyShortestByDependencies.hasNonArgumentDependencies
+            .predicates.filter(_.dependencies.subsetOf(coveredIds))
+        qg.addPredicates(predicates)
+      }
     }
 
     /*
@@ -566,11 +603,7 @@ final case class QueryGraph private (
         createComponentQueryGraphStartingFrom(patternNode)
     }
 
-    (argumentComponents ++ rest) match {
-      case first +: rest =>
-        first.addPredicates(strayPredicates) +: rest
-      case x => x
-    }
+    argumentComponents ++ rest
   }
 
   def joinHints: Set[UsingJoinHint] =
@@ -797,4 +830,16 @@ object QueryGraph {
     preferSingleQuotes = false,
     sensitiveParamsAsParams = false
   )
+
+  case class PredicatesAndLegacyShortestByDependencies(
+    dependOnArgumentsOnly: PredicatesAndLegacyShortestByDependencies.Bucket,
+    hasNonArgumentDependencies: PredicatesAndLegacyShortestByDependencies.Bucket
+  )
+
+  object PredicatesAndLegacyShortestByDependencies {
+
+    case class Bucket(predicates: Set[Predicate], shortestRelationshipPatterns: Set[ShortestRelationshipPattern]) {
+      def isEmpty: Boolean = predicates.isEmpty && shortestRelationshipPatterns.isEmpty
+    }
+  }
 }

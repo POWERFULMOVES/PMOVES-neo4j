@@ -27,13 +27,19 @@ import org.neo4j.cypher.internal.compiler.planner.logical.Metrics.QueryGraphCard
 import org.neo4j.cypher.internal.compiler.planner.logical.Metrics.RelTypeInfo
 import org.neo4j.cypher.internal.compiler.planner.logical.Metrics.SelectivityCalculator
 import org.neo4j.cypher.internal.compiler.planner.logical.cardinality.SelectivityCombiner
+import org.neo4j.cypher.internal.compiler.planner.logical.cardinality.assumeIndependence.QueryGraphPredicates.PredicatesWithDisjunctiveLabelInfos
 import org.neo4j.cypher.internal.compiler.planner.logical.steps.index.IndexCompatiblePredicatesProviderContext
+import org.neo4j.cypher.internal.expressions.HasLabels
+import org.neo4j.cypher.internal.expressions.LabelName
+import org.neo4j.cypher.internal.expressions.Ors
 import org.neo4j.cypher.internal.ir.QueryGraph
 import org.neo4j.cypher.internal.planner.spi.PlanContext
 import org.neo4j.cypher.internal.util.Cardinality
 import org.neo4j.cypher.internal.util.Cardinality.NumericCardinality
 import org.neo4j.cypher.internal.util.Multiplier.NumericMultiplier
+import org.neo4j.cypher.internal.util.Selectivity
 
+import scala.math.Ordering.Implicits.infixOrderingOps
 import scala.util.chaining.scalaUtilChainingOps
 
 final class AssumeIndependenceQueryGraphCardinalityModel(
@@ -104,7 +110,18 @@ final class AssumeIndependenceQueryGraphCardinalityModel(
         // Note that the new context is not propagated further than this method.
         // This means that any newly resolved label names will not be known
         // to any later query graphs.
-        getBaseQueryGraphCardinalityWithInferredLabelContext(queryGraph, predicates, context)
+        (predicates.allLabelInfo, getBaseQueryGraphCardinalityWithInferredLabelContext(queryGraph, predicates, context))
+    }
+  }
+
+  /**
+   * Matches on the label names in `Ors(ListSet(HasLabels(...), ..., HasLabels(...)))`.
+   */
+  object OredHasLabels {
+
+    def unapply(arg: Ors): Option[Set[LabelName]] = arg.exprs.foldLeft(Option(Set.empty[LabelName])) {
+      case (Some(previous), HasLabels(_, Seq(labelName))) => Some(previous + labelName)
+      case _                                              => None
     }
   }
 
@@ -116,10 +133,52 @@ final class AssumeIndependenceQueryGraphCardinalityModel(
     queryGraph: QueryGraph,
     predicates: QueryGraphPredicates,
     context: QueryGraphCardinalityContext
-  ): (LabelInfo, Cardinality) = {
+  ): Cardinality =
+    predicates.distributeLabelDisjunctionAsLabelInfo match {
+      case PredicatesWithDisjunctiveLabelInfos(_, Seq(nonDistributedPredicates)) =>
+        // If no disjunctions were distributed, we can just calculate the cardinality of predicates == nonDistributedPredicates
+        getBaseQueryGraphCardinalityWithInferredLabelContextPerDisjunction(
+          queryGraph,
+          nonDistributedPredicates,
+          context
+        )
 
-    val coveredIdsForPattern = queryGraph.coveredIdsForPatterns
+      case PredicatesWithDisjunctiveLabelInfos(basePredicates, distributedLabelInfos) =>
+        // If some disjunctions were distributed into label infos, ...
+        getBaseQueryGraphCardinalityWithInferredLabelContextPerDisjunction(queryGraph, basePredicates, context) match {
+          // If the base predicates have no cardinality, we can just return it
+          case Cardinality.EMPTY =>
+            Cardinality.EMPTY
+          case baseCardinality =>
+            val labelInfoCardinalities = distributedLabelInfos
+              // ... we calculate the cardinality for each label info separately, ...
+              .map(getBaseQueryGraphCardinalityWithInferredLabelContextPerDisjunction(queryGraph, _, context))
 
+            if (labelInfoCardinalities.contains(Cardinality.INFINITY)) {
+              // If any of the disjunctive label already causes an overflow in cardinality, the disjunction will only be greater
+              Cardinality.INFINITY
+            } else {
+              // It might happen that through a label info, we estimate a cardinality higher than the base cardinality.
+              // In that case, we should use the sum of the label info cardinalities as the base cardinality as a better approximation
+              val baseCardinalityToUse = baseCardinality max labelInfoCardinalities.reduce(_ + _)
+              val labelInfosSelectivities =
+                labelInfoCardinalities
+                  // ... divide it by the cardinality of the base predicates to get the selectivity of each label info ...
+                  .map(card => (card / baseCardinalityToUse).getOrElse(Selectivity.ONE))
+              // ... and then combine the selectivities of all label infos using the formula for selectivity of disjunctions ...
+              val labelInfosSelectivity =
+                combiner.orTogetherSelectivities(labelInfosSelectivities).getOrElse(Selectivity.ONE)
+              // ... to get the effective selectivity of the predicates that were removed from predicates to basePredicates
+              baseCardinalityToUse * labelInfosSelectivity
+            }
+        }
+    }
+
+  private def getBaseQueryGraphCardinalityWithInferredLabelContextPerDisjunction(
+    queryGraph: QueryGraph,
+    predicates: QueryGraphPredicates,
+    context: QueryGraphCardinalityContext
+  ) = {
     // Calculate the multiplier for each node connection, accumulating bound nodes and arguments and threading them through
     val (boundNodesAndArguments, nodeConnectionMultipliers) =
       queryGraph
@@ -132,7 +191,7 @@ final class AssumeIndependenceQueryGraphCardinalityModel(
               predicates,
               boundNodesAndArguments,
               nodeConnection,
-              coveredIdsForPattern
+              queryGraph.coveredIdsForPatterns
             )
         }
 
@@ -157,11 +216,8 @@ final class AssumeIndependenceQueryGraphCardinalityModel(
     val otherPredicatesSelectivity =
       context.predicatesSelectivity(predicates.allLabelInfo, predicates.otherPredicates)
 
-    val cardinality =
-      nodesCardinality *
-        nodeConnectionMultipliers.product(NumericMultiplier) *
-        otherPredicatesSelectivity
-
-    (predicates.allLabelInfo, cardinality)
+    nodesCardinality *
+      nodeConnectionMultipliers.product(NumericMultiplier) *
+      otherPredicatesSelectivity
   }
 }

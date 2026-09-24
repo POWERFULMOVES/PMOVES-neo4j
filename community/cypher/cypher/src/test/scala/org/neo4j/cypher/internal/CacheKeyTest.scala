@@ -25,10 +25,12 @@ import org.neo4j.cypher.internal.options.CypherDebugOptions
 import org.neo4j.cypher.internal.options.CypherEagerAnalyzerOption
 import org.neo4j.cypher.internal.options.CypherExecutionMode
 import org.neo4j.cypher.internal.options.CypherExpressionEngineOption
+import org.neo4j.cypher.internal.options.CypherHeapEstimatorCacheOption
 import org.neo4j.cypher.internal.options.CypherInferSchemaPartsOption
 import org.neo4j.cypher.internal.options.CypherInterpretedPipesFallbackOption
 import org.neo4j.cypher.internal.options.CypherOperatorEngineOption
 import org.neo4j.cypher.internal.options.CypherParallelRuntimeSupportOption
+import org.neo4j.cypher.internal.options.CypherPipelinedBatchReuseOption
 import org.neo4j.cypher.internal.options.CypherPlanVarExpandInto
 import org.neo4j.cypher.internal.options.CypherPlannerOption
 import org.neo4j.cypher.internal.options.CypherQueryOptions
@@ -72,7 +74,9 @@ class CacheKeyTest extends CypherFunSuite {
       eagerAnalyzer = CypherEagerAnalyzerOption.ir,
       inferSchemaParts = CypherInferSchemaPartsOption.mostSelectiveLabel,
       statefulShortestPlanningModeOption = CypherStatefulShortestPlanningModeOption.allIfPossible,
-      planVarExpandInto = CypherPlanVarExpandInto.minimumCost
+      planVarExpandInto = CypherPlanVarExpandInto.minimumCost,
+      pipelinedBatchReuseOption = CypherPipelinedBatchReuseOption.pack,
+      heapEstimatorCacheOption = CypherHeapEstimatorCacheOption.disabled
     )
 
     options.cacheKey
@@ -98,7 +102,9 @@ class CacheKeyTest extends CypherFunSuite {
       eagerAnalyzer = CypherEagerAnalyzerOption.ir,
       inferSchemaParts = CypherInferSchemaPartsOption.mostSelectiveLabel,
       statefulShortestPlanningModeOption = CypherStatefulShortestPlanningModeOption.allIfPossible,
-      planVarExpandInto = CypherPlanVarExpandInto.minimumCost
+      planVarExpandInto = CypherPlanVarExpandInto.minimumCost,
+      pipelinedBatchReuseOption = CypherPipelinedBatchReuseOption.pack,
+      heapEstimatorCacheOption = CypherHeapEstimatorCacheOption.disabled
     )
 
     options.logicalPlanCacheKey

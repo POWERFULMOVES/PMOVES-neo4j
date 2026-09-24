@@ -19,11 +19,12 @@
  */
 package org.neo4j.kernel.impl.query;
 
+import java.io.Closeable;
 import java.util.List;
 import org.neo4j.graphdb.Result;
 import org.neo4j.values.virtual.MapValue;
 
-public interface QueryExecutionEngine {
+public interface QueryExecutionEngine extends Closeable {
     Result executeQuery(String query, MapValue parameters, TransactionalContext context, boolean prePopulate)
             throws QueryExecutionKernelException;
 

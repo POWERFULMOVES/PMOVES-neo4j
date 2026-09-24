@@ -4,7 +4,7 @@
     <parent>
         <groupId>org.neo4j</groupId>
         <artifactId>parent</artifactId>
-        <version>5.26.0</version>
+        <version>5.26.25-SNAPSHOT</version>
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
@@ -58,6 +58,11 @@
             <groupId>org.neo4j</groupId>
             <artifactId>neo4j-gql-status</artifactId>
             <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.github.jbellis</groupId>
+            <artifactId>jamm</artifactId>
+            <scope>provided</scope>
         </dependency>
     </dependencies>
 </project>

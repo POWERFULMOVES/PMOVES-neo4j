@@ -119,14 +119,20 @@ abstract class CreateTestBase[CONTEXT <: RuntimeContext](
       .input(variables = Seq("label"))
       .build(readOnly = false)
 
+    def theDynamicLabel(v: Any): Unit = consume(execute(logicalQuery, runtime, inputValues(Array(v))))
+
     // then
-    a[CypherTypeException] shouldBe thrownBy(consume(execute(logicalQuery, runtime, inputValues(Array(1)))))
-    an[IllegalTokenNameException] shouldBe thrownBy(consume(execute(logicalQuery, runtime, inputValues(Array("")))))
-    an[IllegalTokenNameException] shouldBe thrownBy(consume(execute(
-      logicalQuery,
-      runtime,
-      inputValues(Array("\u0000"))
-    )))
+    the[CypherTypeException] thrownBy theDynamicLabel(
+      1
+    ) should have message "Expected node label to be a string or list of strings."
+    the[CypherTypeException] thrownBy theDynamicLabel(
+      Array(1)
+    ) should have message "Expected node label to be a string or list of strings."
+    the[CypherTypeException] thrownBy theDynamicLabel(
+      null
+    ) should have message "Expected node label to be a string or list of strings."
+    a[IllegalTokenNameException] shouldBe thrownBy(theDynamicLabel(""))
+    a[IllegalTokenNameException] shouldBe thrownBy(theDynamicLabel("\u0000"))
   }
 
   test("should create node with properties") {
@@ -368,7 +374,7 @@ abstract class CreateTestBase[CONTEXT <: RuntimeContext](
   }
 
   test("should create relationship with dynamic type") {
-    // given an empty data base
+    // given
     givenGraph {
       val n = tx.createNode(label("A"))
       n.setProperty("prop", "R")
@@ -389,6 +395,67 @@ abstract class CreateTestBase[CONTEXT <: RuntimeContext](
       relationshipsCreated = 1
     )
     relationship.getType.name() should equal("R")
+  }
+
+  test("should not incorrectly cache the dynamic relationship type!") {
+    // given
+    givenGraph {
+      tx.createNode()
+    }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("r")
+      .create(createRelationshipWithDynamicType("r", "n", "relType", "n", OUTGOING))
+      .cartesianProduct()
+      .|.allNodeScan("n")
+      .unwind("['B', 'C'] as relType")
+      .argument()
+      .build(readOnly = false)
+
+    // then
+    val runtimeResult = execute(logicalQuery, runtime)
+    consume(runtimeResult)
+
+    tx.getAllRelationships.asScala.map(_.getType.name()) should contain theSameElementsAs Seq("B", "C")
+  }
+
+  test("should throw the correct error if the dynamic type is invalid") {
+    // given
+    val nodes = givenGraph {
+      Seq(tx.createNode(label("A")), tx.createNode(label("B")))
+    }
+
+    // when
+    val logicalQuery = new LogicalQueryBuilder(this)
+      .produceResults("r")
+      .create(createRelationshipWithDynamicType("r", "a", "type", "b", OUTGOING))
+      .input(nodes = Seq("a", "b"), variables = Seq("type"))
+      .build(readOnly = false)
+
+    def theDynamicType(v: Any): Unit = consume(execute(logicalQuery, runtime, inputValues((nodes :+ v).toArray)))
+
+    // then
+    the[IllegalArgumentException] thrownBy theDynamicType(
+      Array[String]()
+    ) should have message "Exactly one relationship type must be specified, but 0 were found."
+    the[IllegalArgumentException] thrownBy theDynamicType(
+      Array[String]("C", "D")
+    ) should have message "Exactly one relationship type must be specified, but 2 were found."
+    the[IllegalArgumentException] thrownBy theDynamicType(
+      Array[String]("A", "A")
+    ) should have message "Exactly one relationship type must be specified, but 2 were found."
+    the[CypherTypeException] thrownBy theDynamicType(
+      1
+    ) should have message "Expected relationship type to be a string or list of strings."
+    the[CypherTypeException] thrownBy theDynamicType(
+      Array(1)
+    ) should have message "Expected relationship type to be a string or list of strings."
+    the[CypherTypeException] thrownBy theDynamicType(
+      null
+    ) should have message "Expected relationship type to be a string or list of strings."
+    a[IllegalTokenNameException] shouldBe thrownBy(theDynamicType(""))
+    a[IllegalTokenNameException] shouldBe thrownBy(theDynamicType("\u0000"))
   }
 
   test("should create relationship with null property") {

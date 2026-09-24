@@ -27,6 +27,7 @@ import org.neo4j.cypher.internal.frontend.phases.BaseState
 import org.neo4j.cypher.internal.options.CypherReplanOption
 import org.neo4j.cypher.internal.runtime.InputDataStream
 import org.neo4j.cypher.internal.runtime.NoInput
+import org.neo4j.cypher.internal.runtime.QueryRuntimeConfig
 import org.neo4j.cypher.internal.tracing.CompilationTracer
 import org.neo4j.cypher.internal.tracing.CompilationTracer.QueryCompilationEvent
 import org.neo4j.cypher.internal.util.InternalNotification
@@ -52,6 +53,7 @@ import org.neo4j.logging.InternalLogProvider
 import org.neo4j.monitoring.Monitors
 import org.neo4j.values.virtual.MapValue
 
+import java.io.Closeable
 import java.lang
 import java.time.Clock
 import java.util.Optional
@@ -72,7 +74,7 @@ abstract class ExecutionEngine(
   val queryCaches: CypherQueryCaches,
   val logProvider: InternalLogProvider,
   val clock: Clock = Clock.systemUTC()
-) {
+) extends Closeable {
 
   // HELPER OBJECTS
   protected val defaultQueryExecutionMonitor = kernelMonitors.newMonitor(classOf[QueryExecutionMonitor])
@@ -271,6 +273,7 @@ abstract class ExecutionEngine(
       )
     }
 
+    val queryConfig = QueryRuntimeConfig.createFrom(query.options.queryOptions, config)
     executableQuery.execute(
       context,
       isOutermostQuery,
@@ -279,7 +282,8 @@ abstract class ExecutionEngine(
       prePopulate,
       input,
       queryMonitor,
-      subscriber
+      subscriber,
+      queryConfig
     )
   }
 
@@ -479,6 +483,9 @@ abstract class ExecutionEngine(
       org.neo4j.cypher.internal.expressions.IterablePredicateExpression.functionInfo.map(FunctionWithInformation)
     (informations ++ predicateInformations).asJava
   }
+
+  override def close(): Unit =
+    queryCaches.close()
 
   // HELPERS
 

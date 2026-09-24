@@ -39,11 +39,16 @@ import org.neo4j.cypher.internal.logical.plans.NestedPlanExistsExpression
 import org.neo4j.cypher.internal.logical.plans.NestedPlanGetByNameExpression
 import org.neo4j.cypher.internal.logical.plans.Selection
 import org.neo4j.cypher.internal.logical.plans.Top
+import org.neo4j.cypher.internal.util.symbols.CTAny
 import org.neo4j.cypher.internal.util.test_helpers.CypherFunSuite
 import org.scalatest.OptionValues
 
 class FindShortestPathsPlanningIntegrationTest extends CypherFunSuite with LogicalPlanningIntegrationTestSupport
     with AstConstructionTestSupport with OptionValues {
+
+  // We compare "solvedExpressionString" nested inside LogicalPlans.
+  // This saves us from windows line break mismatches in those strings.
+  implicit private val windowsSafe: WindowsSafeAnyRef[LogicalPlan] = new WindowsSafeAnyRef[LogicalPlan]
 
   test("finds shortest paths") {
     val cfg = plannerBuilder().setAllNodesCardinality(100).build()
@@ -476,10 +481,6 @@ class FindShortestPathsPlanningIntegrationTest extends CypherFunSuite with Logic
   }
 
   test("should plan count predicate with path reference inside the shortestPath operator as a prefilter") {
-    // We compare "solvedExpressionString" nested inside LogicalPlans.
-    // This saves us from windows line break mismatches in those strings.
-    implicit val windowsSafe: WindowsSafeAnyRef[LogicalPlan] = new WindowsSafeAnyRef[LogicalPlan]
-
     val planner = plannerBuilder()
       .setAllNodesCardinality(100)
       .setAllRelationshipsCardinality(50)
@@ -618,10 +619,6 @@ class FindShortestPathsPlanningIntegrationTest extends CypherFunSuite with Logic
   }
 
   test("should plan exists predicate with path reference inside the shortestPath operator as a prefilter") {
-    // We compare "solvedExpressionString" nested inside LogicalPlans.
-    // This saves us from windows line break mismatches in those strings.
-    implicit val windowsSafe: WindowsSafeAnyRef[LogicalPlan] = new WindowsSafeAnyRef[LogicalPlan]
-
     val planner = plannerBuilder()
       .setAllNodesCardinality(100)
       .setAllRelationshipsCardinality(50)
@@ -688,11 +685,6 @@ class FindShortestPathsPlanningIntegrationTest extends CypherFunSuite with Logic
   }
 
   test("should plan collect predicate with path reference inside the shortestPath operator as a prefilter") {
-
-    // We compare "solvedExpressionString" nested inside LogicalPlans.
-    // This saves us from windows line break mismatches in those strings.
-    implicit val windowsSafe: WindowsSafeAnyRef[LogicalPlan] = new WindowsSafeAnyRef[LogicalPlan]
-
     val planner = plannerBuilder()
       .setAllNodesCardinality(100)
       .setAllRelationshipsCardinality(50)
@@ -758,6 +750,129 @@ class FindShortestPathsPlanningIntegrationTest extends CypherFunSuite with Logic
       .cartesianProduct()
       .|.nodeByLabelScan("dest", "C")
       .nodeByLabelScan("src", "A")
+      .build()
+  }
+
+  test("should plan EXISTS predicate with relationship group variable as a nested plan path predicate") {
+    val planner = plannerBuilder()
+      .setAllNodesCardinality(100)
+      .setLabelCardinality("A", 90)
+      .setAllRelationshipsCardinality(50)
+      .setRelationshipCardinality("(:A)-[]->()", 30)
+      .build()
+
+    val query =
+      """MATCH (a:A)-[x]->(b)
+        |MATCH shortestPath((a:A)-[rels*]->(b))
+        |WHERE EXISTS {
+        |  MATCH (z)
+        |  WHERE z.prop = size(rels)
+        |}
+        |RETURN a, rels, b
+        |""".stripMargin
+
+    val solvedExpr =
+      """EXISTS { MATCH (z)
+        |  WHERE z.prop IN [size(rels)] }""".stripMargin
+
+    val nestedPlan = planner.subPlanBuilder()
+      .filter("cacheNFromStore[z.prop] = size(rels)")
+      .allNodeScan("z", "rels")
+      .build()
+
+    val existsExpr = NestedPlanExistsExpression(
+      plan = nestedPlan,
+      solvedExpressionAsString = solvedExpr
+    )(pos)
+
+    val pathExpression = varLengthPathExpression(varFor("a"), varFor("rels"), varFor("b"), OUTGOING)
+
+    val plan = planner.plan(query).stripProduceResults
+    plan shouldEqual planner.subPlanBuilder()
+      .antiConditionalApply("anon_1")
+      .|.top(1, "anon_2 ASC")
+      .|.projection("length(anon_1) AS anon_2")
+      .|.filter("CoerceToPredicate(anon_0)")
+      .|.letSemiApply("anon_0")
+      .|.|.filter("cacheNFromStore[z.prop] = size(rels)")
+      .|.|.allNodeScan("z", "rels")
+      .|.projection(Map("anon_1" -> pathExpression))
+      .|.expandInto("(a)-[rels*1..]->(b)")
+      .|.argument("a", "b")
+      .apply()
+      .|.optional("a", "b")
+      .|.shortestPathExpr(
+        "(a)-[rels*1..]->(b)",
+        pathName = Some("anon_1"),
+        withFallback = true,
+        pathPredicates = Seq(existsExpr)
+      )
+      .|.argument("a", "b")
+      .filter("a:A")
+      .allRelationshipsScan("(a)-[x]->(b)")
+      .build()
+  }
+
+  test("should plan COUNT predicate with relationship group variable as a nested plan path predicate") {
+    val planner = plannerBuilder()
+      .setAllNodesCardinality(100)
+      .setLabelCardinality("A", 90)
+      .setAllRelationshipsCardinality(50)
+      .setRelationshipCardinality("(:A)-[]->()", 30)
+      .build()
+
+    val query =
+      """MATCH (a:A)-[x]->(b)
+        |MATCH shortestPath((a:A)-[rels*]->(b))
+        |WHERE COUNT {
+        |  MATCH (z)
+        |  WHERE z.prop = size(rels)
+        |} > $param
+        |RETURN a, rels, b
+        |""".stripMargin
+
+    val solvedExpr =
+      """COUNT { MATCH (z)
+        |  WHERE z.prop IN [size(rels)] }""".stripMargin
+
+    val nestedPlan = planner.subPlanBuilder()
+      .aggregation(Seq.empty, Seq("count(*) AS anon_0"))
+      .filter("cacheNFromStore[z.prop] = size(rels)")
+      .allNodeScan("z", "rels")
+      .build()
+
+    val countExpr = NestedPlanGetByNameExpression(
+      plan = nestedPlan,
+      solvedExpressionAsString = solvedExpr,
+      columnNameToGet = v"anon_0"
+    )(pos)
+
+    val pathExpression = varLengthPathExpression(varFor("a"), varFor("rels"), varFor("b"), OUTGOING)
+
+    val plan = planner.plan(query).stripProduceResults
+    plan shouldEqual planner.subPlanBuilder()
+      .antiConditionalApply("anon_1")
+      .|.top(1, "anon_2 ASC")
+      .|.projection("length(anon_1) AS anon_2")
+      .|.filter("anon_0 > $param")
+      .|.apply()
+      .|.|.aggregation(Seq.empty, Seq("count(*) AS anon_0"))
+      .|.|.filter("cacheNFromStore[z.prop] = size(rels)")
+      .|.|.allNodeScan("z", "rels")
+      .|.projection(Map("anon_1" -> pathExpression))
+      .|.expandInto("(a)-[rels*1..]->(b)")
+      .|.argument("a", "b")
+      .apply()
+      .|.optional("a", "b")
+      .|.shortestPathExpr(
+        "(a)-[rels*1..]->(b)",
+        pathName = Some("anon_1"),
+        withFallback = true,
+        pathPredicates = Seq(greaterThan(countExpr, parameter("param", CTAny)))
+      )
+      .|.argument("a", "b")
+      .filter("a:A")
+      .allRelationshipsScan("(a)-[x]->(b)")
       .build()
   }
 

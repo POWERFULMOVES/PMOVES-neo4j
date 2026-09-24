@@ -24,6 +24,7 @@ import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import io.netty.util.ReferenceCounted;
 import java.util.Objects;
+import org.neo4j.util.Preconditions;
 
 public final class BitMask implements ReferenceCounted {
 
@@ -33,14 +34,25 @@ public final class BitMask implements ReferenceCounted {
     private int readerIndex;
     private int writerIndex;
 
-    public BitMask(ByteBufAllocator alloc, int length) {
-        this.encoded = alloc.buffer(length / 8 + (length % 8 == 0 ? 0 : 1));
+    private BitMask(ByteBuf encoded, int length) {
+        Objects.requireNonNull(encoded, "encoded");
+        Preconditions.requireNonNegative(length);
+
+        this.encoded = encoded;
         this.length = length;
     }
 
+    public BitMask(ByteBufAllocator alloc, int length) {
+        this(allocateZeroedBuffer(alloc, length), length);
+    }
+
+    private static ByteBuf allocateZeroedBuffer(ByteBufAllocator alloc, int length) {
+        var bufferLength = length / 8 + (length % 8 == 0 ? 0 : 1);
+        return alloc.buffer(bufferLength).setZero(0, bufferLength);
+    }
+
     public BitMask(byte[] encoded) {
-        this.encoded = Unpooled.wrappedBuffer(encoded);
-        this.length = encoded.length * 8;
+        this(Unpooled.wrappedBuffer(encoded), encoded.length * 8);
     }
 
     public boolean get(int index) {
@@ -167,7 +179,11 @@ public final class BitMask implements ReferenceCounted {
 
     @Override
     public boolean release() {
-        return this.encoded.release();
+        ByteBuf byteBuf = this.encoded;
+        if (byteBuf == null) {
+            return false;
+        }
+        return byteBuf.release();
     }
 
     @Override

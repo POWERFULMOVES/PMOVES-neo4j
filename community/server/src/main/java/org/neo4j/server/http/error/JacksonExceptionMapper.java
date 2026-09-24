@@ -19,7 +19,7 @@
  */
 package org.neo4j.server.http.error;
 
-import static org.neo4j.server.queryapi.response.HttpErrorResponse.singleError;
+import static org.neo4j.server.queryapi.response.error.HttpErrorResponse.singleError;
 
 import com.fasterxml.jackson.core.JacksonException;
 import javax.ws.rs.core.Response;

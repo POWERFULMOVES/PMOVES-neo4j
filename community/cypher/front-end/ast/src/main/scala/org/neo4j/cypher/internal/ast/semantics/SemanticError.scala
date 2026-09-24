@@ -644,11 +644,6 @@ object SemanticError {
     SemanticError(gql, s"$numberType is too large", position)
   }
 
-  def integerOperationCannotBeRepresented(operation: String, position: InputPosition): SemanticError = {
-    val gql = GqlHelper.getGql22003(operation, position.line, position.column, position.offset)
-    SemanticError(gql, s"result of $operation cannot be represented as an integer", position)
-  }
-
   def notSupported(pos: InputPosition): SemanticError = {
     val msg = "Not supported."
     val gql = GqlHelper.get50N00(SemanticError.getClass.getSimpleName, msg, pos.line, pos.column, pos.offset)
@@ -890,6 +885,41 @@ object SemanticError {
         .build())
       .build()
     SemanticError(gql, legacyMessage, position)
+  }
+
+  def mixingColonAndIs(
+    labelExpressions: Set[String],
+    replacements: Set[String],
+    position: InputPosition
+  ): SemanticError = {
+    val gql = GqlHelper.getGql42001_42I29(
+      labelExpressions.mkString(", "),
+      replacements.mkString(", "),
+      position.line,
+      position.column,
+      position.offset
+    )
+    val exprText = if (replacements.size > 1) "These expressions" else "This expression"
+    SemanticError(
+      gql,
+      s"Mixing the IS keyword with colon (':') between labels is not allowed. $exprText could be expressed as ${replacements.mkString(", ")}.",
+      position
+    )
+  }
+
+  def mixingIsWithMultipleLabels(statement: String, replacement: String, position: InputPosition): SemanticError = {
+    val gql = GqlHelper.getGql42001_42I29(
+      statement,
+      replacement,
+      position.line,
+      position.column,
+      position.offset
+    )
+    SemanticError(
+      gql,
+      s"It is not supported to use the `IS` keyword together with multiple labels in `$statement`. Rewrite the expression as `$replacement`.",
+      position
+    )
   }
 }
 

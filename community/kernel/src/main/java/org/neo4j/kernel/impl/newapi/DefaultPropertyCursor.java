@@ -176,6 +176,7 @@ public class DefaultPropertyCursor extends TraceableCursorImpl<DefaultPropertyCu
 
     void initRelationship(
             long relationshipReference,
+            int type,
             Reference reference,
             PropertySelection selection,
             Read read,
@@ -187,6 +188,7 @@ public class DefaultPropertyCursor extends TraceableCursorImpl<DefaultPropertyCu
         initializeRelationshipTransactionState(relationshipReference, txStateHolder);
         storeCursor.initRelationshipProperties(reference, filterSelectionForTxState(selection));
         this.entityReference = relationshipReference;
+        this.type = type;
     }
 
     void initRelationship(
@@ -207,6 +209,8 @@ public class DefaultPropertyCursor extends TraceableCursorImpl<DefaultPropertyCu
         } else {
             storeCursor.reset();
         }
+        this.type = relationshipCursor.type();
+        assert type >= 0;
     }
 
     private void initializeRelationshipTransactionState(long relationshipReference, TxStateHolder txStateHolder) {
@@ -380,14 +384,13 @@ public class DefaultPropertyCursor extends TraceableCursorImpl<DefaultPropertyCu
     @Override
     public int getRelType() {
         assert isRelationship();
-
         if (type < 0) {
             if (securityRelCursor == null) {
                 securityRelCursor = internalCursors.allocateFullAccessRelationshipScanCursor();
             }
             read.singleRelationship(entityReference, securityRelCursor);
             securityRelCursor.next();
-            this.type = securityRelCursor.type();
+            type = securityRelCursor.type();
         }
         return type;
     }

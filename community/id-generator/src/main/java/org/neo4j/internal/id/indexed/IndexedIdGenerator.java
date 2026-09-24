@@ -41,7 +41,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -67,9 +66,11 @@ import org.neo4j.index.internal.gbptree.ValueHolder;
 import org.neo4j.internal.helpers.progress.ProgressMonitorFactory;
 import org.neo4j.internal.id.FreeIds;
 import org.neo4j.internal.id.IdGenerator;
+import org.neo4j.internal.id.IdSequence;
 import org.neo4j.internal.id.IdSlotDistribution;
 import org.neo4j.internal.id.IdType;
 import org.neo4j.internal.id.IdValidator;
+import org.neo4j.internal.id.indexed.IdCache.SlotSizeFallback;
 import org.neo4j.internal.id.range.ArrayBasedRange;
 import org.neo4j.internal.id.range.ContinuousIdRange;
 import org.neo4j.internal.id.range.PageIdRange;
@@ -88,106 +89,49 @@ import org.neo4j.util.Preconditions;
  */
 public class IndexedIdGenerator implements IdGenerator {
     public interface Monitor extends AutoCloseable {
-        void opened(long highestWrittenId, long highId, long numUnusedIds);
+        default void opened(long highestWrittenId, long highId, long numUnusedIds) {}
 
         @Override
-        void close();
+        default void close() {}
 
-        void allocatedFromHigh(long allocatedId, int numberOfIds);
+        default void allocatedFromHigh(long allocatedId, int numberOfIds) {}
 
-        void allocatedFromReused(long allocatedId, int numberOfIds);
+        default void allocatedFromReused(long allocatedId, int numberOfIds) {}
 
-        void cached(long cachedId, int numberOfIds);
+        default void cached(long cachedId, int numberOfIds) {}
 
-        void markedAsUsed(long markedId, int numberOfIds);
+        default void markedAsUsed(long markedId, int numberOfIds) {}
 
-        void markedAsDeleted(long markedId, int numberOfIds);
+        default void markedAsDeleted(long markedId, int numberOfIds) {}
 
-        void markedAsFree(long markedId, int numberOfIds);
+        default void markedAsFree(long markedId, int numberOfIds) {}
 
-        void markedAsReserved(long markedId, int numberOfIds);
+        default void markedAsReserved(long markedId, int numberOfIds) {}
 
-        void markedAsUnreserved(long markedId, int numberOfIds);
+        default void markedAsUnreserved(long markedId, int numberOfIds) {}
 
-        void markSessionDone();
+        default void markSessionDone() {}
 
-        void normalized(long idRange);
+        default void normalized(long idRange) {}
 
-        void bridged(long bridgedId, long numberOfIds);
+        default void bridged(long bridgedId, long numberOfIds) {}
 
-        void checkpoint(long highestWrittenId, long highId);
+        default void checkpoint(long highestWrittenId, long highId) {}
 
-        void clearingCache();
+        default void clearingCache() {}
 
-        void clearedCache();
+        default void clearedCache() {}
 
-        void skippedIdsAtHighId(long firstSkippedId, int numberOfIds);
+        default void skippedIdsAtHighId(long firstSkippedId, int numberOfIds) {}
 
-        void skippedIdsAtAllocation(long firstWastedId, int numberOfIds);
+        default void skippedIdsAtAllocation(long firstWastedId, int numberOfIds) {}
 
-        class Adapter implements Monitor {
-            @Override
-            public void opened(long highestWrittenId, long highId, long numUnusedIds) {}
+        default void scanStart(boolean startFromScratch) {}
 
-            @Override
-            public void allocatedFromHigh(long allocatedId, int numberOfIds) {}
-
-            @Override
-            public void allocatedFromReused(long allocatedId, int numberOfIds) {}
-
-            @Override
-            public void cached(long cachedId, int numberOfIds) {}
-
-            @Override
-            public void markedAsUsed(long markedId, int numberOfIds) {}
-
-            @Override
-            public void markedAsDeleted(long markedId, int numberOfIds) {}
-
-            @Override
-            public void markedAsFree(long markedId, int numberOfIds) {}
-
-            @Override
-            public void markedAsReserved(long markedId, int numberOfIds) {}
-
-            @Override
-            public void markedAsUnreserved(long markedId, int numberOfIds) {}
-
-            @Override
-            public void markSessionDone() {}
-
-            @Override
-            public void normalized(long idRange) {}
-
-            @Override
-            public void bridged(long bridgedId, long numberOfIds) {}
-
-            @Override
-            public void checkpoint(long highestWrittenId, long highId) {}
-
-            @Override
-            public void clearingCache() {}
-
-            @Override
-            public void clearedCache() {}
-
-            @Override
-            public void skippedIdsAtHighId(long firstSkippedId, int numberOfIds) {}
-
-            @Override
-            public void skippedIdsAtAllocation(long firstWastedId, int numberOfIds) {}
-
-            @Override
-            public void close() {}
-        }
+        default void scanEnd(int numEntriesVisited, int[] numFoundIds, ScanEndCondition endCondition) {}
     }
 
-    public static final Monitor NO_MONITOR = new Monitor.Adapter();
-
-    /**
-     * Represents the absence of an id in the id cache.
-     */
-    static final long NO_ID = -1;
+    public static final Monitor NO_MONITOR = new Monitor() {};
 
     /**
      * Number of ids per entry in the GBPTree.
@@ -214,6 +158,12 @@ public class IndexedIdGenerator implements IdGenerator {
      * looks like FREE in the current session. Updates to tree items (except for recovery) will reset the generation that of the current session.
      */
     private static final long STARTING_GENERATION = 1;
+
+    /*
+     * Id reuse fetches from cache optimistically, if we get collision (in MVCC), we retry reuse a few times to not
+     * expand the id space too much
+     * */
+    private static final int REUSE_RETRY_ATTEMPTS = 50;
 
     /**
      * {@link GBPTree} for storing and accessing the id states.
@@ -270,7 +220,7 @@ public class IndexedIdGenerator implements IdGenerator {
      * Means of communicating that there are stored free ids that {@link FreeIdScanner} could pick up.
      * It's typically incremented by {@link IdRangeMarker} and compared in {@link FreeIdScanner}.
      */
-    private final AtomicInteger freeIdsNotifier = new AtomicInteger();
+    private final FreeIdFindState freeIdFindState = new FreeIdFindState();
 
     /**
      * Kept up to date with live changes and represents the number of ids that are currently unused, i.e. that are marked as deleted.
@@ -320,6 +270,7 @@ public class IndexedIdGenerator implements IdGenerator {
 
     private final Set<Long> lockedPageRanges;
     private final boolean respectsReservedIds;
+    private volatile SlotSizeFallback acceptableSlotSizeFallback = SlotSizeFallback.none;
 
     public IndexedIdGenerator(
             PageCache pageCache,
@@ -393,7 +344,7 @@ public class IndexedIdGenerator implements IdGenerator {
                     idsPerEntry);
             // Let's optimistically assume that there may be some free ids in here. This will ensure that a scan
             // is triggered on first request
-            this.freeIdsNotifier.incrementAndGet();
+            this.freeIdFindState.notifySeenFreedId(Integer.MAX_VALUE);
             this.numUnusedIds.set(header.numUnusedIds);
         } else {
             // We're creating this file, so set initial values
@@ -412,7 +363,7 @@ public class IndexedIdGenerator implements IdGenerator {
                 tree,
                 layout,
                 cache,
-                freeIdsNotifier,
+                freeIdFindState,
                 this::contextualMarker,
                 generation,
                 strictlyPrioritizeFreelist,
@@ -471,7 +422,7 @@ public class IndexedIdGenerator implements IdGenerator {
         do {
             // If strictly prioritizing the freelist then the method below will block on the current scan,
             // if there's any ongoing, otherwise it will not block.
-            checkRefillCache(cursorContext);
+            checkRefillCache(1, cursorContext);
             long id = cache.takeOrDefault(NO_ID);
             if (id != NO_ID) {
                 monitor.allocatedFromReused(id, 1);
@@ -480,7 +431,7 @@ public class IndexedIdGenerator implements IdGenerator {
             // If strictly prioritizing the freelist then stay in this loop until either there's an available
             // free ID or there are no more to be found. The loop will not be busy-wait given the blocking
             // nature of the scan in this scenario.
-        } while (strictlyPrioritizeFreelist && scanner.hasMoreFreeIds(false));
+        } while (strictlyPrioritizeFreelist && scanner.hasMoreFreeIds(false, 1));
 
         // There was no ID in the cache. This could be that either there are no free IDs in here (the typical case),
         // or a benign race where the cache ran out of IDs and it's very soon filled with more IDs from an ongoing
@@ -499,7 +450,7 @@ public class IndexedIdGenerator implements IdGenerator {
 
     @Override
     public PageIdRange nextPageRange(CursorContext cursorContext, int idsPerPage) {
-        checkRefillCache(cursorContext);
+        checkRefillCache(0, cursorContext);
         long[] reusedIds = cache.drainRange(idsPerPage);
         if (reusedIds.length > 0) {
             // we have some reuse ids available that we allocated from cache
@@ -544,19 +495,29 @@ public class IndexedIdGenerator implements IdGenerator {
     }
 
     @Override
-    public long nextConsecutiveIdRange(int numberOfIds, boolean favorSamePage, CursorContext cursorContext) {
+    public ConsecutiveId nextConsecutiveIdRange(int numberOfIds, int flags, CursorContext cursorContext) {
+        boolean allowSmaller = (flags & IdSequence.FLAG_ALLOW_ALLOCATE_SMALLER) != 0;
+        SlotSizeFallback slotSizeFallback = allowSmaller ? this.acceptableSlotSizeFallback : SlotSizeFallback.none;
         if (numberOfIds <= biggestSlotSize) {
-            // TODO to fill cache in a do-while would be preferrable here too, but slightly harder since the scanner
-            //  may say that there are more free IDs, but there may not actually be more free IDs of the given
+            // TODO to always fill cache in a do-while would be preferrable here too, but slightly harder since the
+            //  scanner may say that there are more free IDs, but there may not actually be more free IDs of the given
             //  numberOfIds
-            checkRefillCache(cursorContext);
-            long id = cache.takeOrDefault(NO_ID, numberOfIds, monitor, scanner::queueWastedCachedId);
-            if (id != NO_ID) {
-                monitor.allocatedFromReused(id, numberOfIds);
-                return id;
-            }
+            int retries = 0;
+            do {
+                checkRefillCache(numberOfIds, cursorContext);
+                ConsecutiveId id = cache.takeOrDefault(
+                        NO_ID, numberOfIds, monitor, scanner::queueWastedCachedId, slotSizeFallback);
+                if (id.id() != NO_ID) {
+                    monitor.allocatedFromReused(id.id(), id.numberOfIds());
+                    return id;
+                }
+            } while (allowSmaller
+                    && strictlyPrioritizeFreelist
+                    && scanner.hasMoreFreeIds(false, numberOfIds)
+                    && retries++ < REUSE_RETRY_ATTEMPTS);
         }
 
+        boolean favorSamePage = (flags & IdSequence.FLAG_FAVOR_SAME_PAGE) != 0;
         long readHighId;
         long endId;
         int skipped;
@@ -597,7 +558,7 @@ public class IndexedIdGenerator implements IdGenerator {
             }
             monitor.skippedIdsAtHighId(id, numberOfIds);
         }
-        return id;
+        return new ConsecutiveId(id, numberOfIds);
     }
 
     @Override
@@ -679,7 +640,10 @@ public class IndexedIdGenerator implements IdGenerator {
             Lock lock, boolean bridgeIdGaps, boolean deleteAlsoFrees, CursorContext cursorContext) {
         try {
             var merger = new IdRangeMerger(
-                    !started, monitor, numUnusedIds.get() == HeaderReader.UNINITIALIZED ? null : numUnusedIds);
+                    !started,
+                    monitor,
+                    numUnusedIds.get() == HeaderReader.UNINITIALIZED ? null : numUnusedIds,
+                    !hasOnlySingleIds());
             return new IdRangeMarker(
                     idType,
                     idsPerEntry,
@@ -688,7 +652,7 @@ public class IndexedIdGenerator implements IdGenerator {
                     lock,
                     merger,
                     started,
-                    freeIdsNotifier,
+                    freeIdFindState,
                     generation,
                     highestWrittenId,
                     bridgeIdGaps,
@@ -773,14 +737,35 @@ public class IndexedIdGenerator implements IdGenerator {
     public void maintenance(CursorContext cursorContext) {
         if (started && !cache.isFull() && !readOnly) {
             // We're just helping other allocation requests and avoiding unwanted sliding of highId here
-            scanner.tryLoadFreeIdsIntoCache(true, true, cursorContext);
+            scanner.tryLoadFreeIdsIntoCache(true, true, 0, cursorContext);
+        }
+
+        // For ID-generators that supports multi-ID slots and allows fragmentation in favor of 100% colocation
+        // This will figure out the reasonable amount of fragmentation to accept, and eventually pass on to
+        // IdCache when looking for IDs there.
+        if (!hasOnlySingleIds()) {
+            long numUnused = numUnusedIds.get();
+            SlotSizeFallback calculatedFallback = slotSizeFallbackForFactorUnused(
+                    (double) numUnused / Math.max(1, highestWrittenId.get()), numUnused);
+            if (calculatedFallback != acceptableSlotSizeFallback) {
+                this.acceptableSlotSizeFallback = calculatedFallback;
+            }
         }
     }
 
-    private void checkRefillCache(CursorContext cursorContext) {
-        if (cache.size() <= cacheOptimisticRefillThreshold) {
+    private SlotSizeFallback slotSizeFallbackForFactorUnused(double factorUnused, long numUnused) {
+        if (factorUnused < 0.05 && numUnused < 100_000) {
+            return SlotSizeFallback.none;
+        } else if (factorUnused < 0.20) {
+            return SlotSizeFallback.some;
+        }
+        return SlotSizeFallback.full;
+    }
+
+    private void checkRefillCache(int requestedNumberOfIds, CursorContext cursorContext) {
+        if (cache.size(requestedNumberOfIds) <= cacheOptimisticRefillThreshold) {
             // We're just helping other allocation requests and avoiding unwanted sliding of highId here
-            scanner.tryLoadFreeIdsIntoCache(strictlyPrioritizeFreelist, false, cursorContext);
+            scanner.tryLoadFreeIdsIntoCache(strictlyPrioritizeFreelist, false, requestedNumberOfIds, cursorContext);
         }
     }
 

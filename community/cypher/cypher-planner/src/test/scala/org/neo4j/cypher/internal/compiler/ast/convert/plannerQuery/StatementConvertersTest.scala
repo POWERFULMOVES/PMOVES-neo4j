@@ -1804,8 +1804,9 @@ class StatementConvertersTest extends CypherFunSuite with LogicalPlanningTestSup
 
   private def queryWith(
     qg: QueryGraph,
-    horizon: QueryHorizon = RegularQueryProjection(
-    )
+    horizon: QueryHorizon =
+      RegularQueryProjection(
+      )
   ): RegularSinglePlannerQuery = {
     RegularSinglePlannerQuery(
       queryGraph = qg,
@@ -2275,7 +2276,7 @@ class StatementConvertersTest extends CypherFunSuite with LogicalPlanningTestSup
               Seq.empty,
               SimplePatternLength
             )),
-          selections = Selections.from(andedPropertyInequalities(greaterThan(prop("n", "prop"), prop("m", "prop")))),
+          selections = Selections.from(greaterThan(prop("n", "prop"), prop("m", "prop"))),
           repetition = Repetition(min = 1, max = UpperBound.Unlimited),
           nodeVariableGroupings = Set(variableGrouping(v"n", v"n"), variableGrouping(v"m", v"m")),
           relationshipVariableGroupings = Set(variableGrouping(v"r", v"r"))
@@ -2301,7 +2302,7 @@ class StatementConvertersTest extends CypherFunSuite with LogicalPlanningTestSup
               Seq.empty,
               SimplePatternLength
             )),
-          selections = Selections.from(andedPropertyInequalities(
+          selections = Selections.from(Seq(
             propGreaterThan("r", "prop", 0),
             propLessThan("r", "prop", 10)
           )),
@@ -2711,7 +2712,7 @@ class StatementConvertersTest extends CypherFunSuite with LogicalPlanningTestSup
       SelectivePathPattern(
         pathPattern = ExhaustivePathPattern.NodeConnections(NonEmptyList(qpp)),
         selections = Selections.from(List(
-          andedPropertyInequalities(lessThan(prop("start", "prop"), function("size", v"r"))),
+          lessThan(prop("start", "prop"), function("size", v"r")),
           unique(v"r")
         )),
         selector = SelectivePathPattern.Selector.Shortest(1)
@@ -2721,7 +2722,7 @@ class StatementConvertersTest extends CypherFunSuite with LogicalPlanningTestSup
       QueryGraph
         .empty
         .addPredicates(
-          andedPropertyInequalities(greaterThan(prop("end", "prop"), literalInt(0))),
+          greaterThan(prop("end", "prop"), literalInt(0)),
           hasLabels("start", "Start")
         )
         .addSelectivePathPattern(shortestPathPattern)

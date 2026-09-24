@@ -128,6 +128,8 @@ import scala.collection.mutable
  * A logical plan rewriter that also changes the semantic table (thus a Transformer).
  *
  * It traverses the plan and swaps property lookups for cached properties where possible.
+ *
+ * It can be disabled with [[CypherDebugOption.disableExistsSubqueryCaching]]
  */
 case class InsertCachedProperties(pushdownPropertyReads: Boolean)
     extends Phase[PlannerContext, LogicalPlanState, LogicalPlanState] {
@@ -137,7 +139,6 @@ case class InsertCachedProperties(pushdownPropertyReads: Boolean)
   override def postConditions: Set[StepSequencer.Condition] = InsertCachedProperties.postConditions
 
   override def process(from: LogicalPlanState, context: PlannerContext): LogicalPlanState = {
-
     val remoteBatchPropertiesImplementation =
       from.maybeRemoteBatchPropertiesImplementation.getOrElse(throw new IllegalStateException(
         "Expected the remote batch properties implementation in the logical plan state, but found nothing."
@@ -175,6 +176,10 @@ case class InsertCachedProperties(pushdownPropertyReads: Boolean)
       } else {
         from.logicalPlan
       }
+
+    if (context.debugOptions.disablePropertyCaching) {
+      return from.withMaybeLogicalPlan(Some(logicalPlan))
+    }
 
     // In the first step we collect all property usages and renaming while going over the tree
     val propertyUsagesAndRenamings =
@@ -365,13 +370,16 @@ case class InsertCachedProperties(pushdownPropertyReads: Boolean)
     val rewriter = bottomUp(Rewriter.lift {
 
       case produceResult: ProduceResult if cachePropertiesForEntities =>
+        cachedPropertiesTracker.clearUnavailableSymbols(produceResult.availableSymbols)
         val newColumns =
           produceResult
             .returnColumns
             .map(column =>
               cachedPropertiesTracker.get(acc.variableWithOriginalName(asVariable(column.variable))).fold(column) {
-                cached =>
-                  column.copy(cachedProperties = cached)
+                cached: Set[ASTCachedProperty] =>
+                  column.copy(cachedProperties = cached.collect {
+                    case cp: CachedProperty => cp.copy(failOnMissingEntity = false)(cp.position)
+                  })
               }
             )
         produceResult.withNewReturnColumns(newColumns)

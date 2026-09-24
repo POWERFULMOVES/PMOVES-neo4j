@@ -28,8 +28,10 @@ import javax.ws.rs.core.MediaType;
 import javax.ws.rs.ext.MessageBodyWriter;
 import org.neo4j.driver.exceptions.Neo4jException;
 import org.neo4j.logging.InternalLog;
-import org.neo4j.server.http.cypher.format.api.ConnectionException;
+import org.neo4j.server.queryapi.exception.ExceptionsUnwrapper;
+import org.neo4j.server.queryapi.exception.QueryApiException;
 import org.neo4j.server.queryapi.request.TxManagedResultContainer;
+import org.neo4j.server.queryapi.response.error.HttpErrorResponse;
 import org.neo4j.server.queryapi.tx.TransactionManager;
 
 abstract class AbstractTxManagingResultWriter implements MessageBodyWriter<TxManagedResultContainer> {
@@ -51,7 +53,8 @@ abstract class AbstractTxManagingResultWriter implements MessageBodyWriter<TxMan
     }
 
     public void writeDriverResult(TxManagedResultContainer result, OutputStream outputStream) throws IOException {
-        var hasFailed = false;
+        HttpErrorResponse errorResponse = null;
+        var hasFailed = true;
         var jsonGenerator = jsonFactory.createGenerator(outputStream);
         var resultSerializer = new DriverResultSerializer(jsonGenerator);
         try {
@@ -70,20 +73,19 @@ abstract class AbstractTxManagingResultWriter implements MessageBodyWriter<TxMan
                         result.transaction().expiresAt(),
                         result.requireSummaryCounters());
             }
-
-        } catch (Neo4jException ex) {
-            hasFailed = true;
-            try {
-                resultSerializer.writeError(ex);
-            } catch (IOException errorWritingException) {
-                // We have errored during writing an error implying the connection has disappeared during writing.
-                // We simply log in this case.
-                log.warn("An error was thrown whilst attempting to write an error.", errorWritingException);
-            }
+            hasFailed = false;
         } catch (IOException ex) {
-            hasFailed = true;
-            throw new ConnectionException("Failed to write to the connection", ex);
+            errorResponse = ExceptionsUnwrapper.transformNeo4jAndQueryApiExceptions(
+                    HttpErrorResponse::fromDriverException, HttpErrorResponse::fromQueryApiException, ex);
+        } catch (Neo4jException neo4jException) {
+            errorResponse = HttpErrorResponse.fromDriverException(neo4jException);
+        } catch (QueryApiException queryApiException) {
+            errorResponse = HttpErrorResponse.fromQueryApiException(queryApiException);
         } finally {
+            if (errorResponse != null) {
+                resultSerializer.writeError(errorResponse);
+            }
+
             if (!result.transaction().isOpen() || hasFailed) {
                 transactionManager.removeTransaction(result.transaction().id());
             } else {

@@ -6,7 +6,7 @@
     <parent>
         <groupId>org.neo4j</groupId>
         <artifactId>community-integration-tests</artifactId>
-        <version>5.26.0</version>
+        <version>5.26.25-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
@@ -20,6 +20,8 @@
     <properties>
         <moduleName>org.neo4j.community.bolt.it</moduleName>
         <default.jupiter.test.mode>concurrent</default.jupiter.test.mode>
+        <test.vm.heap.size>4G</test.vm.heap.size>
+        <test.vm.netty.leakDetection.level>DISABLED</test.vm.netty.leakDetection.level>
     </properties>
 
     <scm>
@@ -53,7 +55,7 @@
         </dependency>
         <dependency>
             <groupId>org.eclipse.jetty.websocket</groupId>
-            <artifactId>websocket-jetty-client</artifactId>
+            <artifactId>jetty-websocket-jetty-client</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>

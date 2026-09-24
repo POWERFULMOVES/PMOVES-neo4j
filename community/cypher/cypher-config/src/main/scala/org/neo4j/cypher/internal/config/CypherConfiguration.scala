@@ -23,19 +23,23 @@ import org.neo4j.configuration.Config
 import org.neo4j.configuration.GraphDatabaseInternalSettings
 import org.neo4j.configuration.GraphDatabaseInternalSettings.ExtractLiteral
 import org.neo4j.configuration.GraphDatabaseInternalSettings.RemoteBatchPropertiesImplementation
+import org.neo4j.configuration.GraphDatabaseInternalSettings.extractCustomHeapEstimatorCacheConfig
 import org.neo4j.configuration.GraphDatabaseSettings
 import org.neo4j.cypher.internal.config.CypherConfiguration.statsDivergenceFromConfig
 import org.neo4j.cypher.internal.options.CypherEagerAnalyzerOption
 import org.neo4j.cypher.internal.options.CypherExpressionEngineOption
+import org.neo4j.cypher.internal.options.CypherHeapEstimatorCacheOption
 import org.neo4j.cypher.internal.options.CypherInferSchemaPartsOption
 import org.neo4j.cypher.internal.options.CypherInterpretedPipesFallbackOption
 import org.neo4j.cypher.internal.options.CypherOperatorEngineOption
 import org.neo4j.cypher.internal.options.CypherParallelRuntimeSupportOption
+import org.neo4j.cypher.internal.options.CypherPipelinedBatchReuseOption
 import org.neo4j.cypher.internal.options.CypherPlanVarExpandInto
 import org.neo4j.cypher.internal.options.CypherPlannerOption
 import org.neo4j.cypher.internal.options.CypherRuntimeOption
 import org.neo4j.cypher.internal.options.CypherStatefulShortestPlanningModeOption
 import org.neo4j.graphdb.config.Setting
+import org.neo4j.memory.HeapEstimatorCacheConfig
 
 import java.io.File
 
@@ -114,6 +118,7 @@ class CypherConfiguration private (val config: Config) {
   val lenientCreateRelationship: Boolean = config.get(GraphDatabaseSettings.cypher_lenient_create_relationship)
   val pipelinedBatchSizeSmall: Int = config.get(GraphDatabaseInternalSettings.cypher_pipelined_batch_size_small)
   val pipelinedBatchSizeBig: Int = config.get(GraphDatabaseInternalSettings.cypher_pipelined_batch_size_big)
+  def pipelinedBatchReuse: CypherPipelinedBatchReuseOption = CypherPipelinedBatchReuseOption.fromConfig(config)
   val doSchedulerTracing: Boolean = config.get(GraphDatabaseInternalSettings.enable_pipelined_runtime_trace)
   val schedulerTracingFile: File = config.get(GraphDatabaseInternalSettings.pipelined_scheduler_trace_filename).toFile
   val recompilationLimit: Int = config.get(GraphDatabaseInternalSettings.cypher_expression_recompilation_limit)
@@ -170,6 +175,9 @@ class CypherConfiguration private (val config: Config) {
   val freeMemoryOfUnusedColumns: Boolean =
     config.get(GraphDatabaseInternalSettings.cypher_free_memory_of_unused_columns)
 
+  val warnOnAggregationSkipNull: Boolean =
+    config.get(GraphDatabaseInternalSettings.cypher_warn_on_aggregation_skip_null)
+
   val lpEagerFallbackEnabled: Boolean =
     config.get(GraphDatabaseInternalSettings.cypher_lp_eager_analysis_fallback_enabled)
 
@@ -194,6 +202,9 @@ class CypherConfiguration private (val config: Config) {
   private var _parallelRuntimeSupport: CypherParallelRuntimeSupportOption =
     CypherParallelRuntimeSupportOption.fromConfig(config)
 
+  private var _customHeapEstimatorCacheConfig: HeapEstimatorCacheConfig =
+    GraphDatabaseInternalSettings.extractCustomHeapEstimatorCacheConfig(config)
+
   config.addListener[GraphDatabaseInternalSettings.CypherParallelRuntimeSupport](
     GraphDatabaseInternalSettings.cypher_parallel_runtime_support,
     (
@@ -217,10 +228,26 @@ class CypherConfiguration private (val config: Config) {
     (_: java.lang.Boolean, newValue: java.lang.Boolean) => _renderPlanDescription = newValue
   )
 
+  // Heap estimator cache config
+  config.addListener[java.lang.Integer](
+    GraphDatabaseInternalSettings.heap_estimator_cache_size_limit,
+    (_: java.lang.Integer, _: java.lang.Integer) =>
+      _customHeapEstimatorCacheConfig = extractCustomHeapEstimatorCacheConfig(config)
+  )
+
+  config.addListener[java.lang.Long](
+    GraphDatabaseInternalSettings.heap_estimator_cache_large_object_threshold,
+    (_: java.lang.Long, _: java.lang.Long) =>
+      _customHeapEstimatorCacheConfig = extractCustomHeapEstimatorCacheConfig(config)
+  )
+
   def toggledFeatures(features: Map[Setting[java.lang.Boolean], String]): Set[String] =
     features.filter(s => config.get(s._1)).values.toSet
 
   def obfuscateLiterals: Boolean = _obfuscateLiterals
   def renderPlanDescription: Boolean = _renderPlanDescription
   def parallelRuntimeSupport: CypherParallelRuntimeSupportOption = _parallelRuntimeSupport
+
+  def heapEstimatorCacheOption: CypherHeapEstimatorCacheOption = CypherHeapEstimatorCacheOption.fromConfig(config)
+  def customHeapEstimatorCacheConfig: HeapEstimatorCacheConfig = _customHeapEstimatorCacheConfig
 }

@@ -40,7 +40,6 @@ import static org.neo4j.shell.Conditions.notContains;
 import static org.neo4j.shell.Conditions.startsWith;
 import static org.neo4j.shell.DatabaseManager.DEFAULT_DEFAULT_DB_NAME;
 import static org.neo4j.shell.DatabaseManager.SYSTEM_DB_NAME;
-import static org.neo4j.shell.util.Versions.majorVersion;
 
 import java.io.BufferedReader;
 import java.io.FileReader;
@@ -1532,8 +1531,7 @@ class MainIntegrationTest extends TestHarness {
         final String expected;
         if (protocolVersion.compareTo(Versions.version("5.6")) >= 0) {
             expected =
-                    "info: If a part of a query contains multiple disconnected patterns, this will build a cartesian product between all those parts. This may produce a large amount of data and slow down query processing. While occasionally intended, it may often be possible to reformulate the query that avoids the use of this cross product, perhaps by adding a relationship between the different parts or by using OPTIONAL MATCH (identifier is: (b))\n"
-                            + "03N90 (Neo.ClientNotification.Statement.CartesianProduct)";
+                    "info: cartesian product. The disconnected pattern '(a:A), (b:B)' builds a cartesian product. A cartesian product may produce a large amount of data and slow down query processing. (03N90)";
         } else if (serverVersion.compareTo(Versions.version("5.0.0")) >= 0) {
             expected =
                     "info: If a part of a query contains multiple disconnected patterns, this will build a cartesian product between all those parts. This may produce a large amount of data and slow down query processing. While occasionally intended, it may often be possible to reformulate the query that avoids the use of this cross product, perhaps by adding a relationship between the different parts or by using OPTIONAL MATCH (identifier is: (b)) (Neo.ClientNotification.Statement.CartesianProduct)";
@@ -1557,8 +1555,8 @@ class MainIntegrationTest extends TestHarness {
         final String expected;
 
         if (protocolVersion.compareTo(Versions.version("5.6")) >= 0) {
-            expected = "warn: The query used a deprecated function: `id`.\n"
-                    + "01N02 (Neo.ClientNotification.Statement.FeatureDeprecationWarning)";
+            expected =
+                    "warn: feature deprecated without replacement. id is deprecated and will be removed without a replacement. (01N02)";
         } else {
             expected =
                     "warn: The query used a deprecated function: `id`. (Neo.ClientNotification.Statement.FeatureDeprecationWarning)";
@@ -1673,7 +1671,7 @@ class MainIntegrationTest extends TestHarness {
 
     private static void createOrReplaceUser(
             CypherShell shell, String name, String password, boolean requirePasswordChange) throws CommandException {
-        if (majorVersion(shell.getServerVersion()) >= 4) {
+        if (versionOrThrow(shell.getServerVersion()).major() >= 4) {
             var changeString = requirePasswordChange ? "" : " CHANGE NOT REQUIRED";
             shell.execute(CypherStatement.complete(
                     "CREATE OR REPLACE USER " + name + " SET PASSWORD '" + password + "'" + changeString + ";"));
@@ -1694,6 +1692,14 @@ class MainIntegrationTest extends TestHarness {
         }
     }
 
+    private static org.neo4j.shell.util.Version versionOrThrow(String version) {
+        try {
+            return Versions.version(version);
+        } catch (Versions.FailedToParseException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     private String return42Output() {
         return format("> return 42 as x;%n" + return42VerboseTable());
     }
@@ -1707,7 +1713,7 @@ class MainIntegrationTest extends TestHarness {
     }
 
     private void withDefaultDatabaseStopped(ThrowingAction<Exception> test) {
-        final var useWait = serverVersion.compareTo(Versions.version("4.4.0")) >= 0;
+        final var useWait = serverVersion.compareTo(versionOrThrow("4.4.0")) >= 0;
         final var stop = "STOP DATABASE " + DEFAULT_DEFAULT_DB_NAME + (useWait ? " WAIT;" : ";");
         final var start = "START DATABASE " + DEFAULT_DEFAULT_DB_NAME + (useWait ? " WAIT;" : ";");
         try {

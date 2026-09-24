@@ -56,6 +56,7 @@ import java.util.List;
 import java.util.Set;
 import org.neo4j.annotations.service.ServiceProvider;
 import org.neo4j.graphdb.config.Setting;
+import org.neo4j.memory.HeapEstimatorCacheConfig;
 
 @ServiceProvider
 public class GraphDatabaseInternalSettings implements SettingsDeclaration {
@@ -370,6 +371,22 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             .build();
 
     @Internal
+    @Description("Decides how batches are allowed to be reused in pipelined and parallel runtime.")
+    public static final Setting<CypherPipelinedBatchReuse> cypher_pipelined_batch_reuse = newBuilder(
+                    "internal.cypher.pipelined.batch_reuse",
+                    ofEnum(CypherPipelinedBatchReuse.class),
+                    CypherPipelinedBatchReuse.DEFAULT)
+            .dynamic()
+            .build();
+
+    public enum CypherPipelinedBatchReuse {
+        DEFAULT,
+        DISABLED,
+        PACK,
+        FULL
+    }
+
+    @Internal
     @Description(
             "Maximum number of queries that the Cypher worker threads for the parallel runtime will start working on concurrently. "
                     + "If set to 0, a default value of `server.cypher.parallel.worker_limit` will be chosen.")
@@ -541,6 +558,12 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
     @Description("Enable freeing memory of unused columns during Cypher query execution")
     public static final Setting<Boolean> cypher_free_memory_of_unused_columns = newBuilder(
                     "internal.cypher.free_memory_of_unused_columns", BOOL, true)
+            .build();
+
+    @Internal
+    @Description("Warn if aggregation encounters and skips a NULL value. Part of GQL but annoying and not very useful.")
+    public static final Setting<Boolean> cypher_warn_on_aggregation_skip_null = newBuilder(
+                    "internal.cypher.warn_on_aggregation_skip_null", BOOL, false)
             .build();
 
     @Internal
@@ -1082,6 +1105,14 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
             newBuilder("internal.dbms.recovery.enable_parallelism", BOOL, false).build();
 
     @Internal
+    @Description(
+            "Whether to update indexes in parallel during parallel recovery (disabled if parallel recover is disabled)")
+    public static final Setting<Boolean> do_parallel_index_updates_in_recovery = newBuilder(
+                    "internal.dbms.recovery.enable_index_updates_parallelism", BOOL, true)
+            .internal()
+            .build();
+
+    @Internal
     @Description("Whether or not to log contents of data that is inconsistent when deleting it.")
     public static final Setting<Boolean> log_inconsistent_data_deletion = newBuilder(
                     "internal.dbms.log_inconsistent_data_deletion", BOOL, Boolean.FALSE)
@@ -1484,7 +1515,7 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
     @Internal
     @Description("Id controller maintenance interval")
     public static final Setting<Duration> id_controller_maintenance_interval = newBuilder(
-                    "internal.db.idcontroller.maintenance_interval", DURATION, ofSeconds(1))
+                    "internal.db.idcontroller.maintenance_interval", DURATION, ofMillis(400))
             .build();
 
     @Internal
@@ -1573,4 +1604,73 @@ public class GraphDatabaseInternalSettings implements SettingsDeclaration {
     public static final Setting<Duration> shutdown_terminated_transaction_wait_timeout = newBuilder(
                     "internal.db.transaction.shutdown_terminated_transaction_wait_timeout", DURATION, ofSeconds(1))
             .build();
+
+    // Heap estimator cache settings
+
+    @Internal
+    @Description("Enable the use of a heap estimator cache that can reduce heap usage overestimation of large objects "
+            + " in some queries.")
+    public static final Setting<HeapEstimatorCachePreset> heap_estimator_cache_preset = newBuilder(
+                    "internal.server.heap_estimator_cache.preset",
+                    ofEnum(HeapEstimatorCachePreset.class),
+                    HeapEstimatorCachePreset.DEFAULT)
+            .dynamic()
+            .build();
+
+    public enum HeapEstimatorCachePreset {
+        DEFAULT,
+        DISABLED,
+        SMALL,
+        LARGE,
+        CUSTOM
+    }
+
+    @Internal
+    @Description(
+            "The maximum size of a heap estimator cache instance. "
+                    + "This setting only takes effect in combination with 'internal.server.heap_estimator_cache.preset' set to 'custom'.")
+    public static final Setting<Integer> heap_estimator_cache_size_limit = newBuilder(
+                    "internal.server.heap_estimator_cache.size_limit", INT, HeapEstimatorCacheConfig.DEFAULT_SIZE_LIMIT)
+            .addConstraint(min(0))
+            .dynamic()
+            .build();
+
+    @Internal
+    @Description(
+            "The estimated heap usage threshold in bytes for an object to be considered a large object by "
+                    + " the heap estimator cache. Only objects larger than this threshold will be considered for caching. "
+                    + "This setting only takes effect in combination with 'internal.server.heap_estimator_cache.preset' set to 'custom'.")
+    public static final Setting<Long> heap_estimator_cache_large_object_threshold = newBuilder(
+                    "internal.server.heap_estimator_cache.large_object_threshold",
+                    BYTES,
+                    HeapEstimatorCacheConfig.DEFAULT_LARGE_OBJECT_THRESHOLD)
+            .addConstraint(min(0L))
+            .dynamic()
+            .build();
+
+    @Internal
+    @Description("Enables profiling of composite queries. Profiling of composite queries behaves differently "
+            + "than in the case of the non-composite ones. The result of profiling is not returned in the form of "
+            + "a profiled execution plan at the end of the query, but the profiling data are written to a file. "
+            + "A file is created for each profiled query execution and the files are located, by default, in logs/profiles "
+            + "directory. The location can be changed with 'internal.db.composite.query_profiles_output' setting.")
+    public static final Setting<Boolean> composite_query_profiling_enabled = newBuilder(
+                    "internal.db.composite.query_profiling_enabled", BOOL, false)
+            .dynamic()
+            .build();
+
+    @Internal
+    @Description("Output directory of composite query profiling output.")
+    public static final Setting<Path> composite_query_profiles_output = newBuilder(
+                    "internal.db.composite.query_profiles_output", PATH, Path.of("logs", "profiles"))
+            .setDependency(GraphDatabaseSettings.neo4j_home)
+            .dynamic()
+            .build();
+
+    // Helper method
+    public static HeapEstimatorCacheConfig extractCustomHeapEstimatorCacheConfig(Config config) {
+        return new HeapEstimatorCacheConfig(
+                config.get(GraphDatabaseInternalSettings.heap_estimator_cache_size_limit),
+                config.get(GraphDatabaseInternalSettings.heap_estimator_cache_large_object_threshold));
+    }
 }

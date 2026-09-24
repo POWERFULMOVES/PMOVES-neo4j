@@ -22,10 +22,17 @@ package org.neo4j.server.queryapi.tx;
 import org.neo4j.driver.AuthToken;
 import org.neo4j.driver.Session;
 import org.neo4j.driver.TransactionConfig;
+import org.neo4j.util.VisibleForTesting;
 
 public interface TransactionManager {
 
-    Transaction begin(String txId, Session session, AuthToken authToken, String databaseName, TransactionConfig config)
+    Transaction begin(
+            String txId,
+            Session session,
+            AuthToken authToken,
+            String databaseName,
+            TransactionConfig config,
+            String txType)
             throws TransactionIdCollisionException;
 
     Transaction retrieveTransaction(String transactionId, String requestedDatabase, AuthToken accessingUser)
@@ -46,4 +53,11 @@ public interface TransactionManager {
     void beginTimeoutJob();
 
     long openTransactionCount();
+
+    /**
+     * Close and remove all managed transactions.
+     * This method is specially used in tests and it is not safe.
+     */
+    @VisibleForTesting
+    void removeAllTransactions();
 }

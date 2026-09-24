@@ -48,7 +48,6 @@ import org.neo4j.cypher.internal.procs.QueryHandler
 import org.neo4j.cypher.internal.procs.QueryHandlerResult
 import org.neo4j.cypher.internal.procs.ThrowException
 import org.neo4j.cypher.internal.procs.UpdatingSystemCommandExecutionPlan
-import org.neo4j.cypher.internal.util.DeprecatedDatabaseNameNotification
 import org.neo4j.cypher.internal.util.HomeDatabaseNotPresent
 import org.neo4j.cypher.internal.util.InternalNotification
 import org.neo4j.cypher.internal.util.symbols.CTInteger
@@ -284,7 +283,6 @@ object AdministrationCommandRuntime {
     val passwordChangeRequiredKey = internalKey("passwordChangeRequired")
     val suspendedKey = internalKey("suspended")
     val uuidKey = internalKey("uuid")
-    val userId = Values.utf8Value(UUID.randomUUID().toString)
     val authKey = internalKey("auth")
     val homeDatabaseFields = defaultDatabase.map {
       case RemoveHomeDatabaseAction => NameFields(s"${internalPrefix}homeDatabase", Values.NO_VALUE, IdentityConverter)
@@ -310,6 +308,7 @@ object AdministrationCommandRuntime {
     ).getOrElse("")
 
     def authMapGenerator: ParameterGenerationFunction = (_, _, params) => {
+      val userId = Values.utf8Value(UUID.randomUUID().toString)
       val authList = externalAuths.map(auth => {
         val id = runtimeStringValue(auth.id, params, prettyPrint = true)
         validateAuthId(id)
@@ -317,7 +316,7 @@ object AdministrationCommandRuntime {
       }) ++ nativeAuth.map(_ =>
         VirtualValues.map(Array("provider", "id"), Array(Values.utf8Value(NATIVE_AUTH), userId))
       )
-      VirtualValues.map(Array(authKey), Array(VirtualValues.list(authList: _*)))
+      VirtualValues.map(Array(authKey, uuidKey), Array(VirtualValues.list(authList: _*), userId))
     }
 
     val parameterTransformer = ParameterTransformer(authMapGenerator)
@@ -349,7 +348,7 @@ object AdministrationCommandRuntime {
         )
           ++ Array[AnyValue](
             userNameFields.nameValue,
-            userId,
+            Values.NO_VALUE,
             Values.booleanValue(suspended),
             Values.NO_VALUE // generated
           ) ++ homeDatabaseFields.map(_.nameValue) ++ changeRequiredOption.map(Values.booleanValue)
@@ -1079,7 +1078,7 @@ object AdministrationCommandRuntime {
             Values.utf8Value(aliasName)
           )
             .updatedWith(aliasNameFields.namespaceKey, Values.utf8Value(DEFAULT_NAMESPACE)),
-          if (aliasNameFields.wasParameter) Set.empty else Set(DeprecatedDatabaseNameNotification(aliasName, None))
+          Set.empty
         )
       } else {
         (params, Set.empty)

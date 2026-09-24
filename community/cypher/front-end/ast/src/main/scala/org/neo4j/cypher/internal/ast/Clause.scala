@@ -37,6 +37,7 @@ import org.neo4j.cypher.internal.ast.semantics.SemanticErrorDef
 import org.neo4j.cypher.internal.ast.semantics.SemanticExpressionCheck
 import org.neo4j.cypher.internal.ast.semantics.SemanticExpressionCheck.FilteringExpressions
 import org.neo4j.cypher.internal.ast.semantics.SemanticFeature
+import org.neo4j.cypher.internal.ast.semantics.SemanticFeature.AllowClauseWithMixedLabelSyntax
 import org.neo4j.cypher.internal.ast.semantics.SemanticPatternCheck
 import org.neo4j.cypher.internal.ast.semantics.SemanticPatternCheck.error
 import org.neo4j.cypher.internal.ast.semantics.SemanticState
@@ -126,8 +127,8 @@ import org.neo4j.cypher.internal.util.symbols.CTPath
 import org.neo4j.cypher.internal.util.symbols.CTRelationship
 import org.neo4j.cypher.internal.util.symbols.CTString
 import org.neo4j.cypher.internal.util.symbols.CypherType
+import org.neo4j.cypher.internal.util.symbols.TypeSpec
 import org.neo4j.exceptions.SyntaxException
-import org.neo4j.gqlstatus.GqlHelper
 import org.neo4j.kernel.database.DatabaseReference
 import org.neo4j.kernel.database.NormalizedDatabaseName
 
@@ -143,7 +144,10 @@ sealed trait Clause extends ASTNode with SemanticCheckable with SemanticAnalysis
 
   final override def semanticCheck: SemanticCheck =
     clauseSpecificSemanticCheck chain
-      fromState(checkIfMixingLabelExpressionWithOldSyntax) chain
+      whenState(_.features.contains(AllowClauseWithMixedLabelSyntax))(
+        thenBranch = SemanticCheck.success,
+        elseBranch = fromState(checkIfMixingLabelExpressionWithOldSyntax)
+      ) chain
       when(shouldRunQPPChecks) {
         checkIfMixingLegacyVarLengthWithQPPs chain
           checkIfMixingLegacyShortestWithPathSelectorOrMatchMode
@@ -167,9 +171,11 @@ sealed trait Clause extends ASTNode with SemanticCheckable with SemanticAnalysis
     case object ReadWrite extends UsageContext
 
     case class LegacyLabelExpression(labelExpression: LabelExpression) {
-      def replacementString: String = {
+      def labelExprAndReplacement: (String, String) = {
         val isOrColon = if (labelExpression.containsIs) "IS " else ":"
-        isOrColon + stringifier.stringifyLabelExpression(labelExpression.replaceColonSyntax)
+        val prettifiedLabelExpr = isOrColon + stringifier.stringifyLabelExpression(labelExpression)
+        val replacement = isOrColon + stringifier.stringifyLabelExpression(labelExpression.replaceColonSyntax)
+        (prettifiedLabelExpr, replacement)
       }
 
       def position: InputPosition = labelExpression.position
@@ -187,30 +193,35 @@ sealed trait Clause extends ASTNode with SemanticCheckable with SemanticAnalysis
 
       def semanticCheck: SemanticCheck = when(legacy.nonEmpty && gpm.nonEmpty) {
         // we prefer the new way, so we will only error on the "legacy" expressions
-        val maybeExplanation = legacy.map { ls =>
-          (ls.replacementString, ls.position)
+        val maybeErrorDetails = legacy.map { ls =>
+          (ls.labelExprAndReplacement._1, ls.labelExprAndReplacement._2, ls.position)
         } match {
-          case SetExtractor() => None
-          case SetExtractor((singleExpression, pos)) =>
-            Some((s"This expression could be expressed as $singleExpression.", pos))
-
-          case set: Set[(String, InputPosition)] =>
+          case SetExtractor()                            => None
+          case set: Set[(String, String, InputPosition)] =>
             // we report all errors on the first position as we will later on throw away everything but the first error.
-            val replacement = set.map(_._1)
-            Some((s"These expressions could be expressed as ${replacement.mkString(", ")}.", set.head._2))
+            Some((set.map(_._1), set.map(_._2), set.head._3))
         }
-        maybeExplanation match {
-          case Some((explanation, pos)) =>
+        maybeErrorDetails match {
+          case Some((labelExpressions, replacements, pos)) =>
             // We may have multiple conflicts, both with IS and with label expression symbols.
             // We just look at the first GPM label expression and decide what conflict we report
             // based on whether it contains IS.
             val conflictWithIS = gpm.head.containsIs
-            SemanticError(
-              if (conflictWithIS) s"Mixing the IS keyword with colon (':') between labels is not allowed. $explanation"
-              else
-                s"Mixing label expression symbols ('|', '&', '!', and '%') with colon (':') between labels is not allowed. Please only use one set of symbols. $explanation",
-              pos
-            )
+            if (conflictWithIS) SemanticError.mixingColonAndIs(labelExpressions, replacements, pos)
+            else {
+              if (replacements.size > 1) {
+                SemanticError(
+                  s"Mixing label expression symbols ('|', '&', '!', and '%') with colon (':') between labels is not allowed. Please only use one set of symbols. These expressions could be expressed as ${replacements.mkString(", ")}.",
+                  pos
+                )
+              } else {
+                SemanticError(
+                  s"Mixing label expression symbols ('|', '&', '!', and '%') with colon (':') between labels is not allowed. Please only use one set of symbols. This expression could be expressed as ${replacements.mkString(", ")}.",
+                  pos
+                )
+              }
+            }
+
           case None => SemanticCheck.success
         }
       }
@@ -246,19 +257,19 @@ sealed trait Clause extends ASTNode with SemanticCheckable with SemanticAnalysis
 
       def sortLabelExpressionIntoPartition(
         labelExpression: LabelExpression,
-        isNode: Boolean
+        entityType: TypeSpec
       ): Acc = {
         val acc = if (labelExpression.containsIs) {
           // Only allowed in GPM
           withGPMExpression(labelExpression)
         } else this
 
-        acc.sortLabelExpressionIntoPartitionIgnoringIs(labelExpression, isNode)
+        acc.sortLabelExpressionIntoPartitionIgnoringIs(labelExpression, entityType)
       }
 
       private def sortLabelExpressionIntoPartitionIgnoringIs(
         labelExpression: LabelExpression,
-        isNode: Boolean
+        entityType: TypeSpec
       ): Acc = {
         labelExpression match {
           case _: Leaf =>
@@ -266,16 +277,23 @@ sealed trait Clause extends ASTNode with SemanticCheckable with SemanticAnalysis
             // Thus not adding to any partition.
             this
           case _: DynamicLeaf =>
-            // A dynamic leaf is neither GPM or legacy syntax.
+            // A dynamic leaf is neither GPM nor legacy syntax.
             // Thus not adding to any partition.
             this
-          case Disjunctions(children, _) if !isNode && children.forall(_.isInstanceOf[Leaf]) =>
+          case Disjunctions(children, _)
+            if entityType != CTNode.invariant && // We continue here with unknown types to play it safe
+              children.forall(child => child.isInstanceOf[Leaf] || child.isInstanceOf[DynamicLeaf]) =>
             // The disjunction for relationships is both GPM and legacy syntax.
+            // Or in case a children is a DynamicLeaf neither GPM nor legacy syntax.
             // Thus not adding to any partition.
             this
-          case x if isNode && x.containsGpmSpecificLabelExpression    => withGPMExpression(x)
-          case x if !isNode && x.containsGpmSpecificRelTypeExpression => withGPMExpression(x)
-          case x                                                      => withLegacyExpression(x)
+          case x =>
+            val isDefinitelyNode = entityType == CTNode.invariant
+            val isDefinitelyRel = entityType == CTRelationship.invariant
+            if (!isDefinitelyRel && !isDefinitelyNode) this // We don't know the type so we ignore this expression
+            else if (isDefinitelyNode && x.containsGpmSpecificLabelExpression) withGPMExpression(x)
+            else if (isDefinitelyRel && x.containsGpmSpecificRelTypeExpression) withGPMExpression(x)
+            else withLegacyExpression(x)
         }
       }
     }
@@ -299,22 +317,16 @@ sealed trait Clause extends ASTNode with SemanticCheckable with SemanticAnalysis
       // Partition label expressions into legacy and gpm.
 
       case NodePattern(_, Some(le), _, _) => acc =>
-          val partition =
-            acc.sortLabelExpressionIntoPartition(le, isNode = true)
-          TraverseChildren(partition)
+          TraverseChildren(acc.sortLabelExpressionIntoPartition(le, CTNode))
 
       case LabelExpressionPredicate(entity, le) => acc =>
-          val isNode = state.expressionType(entity).specified == CTNode.invariant
-          val partition = Function.chain[Acc](Seq(
+          SkipChildren(Function.chain[Acc](Seq(
             _.inReadContext(),
-            _.sortLabelExpressionIntoPartition(le, isNode = isNode)
-          ))(acc)
-          SkipChildren(partition)
+            _.sortLabelExpressionIntoPartition(le, state.expressionType(entity).specified)
+          ))(acc))
 
       case RelationshipPattern(_, Some(le), _, _, _, _) => acc =>
-          val partition =
-            acc.sortLabelExpressionIntoPartition(le, isNode = false)
-          TraverseChildren(partition)
+          TraverseChildren(acc.sortLabelExpressionIntoPartition(le, CTRelationship))
     }
 
     readPartitions.semanticCheck chain
@@ -325,16 +337,16 @@ sealed trait Clause extends ASTNode with SemanticCheckable with SemanticAnalysis
     val legacyVarLengthRelationships = this.folder.treeFold(Seq.empty[RelationshipPattern]) {
       case r @ RelationshipPattern(_, _, Some(_), _, _, _) => acc =>
           TraverseChildren(acc :+ r)
-        // We should traverse into subqeries to implement CIP-40 correctly.
-        // We don't, because changing this would break backwards compatibility.
+      // We should traverse into subqeries to implement CIP-40 correctly.
+      // We don't, because changing this would break backwards compatibility.
       // See the "GPM Sync Rolling Agenda" notes for Nov 23, 2023
       case _: SubqueryCall | _: FullSubqueryExpression => acc => SkipChildren(acc)
     }
     val hasQPP = this.folder.treeFold(false) {
       case _: QuantifiedPath => _ =>
           SkipChildren(true)
-        // We should traverse into subqeries to implement CIP-40 correctly.
-        // We don't, because changing this would break backwards compatibility.
+      // We should traverse into subqeries to implement CIP-40 correctly.
+      // We don't, because changing this would break backwards compatibility.
       // See the "GPM Sync Rolling Agenda" notes for Nov 23, 2023
       case _: SubqueryCall | _: FullSubqueryExpression => acc => SkipChildren(acc)
       case _                                           => acc => if (acc) SkipChildren(acc) else TraverseChildren(acc)
@@ -379,10 +391,6 @@ sealed trait Clause extends ASTNode with SemanticCheckable with SemanticAnalysis
 
 sealed trait UpdateClause extends Clause with HasMappableExpressions[UpdateClause] {
   override def returnVariables: ReturnVariables = ReturnVariables.empty
-
-  protected def mixingIsWithMultipleLabelsMessage(statement: String, replacement: String): String = {
-    s"It is not supported to use the `IS` keyword together with multiple labels in `$statement`. Rewrite the expression as `$replacement`."
-  }
 }
 
 sealed trait CreateOrInsert extends UpdateClause {
@@ -1284,8 +1292,7 @@ case class SetClause(items: Seq[SetItem])(val position: InputPosition) extends U
         case x => Seq(x)
       }
       val replacement = prettifier.prettifySetItems(setItems)
-      val gql = GqlHelper.getGql42001_42I29(name, replacement, position.line, position.column, position.offset)
-      SemanticError(gql, mixingIsWithMultipleLabelsMessage(name, replacement), position)
+      SemanticError.mixingIsWithMultipleLabels(name, replacement, position)
     }
   }
 }
@@ -1342,8 +1349,7 @@ case class Remove(items: Seq[RemoveItem])(val position: InputPosition) extends U
         case x => Seq(x)
       }
       val replacement = prettifier.prettifyRemoveItems(removeItems)
-      val gql = GqlHelper.getGql42001_42I29(name, replacement, position.line, position.column, position.offset)
-      SemanticError(gql, mixingIsWithMultipleLabelsMessage(name, replacement), position)
+      SemanticError.mixingIsWithMultipleLabels(name, replacement, position)
     }
   }
 }

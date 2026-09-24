@@ -24,13 +24,14 @@ import static org.neo4j.driver.internal.summary.InternalProfiledPlan.PROFILED_PL
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.neo4j.bolt.connection.BoltProtocolVersion;
+import org.neo4j.bolt.connection.BoltServerAddress;
 import org.neo4j.driver.Query;
 import org.neo4j.driver.Value;
 import org.neo4j.driver.Values;
-import org.neo4j.driver.internal.BoltServerAddress;
-import org.neo4j.driver.internal.messaging.v5.BoltProtocolV5;
 import org.neo4j.driver.internal.summary.InternalDatabaseInfo;
 import org.neo4j.driver.internal.summary.InternalResultSummary;
 import org.neo4j.driver.internal.summary.InternalServerInfo;
@@ -50,7 +51,7 @@ class OutputFormatterTest {
         ProfiledPlan plan = PROFILED_PLAN_FROM_VALUE.apply(planMap);
         ResultSummary summary = new InternalResultSummary(
                 new Query("PROFILE MATCH (n:LABEL) WHERE 20 < n.age < 35 return n"),
-                new InternalServerInfo("agent", new BoltServerAddress("localhost:7687"), BoltProtocolV5.VERSION),
+                new InternalServerInfo("agent", new BoltServerAddress("localhost:7687"), new BoltProtocolVersion(5, 0)),
                 new InternalDatabaseInfo("neo4j"),
                 QueryType.READ_ONLY,
                 null,
@@ -74,7 +75,7 @@ class OutputFormatterTest {
         operatorMap.put("dbHits", Values.value(dbHits));
         operatorMap.put("rows", Values.value(rows));
         if (child != null) {
-            operatorMap.put("children", new ListValue(child));
+            operatorMap.put("children", new ListValue(List.of(child)));
         }
         return new MapValue(operatorMap);
     }

@@ -6,14 +6,14 @@
     <parent>
         <groupId>org.neo4j</groupId>
         <artifactId>cypher-parent</artifactId>
-        <version>5.26.0</version>
+        <version>5.26.25-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
     <modelVersion>4.0.0</modelVersion>
     <artifactId>neo4j-cypher-slotted-runtime</artifactId>
     <packaging>jar</packaging>
-    <version>5.26.0</version>
+    <version>5.26.25-SNAPSHOT</version>
     <name>Neo4j - Cypher Slotted Runtime</name>
     <description>Planner for the physical query plans</description>
     <url>http://components.neo4j.org/${project.artifactId}/${project.version}</url>
@@ -179,8 +179,8 @@
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>org.eclipse.jetty</groupId>
-            <artifactId>jetty-servlet</artifactId>
+            <groupId>org.eclipse.jetty.ee8</groupId>
+            <artifactId>jetty-ee8-servlet</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>

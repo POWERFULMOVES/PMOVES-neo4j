@@ -59,10 +59,8 @@ public class KeepAliveConnectionListener implements ConnectionListener {
 
         this.connection.memoryTracker().allocateHeap(KeepAliveHandler.SHALLOW_SIZE);
 
-        this.connection
-                .channel()
-                .pipeline()
-                .addLast(new KeepAliveHandler(this.legacyMode, this.writerIdleTimeSeconds, this.logging));
+        this.connection.modifyPipeline(pipeline ->
+                pipeline.addLast(new KeepAliveHandler(this.legacyMode, this.writerIdleTimeSeconds, this.logging)));
 
         this.connection.removeListener(this);
     }

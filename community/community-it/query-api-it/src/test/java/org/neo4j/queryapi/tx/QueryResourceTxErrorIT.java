@@ -34,6 +34,7 @@ import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.neo4j.configuration.connectors.BoltConnector;
 import org.neo4j.configuration.connectors.BoltConnectorInternalSettings;
@@ -47,6 +48,7 @@ import org.neo4j.kernel.api.exceptions.Status;
 import org.neo4j.kernel.api.procedure.GlobalProcedures;
 import org.neo4j.queryapi.QueryApiTestUtil;
 import org.neo4j.queryapi.testclient.QueryAPITestClient;
+import org.neo4j.queryapi.testclient.QueryApiTestClientException;
 import org.neo4j.queryapi.testclient.QueryRequest;
 import org.neo4j.server.configuration.ConfigurableServerModules;
 import org.neo4j.server.configuration.ServerSettings;
@@ -87,13 +89,18 @@ public class QueryResourceTxErrorIT {
         dbms.shutdown();
     }
 
+    @BeforeEach
+    void beforeEach() {
+        txManager.removeAllTransactions();
+    }
+
     @AfterEach
     void afterEach() {
         Assertions.assertThat(txManager.openTransactionCount()).isEqualTo(0);
     }
 
     @Test
-    void shouldNotSwitchDbMidTx() throws IOException, InterruptedException {
+    void shouldNotSwitchDbMidTx() throws IOException, InterruptedException, QueryApiTestClientException {
         var startTx = testClient.beginTx(
                 QueryRequest.newBuilder().statement("RETURN 1").build());
 
@@ -107,7 +114,7 @@ public class QueryResourceTxErrorIT {
     }
 
     @Test
-    void shouldNotSwitchDbOnCommit() throws IOException, InterruptedException {
+    void shouldNotSwitchDbOnCommit() throws IOException, InterruptedException, QueryApiTestClientException {
         var startTx = testClient.beginTx(
                 QueryRequest.newBuilder().statement("RETURN 1").build());
 
@@ -126,13 +133,35 @@ public class QueryResourceTxErrorIT {
     }
 
     @Test
-    void shouldRejectCallInTransactions() throws IOException, InterruptedException {
+    void shouldRejectCallInTransactionsWhenDelayedExecution() throws IOException, InterruptedException {
         var res = testClient.beginTx(QueryRequest.newBuilder()
                 .statement("UNWIND [4, 2, 1, 0] AS i CALL { WITH i CREATE ()} IN TRANSACTIONS OF 2 ROWS RETURN i")
                 .build());
 
         assertThat(res).hasErrorStatus(202, Status.Transaction.TransactionStartFailed);
         assertThat(res).hasNoTransaction();
+    }
+
+    @Test
+    void shouldRejectCallInTransactions() throws IOException, InterruptedException {
+        var res = testClient.beginTx(QueryRequest.newBuilder()
+                .statement("CALL() { CREATE (t:Test) } IN TRANSACTIONS OF 1 ROWS")
+                .build());
+
+        assertThat(res).hasErrorStatus(500, Status.Transaction.TransactionStartFailed);
+        assertThat(res).hasNoTransaction();
+    }
+
+    @Test
+    void shouldRunCallInTransactionsInImplicit() throws IOException, InterruptedException, QueryApiTestClientException {
+        var res = testClient.beginTx(QueryRequest.newBuilder()
+                .statement("UNWIND [4, 2, 1, 0] AS i CALL { WITH i CREATE ()} IN TRANSACTIONS OF 2 ROWS RETURN i")
+                .txType("IMPLICIT")
+                .build());
+
+        assertThat(res).wasSuccessful();
+        assertThat(res).hasTransaction();
+        testClient.commitTx(res.body().txId());
     }
 
     @Test
@@ -147,7 +176,7 @@ public class QueryResourceTxErrorIT {
     }
 
     @Test
-    void shouldNotAllowConcurrentTxAccess() throws IOException, InterruptedException {
+    void shouldNotAllowConcurrentTxAccess() throws IOException, InterruptedException, QueryApiTestClientException {
         var res = testClient.beginTx();
         var latch = new CountDownLatch(1);
 
@@ -159,7 +188,7 @@ public class QueryResourceTxErrorIT {
                                 .build(),
                         res.body().txId());
                 latch.countDown();
-            } catch (IOException | InterruptedException ignored) {
+            } catch (IOException | InterruptedException | QueryApiTestClientException ignored) {
                 fail("Error starting long running transaction");
             }
         });
@@ -177,5 +206,14 @@ public class QueryResourceTxErrorIT {
                 res.body().txId());
         assertThat(accessReq).wasSuccessful();
         assertThat(accessReq).hasNoTransaction();
+    }
+
+    @Test
+    void blankStatementShouldOpenTx() throws IOException, InterruptedException, QueryApiTestClientException {
+        var res = testClient.beginTx(QueryRequest.newBuilder().statement("").build());
+
+        assertThat(res).wasSuccessful();
+        assertThat(res).hasTransaction();
+        testClient.commitTx(res.body().txId());
     }
 }

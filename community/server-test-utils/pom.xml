@@ -4,7 +4,7 @@
     <parent>
         <groupId>org.neo4j</groupId>
         <artifactId>parent</artifactId>
-        <version>5.26.0</version>
+        <version>5.26.25-SNAPSHOT</version>
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
@@ -13,7 +13,9 @@
     <artifactId>neo4j-server-test-utils</artifactId>
     <url>http://components.neo4j.org/${project.artifactId}/${project.version}</url>
 
+    <name>Neo4j - Server Test Utilities</name>
     <packaging>jar</packaging>
+    <description>Neo4j Server Test Utilities.</description>
 
     <properties>
         <neo4j.version>${project.version}</neo4j.version>

@@ -26,7 +26,9 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.RandomAccess;
 import org.neo4j.gqlstatus.ErrorGqlStatusObject;
+import org.neo4j.memory.HeapEstimatorCache;
 import org.neo4j.values.AnyValue;
 import org.neo4j.values.ElementIdMapper;
 import org.neo4j.values.storable.ArrayValue;
@@ -52,6 +54,18 @@ public final class VirtualValues {
         ValueRepresentation representation = ValueRepresentation.ANYTHING;
         for (AnyValue value : values) {
             payloadSize += value.estimatedHeapUsage();
+            if (value.valueRepresentation() != representation) {
+                representation = representation.coerce(value.valueRepresentation());
+            }
+        }
+        return new ListValue.ArrayListValue(values, payloadSize, representation);
+    }
+
+    public static ListValue list(HeapEstimatorCache heapEstimatorCache, AnyValue... values) {
+        long payloadSize = 0;
+        ValueRepresentation representation = ValueRepresentation.ANYTHING;
+        for (AnyValue value : values) {
+            payloadSize += value.estimatedHeapUsage(heapEstimatorCache);
             if (value.valueRepresentation() != representation) {
                 representation = representation.coerce(value.valueRepresentation());
             }
@@ -176,6 +190,10 @@ public final class VirtualValues {
                     "Tried to construct a path that is not built like a path: even number of elements");
         }
         assert nodes.size() == relationships.size() + 1;
+
+        // This is to catch if we have a use case where the relationship list does not support random access,
+        // because then we may need to optimize PathReferenceReferences.
+        assert relationships instanceof RandomAccess;
 
         return PathReference.path(nodes, relationships);
     }

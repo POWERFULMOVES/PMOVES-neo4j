@@ -62,6 +62,7 @@ import org.eclipse.collections.impl.factory.primitive.LongLists;
 import org.eclipse.collections.impl.factory.primitive.LongSets;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.neo4j.common.DependencyResolver;
@@ -218,6 +219,8 @@ public class DetectRandomSabotageIT {
     }
 
     @Test
+    @Disabled(
+            "Disabled for maintenance branch as this test is flaky by design. It may sabotage data into a completely valid state")
     void shouldDetectRandomSabotage() throws Exception {
         // given
         SabotageType type = random.among(SabotageType.values());
@@ -521,7 +524,7 @@ public class DetectRandomSabotageIT {
                 store.getRecordByCursor(
                         node.getId(), before, RecordLoad.NORMAL, nodeCursor, EmptyMemoryTracker.INSTANCE);
                 NodeLabels nodeLabels = NodeLabelsField.parseLabelsField(node);
-                int[] existing = nodeLabels.get(store, storageCursors, EmptyMemoryTracker.INSTANCE);
+                int[] existing = nodeLabels.get(store, storageCursors);
                 if (random.nextBoolean()) {
                     // Change inlined
                     do {
@@ -529,8 +532,7 @@ public class DetectRandomSabotageIT {
                         if (!NodeLabelsField.fieldPointsToDynamicRecordOfLabels(labelField)) {
                             node.setLabelField(labelField, node.getDynamicLabelRecords());
                         }
-                    } while (Arrays.equals(
-                            existing, NodeLabelsField.get(node, store, storageCursors, EmptyMemoryTracker.INSTANCE)));
+                    } while (Arrays.equals(existing, NodeLabelsField.get(node, store, storageCursors)));
                 } else {
                     long existingLabelField = node.getLabelField();
                     do {
@@ -1046,7 +1048,7 @@ public class DetectRandomSabotageIT {
                     if (nodeRecord.inUse()) {
                         // Our node is in use, make sure it's a label it doesn't already have
                         NodeLabels labelsField = NodeLabelsField.parseLabelsField(nodeRecord);
-                        int[] labelsBefore = labelsField.get(store, storageCursors, EmptyMemoryTracker.INSTANCE);
+                        int[] labelsBefore = labelsField.get(store, storageCursors);
                         for (int labelIdBefore : labelsBefore) {
                             labelNames.remove(tokenHolders
                                     .labelTokens()

@@ -45,6 +45,7 @@ import static org.neo4j.configuration.SettingValueParsers.INT;
 import static org.neo4j.configuration.SettingValueParsers.LONG;
 import static org.neo4j.configuration.SettingValueParsers.PATH;
 import static org.neo4j.configuration.SettingValueParsers.SOCKET_ADDRESS;
+import static org.neo4j.configuration.SettingValueParsers.SOCKET_ADDRESS_ONLY_HOST_NAME;
 import static org.neo4j.configuration.SettingValueParsers.STRING;
 import static org.neo4j.configuration.SettingValueParsers.TIMEZONE;
 import static org.neo4j.configuration.SettingValueParsers.listOf;
@@ -823,14 +824,22 @@ public class GraphDatabaseSettings implements SettingsDeclaration {
             .dynamic()
             .build();
 
-    @Description("Obfuscates all literals of the query before writing to the log. "
-            + "Note that node labels, relationship types and map property keys are still shown. "
-            + "Changing the setting will not affect queries that are cached. So, if you want the switch "
-            + "to have immediate effect, you must also call `CALL db.clearQueryCaches()`.")
+    @Description("If true, obfuscates all literals in a query before writing the query to the query log. "
+            + "Note that node labels, relationship types, and map property keys remain visible. "
+            + "Changing the setting will not affect queries that are cached. To apply "
+            + "the change immediately, you must also call `CALL db.clearQueryCaches()`. "
+            + "It is recommended to set this setting to `true` in production.")
     public static final Setting<Boolean> log_queries_obfuscate_literals = newBuilder(
                     "db.logs.query.obfuscate_literals", BOOL, false)
             .dynamic()
             .build();
+
+    @Description(
+            "If true, obfuscates all error information that can contain sensitive data before writing it to the query log. "
+                    + "This applies to `failureReason` and `statusDescription` fields when the query log uses JSON format and error messages otherwise. "
+                    + "It is recommended to set this setting to `true` in production.")
+    public static final Setting<Boolean> log_queries_obfuscate_errors =
+            newBuilder("db.logs.query.obfuscate_errors", BOOL, false).dynamic().build();
 
     @Description("Log query plan description table, useful for debugging purposes.")
     public static final Setting<Boolean> log_queries_query_plan = newBuilder(
@@ -892,14 +901,14 @@ public class GraphDatabaseSettings implements SettingsDeclaration {
     @Description("Default network interface to listen for incoming connections. "
             + "To listen for connections on all interfaces, use \"0.0.0.0\". ")
     public static final Setting<SocketAddress> default_listen_address = newBuilder(
-                    "server.default_listen_address", SOCKET_ADDRESS, new SocketAddress("localhost"))
+                    "server.default_listen_address", SOCKET_ADDRESS_ONLY_HOST_NAME, new SocketAddress("localhost"))
             .addConstraint(HOSTNAME_ONLY)
             .immutable()
             .build();
 
     @Description("Default hostname or IP address the server uses to advertise itself.")
     public static final Setting<SocketAddress> default_advertised_address = newBuilder(
-                    "server.default_advertised_address", SOCKET_ADDRESS, new SocketAddress("localhost"))
+                    "server.default_advertised_address", SOCKET_ADDRESS_ONLY_HOST_NAME, new SocketAddress("localhost"))
             .addConstraint(HOSTNAME_ONLY)
             .addConstraint(NO_ALL_INTERFACES_ADDRESS)
             .immutable()
