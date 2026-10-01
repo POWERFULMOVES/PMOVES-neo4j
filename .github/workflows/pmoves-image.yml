@@ -1,0 +1,51 @@
+# Build the PMOVES Neo4j image from source (amd64). No registry push: GHCR publish and the PMOVES.AI digest
+# pin come after the A/B against neo4j:5.26.30-community (see PMOVES_BUILD.md).
+name: pmoves-image
+
+on:
+  pull_request:
+    branches: [PMOVES.AI-Edition-5.26]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pmoves-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-amd64:
+    runs-on: ubuntu-latest
+    # A full Maven reactor for the community tarball plus APOC; the matrix job in PMOVES.AI
+    # (integrations-ghcr.yml, 45 min) is too short for this, which is why it lives in the fork.
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Image build file present
+        run: |
+          if [ ! -f Dockerfile ]; then
+            echo "::error::No Dockerfile yet. It lands on this PR once the PMOVES.AI protected-path grant is given (PMOVES_BUILD.md)."
+            exit 1
+          fi
+      - name: Free runner disk
+        run: |
+          df -h /
+          for d in /usr/share/dotnet /usr/local/lib/android /opt/ghc; do sudo find "$d" -mindepth 1 -delete 2>/dev/null || true; done
+          df -h /
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+      - name: Build (amd64, no push)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: VCS_REF=${{ github.sha }}
+          tags: pmoves-neo4j:ci-${{ github.sha }}
+          load: true
+          push: false
+      - name: Smoke
+        run: |
+          img=pmoves-neo4j:ci-${{ github.sha }}
+          docker run --rm --entrypoint neo4j "$img" --version | tee /dev/stderr | grep -qx 'neo4j 5.26.30'
+          docker run --rm --entrypoint sh "$img" -c 'ls /var/lib/neo4j/labs/apoc-5.26.30-core.jar && sha256sum /startup/docker-entrypoint.sh'
+          docker image inspect "$img" --format '{{json .Config.Labels}}'
