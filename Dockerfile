@@ -29,10 +29,12 @@ COPY . .
 # Upstream README.asciidoc "Building Neo4j": MAVEN_OPTS=-Xmx2048m, `mvn clean install -DskipTests -T1C`.
 # -pl/-am limits the reactor to what the community tarball needs.
 ENV MAVEN_OPTS="-Xmx2048m"
+# The tarball lands in the PARENT module's target/, not standalone-community/target/ -- CI run 36920443791 logged
+# "Building tar: /src/packaging/standalone/target/neo4j-community-5.26.30-unix.tar.gz".
 RUN mvn -B -q versions:set -DnewVersion="${NEO4J_VERSION}" -DgenerateBackupPoms=false -DprocessAllModules=true \
  && test "$(grep -rl --include=pom.xml -- '-SNAPSHOT' . | wc -l)" = 0 \
  && mvn -B -DskipTests -T1C install -pl packaging/standalone/standalone-community -am \
- && cp "packaging/standalone/standalone-community/target/neo4j-community-${NEO4J_VERSION}-unix.tar.gz" /neo4j.tar.gz
+ && cp "packaging/standalone/target/neo4j-community-${NEO4J_VERSION}-unix.tar.gz" /neo4j.tar.gz
 
 # ---------------------------------------------------------------- 2. APOC core
 FROM ${GRADLE_JDK_IMAGE} AS apoc-build
